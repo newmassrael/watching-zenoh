@@ -259,9 +259,7 @@ impl MemoryBasis {
             },
         ];
         for row in rows {
-            memory
-                .push(row)
-                .expect("the rows fit: asserted when the build is made");
+            put(&mut memory, row);
         }
         push_process_rows(&mut memory, process);
         memory
@@ -274,35 +272,45 @@ impl MemoryBasis {
 #[allow(unused_variables)]
 fn push_process_rows(memory: &mut SessionMemory, process: &ProcessRows) {
     #[cfg(feature = "supervision")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"process supervisor",
             basis: c"SUPERVISION_CHECKPOINTS",
             count: Some(1),
             entry_bytes: core::mem::size_of::<wz_session_core::supervisor::BuildSupervisor>(),
             enforced: true,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
     #[cfg(feature = "message-catalog")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"message catalog entries",
             basis: c"MESSAGE_CATALOG_ENTRIES",
             count: Some(process.message_catalog_entries),
             entry_bytes: core::mem::size_of::<wz_app_frame::message_catalog::Message>(),
             enforced: false,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
     #[cfg(feature = "e2e-supervision")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"stream supervisor rows",
             basis: c"E2E_SUPERVISED_STREAMS",
             count: Some(process.e2e_supervised_streams),
             entry_bytes: core::mem::size_of::<wz_session_core::stream_supervisor::StreamSlot>(),
             enforced: true,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
+}
+
+/// Add `row` to a report the session core's tables began. The rows of those tables, this ABI's and
+/// the process's fit a report together, as the assertion beside `PROCESS_ROWS` checks when the
+/// build is made, so a push here is never refused.
+fn put(memory: &mut SessionMemory, row: MemoryRow) {
+    let _ = memory.push(row);
 }
 
 impl Default for wz_ext_session_memory_t {

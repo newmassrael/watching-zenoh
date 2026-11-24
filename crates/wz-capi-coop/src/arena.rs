@@ -762,6 +762,10 @@ impl TransportRows {
     #[cfg(feature = "group")]
     fn group_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
         let (buffers, bytes) = self.group_rx;
+        // A plan that counts no group laid no table of them out.
+        if buffers == 0 {
+            return tables;
+        }
         tables.with_group_rx(lend.byte_cells(bytes, buffers))
     }
 
@@ -1047,9 +1051,10 @@ impl ArenaPlan {
         // A receive buffer for each group the session may join, lent with the links' tables
         // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
-        // datagram longer than it is dropped and counted by its transport.
+        // datagram longer than it is dropped and counted by its transport. A config that names no
+        // group has no table of them in its plan.
         #[cfg(feature = "group")]
-        {
+        if !config.groups.is_empty() {
             let buffers = config.groups.len().min(caps::MAX_TASKS);
             let bytes = config
                 .groups

@@ -208,9 +208,10 @@ pub unsafe extern "C" fn _z_rc_weak_upgrade(cnt: *mut c_void) -> ZResult {
         };
         let mut prev = block.strong.load(Ordering::Relaxed);
         while prev != 0 && prev < RC_MAX_COUNT {
+            // Under `RC_MAX_COUNT`, so one more does not saturate.
             match block.strong.compare_exchange_weak(
                 prev,
-                prev + 1,
+                prev.saturating_add(1),
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
@@ -240,14 +241,7 @@ pub unsafe extern "C" fn _z_rc_weak_count(cnt: *mut c_void) -> usize {
         };
         let strong = block.strong.load(Ordering::Relaxed);
         let weak = block.weak.load(Ordering::Relaxed);
-        if weak == 0 {
-            return 0;
-        }
-        if strong > 0 {
-            weak - 1
-        } else {
-            weak
-        }
+        weak.saturating_sub(usize::from(strong > 0))
     })
 }
 
@@ -456,27 +450,20 @@ unsafe fn push(
         return Z_ERR_GENERIC;
     };
     let mut state = channel.state.lock();
-    // A blocking push waits until there is room or the channel closes.
-    #[cfg(feature = "multi-thread")]
-    if policy == FullPolicy::Block {
-        while !state.closed && state.items.len() >= channel.capacity {
-            state = channel.not_full.wait(state);
-        }
-    }
-    if state.closed {
-        // A closed channel accepts nothing more. The element is the caller's to
-        // release; report the closure rather than leaking it into a collection
-        // that will never be pulled.
-        drop(state);
-        return Z_RES_CHANNEL_CLOSED;
-    }
     // The element the ring evicted, released AFTER the lock is dropped: the
     // free function is C code that may re-enter this library (a
     // `z_owned_sample_t`'s drop runs this crate's own `z_sample_drop`), and
     // running it under the channel mutex is how a self-deadlock gets built.
     let mut evicted: Option<*mut c_void> = None;
-    if state.items.len() >= channel.capacity {
+    if !state.closed && state.items.len() >= channel.capacity {
         match policy {
+            // A blocking push waits until there is room or the channel closes.
+            #[cfg(feature = "multi-thread")]
+            FullPolicy::Block => {
+                while !state.closed && state.items.len() >= channel.capacity {
+                    state = channel.not_full.wait(state);
+                }
+            }
             FullPolicy::EvictOldest => {
                 evicted = state.items.pop_front().map(|bits| bits as *mut c_void);
             }
@@ -491,10 +478,14 @@ unsafe fn push(
                 }
                 return Z_OK;
             }
-            // The wait above returned with room or closed, and closed returned.
-            #[cfg(feature = "multi-thread")]
-            FullPolicy::Block => unreachable!("a blocking push waits for room"),
         }
+    }
+    if state.closed {
+        // A closed channel accepts nothing more. The element is the caller's to
+        // release; report the closure rather than leaking it into a collection
+        // that will never be pulled.
+        drop(state);
+        return Z_RES_CHANNEL_CLOSED;
     }
     state.items.push_back(elem as usize);
     drop(state);
@@ -932,6 +923,53 @@ mod tests {
                 Z_RES_CHANNEL_NODATA
             );
             _z_ring_mt_clear(&mut ring, Some(free_usize));
+        }
+    }
+
+    /// A full ring that is closed refuses a push with the closure and evicts nothing: the element
+    /// it held first is still the first pulled.
+    #[test]
+    fn a_closed_full_ring_refuses_a_push_and_evicts_nothing() {
+        let mut ring = _z_ring_mt_t {
+            handle: core::ptr::null_mut(),
+            _pad: [0; RING_MT_BYTES - core::mem::size_of::<*mut c_void>()],
+        };
+        unsafe {
+            assert_eq!(_z_ring_mt_init(&mut ring, 2), Z_OK);
+            let ctx = (&mut ring as *mut _z_ring_mt_t).cast::<c_void>();
+            for value in 1..=2usize {
+                assert_eq!(_z_ring_mt_push(elem(value), ctx, Some(free_usize)), Z_OK);
+            }
+            assert_eq!(_z_ring_mt_close(&mut ring), Z_OK);
+            let refused = elem(3);
+            assert_eq!(
+                _z_ring_mt_push(refused, ctx, Some(free_usize)),
+                Z_RES_CHANNEL_CLOSED
+            );
+            let mut raw = refused.cast_mut();
+            free_usize(&mut raw);
+            let mut out: usize = 0;
+            let dst = (&mut out as *mut usize).cast::<c_void>();
+            assert_eq!(_z_ring_mt_pull(dst, ctx, Some(move_usize)), Z_OK);
+            assert_eq!(out, 1, "nothing was evicted for the refused push");
+            _z_ring_mt_clear(&mut ring, Some(free_usize));
+        }
+    }
+
+    /// The user's weak references are counted without the one the strong set holds, and a block
+    /// no strong reference holds counts every weak.
+    #[test]
+    fn the_weak_count_leaves_out_the_strong_sets_own() {
+        let mut cnt: *mut c_void = core::ptr::null_mut();
+        unsafe {
+            assert_eq!(_z_rc_init(&mut cnt), Z_OK);
+            assert_eq!(_z_rc_weak_count(cnt), 0);
+            assert_eq!(_z_rc_increase_weak(cnt), Z_OK);
+            assert_eq!(_z_rc_weak_count(cnt), 1);
+            let mut weak = cnt;
+            assert!(_z_rc_decrease_strong(&mut cnt));
+            assert_eq!(_z_rc_weak_count(weak), 1);
+            assert!(_z_rc_decrease_weak(&mut weak));
         }
     }
 

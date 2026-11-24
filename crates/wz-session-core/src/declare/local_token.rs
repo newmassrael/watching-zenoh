@@ -317,7 +317,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
         if self.tokens.iter().any(|t| t.token_id == token_id) {
             return Ok(false);
         }
-        if !self.quota.admits(self.tokens.len() + 1) {
+        if !self.quota.admits(self.tokens.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         if !self.key_quota.admits(keyexpr.len()) {
@@ -412,22 +412,31 @@ impl<P: Storage> LocalTokenRegistry<P> {
         if !self.has_room(pending, matching.saturating_add(1)) {
             return Err(CapacityFull(()));
         }
-        const RESERVED: &str = "room for the whole chain was checked above";
+        // The room was checked above; a push refused all the same takes back what this chain
+        // staged, so the chain is staged whole or not at all whatever the staging answers.
+        let start = pending.len();
+        let mut refused = false;
         held.each_token(&mut |token_id, keyexpr| {
-            if token_matches(keyexpr, pattern) {
+            if !refused && token_matches(keyexpr, pattern) {
                 // Stage the token by id only — the keyexpr stays in the table
                 // (SSOT) and is resolved at drain via `keyexpr_for`.
-                pending
+                refused = pending
                     .push(DeclResponseItem::Token {
                         token_id,
                         interest_id,
                     })
-                    .expect(RESERVED);
+                    .is_err();
             }
         });
-        pending
-            .push(DeclResponseItem::Final { interest_id })
-            .expect(RESERVED);
+        if refused
+            || pending
+                .push(DeclResponseItem::Final { interest_id })
+                .is_err()
+        {
+            // Take back what this chain staged; `truncate` is the byte list's alone.
+            while pending.len() > start && pending.pop().is_some() {}
+            return Err(CapacityFull(()));
+        }
         Ok(matching)
     }
 

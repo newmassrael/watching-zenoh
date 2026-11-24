@@ -245,10 +245,10 @@ mod window {
                         Some(_) => {}
                     }
                     let waited = now_ms().saturating_sub(start);
-                    if waited >= budget_ms {
+                    let Some(left) = budget_ms.checked_sub(waited).filter(|&left| left != 0) else {
                         return Err(Unclaimed::Expired);
-                    }
-                    thread = holder.freed.wait_timeout_ms(thread, budget_ms - waited).0;
+                    };
+                    thread = holder.freed.wait_timeout_ms(thread, left).0;
                 }
             }
 
@@ -262,7 +262,7 @@ mod window {
                 // `&mut self`.
                 let (table, buffer) = unsafe { (&mut *TABLE.0.get(), &mut *BUFFER.0.get()) };
                 let room = limits.pico_multicast_batch_bytes().min(buffer.len());
-                (table, &mut buffer[..room])
+                (table, buffer.get_mut(..room).unwrap_or_default())
             }
         }
 
@@ -536,7 +536,7 @@ fn lend_hello(hello: &impl HelloFacts, on_hello: &mut impl FnMut(&mut HelloState
             },
         });
     // SAFETY: `views` and the Hello's strings outlive the array, which this frame keeps.
-    let array = unsafe { StringArrayState::lent(&views[..count]) };
+    let array = unsafe { StringArrayState::lent(views.get(..count).unwrap_or(views.as_slice())) };
     on_hello(&mut HelloState::lent(zid, whatami, &array));
 }
 
@@ -794,9 +794,11 @@ impl KeptHello {
                 _start: start,
                 _len: bytes.len(),
             });
-            used += bytes.len();
+            // The locators fit the text together (the contract above), so no sum saturates.
+            used = used.saturating_add(bytes.len());
         }
-        text.add(used).write_bytes(0, KEPT_HELLO_TEXT - used);
+        text.add(used)
+            .write_bytes(0, KEPT_HELLO_TEXT.saturating_sub(used));
         let array = core::ptr::addr_of_mut!((*at).array);
         array.write(StringArrayState::lent(core::slice::from_raw_parts(
             views, count,

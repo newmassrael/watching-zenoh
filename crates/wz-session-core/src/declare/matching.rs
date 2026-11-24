@@ -179,7 +179,8 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// the lock and is unconstrained.
     pub fn register(&mut self, criterion: K, initial: bool, sink: C) -> u64 {
         let id = self.next_id;
-        self.next_id += 1;
+        // A u64 counted up by one a registration does not come back round in any session's life.
+        self.next_id = self.next_id.wrapping_add(1);
         let mut sink = sink;
         if initial {
             sink.on_matching_changed(true);
@@ -226,13 +227,13 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// own, and the sweep is one body whatever the closure, not a copy for each.
     #[inline(never)]
     fn reevaluate_by(&mut self, has_matching: &dyn Fn(&K) -> bool) -> usize {
-        let mut fired = 0;
+        let mut fired = 0usize;
         for watch in self.watches.iter_mut() {
             let now = has_matching(&watch.criterion);
             if now != watch.last {
                 watch.last = now;
                 watch.sink.on_matching_changed(now);
-                fired += 1;
+                fired = fired.saturating_add(1);
             }
         }
         fired

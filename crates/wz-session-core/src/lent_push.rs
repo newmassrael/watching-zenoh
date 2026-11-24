@@ -21,6 +21,8 @@
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use sce_forge_runtime::codec::Bounded;
 use sce_forge_runtime::codec::CodecError;
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+use sce_forge_runtime::codec::SceSink;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
@@ -242,17 +244,25 @@ pub fn plain_put_len(
     if refuses(suffix, value) {
         return 0;
     }
+    // Saturating, not checked: the parts are a slice's length and a few bytes of fields, which no
+    // address space holds past `usize`, and a length that did saturate is one no link lends.
     // The Push header and the key's id, then the suffix with its length when one rides.
-    let mut len = 1 + vle_len(u64::from(mapping_id));
+    let mut len = vle_len(u64::from(mapping_id)).saturating_add(1);
     if let Some(text) = suffix {
-        len += vle_len(text.len() as u64) + text.len();
+        len = len
+            .saturating_add(vle_len(text.len() as u64))
+            .saturating_add(text.len());
     }
     // The QoS extension's header and its value.
     if qos_rides(qos) {
-        len += 1 + vle_len(u64::from(qos.raw));
+        len = len
+            .saturating_add(1)
+            .saturating_add(vle_len(u64::from(qos.raw)));
     }
     // The Put header, the payload's length and the payload.
-    len + 1 + vle_len(value.len() as u64) + value.len()
+    len.saturating_add(1)
+        .saturating_add(vle_len(value.len() as u64))
+        .saturating_add(value.len())
 }
 
 /// Whether [`write_plain_put`] refuses a Put on `suffix` carrying `value`: a key past the
@@ -278,16 +288,14 @@ fn qos_rides(qos: crate::sample::QosLevel) -> bool {
     }
 }
 
-/// How many bytes [`put_vle`] writes `value` in: seven data bits a byte for the first eight, and
-/// a ninth that carries its eight bits whole.
+/// How many bytes `SceSink::write_vle_u64` writes `value` in: seven data bits a byte for the
+/// first eight, and a ninth that carries its eight bits whole. A value of up to 56 significant bits
+/// takes one byte per seven of them (one for zero); a wider one takes the nine.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-fn vle_len(mut value: u64) -> usize {
-    let mut len = 1;
-    while value >= 0x80 && len < 9 {
-        value >>= 7;
-        len += 1;
-    }
-    len
+fn vle_len(value: u64) -> usize {
+    let bits = u64::BITS.saturating_sub(value.leading_zeros());
+    // At most 64 bits, so the quotient is at most ten and the cast keeps it.
+    (bits.saturating_add(6) / 7).clamp(1, 9) as usize
 }
 
 /// A Del's header with no timestamp and no extension.
@@ -484,50 +492,46 @@ where
         | FLAG_PUSH_M
         // The header says an outer extension chain follows.
         | if with_qos || with_stack { 0x80 } else { 0 };
-    let mut head = [0u8; 24];
-    let mut used = 0usize;
-    head[used] = header;
-    used += 1;
-    used = put_vle(&mut head, used, u64::from(mapping_id));
+    let mut head = Head::default();
+    head.write_u8(header)?;
+    head.write_vle_u64(u64::from(mapping_id))?;
     if let Some(text) = suffix {
-        used = put_vle(&mut head, used, text.len() as u64);
-        sink.write_bytes(&head[..used])?;
+        head.write_vle_u64(text.len() as u64)?;
+        head.flush_into(sink)?;
         sink.write_bytes(text.as_bytes())?;
-        used = 0;
     }
     if with_qos {
         // ENC_ZINT(0x20) | id_qos(0x01), with `Z` when the timestamp stack follows it.
-        head[used] = 0x21 | if with_stack { 0x80 } else { 0 };
-        used += 1;
-        used = put_vle(&mut head, used, u64::from(qos.raw));
+        head.write_u8(0x21 | if with_stack { 0x80 } else { 0 })?;
+        head.write_vle_u64(u64::from(qos.raw))?;
     }
     #[cfg(feature = "pubsub-ts-stack")]
     if let Some(stack) = body.stack {
         // The last extension of the outer chain, so no `Z`: its header, its length, its body.
-        sink.write_bytes(&head[..used])?;
-        used = 0;
+        head.flush_into(sink)?;
         sink.write_u8(crate::ts_stack::TS_STACK_EXT_HEADER)?;
         sink.write_vle_u64(stack.encoded_len() as u64)?;
         stack.write(sink)?;
     }
     let extended = body.source_info.is_some() || body.attachment.is_some();
-    head[used] = if put { PUT_HEADER } else { DEL_HEADER }
-        | if body.timestamp.is_some() { 0x20 } else { 0 }
-        | if body.encoding.is_some() { 0x40 } else { 0 }
-        | if extended { 0x80 } else { 0 };
-    used += 1;
+    head.write_u8(
+        if put { PUT_HEADER } else { DEL_HEADER }
+            | if body.timestamp.is_some() { 0x20 } else { 0 }
+            | if body.encoding.is_some() { 0x40 } else { 0 }
+            | if extended { 0x80 } else { 0 },
+    )?;
     // The straight path: no body field, so the payload's length closes the tail.
     if body.is_plain() {
         if put {
-            used = put_vle(&mut head, used, value.len() as u64);
+            head.write_vle_u64(value.len() as u64)?;
         }
-        sink.write_bytes(&head[..used])?;
+        head.flush_into(sink)?;
         if put {
             sink.write_bytes(value)?;
         }
         return Ok(());
     }
-    sink.write_bytes(&head[..used])?;
+    head.flush_into(sink)?;
     if let Some(stamp) = body.timestamp {
         sink.write_vle_u64(stamp.time)?;
         sink.write_vle_u64(stamp.zid.len() as u64)?;
@@ -548,9 +552,15 @@ where
         let (eid, sn) = (u64::from(info.eid), u64::from(info.sn));
         // ENC_ZBUF(0x40) | id 0x01.
         sink.write_u8(0x41 | if body.attachment.is_some() { 0x80 } else { 0 })?;
-        // One byte of the id's length, the id, then the entity and the sequence number.
-        sink.write_vle_u64((1 + zid.len() + vle_len(eid) + vle_len(sn)) as u64)?;
-        sink.write_u8(((zid.len() as u8) - 1) << 4)?;
+        // One byte of the id's length, the id, then the entity and the sequence number. The id
+        // has one to sixteen bytes (`BodyParts::of` keeps no other), so its length less one is
+        // the byte's high nibble and the sum is a few dozen bytes.
+        let extension_len = 1usize
+            .saturating_add(zid.len())
+            .saturating_add(vle_len(eid))
+            .saturating_add(vle_len(sn));
+        sink.write_vle_u64(extension_len as u64)?;
+        sink.write_u8((zid.len() as u8).saturating_sub(1) << 4)?;
         sink.write_bytes(zid)?;
         sink.write_vle_u64(eid)?;
         sink.write_vle_u64(sn)?;
@@ -574,26 +584,74 @@ std::thread_local! {
     static WRITER_RUNS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-/// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
-/// bits a byte with the high bit set while more follow, at most eight such bytes, and a ninth
-/// that carries its eight bits whole (`SceSink::write_vle_u64`, byte for byte).
+/// The fixed fields of a Push [`write_push`] gathers before it hands them to its sink in one
+/// write: a sink of its own, so a field is written by the codec's own writer (`write_vle_u64`
+/// byte for byte), and of a room past the longest head and tail (19 and 13 bytes), which it
+/// refuses to pass as `BufferOverflow` rather than write outside it.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-fn put_vle(buf: &mut [u8; 24], mut at: usize, mut value: u64) -> usize {
-    let mut continued = 0u32;
-    while value >= 0x80 && continued < 8 {
-        buf[at] = (value as u8 & 0x7f) | 0x80;
-        at += 1;
-        value >>= 7;
-        continued += 1;
+#[derive(Default)]
+struct Head(sce_forge_runtime::heapless::Vec<u8, 24>);
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl Head {
+    /// Hand what is gathered to `sink` in one write and start again empty.
+    fn flush_into<S: SceSink>(&mut self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        sink.write_bytes(&self.0)?;
+        self.0.clear();
+        Ok(())
     }
-    buf[at] = value as u8;
-    at + 1
+}
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl SceSink for Head {
+    type Error = CodecError;
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        self.0
+            .extend_from_slice(bytes)
+            .map_err(|_| CodecError::BufferOverflow)
+    }
+
+    fn position(&self) -> usize {
+        self.0.len()
+    }
 }
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::push_build::build_push_literal;
+
+    /// The worked-out length of a VLE is the bytes the codec's writer writes, at the edges of
+    /// every width: one byte up to seven bits, one more for each seven after, and nine past 56.
+    #[test]
+    fn a_vle_length_is_the_bytes_the_codec_writes() {
+        let mut edges = alloc::vec![0u64, 1, u64::MAX];
+        for bits in (7..64).step_by(7) {
+            edges.push((1u64 << bits) - 1);
+            edges.push(1u64 << bits);
+        }
+        for value in edges {
+            let mut bytes = alloc::vec::Vec::new();
+            sce_forge_runtime::codec::VecSink::new(&mut bytes)
+                .write_vle_u64(value)
+                .expect("a Vec grows");
+            assert_eq!(vle_len(value), bytes.len(), "the length of {value:#x}");
+        }
+    }
+
+    /// The head a Push is gathered in refuses a field past its room as a value, and keeps what
+    /// it held.
+    #[test]
+    fn a_head_refuses_a_field_past_its_room() {
+        let mut head = Head::default();
+        head.write_bytes(&[0u8; 24]).expect("the head's room");
+        assert_eq!(head.write_u8(1), Err(CodecError::BufferOverflow));
+        assert_eq!(head.position(), 24);
+    }
 
     /// The direct writer and the codec's encoder write the same bytes: for a literal key and
     /// for an id, with and without a suffix, for the default QoS byte and for others, and for

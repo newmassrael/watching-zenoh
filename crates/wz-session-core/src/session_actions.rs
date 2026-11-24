@@ -18857,18 +18857,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 /*cookie_override=*/ None,
                 ExtChainRole::InitSyn,
             );
+            // An InitSyn the encoder refuses is not sent and is counted, as the lend-only
+            // arm above answers it.
             #[cfg(not(feature = "tx-lend-only"))]
             {
-                let bytes = a
-                    .encode_init_with_role(
-                        /*is_ack=*/ false,
-                        /*cookie_override=*/ None,
-                        ExtChainRole::InitSyn,
-                    )
-                    .expect(
-                        "InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)",
-                    );
-                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                let encoded = a.encode_init_with_role(
+                    /*is_ack=*/ false,
+                    /*cookie_override=*/ None,
+                    ExtChainRole::InitSyn,
+                );
+                #[cfg(feature = "transport-stats")]
+                if encoded.is_err() {
+                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                }
+                if let Ok(bytes) = encoded {
+                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                }
             }
         }
     }
@@ -18908,17 +18912,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(not(feature = "tx-lend-only"))]
             {
                 let cookie_override = R::with_mutex_mut(&a.inbound_cookie, |c| c.clone());
-                let bytes = a
-                    .encode_open_with_role(
-                        /*is_ack=*/ false,
-                        cookie_override.as_deref(),
-                        ExtChainRole::OpenSyn,
-                    )
-                    .expect(
-                        "OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)",
-                    );
-                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
-                a.hold_handshake_answer(&bytes);
+                // An OpenSyn the encoder refuses is not sent and is counted, as the lend-only
+                // arm below answers it.
+                let encoded = a.encode_open_with_role(
+                    /*is_ack=*/ false,
+                    cookie_override.as_deref(),
+                    ExtChainRole::OpenSyn,
+                );
+                #[cfg(feature = "transport-stats")]
+                if encoded.is_err() {
+                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                }
+                if let Ok(bytes) = encoded {
+                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.hold_handshake_answer(&bytes);
+                }
             }
             // Fixed-memory step S4 — the peer's cookie is echoed from the slot
             // that holds it, read where it lies, and the message is written into
@@ -19109,19 +19117,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ),
                     _ => None,
                 };
-                let bytes = a
-                    .encode_init_with_role(
-                        /*is_ack=*/ true,
-                        cookie_bytes.as_deref(),
-                        ExtChainRole::InitAck,
-                    )
-                    .expect(
-                        "the widest accept cookie is held under the codec's 128 cap by \
-                         accept_cookie::the_widest_cookie_fits_the_generated_field",
-                    );
-                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
-                a.hold_handshake_answer(&bytes);
-                cookie_bytes.is_some()
+                // An InitAck the encoder refuses is not sent and is counted, and carried no
+                // cookie, as the lend-only arm below answers it.
+                let encoded = a.encode_init_with_role(
+                    /*is_ack=*/ true,
+                    cookie_bytes.as_deref(),
+                    ExtChainRole::InitAck,
+                );
+                #[cfg(feature = "transport-stats")]
+                if encoded.is_err() {
+                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                }
+                if let Ok(bytes) = &encoded {
+                    a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.hold_handshake_answer(bytes);
+                }
+                encoded.is_ok() && cookie_bytes.is_some()
             };
             // Fixed-memory step S4 — the same InitAck with no heap in it: the
             // peer's zid is copied out of its slot (sixteen bytes and a length),
@@ -19210,18 +19221,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 /*echo_inbound_cookie=*/ false,
                 ExtChainRole::OpenAck,
             );
+            // An OpenAck the encoder refuses is not sent and is counted, as the lend-only arm
+            // above answers it.
             #[cfg(not(feature = "tx-lend-only"))]
             {
-                let bytes = a
-                    .encode_open_with_role(
-                        /*is_ack=*/ true,
-                        /*cookie_override=*/ None,
-                        ExtChainRole::OpenAck,
-                    )
-                    .expect(
-                        "OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied",
-                    );
-                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                let encoded = a.encode_open_with_role(
+                    /*is_ack=*/ true,
+                    /*cookie_override=*/ None,
+                    ExtChainRole::OpenAck,
+                );
+                #[cfg(feature = "transport-stats")]
+                if encoded.is_err() {
+                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                }
+                if let Ok(bytes) = encoded {
+                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                }
             }
         }
     }

@@ -480,10 +480,13 @@ const AUTH_SUB: &[Row] = &[
 const fn identities_of<const N: usize>(table: &[Row]) -> [u8; N] {
     assert!(table.len() == N, "an identity table is as long as its rows");
     let mut out = [0u8; N];
-    let mut i = 0;
-    while i < N {
-        out[i] = row_eid(&table[i]);
-        i += 1;
+    let mut rest = table;
+    let mut i = 0usize;
+    while let [row, tail @ ..] = rest {
+        out[i] = row_eid(row);
+        // At most `N`, the rows' count.
+        i = i.saturating_add(1);
+        rest = tail;
     }
     out
 }

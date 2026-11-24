@@ -24,9 +24,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .filter(|face| face.id != DIAL_FACE && matches!(face.link, Link::Opening { .. }))
             .count();
-        if self.transport.links.faces().len() > self.config.max_faces
-            || pending >= self.config.accept_pending
-        {
+        if pending >= self.config.accept_pending || self.faces_full() {
             return;
         }
         let id = self.transport.links.next_face_id();
@@ -58,6 +56,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
     }
 
+    /// Whether the table holds as many faces as `max_faces` admits beside the dial role's. A place
+    /// kept for a departed face's tomb alone is given up first: a face that comes outweighs a
+    /// departure owed to a listener's replay (`told`).
+    fn faces_full(&mut self) -> bool {
+        #[cfg(feature = "connectivity")]
+        if self.transport.links.faces().len() > self.config.max_faces {
+            self.give_up_a_departure();
+        }
+        self.transport.links.faces().len() > self.config.max_faces
+    }
+
     /// Add a face whose link is `link`: a dial under way or a handshake. It is told the session's
     /// declarations at the pace the dial role's face is. Every face the open admits has its place
     /// in the table; one past them, which the callers refuse before they make it, is let go of
@@ -68,6 +77,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             id,
             link,
             replay: Replay::with_pacing(pacing),
+            #[cfg(feature = "connectivity")]
+            told: FaceTold::default(),
         };
         if let Err(face) = self.transport.links.push_face(face) {
             if let Some(wire) = face.link.wire() {
@@ -105,7 +116,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // A face past `max_faces` would have no buffers: the arena holds the links of as many
         // faces as the config admits, and an accepted link past them is closed unread.
-        if core.transport.links.faces().len() > core.config.max_faces {
+        if core.faces_full() {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
                 endpoint,
                 Refusal::FacesFull,

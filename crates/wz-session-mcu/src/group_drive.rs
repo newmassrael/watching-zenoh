@@ -440,7 +440,7 @@ impl MulticastReplyQueue {
     fn push(&self, item: MulticastTxItem) {
         let refused = {
             let mut queue = self.queue.borrow_mut();
-            if self.quota.get().admits(queue.items.len() + 1) {
+            if self.quota.get().admits(queue.items.len().saturating_add(1)) {
                 queue.items.push_back(item);
                 None
             } else {
@@ -608,7 +608,7 @@ impl MulticastReplyQueue {
     fn push(&self, item: MulticastTxItem) {
         let refused = wz_runtime_coop::cs::with(|_| {
             let mut items = self.items.borrow_mut();
-            let refused = if self.quota.get().admits(items.len() + 1) {
+            let refused = if self.quota.get().admits(items.len().saturating_add(1)) {
                 items.push_back(item).err()
             } else {
                 Some(item)
@@ -1445,8 +1445,11 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 }
             }
             let mut dgram = [0u8; 2];
-            if let Ok(len) = encode_multicast_close_into_slice(&mut dgram) {
-                transport.send_to_group(&dgram[..len]);
+            if let Some(close) = encode_multicast_close_into_slice(&mut dgram)
+                .ok()
+                .and_then(|len| dgram.get(..len))
+            {
+                transport.send_to_group(close);
             }
             // Pump before returning so the datagram actually LEAVES. The body
             // does the same after its TX drain, and for the same reason: on a
@@ -1503,7 +1506,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             if *iter >= limit {
                 return Some(MulticastOutcome::IterationLimit);
             }
-            *iter += 1;
+            *iter = (*iter).saturating_add(1);
         }
 
         let now = clock.now_monotonic_ms();
@@ -1565,8 +1568,11 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             // JOIN `encode_join` is, byte for byte, over a heap vector), so the
             // beacon takes nothing from an allocator on either profile.
             let mut beacon = [0u8; JOIN_MAX_BYTES];
-            if let Ok(len) = encode_join_into_slice(params, advertised, &mut beacon) {
-                transport.send_to_group(&beacon[..len]);
+            if let Some(join) = encode_join_into_slice(params, advertised, &mut beacon)
+                .ok()
+                .and_then(|len| beacon.get(..len))
+            {
+                transport.send_to_group(join);
             }
             *next_join_ms = now.saturating_add(params.join_interval_ms);
         }

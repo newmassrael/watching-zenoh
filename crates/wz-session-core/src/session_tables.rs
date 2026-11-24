@@ -967,8 +967,17 @@ pub struct Undeclared<R> {
 pub struct Watching<K> {
     /// Its row.
     pub handle: Handle<K>,
-    /// The id of a new Interest to send, `None` when it shares one already open.
-    pub interest: Option<EntityId>,
+    /// The new Interest it opened, to send; `None` when it shares one already open.
+    pub interest: Option<OpenedInterest>,
+}
+
+/// An Interest a declaration opened, to send: its row, which the sender reads, and its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenedInterest {
+    /// Its row.
+    pub handle: InterestHandle,
+    /// The id it carries.
+    pub id: EntityId,
 }
 
 /// A write filter or a matching listener undeclared.
@@ -1759,27 +1768,23 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- Interests, write filters and matching listeners ------------------------------------
 
-    /// Hold an Interest of `kind` on `key`: the one open already, or a new one, whose id is
-    /// handed back to be sent.
+    /// Hold an Interest of `kind` on `key`: the one open already, or a new one, handed back
+    /// to be sent.
     fn hold_interest(
         &mut self,
         kind: InterestKind,
         key: &str,
         name: InterestName<'_>,
-    ) -> Result<(InterestHandle, Option<EntityId>), RegisterError> {
+    ) -> Result<(InterestHandle, Option<OpenedInterest>), RegisterError> {
         // Tables that keep no write filter hold no Interest of one.
         let interests =
             <F::FilterPresence as Presence>::get_mut::<Interests<P>>(&mut self.interests)
                 .ok_or(RegisterError::TableFull)?;
-        let found = interests
-            .iter()
+        if let Some((handle, row)) = interests
+            .iter_mut()
             .find(|(_, row)| row.kind == kind && text(&row.key) == key)
-            .map(|(handle, row)| (handle, row.holds));
-        if let Some((handle, holds)) = found {
-            let holds = holds.checked_add(1).ok_or(RegisterError::TableFull)?;
-            if let Some(row) = interests.get_mut(handle) {
-                row.holds = holds;
-            }
+        {
+            row.holds = row.holds.checked_add(1).ok_or(RegisterError::TableFull)?;
             return Ok((handle, None));
         }
         if interests.is_full() {
@@ -1804,7 +1809,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 suffix,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        Ok((handle, Some(id)))
+        Ok((handle, Some(OpenedInterest { handle, id })))
     }
 
     /// Let go of one hold of the Interest `handle` names: its id when that was the last, for its

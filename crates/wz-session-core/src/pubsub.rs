@@ -982,7 +982,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// Take the id [`Self::next_entity_id`] returned. Called only after it
     /// returned one, so the counter stops one past `u32::MAX`.
     fn consume_entity_id(&mut self) {
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
     }
 
     /// R311gb-2b — register an explicit [`SampleSink`] for a keyexpr
@@ -1054,7 +1054,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
         }
         // The quota first, before the key gate numbers an entity or an id is taken: a refused
         // registration changes nothing.
-        if !self.quota.admits(self.subscribers.len() + 1) {
+        if !self.quota.admits(self.subscribers.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         // The row's key, also before an entity or an id is taken: a pattern with no room where
@@ -2279,9 +2279,11 @@ impl<P: Storage> MatchMemo<P> {
             hash ^= u32::from(*byte);
             hash = hash.wrapping_mul(0x0100_0193);
         }
-        // `max(1)` only keeps the remainder defined where there are no slots: nothing reaches
-        // this function then (see `fire_into_memoized`).
-        (hash ^ (hash >> 15)) as usize % self.slot_count().max(1)
+        // No slots has no remainder, and the first is answered: nothing reaches this function
+        // then (see `fire_into_memoized`).
+        ((hash ^ (hash >> 15)) as usize)
+            .checked_rem(self.slot_count())
+            .unwrap_or(0)
     }
 }
 
@@ -2412,7 +2414,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     if repeats_previous {
         if let Some((at, writes)) = memo.last {
             if writes == memo.writes {
-                if let Some(slot) = &memo.slots[at] {
+                if let Some(Some(slot)) = memo.slots.get(at) {
                     if slot.epoch == epoch && slot.remote == is_remote {
                         for position in slot.hits.iter() {
                             if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
@@ -2427,7 +2429,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     }
     memo.last = None;
     let at = memo.slot_of(key);
-    if let Some(slot) = &memo.slots[at] {
+    if let Some(Some(slot)) = memo.slots.get(at) {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
             for position in slot.hits.iter() {
@@ -2467,13 +2469,18 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     if text.push_str(key).is_err() {
         return fired;
     }
-    memo.slots[at] = Some(MemoSlot {
+    // `slot_of` answers a slot of the table, which is not empty here.
+    let Some(entry) = memo.slots.get_mut(at) else {
+        return fired;
+    };
+    *entry = Some(MemoSlot {
         epoch,
         remote: is_remote,
         key: text,
         hits,
     });
-    memo.writes += 1;
+    // A count of writes, read only for equality with the one a remembered slot was written at.
+    memo.writes = memo.writes.wrapping_add(1);
     memo.last = Some((at, memo.writes));
     fired
 }
@@ -3149,7 +3156,7 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming
             .aliases
             .find(crate::wire_id::peer_key(id))
-            .map(|text| String::from(&text[..]))
+            .map(|text| String::from(&**text))
     }
 
     /// How many keyexpr aliases the peer has declared and not retracted.
@@ -3640,7 +3647,7 @@ impl<P: Storage> InterestSide<P> {
             // interest: its id is at least the counter AFTER the id the row
             // took. `watermark` is that boundary, for a table that learns of
             // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
-            let stored = self.quota.admits(self.rows.len() + 1)
+            let stored = self.quota.admits(self.rows.len().saturating_add(1))
                 && subs.next_entity_id().is_some_and(|decl_id| {
                     self.rows
                         .push(InboundSubInterest {
@@ -3648,7 +3655,8 @@ impl<P: Storage> InterestSide<P> {
                             keyexpr,
                             aggregate,
                             aggregate_decl_id: decl_id,
-                            watermark: u64::from(decl_id) + 1,
+                            // A u32 id one up in a u64, which holds it.
+                            watermark: u64::from(decl_id).saturating_add(1),
                             #[cfg(feature = "declare-undeclare")]
                             announced: false,
                         })
@@ -3700,29 +3708,41 @@ impl<P: Storage> InterestSide<P> {
             self.count_refused_chain();
             return 0;
         }
-        const RESERVED: &str = "room for the whole chain was checked above";
+        // The room was checked above; a push refused all the same takes back what this chain
+        // staged and counts the chain, so a chain is staged whole or not at all.
+        let start = self.staged.len();
+        let mut refused = false;
         if aggregate {
             if replies == 1 {
-                self.staged
+                refused = self
+                    .staged
                     .push(SubInterestReply::Aggregate { interest_id })
-                    .expect(RESERVED);
+                    .is_err();
             }
         } else {
             let staged = &mut self.staged;
             subs.for_each_subscription(&mut |subscription_id, sub_pattern, _| {
-                if subscription_matches_interest(sub_pattern, pattern) {
-                    staged
+                if !refused && subscription_matches_interest(sub_pattern, pattern) {
+                    refused = staged
                         .push(SubInterestReply::Concrete {
                             interest_id,
                             subscription_id,
                         })
-                        .expect(RESERVED);
+                        .is_err();
                 }
             });
         }
-        self.staged
-            .push(SubInterestReply::Final { interest_id })
-            .expect(RESERVED);
+        if refused
+            || self
+                .staged
+                .push(SubInterestReply::Final { interest_id })
+                .is_err()
+        {
+            // Take back what this chain staged; `truncate` is the byte list's alone.
+            while self.staged.len() > start && self.staged.pop().is_some() {}
+            self.count_refused_chain();
+            return 0;
+        }
         replies
     }
 
@@ -3831,7 +3851,7 @@ impl<P: Storage> InterestSide<P> {
         quota: crate::limits::MaxPendingDeclaresHeld,
         item: SubInterestReply,
     ) {
-        if !quota.admits(staged.len() + 1) || staged.push(item).is_err() {
+        if !quota.admits(staged.len().saturating_add(1)) || staged.push(item).is_err() {
             refusals.announcements = refusals.announcements.saturating_add(1);
         }
     }
@@ -3839,12 +3859,13 @@ impl<P: Storage> InterestSide<P> {
     /// Stage the terminating `Final` of an interest that could not be
     /// remembered, as a chain of one, whole or counted.
     fn stage_final_only(&mut self, interest_id: u64) {
-        if !self.has_room(1) {
-            self.count_refused_chain();
-        } else {
-            self.staged
+        if !self.has_room(1)
+            || self
+                .staged
                 .push(SubInterestReply::Final { interest_id })
-                .expect("one free slot was checked above");
+                .is_err()
+        {
+            self.count_refused_chain();
         }
     }
 

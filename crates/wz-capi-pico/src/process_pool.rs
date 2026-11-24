@@ -133,29 +133,31 @@ pub(crate) const fn slot_bytes(class: usize) -> usize {
 /// The size class of an object of `size` bytes aligned to `align`: the smallest slot that holds
 /// it, or none.
 pub(crate) const fn class_of(size: usize, align: usize) -> Option<usize> {
-    if align > SLOT_ALIGN {
+    if align > SLOT_ALIGN || size > slot_bytes(CLASSES - 1) {
         return None;
     }
-    let mut class = 0;
-    while class < CLASSES {
-        if size <= slot_bytes(class) {
-            return Some(class);
-        }
-        class += 1;
-    }
-    None
+    // The slots double from the smallest, so the class is how many times the smallest power of two
+    // that holds the object doubles the smallest slot.
+    let slot = if size < SMALLEST_SLOT {
+        SMALLEST_SLOT
+    } else {
+        size.next_power_of_two()
+    };
+    Some((slot / SMALLEST_SLOT).trailing_zeros() as usize)
 }
 
 /// The bytes of each slot of the pool of a `T`: its own size rounded up to the alignment of a
 /// slot, and one alignment for an object of no bytes, as a free slot holds the link to the next. A
 /// kind's pool lends its slots to no other kind, so a slot larger than its object would hold
-/// nothing more. Evaluated when the build is compiled, so an object aligned past a slot fails the
-/// build rather than a reservation.
+/// nothing more. An object aligned past a slot fails the build rather than a reservation.
 const fn slot_size<T>() -> usize {
+    const {
+        assert!(
+            core::mem::align_of::<T>() <= SLOT_ALIGN,
+            "an object of the ABI is aligned past a slot of the process pools"
+        )
+    };
     let size = core::mem::size_of::<T>();
-    if core::mem::align_of::<T>() > SLOT_ALIGN {
-        panic!("an object of the ABI is aligned past a slot of the process pools");
-    }
     if size == 0 {
         SLOT_ALIGN
     } else {
@@ -500,11 +502,11 @@ impl Plan {
                 objects.link_events_listeners,
             );
         }
-        let mut kind = 0;
         let mut holds = plan.area != 0;
-        while kind < KINDS {
-            holds |= plan.slots[kind] != 0;
-            kind += 1;
+        let mut rest: &[usize] = &plan.slots;
+        while let [slots, tail @ ..] = rest {
+            holds |= *slots != 0;
+            rest = tail;
         }
         if !holds {
             return Err(Unplanned::Empty);
@@ -523,23 +525,27 @@ impl Plan {
     /// The bytes every pool's slots take together.
     const fn slot_bytes(&self) -> Result<usize, Unplanned> {
         let mut total: usize = 0;
-        let mut kind = 0;
-        while kind < KINDS {
-            total = match self.slots[kind].checked_mul(self.sizes[kind]) {
+        let mut pools: (&[usize], &[usize]) = (&self.slots, &self.sizes);
+        while let ([slots, slots_rest @ ..], [size, sizes_rest @ ..]) = pools {
+            total = match slots.checked_mul(*size) {
                 Some(bytes) => match total.checked_add(bytes) {
                     Some(total) => total,
                     None => return Err(Unplanned::TooLarge),
                 },
                 None => return Err(Unplanned::TooLarge),
             };
-            kind += 1;
+            pools = (slots_rest, sizes_rest);
         }
         Ok(total)
     }
 
     /// The bytes the pools take together: the slots, then the payloads' area and its marks.
     pub(crate) const fn bytes(&self) -> Result<usize, Unplanned> {
-        match planned!(self.slot_bytes()).checked_add(self.area + Blocks::marks_bytes(self.area)) {
+        let area = match self.area.checked_add(Blocks::marks_bytes(self.area)) {
+            Some(area) => area,
+            None => return Err(Unplanned::TooLarge),
+        };
+        match planned!(self.slot_bytes()).checked_add(area) {
             Some(bytes) => Ok(bytes),
             None => Err(Unplanned::TooLarge),
         }
@@ -666,7 +672,8 @@ impl Blocks {
     /// The bytes of an area for `bytes` of payload: the multiple of `MIN_BLOCK` at or under it,
     /// refused past the largest block's offset an area can name.
     const fn area_of(bytes: usize) -> Result<usize, Unplanned> {
-        let area = bytes - bytes % MIN_BLOCK;
+        // `MIN_BLOCK` is a power of two: the multiple at or under `bytes` clears its low bits.
+        let area = bytes & !(MIN_BLOCK - 1);
         if area > block_bytes(ORDERS - 1) {
             return Err(Unplanned::TooLarge);
         }
@@ -687,18 +694,23 @@ impl Blocks {
         let mut blocks = Self {
             start,
             len,
-            marks: start + len,
+            // The plan counted the area and its marks with checked arithmetic, so no sum of the
+            // offsets of the memory reaches past what it holds.
+            marks: start.saturating_add(len),
             free: [NONE; ORDERS],
             held: 0,
         };
         base.as_ptr()
             .add(blocks.marks)
             .write_bytes(0, Self::marks_bytes(len));
+        // The largest blocks that fit a multiple of `MIN_BLOCK` are the bits of its length, and each
+        // lies after the larger ones: its offset is the bits above its own.
         let mut at = 0;
         for order in (0..ORDERS).rev() {
-            if len - at >= block_bytes(order) {
+            let size = block_bytes(order);
+            if len & size != 0 {
                 blocks.push(base, at, order);
-                at += block_bytes(order);
+                at |= size;
             }
         }
         blocks
@@ -709,7 +721,10 @@ impl Blocks {
     /// # Safety
     /// `offset` is within the area.
     unsafe fn free_block(&self, base: NonNull<u8>, offset: usize) -> *mut FreeBlock {
-        base.as_ptr().add(self.start + offset).cast::<FreeBlock>()
+        base.as_ptr()
+            .add(self.start)
+            .add(offset)
+            .cast::<FreeBlock>()
     }
 
     /// The byte of the marks that holds the mark of `offset`, and the mark's bit in it.
@@ -718,7 +733,10 @@ impl Blocks {
     /// `offset` is within the area.
     unsafe fn mark_of(&self, base: NonNull<u8>, offset: usize) -> (*mut u8, u8) {
         let index = offset / MIN_BLOCK;
-        (base.as_ptr().add(self.marks + index / 8), 1 << (index % 8))
+        (
+            base.as_ptr().add(self.marks).add(index / 8),
+            1 << (index % 8),
+        )
     }
 
     /// Whether a free block starts at `offset`.
@@ -738,7 +756,9 @@ impl Blocks {
     /// The block lies in the area and nothing holds it.
     #[inline(never)]
     unsafe fn push(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
-        let head = self.free[order];
+        let Some(&head) = self.free.get(order) else {
+            return;
+        };
         self.free_block(base, offset).write(FreeBlock {
             prev: NONE,
             next: head,
@@ -747,7 +767,9 @@ impl Blocks {
         if head != NONE {
             (*self.free_block(base, head as usize)).prev = offset as u32;
         }
-        self.free[order] = offset as u32;
+        if let Some(first) = self.free.get_mut(order) {
+            *first = offset as u32;
+        }
         let (byte, bit) = self.mark_of(base, offset);
         *byte |= bit;
     }
@@ -760,7 +782,9 @@ impl Blocks {
     unsafe fn unlink(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
         let FreeBlock { prev, next, .. } = self.free_block(base, offset).read();
         if prev == NONE {
-            self.free[order] = next;
+            if let Some(first) = self.free.get_mut(order) {
+                *first = next;
+            }
         } else {
             (*self.free_block(base, prev as usize)).next = next;
         }
@@ -778,15 +802,19 @@ impl Blocks {
     /// The area was laid at `base` ([`Self::lay`]).
     unsafe fn take(&mut self, base: NonNull<u8>, bytes: usize) -> Option<(usize, usize)> {
         let order = order_for(bytes.max(MIN_BLOCK))?;
-        let found = (order..ORDERS).find(|&order| self.free[order] != NONE)?;
-        let offset = self.free[found] as usize;
+        let (found, offset) = self
+            .free
+            .iter()
+            .enumerate()
+            .skip(order)
+            .find_map(|(found, &head)| (head != NONE).then_some((found, head as usize)))?;
         self.unlink(base, offset, found);
-        let mut split = found;
-        while split > order {
-            split -= 1;
-            self.push(base, offset + block_bytes(split), split);
+        // A block's offset is a multiple of its bytes, so the upper half split from it is at its
+        // offset with the bit of the half's bytes set.
+        for split in (order..found).rev() {
+            self.push(base, offset | block_bytes(split), split);
         }
-        self.held += 1;
+        self.held = self.held.saturating_add(1);
         Some((offset, block_bytes(order)))
     }
 
@@ -800,11 +828,11 @@ impl Blocks {
         debug_assert!(self.held > 0, "a block given back was taken");
         let mut order = order_for(bytes).unwrap_or(0);
         let mut offset = offset;
-        self.held -= 1;
-        while order + 1 < ORDERS {
+        self.held = self.held.saturating_sub(1);
+        while let Some(joined) = order.checked_add(1).filter(|&joined| joined < ORDERS) {
             let size = block_bytes(order);
             let buddy = offset ^ size;
-            if buddy + size > self.len
+            if size > self.len.saturating_sub(buddy)
                 || !self.is_free(base, buddy)
                 || (*self.free_block(base, buddy)).order as usize != order
             {
@@ -812,7 +840,7 @@ impl Blocks {
             }
             self.unlink(base, buddy, order);
             offset = offset.min(buddy);
-            order += 1;
+            order = joined;
         }
         self.push(base, offset, order);
     }
@@ -848,12 +876,15 @@ impl Pools {
             free: None,
         }; KINDS];
         let mut ends = [0; KINDS];
-        let mut at = 0;
-        for (kind, (pool, end)) in pools.iter_mut().zip(ends.iter_mut()).enumerate() {
-            pool.size = plan.sizes[kind];
+        let mut at: usize = 0;
+        let planned = plan.slots.iter().zip(plan.sizes.iter());
+        for ((pool, end), (&slots, &size)) in pools.iter_mut().zip(ends.iter_mut()).zip(planned) {
+            pool.size = size;
             pool.start = at;
-            pool.slots = plan.slots[kind];
-            at += pool.slots * pool.size;
+            pool.slots = slots;
+            // The plan counted these bytes with checked arithmetic (`Plan::bytes`): none of
+            // these sums reaches past its count.
+            at = at.saturating_add(slots.saturating_mul(size));
             *end = at;
         }
         Self {
@@ -873,12 +904,12 @@ impl Pools {
     /// before an untouched one, and the untouched ones go lowest first.
     fn take(&mut self, kind: Kind, size: usize) -> Option<NonNull<u8>> {
         let base = self.base;
-        let pool = &mut self.pools[kind as usize];
+        let pool = self.pools.get_mut(kind as usize)?;
         debug_assert!(
             pool.slots == 0 || size <= pool.size,
             "an object is taken from the pool of its own kind, whose slots hold it"
         );
-        let count = &mut self.counts[count_of(pool.size)];
+        let count = self.counts.get_mut(count_of(pool.size))?;
         let slot = if let Some(slot) = pool.free {
             // SAFETY: the first word of a slot on the list is the link to the next one, written
             // when it was given back.
@@ -886,17 +917,22 @@ impl Pools {
             slot
         } else if pool.fresh < pool.slots {
             // SAFETY: an untouched slot lies within the pool's slots, inside the memory the pools
-            // were laid over, which is not null.
+            // were laid over, which is not null; the plan counted those bytes with checked
+            // arithmetic, so the slot's offset does not saturate.
             let slot = unsafe {
-                NonNull::new_unchecked(base.as_ptr().add(pool.start + pool.fresh * pool.size))
+                NonNull::new_unchecked(
+                    base.as_ptr()
+                        .add(pool.start)
+                        .add(pool.fresh.saturating_mul(pool.size)),
+                )
             };
-            pool.fresh += 1;
+            pool.fresh = pool.fresh.saturating_add(1);
             slot
         } else {
             count.refused = count.refused.saturating_add(1);
             return None;
         };
-        count.in_use += 1;
+        count.in_use = count.in_use.saturating_add(1);
         count.high_water = count.high_water.max(count.in_use);
         Some(slot)
     }
@@ -919,8 +955,9 @@ impl Pools {
             return false;
         };
         debug_assert_eq!(
-            (at - pool.start) % pool.size,
-            0,
+            at.checked_sub(pool.start)
+                .and_then(|offset| offset.checked_rem(pool.size)),
+            Some(0),
             "a place given back is the start of a slot"
         );
         // SAFETY: the slot lies in this pool and was handed out, and its value is gone, so its
@@ -932,20 +969,25 @@ impl Pools {
                 .write(pool.free)
         };
         pool.free = Some(place);
-        self.counts[count_of(pool.size)].in_use -= 1;
+        if let Some(count) = self.counts.get_mut(count_of(pool.size)) {
+            count.in_use = count.in_use.saturating_sub(1);
+        }
         true
     }
 
     /// How many objects the pools hold now, the payloads' blocks among them.
     #[cfg(any(test, feature = "object-pool"))]
     fn held(&self) -> usize {
-        self.counts.iter().map(|count| count.in_use).sum::<usize>() + self.blocks.held
+        self.counts
+            .iter()
+            .map(|count| count.in_use)
+            .fold(self.blocks.held, usize::saturating_add)
     }
 
     /// The pools of size class `class` together.
     #[cfg(any(test, feature = "object-pool"))]
     fn report(&self, class: usize) -> ClassReport {
-        let count = &self.counts[class];
+        let count = self.counts.get(class).copied().unwrap_or_default();
         let pools = || {
             self.pools
                 .iter()
@@ -954,7 +996,9 @@ impl Pools {
         ClassReport {
             slot_bytes: slot_bytes(class),
             slots: pools().map(|pool| pool.slots).sum(),
-            bytes: pools().map(|pool| pool.slots * pool.size).sum(),
+            bytes: pools()
+                .map(|pool| pool.slots.saturating_mul(pool.size))
+                .sum(),
             in_use: count.in_use,
             high_water: count.high_water,
             refused: count.refused,
@@ -1150,7 +1194,8 @@ pub(crate) fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
         // SAFETY: the area was laid over the pools' memory, which this lock holds.
         let (offset, bytes) = unsafe { pools.blocks.take(base, bytes) }?;
         // SAFETY: the block lies in the pools' memory, at an offset aligned to 16 from `base`.
-        let at = unsafe { NonNull::new_unchecked(base.as_ptr().add(pools.blocks.start + offset)) };
+        let at =
+            unsafe { NonNull::new_unchecked(base.as_ptr().add(pools.blocks.start).add(offset)) };
         Some((at, bytes))
     })
 }
@@ -1166,8 +1211,12 @@ pub(crate) unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
         // they hold one.
         if let Some(pools) = reserved.0.as_mut() {
             let base = pools.base;
-            let offset = at.as_ptr() as usize - (base.as_ptr() as usize + pools.blocks.start);
-            pools.blocks.give_back(base, offset, bytes);
+            let offset = (at.as_ptr() as usize)
+                .checked_sub(base.as_ptr() as usize)
+                .and_then(|from_base| from_base.checked_sub(pools.blocks.start));
+            if let Some(offset) = offset {
+                pools.blocks.give_back(base, offset, bytes);
+            }
         }
     });
 }
@@ -1342,6 +1391,19 @@ mod tests {
         assert_eq!(class_of(16 * 1024, 8), Some(CLASSES - 1));
         assert_eq!(class_of(16 * 1024 + 1, 8), None);
         assert_eq!(class_of(16, 32), None);
+    }
+
+    /// The class of every size up to past the largest slot is the first whose slot holds it.
+    #[test]
+    fn a_class_is_the_first_whose_slot_holds_the_size() {
+        for size in 0..=slot_bytes(CLASSES - 1) + 1 {
+            let first = (0..CLASSES).find(|&class| size <= slot_bytes(class));
+            assert_eq!(class_of(size, 1), first, "size {size}");
+        }
+        assert_eq!(class_of(0, 1), Some(0));
+        assert_eq!(class_of(32, 1), Some(1));
+        assert_eq!(class_of(33, 1), Some(2));
+        assert_eq!(class_of(usize::MAX, 1), None);
     }
 
     /// An object takes a slot of its own size, rounded up to the alignment of a slot, whichever
@@ -1652,6 +1714,27 @@ mod tests {
             (64, 3, 2 * 48 + 64)
         );
         assert_eq!(plan.slot_bytes(), Ok(report.bytes));
+    }
+
+    /// A class past the last the pools count reports no slot and nothing held, its slot size
+    /// alone.
+    #[test]
+    fn a_class_past_the_counted_ones_reports_nothing_held() {
+        let mut memory = Memory([0; 512]);
+        let plan = plan_of(&[(Kind::Bytes, 2, 48)]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        assert!(pools.take(Kind::Bytes, 48).is_some());
+        let report = pools.report(CLASSES + 1);
+        assert_eq!(
+            report,
+            ClassReport {
+                slot_bytes: slot_bytes(CLASSES + 1),
+                ..ClassReport::default()
+            }
+        );
+        assert_eq!(pools.report(count_of(48)).in_use, 1);
     }
 
     /// Laying the pools writes nothing into their slots; a pool hands out its untouched slots lowest
@@ -2179,6 +2262,21 @@ mod tests {
             assert!(free_of(&blocks, base, order).is_empty(), "order {order}");
         }
         assert_eq!(blocks.held, 0);
+    }
+
+    /// An area of blocks of three sizes is laid as the bits of its length: each block after the
+    /// larger ones, at the offset their bytes make.
+    #[test]
+    fn an_area_is_laid_as_the_bits_of_its_length() {
+        let mut memory = Memory([0xA5; 512]);
+        let (blocks, base) = area_over(&mut memory, 13 * MIN_BLOCK);
+        assert_eq!(free_of(&blocks, base, 3), [0]);
+        assert_eq!(free_of(&blocks, base, 2), [8 * MIN_BLOCK]);
+        assert_eq!(free_of(&blocks, base, 1), alloc::vec::Vec::<usize>::new());
+        assert_eq!(free_of(&blocks, base, 0), [12 * MIN_BLOCK]);
+        for order in 4..ORDERS {
+            assert!(free_of(&blocks, base, order).is_empty(), "order {order}");
+        }
     }
 
     /// A take is the smallest block that holds its bytes, split from a larger one, the halves it

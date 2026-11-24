@@ -561,9 +561,10 @@ fn retained_attachment(view: &dyn ReplyView) -> Option<crate::link::RxBytes> {
 #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
 pub fn decode_responder_ext_body(body: &[u8]) -> Option<(&[u8], u32)> {
     let (&flags, rest) = body.split_first()?;
-    let zid_len = usize::from(flags >> 4) + 1;
-    let zid = rest.get(..zid_len)?;
-    let (eid, _) = crate::vle::read_vle_u64(rest.get(zid_len..)?)?;
+    // The high nibble is the zid's length less one: one to sixteen bytes.
+    let zid_len = usize::from(flags >> 4).saturating_add(1);
+    let (zid, after) = rest.split_at_checked(zid_len)?;
+    let (eid, _) = crate::vle::read_vle_u64(after)?;
     Some((zid, u32::try_from(eid).ok()?))
 }
 
@@ -1320,7 +1321,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// row its storage has free. A table lent no rows has none, so a get it cannot hold is refused
     /// before anything is put in it.
     pub fn has_room(&self) -> bool {
-        self.pending.free_slots() > 0 && self.quota.admits(self.pending.len() + 1)
+        self.pending.free_slots() > 0 && self.quota.admits(self.pending.len().saturating_add(1))
     }
 
     /// Remove a previously-registered pending entry by rid. Returns
@@ -1634,12 +1635,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// face (`zenoh/src/net/routing/dispatcher/face.rs` @ `finalize_pending_queries(&self.tables, &mut state);`),
     /// and the replies the get already had stand.
     pub fn finish_all(&mut self) -> usize {
-        let mut ended = 0;
+        let mut ended = 0usize;
         let mut at = 0;
         while let Some(mut entry) = self.pending.take_next_where(&mut at, |_| true) {
             let rid = entry.rid;
             entry.sink.on_final(rid);
-            ended += 1;
+            // At most the table's rows.
+            ended = ended.saturating_add(1);
         }
         ended
     }
@@ -1696,13 +1698,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         // (removed from self.pending), then fire it, so a panicking on_final
         // cannot leave a half-swept entry behind and the frame holds one
         // entry and not the table of them.
-        let mut swept = 0;
+        let mut swept = 0usize;
         let mut at = 0;
         while let Some(mut entry) = self.pending.take_next_where(
             &mut at,
             |entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms),
         ) {
-            swept += 1;
+            swept = swept.saturating_add(1);
             let rid = entry.rid;
             // R311y323 — `on_timeout`, NOT a bare `on_final`: an expired query
             // synthesizes `Err("Timeout")` before its final, so a caller can tell
@@ -1849,11 +1851,14 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         // function the final of every get passes through.
         let mut at = 0;
         while let Some(mut entry) = self.pending.take_next_where(&mut at, |entry| {
-            if entry.rid == rid && entry.remaining_finals > 0 {
-                entry.remaining_finals -= 1;
-                return entry.remaining_finals == 0;
+            // An entry of this rid that still owes a Final owes one fewer; the last one ends it.
+            match entry.remaining_finals.checked_sub(1) {
+                Some(left) if entry.rid == rid => {
+                    entry.remaining_finals = left;
+                    left == 0
+                }
+                _ => false,
             }
-            false
         }) {
             entry.sink.on_final(rid);
         }
@@ -2097,6 +2102,28 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
 mod tests {
     use super::*;
     use hashbrown::HashMap;
+
+    /// A responder extension reads its zid by the length its first byte's high nibble gives, one
+    /// to sixteen bytes, and a body that holds fewer, or no entity id after them, names no
+    /// responder.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_responder_extension_reads_its_zid_by_the_nibble_and_refuses_a_short_body() {
+        assert_eq!(
+            decode_responder_ext_body(&[0x10, 0xAA, 0xBB, 0x07]),
+            Some((&[0xAA, 0xBB][..], 7))
+        );
+        let mut widest = alloc::vec![0xF0];
+        widest.extend_from_slice(&[0x5A; 16]);
+        widest.push(0x01);
+        assert_eq!(
+            decode_responder_ext_body(&widest),
+            Some((&[0x5A; 16][..], 1))
+        );
+        assert_eq!(decode_responder_ext_body(&[0xF0, 0x01, 0x02]), None);
+        assert_eq!(decode_responder_ext_body(&[0x10, 0xAA, 0xBB]), None);
+        assert_eq!(decode_responder_ext_body(&[]), None);
+    }
     // no_std test prelude: the std prelude (Box / String / Vec / vec!)
     // is absent under `#![no_std]`, so the alloc forms are imported
     // explicitly; the host-run callback-capture cells use `std::sync`.

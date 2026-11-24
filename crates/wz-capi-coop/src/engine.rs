@@ -84,7 +84,7 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next, Phase, Signals, Turn};
+use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
@@ -93,7 +93,8 @@ use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
-    Dial, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRead, FaceRecord, FaceSession, HandshakeEnd,
+    IdleWait, Link, LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -221,11 +222,18 @@ use {
 mod faces;
 #[cfg(feature = "connectivity")]
 use faces::FacePlane;
+#[cfg(feature = "connectivity")]
+mod told;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
 #[cfg(feature = "connectivity")]
 use wz_session_core::face::{FaceEventSink, FaceLinkRow};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
+#[cfg(feature = "connectivity")]
+use {
+    told::FaceTold,
+    wz_capi_port::told::{ToldKey, ToldPlane},
+};
 
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
@@ -507,6 +515,16 @@ pub enum Refusal {
     /// The group's endpoint is longer than the row a member's link is reported in,
     /// `MAX_GROUP_ENDPOINT_LEN` bytes.
     GroupEndpointTooLong,
+}
+
+impl From<HandshakeEnd> for Refusal {
+    fn from(end: HandshakeEnd) -> Self {
+        match end {
+            HandshakeEnd::Closed(reason) => Refusal::HandshakeClosed(reason),
+            HandshakeEnd::Ended => Refusal::HandshakeEnded,
+            HandshakeEnd::NoAnswerInTime => Refusal::NoAnswerInTime,
+        }
+    }
 }
 
 impl core::fmt::Display for EndpointRefusal {
@@ -1429,18 +1447,6 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 }
 
-/// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
-/// still being made.
-type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
-
-/// What the session read of a face at a step (`Core::read_face`): where its link stands, what it
-/// did since, and the answer of its dial, kept for the link it made.
-struct FaceRead<P> {
-    phase: Phase,
-    signals: Signals,
-    answer: DialAnswer<P>,
-}
-
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
 struct Publication<'a> {
     keyexpr: &'a str,
@@ -1770,6 +1776,10 @@ struct Face<C: ClockSource + 'static, L: SessionLinks> {
     id: FaceId,
     link: Link<LinkSession<C>, L::Dial>,
     replay: Replay,
+    /// What the connectivity listeners whose history is being replayed were told of the face, and
+    /// the tomb of a row of it that went (`told`).
+    #[cfg(feature = "connectivity")]
+    told: FaceTold,
 }
 
 impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
@@ -1828,6 +1838,10 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
 
     fn end(&self) {
         self.actions.send_close_with_reason(CloseReason::Generic);
+    }
+
+    fn close_reason(&self) -> Option<CloseReason> {
+        self.actions.close_reason()
     }
 }
 
@@ -3118,7 +3132,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         if let Some(actions) = up {
             if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
-                self.abort_link(at);
+                self.transport.links.abort_link(at);
                 self.run_tasks();
             }
         }
@@ -3133,7 +3147,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             phase,
             signals,
             answer,
-        } = self.read_face(at, id);
+        } = self.transport.links.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         // A dial that is over is let go of now, with what it held for its link (a socket, the
@@ -3148,46 +3162,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.carry_out(at, &life, effect, answer, redial_ms, now_us)
     }
 
-    /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
-    /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
-    /// made.
-    fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
-        let phase = self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| face.link.phase());
-        let mut signals = Signals::default();
-        let mut answer = None;
-        match self
-            .transport
-            .links
-            .faces_mut()
-            .get_mut(at)
-            .map(|face| &mut face.link)
-        {
-            Some(Link::Up(wire)) => signals.ended = wire.finished(),
-            Some(Link::Opening { wire, .. }) => {
-                signals.ended = wire.finished();
-                signals.established = wire.established();
-            }
-            Some(Link::Dialing { dial, .. }) => {
-                answer = dial.answer();
-                signals.dial = answer.as_ref().map(Result::is_ok);
-            }
-            _ => {}
-        }
-        if let Phase::Held { node } = &phase {
-            signals.node_held = self.transport.links.node_is_held(node.as_slice(), id);
-        }
-        FaceRead {
-            phase,
-            signals,
-            answer,
-        }
-    }
-
     /// The node a handshake that is over reached, when another face holds it or brings a link to
     /// it up: what the dial role's face stands by for. Read before the link's task is ended.
     #[cfg(feature = "listen")]
@@ -3195,11 +3169,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if !matches!(turn, Turn::HandshakeOver { .. }) {
             return None;
         }
-        let node = self.transport.links.faces().get(at)?.link.wire()?.node()?;
-        if !self.transport.links.node_is_held(&node, id) {
-            return None;
-        }
-        SessionZid::new(&node).ok()
+        self.transport.links.held_node(at, id)
     }
 
     /// A session that takes no face besides its dial never finds its node held by another.
@@ -3245,8 +3215,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.follow(at, then, OpenError::NoEndpoint, redial_ms)
             }
             FaceEffect::Fail { then } => {
-                let why = self.handshake_end(at);
-                self.abort_link(at);
+                let why = Refusal::from(self.transport.links.handshake_end(at));
+                self.transport.links.abort_link(at);
                 self.run_tasks();
                 self.transport
                     .links
@@ -3359,46 +3329,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(zid) = lost.and_then(|wire| wire.actions.peer_zid()) {
             self.transport.router.abort_peer(&zid);
         }
+        // What a replaying listener was told of the face is read while its link is held.
+        #[cfg(feature = "connectivity")]
+        self.face_went(at);
         self.transport
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
         self.rooms.forget(id);
         self.lose_link(id);
         self.report_face(FaceEventKind::Down, snapshot);
-    }
-
-    /// Why the handshake of the face at `at` ended: the Close its peer sent, its task's end, or
-    /// its deadline.
-    fn handshake_end(&self, at: usize) -> Refusal {
-        match self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .and_then(|face| face.link.wire())
-        {
-            Some(wire) => match (wire.actions.close_reason(), wire.finished()) {
-                (Some(reason), _) => Refusal::HandshakeClosed(reason),
-                (None, true) => Refusal::HandshakeEnded,
-                (None, false) => Refusal::NoAnswerInTime,
-            },
-            None => Refusal::HandshakeEnded,
-        }
-    }
-
-    /// End the task of the link of the face at `at`, if it holds one.
-    /// Out of line: a face poll and the bring-up of a link end a link in three places.
-    #[inline(never)]
-    fn abort_link(&self, at: usize) {
-        if let Some(wire) = self
-            .transport
-            .links
-            .faces()
-            .get(at)
-            .and_then(|face| face.link.wire())
-        {
-            wire.abort();
-        }
     }
 
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
@@ -3447,7 +3386,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         let actions = wire.actions.clone();
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
-            self.abort_link(at);
+            self.transport.links.abort_link(at);
         }
         let snapshot = self.face_of(&actions);
         self.transport.links.establish(at);
@@ -3751,6 +3690,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                                 row.history(),
                             );
                         }
+                        // A departure owed to a replaying listener outlives the join that ended.
+                        #[cfg(feature = "connectivity")]
+                        face.keep_tombs_of(&self.transport.groups[at]);
                         self.transport.groups[at] = face;
                     }
                     Err(_) => {
@@ -3782,6 +3724,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Take the face at `at` out of the session, with its tables. The dial role's face is never
     /// taken out.
     fn remove_face(&mut self, at: usize) {
+        // A face whose departure a replaying listener is owed keeps its place for its tomb.
+        #[cfg(feature = "connectivity")]
+        if self.keep_departed(at) {
+            return;
+        }
         if let Some(face) = self.transport.links.remove_face(at) {
             self.session.registry.borrow_mut().remove_face(face.id);
         }
@@ -4371,6 +4318,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         id: DIAL_FACE,
                         link: Link::Waiting { at_us: u64::MAX },
                         replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
+                        #[cfg(feature = "connectivity")]
+                        told: FaceTold::default(),
                     },
                     config.max_faces.saturating_add(1),
                     wait_room,
@@ -6486,6 +6435,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.live().and_then(|core| core.0.face_link_at(at))
     }
 
+    // The told bits live on the session's own face rows (`told`), not in a ledger.
+    #[cfg(feature = "connectivity")]
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.live()
+            .is_some_and(|mut core| core.0.tell_came(plane, listener, key))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.live()
+            .is_some_and(|mut core| core.0.tell_went(plane, listener, key))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn first_told_gone(&self, plane: ToldPlane, listener: usize) -> Option<FaceLinkRow> {
+        self.live()
+            .and_then(|core| core.0.first_told_gone(plane, listener))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn forget_told(&self, plane: ToldPlane, listener: usize) {
+        if let Some(mut core) = self.live() {
+            core.0.forget_told(plane, listener);
+        }
+    }
+
     #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
         if SessionEngine::is_closed(self) {
@@ -6872,14 +6847,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
         };
         // A new Interest is asked of each link from its row; one held already was asked.
-        if watching.interest.is_some() {
-            let interest = tables(&core.session.registry)
-                .matching_listeners()
-                .get(watching.handle)
-                .and_then(|row| row.interest());
-            if let Some(interest) = interest {
-                core.announce_interest(interest);
-            }
+        if let Some(opened) = watching.interest {
+            core.announce_interest(opened.handle);
         }
         // A listener that matches already is told so as it is declared, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
@@ -6966,16 +6935,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let spent = if ask.is_some() {
-            let interest = watching.interest.and_then(|_| {
-                tables(&core.session.registry)
-                    .write_filters()
-                    .get(watching.handle)
-                    .and_then(|row| row.interest())
-            });
-            if let Some(interest) = interest {
-                core.announce_interest(interest);
+            if let Some(opened) = watching.interest {
+                core.announce_interest(opened.handle);
             }
-            watching.interest.map(u64::from)
+            watching.interest.map(|opened| u64::from(opened.id))
         } else {
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides: a filter that finds none left is

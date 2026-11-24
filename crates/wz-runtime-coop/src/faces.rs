@@ -23,12 +23,13 @@ use core::ops::Deref;
 
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
+use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
-use crate::face_life::Phase;
+use crate::face_life::{Phase, Signals};
 use crate::link_cells::CellRc;
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
@@ -53,6 +54,9 @@ pub trait FaceSession {
 
     /// The link ends: an established peer is told so.
     fn end(&self);
+
+    /// The reason of the Close the link's peer sent, once it sent one.
+    fn close_reason(&self) -> Option<CloseReason>;
 }
 
 /// One face as the session keeps it: the face's number and its link, beside whatever else the
@@ -399,6 +403,32 @@ impl<D> Dial<D> {
     }
 }
 
+/// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
+/// still being made.
+pub type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
+
+/// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): where its link
+/// stands, what it did since, and the answer of its dial, kept for the link it made.
+pub struct FaceRead<P> {
+    /// Where the face's link stands.
+    pub phase: Phase,
+    /// What the link did since the face was last read.
+    pub signals: Signals,
+    /// The answer of the face's dial, when one was under way.
+    pub answer: DialAnswer<P>,
+}
+
+/// Why the handshake of a face ended ([`LinkSupervisor::handshake_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeEnd {
+    /// The peer sent a Close, with this reason.
+    Closed(CloseReason),
+    /// The link's task ended with no Close.
+    Ended,
+    /// The handshake was still under way when it was given up.
+    NoAnswerInTime,
+}
+
 /// A port the session listens on, the wait for a connection on it, and the row of the endpoint
 /// its links are stated for, when the session states one.
 struct Listening<P> {
@@ -608,6 +638,73 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             .any(|face| face.link().wire().is_some_and(Wire::holds_input))
     }
 
+    /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
+    /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
+    /// made. A face past the table reads as one that waits with no time to dial again.
+    pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
+        let phase = self
+            .faces
+            .get(at)
+            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| {
+                face.link().phase()
+            });
+        let mut signals = Signals::default();
+        let mut answer = None;
+        match self.faces.get_mut(at).map(|face| face.link_mut()) {
+            Some(Link::Up(wire)) => signals.ended = wire.finished(),
+            Some(Link::Opening { wire, .. }) => {
+                signals.ended = wire.finished();
+                signals.established = wire.established();
+            }
+            Some(Link::Dialing { dial, .. }) => {
+                answer = dial.answer();
+                signals.dial = answer.as_ref().map(Result::is_ok);
+            }
+            _ => {}
+        }
+        if let Phase::Held { node } = &phase {
+            signals.node_held = self.node_is_held(node.as_slice(), id);
+        }
+        FaceRead {
+            phase,
+            signals,
+            answer,
+        }
+    }
+
+    /// The node the link of the face at `at`, numbered `id`, reached, when another face holds
+    /// that node or brings a link to it up: what the dial role's face stands by for once its
+    /// handshake is over. Read before the link's task is ended.
+    pub fn held_node(&self, at: usize, id: FaceId) -> Option<SessionZid> {
+        let node = self.faces.get(at)?.link().wire()?.node()?;
+        if !self.node_is_held(&node, id) {
+            return None;
+        }
+        SessionZid::new(&node).ok()
+    }
+
+    /// Why the handshake of the face at `at` ended: the Close its peer sent, its task's end, or
+    /// its deadline. A face that holds no link ended with it.
+    pub fn handshake_end(&self, at: usize) -> HandshakeEnd {
+        match self.faces.get(at).and_then(|face| face.link().wire()) {
+            Some(wire) => match (wire.close_reason(), wire.finished()) {
+                (Some(reason), _) => HandshakeEnd::Closed(reason),
+                (None, true) => HandshakeEnd::Ended,
+                (None, false) => HandshakeEnd::NoAnswerInTime,
+            },
+            None => HandshakeEnd::Ended,
+        }
+    }
+
+    /// End the task of the link of the face at `at`, if it holds one.
+    /// Out of line: a face's poll and the bring-up of a link end a link in three places.
+    #[inline(never)]
+    pub fn abort_link(&self, at: usize) {
+        if let Some(wire) = self.faces.get(at).and_then(|face| face.link().wire()) {
+            wire.abort();
+        }
+    }
+
     /// Have every face's link write what it owes its stack, as far as the stack takes it now, so
     /// a link whose stack has room by now gives back the outbound slot its frame held.
     #[cfg(feature = "session-unicast-accept")]
@@ -807,6 +904,7 @@ mod tests {
         established: bool,
         node: Option<Vec<u8>>,
         ended: Rc<Cell<u32>>,
+        closed: Option<CloseReason>,
     }
 
     impl FaceSession for Session {
@@ -820,6 +918,10 @@ mod tests {
 
         fn end(&self) {
             self.ended.set(self.ended.get() + 1);
+        }
+
+        fn close_reason(&self) -> Option<CloseReason> {
+            self.closed
         }
     }
 
@@ -920,6 +1022,7 @@ mod tests {
             established,
             node: node.map(<[u8]>::to_vec),
             ended: Rc::new(Cell::new(0)),
+            closed: None,
         }
     }
 
@@ -1042,6 +1145,131 @@ mod tests {
         );
         assert!(faces.remove_face(1).is_some());
         assert!(!faces.node_is_held(&node, 100));
+    }
+
+    /// A face is read as its link stands: a dial's answer is asked once and kept, a link in its
+    /// handshake says whether it completed, a face that stands by finds its node held by a face
+    /// that reaches it, and a face past the table reads as one waiting with no time to dial again.
+    #[test]
+    fn a_face_is_read_as_its_link_stands() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let mut faces = supervisor(
+            dialing(
+                DialEndpoint::Listed(0),
+                Some(Err(LinkOpenError::Refused)),
+                1,
+                50,
+            ),
+            2,
+        );
+        let read = faces.read_face(0, 100);
+        assert!(matches!(read.answer, Some(Err(LinkOpenError::Refused))));
+        assert_eq!(read.signals.dial, Some(false));
+        let again = faces.read_face(0, 100);
+        assert!(again.answer.is_none(), "a dial is asked once");
+        assert_eq!(again.signals.dial, None);
+
+        let node = [7u8, 1];
+        let opening = TestFace {
+            id: 1,
+            link: Link::Opening {
+                wire: wire(&local, session(true, Some(&node)), false, false),
+                next: 0,
+                deadline_us: 50,
+            },
+        };
+        assert!(faces.push_face(opening).is_ok());
+        let read = faces.read_face(1, 1);
+        assert_eq!(
+            read.phase,
+            Phase::Opening {
+                next: 0,
+                deadline_us: 50
+            }
+        );
+        assert!(read.signals.established);
+        assert!(!read.signals.ended);
+        assert!(read.answer.is_none());
+
+        faces.put_link(0, Link::Held { zid: held_node() });
+        assert!(faces.read_face(0, 100).signals.node_held);
+        assert!(
+            !faces.read_face(0, 1).signals.node_held,
+            "a face does not hold the node for itself"
+        );
+
+        let past = faces.read_face(9, 9);
+        assert_eq!(past.phase, Phase::Waiting { at_us: u64::MAX });
+        assert_eq!(past.signals, Signals::default());
+        assert!(past.answer.is_none());
+    }
+
+    /// The node a face's handshake reached is the one it stands by for only while another face
+    /// reaches it; a face with no link, or one past the table, reached none.
+    #[test]
+    fn a_face_stands_by_for_its_node_only_while_another_face_reaches_it() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let node = [7u8, 1];
+        let mut faces = supervisor(
+            Link::Opening {
+                wire: wire(&local, session(false, Some(&node)), false, false),
+                next: 0,
+                deadline_us: 50,
+            },
+            2,
+        );
+        assert!(
+            faces.held_node(0, 100).is_none(),
+            "no other face reaches it"
+        );
+        let other = TestFace {
+            id: 1,
+            link: Link::Up(wire(&local, session(true, Some(&node)), false, false)),
+        };
+        assert!(faces.push_face(other).is_ok());
+        assert!(faces.held_node(0, 100) == Some(held_node()));
+        assert!(faces.remove_face(1).is_some());
+        assert!(faces.held_node(0, 100).is_none());
+        faces.put_link(0, Link::Waiting { at_us: 0 });
+        assert!(faces.held_node(0, 100).is_none(), "a face with no link");
+        assert!(faces.held_node(9, 100).is_none(), "a face past the table");
+    }
+
+    /// A handshake that ended names the Close its peer sent, else the end of its task, else the
+    /// deadline it is given up at; ending the link's task is what makes it the second.
+    #[test]
+    fn a_handshake_end_names_the_close_the_task_end_or_the_deadline() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let opening = |session| Link::Opening {
+            wire: wire(&local, session, false, false),
+            next: 0,
+            deadline_us: 50,
+        };
+        let closed = Session {
+            closed: Some(CloseReason::Generic),
+            ..session(false, None)
+        };
+        let mut faces = supervisor(opening(closed), 1);
+        assert_eq!(
+            faces.handshake_end(0),
+            HandshakeEnd::Closed(CloseReason::Generic)
+        );
+        faces.put_link(0, opening(session(false, None)));
+        assert_eq!(faces.handshake_end(0), HandshakeEnd::NoAnswerInTime);
+        faces.abort_link(0);
+        assert_eq!(faces.handshake_end(0), HandshakeEnd::Ended);
+        faces.put_link(0, Link::Waiting { at_us: 0 });
+        faces.abort_link(0);
+        assert_eq!(faces.handshake_end(0), HandshakeEnd::Ended, "no link");
+        faces.abort_link(9);
+        assert_eq!(
+            faces.handshake_end(9),
+            HandshakeEnd::Ended,
+            "past the table"
+        );
     }
 
     /// The node a face that stands by holds in these tests.
