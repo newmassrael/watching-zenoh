@@ -297,9 +297,10 @@ compile_error!(
 ))]
 compile_error!(
     "wz-capi-pico: a library has one engine, and this build names `engine-tokio` beside a \
-     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): build the \
-     cooperative library with `--no-default-features` and its features, or the tokio engine's \
-     without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
+     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): the default \
+     features name `engine-coop`, so build the tokio engine's library with \
+     `--no-default-features` and `engine-tokio` with its features (`wz_config.py \
+     --bench-cargo-args tokio` prints them), or the cooperative one without the tokio engine"
 );
 
 // `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
