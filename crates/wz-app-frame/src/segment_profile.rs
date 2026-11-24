@@ -135,15 +135,22 @@ pub struct Field {
 }
 
 impl Field {
-    /// The field's value in `header`, which holds at least the whole header.
+    /// The field's value in `header`, which holds at least the whole header: a
+    /// copy of its bytes into a run of the value's own bytes in the field's
+    /// order, for the reason [`Self::write`] is one.
     pub fn read(&self, header: &[u8]) -> u64 {
-        let bytes = &header[self.offset..self.offset + self.bytes];
+        let width = self.bytes;
+        let bytes = &header[self.offset..self.offset + width];
+        let mut value = [0u8; 8];
         match self.order {
-            Order::Big => bytes.iter().fold(0u64, |v, b| (v << 8) | u64::from(*b)),
-            Order::Little => bytes
-                .iter()
-                .rev()
-                .fold(0u64, |v, b| (v << 8) | u64::from(*b)),
+            Order::Big => {
+                value[8 - width..].copy_from_slice(bytes);
+                u64::from_be_bytes(value)
+            }
+            Order::Little => {
+                value[..width].copy_from_slice(bytes);
+                u64::from_le_bytes(value)
+            }
         }
     }
 

@@ -296,8 +296,13 @@ impl OpenedFrame {
     }
 }
 
+/// The value of `bytes`, most significant first: the inverse of `write_be`, and
+/// a copy into the tail of a value's big-endian bytes for the same reason. A
+/// field is at most 8 bytes wide (the profile refuses a wider one).
 fn read_be(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b))
+    let mut be = [0u8; 8];
+    be[8 - bytes.len()..].copy_from_slice(bytes);
+    u64::from_be_bytes(be)
 }
 
 /// Write the low `out.len()` bytes of `value`, most significant first. A field
