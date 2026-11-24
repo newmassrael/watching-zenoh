@@ -212,6 +212,7 @@ pub struct KeyFacts {
 impl KeyFacts {
     /// The facts of `text`: the SCE `algorithm` document `sources/algorithms/key_facts.scxml`,
     /// whose record is `key_facts_schema.scxml`.
+    #[inline(never)]
     pub fn of(text: &str) -> Self {
         let facts = generated::key_facts::key_facts(
             text.as_bytes(),
