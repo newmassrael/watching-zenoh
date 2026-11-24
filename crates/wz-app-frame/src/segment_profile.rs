@@ -92,7 +92,8 @@ use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::{width_mask, Crc};
 use crate::e2e_profile::{
-    optional, read_crc_object, read_json, CrcFields, DocError, Pointer, MAX_FIELDS,
+    field_called, optional, read_crc_object, read_field_head, read_json, CrcFields, DocError,
+    Pointer, MAX_FIELDS,
 };
 
 /// The largest whole message a segment profile may admit, in bytes.
@@ -326,7 +327,7 @@ impl SegmentProfile {
         let mut role = |key: &'static str| -> Result<usize, DocError> {
             let role_at = path.key(key);
             let name = role_at.read_string(path.required(body, key)?)?;
-            let index = field_named(&fields, name, &role_at)?;
+            let index = field_called(&fields.as_slice(), name, &role_at)?;
             claim(&fields, &mut taken, index, key, &role_at)?;
             Ok(index)
         };
@@ -340,7 +341,7 @@ impl SegmentProfile {
             for (i, item) in stream_at.array(value)?.iter().enumerate() {
                 let here = stream_at.index(i);
                 let name = here.read_string(item)?;
-                let index = field_named(&fields, name, &here)?;
+                let index = field_called(&fields.as_slice(), name, &here)?;
                 claim(&fields, &mut taken, index, "stream", &here)?;
                 stream.push(index);
             }
@@ -477,13 +478,6 @@ impl SegmentProfile {
     }
 }
 
-fn field_named(fields: &[Field], name: &str, path: &Pointer<'_>) -> Result<usize, DocError> {
-    fields
-        .iter()
-        .position(|f| f.name == name)
-        .ok_or_else(|| path.refuse(format!("no field is called `{name}`")))
-}
-
 /// Give `index` the role `role`, refusing a field that already has one or that
 /// holds a fixed value (a role names a field whose value varies from piece to
 /// piece or from sender to sender).
@@ -525,19 +519,8 @@ fn read_fields(value: &Json5Value, path: &Pointer<'_>) -> Result<Vec<Field>, Doc
         let entries = here.object(item)?;
         here.check_keys(entries, &["name", "bytes", "order", "equals"])?;
 
-        let name_at = here.key("name");
-        let name = name_at.read_name(here.required(entries, "name")?)?;
-        if fields.iter().any(|f| f.name == name) {
-            return Err(name_at.refuse(format!("two fields are called `{name}`")));
-        }
-        let bytes_at = here.key("bytes");
-        let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
-        if !(1..=8).contains(&bytes) {
-            return Err(
-                bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}"))
-            );
-        }
-        let bytes = bytes as usize;
+        let named = |name: &str| fields.iter().any(|f| f.name == name);
+        let (name, bytes) = read_field_head(&here, entries, &named)?;
         let order = match optional(entries, "order") {
             None => Order::Big,
             Some(v) => {

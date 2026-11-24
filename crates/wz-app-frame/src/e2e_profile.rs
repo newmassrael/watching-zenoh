@@ -943,6 +943,28 @@ fn check_name(name: &str, path: &Pointer<'_>) -> Result<(), DocError> {
     Ok(())
 }
 
+/// The name and the width of the field `entries` describes at `here`, read
+/// one way for every kind of profile: a name no earlier field has (`named`
+/// answers whether one has it), and 1 to 8 bytes.
+#[inline(never)]
+pub(crate) fn read_field_head(
+    here: &Pointer<'_>,
+    entries: &Entries,
+    named: &dyn Fn(&str) -> bool,
+) -> Result<(String, usize), DocError> {
+    let name_at = here.key("name");
+    let name = name_at.read_name(here.required(entries, "name")?)?;
+    if named(&name) {
+        return Err(name_at.refuse(format!("two fields are called `{name}`")));
+    }
+    let bytes_at = here.key("bytes");
+    let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
+    if !(1..=8).contains(&bytes) {
+        return Err(bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}")));
+    }
+    Ok((name, bytes as usize))
+}
+
 fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
     let path = Pointer::text("/fields");
     let items = path.array(value)?;
@@ -959,19 +981,8 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
         let entries = here.object(item)?;
         here.check_keys(entries, &["name", "bytes", "xor", "split", "derive"])?;
 
-        let name_at = here.key("name");
-        let name = name_at.read_name(here.required(entries, "name")?)?;
-        if fields.iter().any(|f| f.name == name) {
-            return Err(name_at.refuse(format!("two fields are called `{name}`")));
-        }
-        let bytes_at = here.key("bytes");
-        let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
-        if !(1..=8).contains(&bytes) {
-            return Err(
-                bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}"))
-            );
-        }
-        let bytes = bytes as usize;
+        let named = |name: &str| fields.iter().any(|f| f.name == name);
+        let (name, bytes) = read_field_head(&here, entries, &named)?;
         let bits = (bytes * 8) as u8;
 
         let xor = match optional(entries, "xor") {
@@ -1105,14 +1116,6 @@ fn read_derive(value: &Json5Value, path: &Pointer<'_>, bits: u8) -> Result<Deriv
     Ok(Derive { mask, xor })
 }
 
-#[inline(never)]
-fn field_named(fields: &[Field], name: &str, path: &Pointer<'_>) -> Result<usize, DocError> {
-    fields
-        .iter()
-        .position(|f| f.name == name)
-        .ok_or_else(|| path.refuse(format!("no field is called `{name}`")))
-}
-
 /// A field the mechanism gives a meaning to (CRC, length, counter) carries no
 /// transformation of its own.
 fn plain(field: &Field, role: &str, path: &Pointer<'_>) -> Result<(), DocError> {
@@ -1165,7 +1168,7 @@ fn read_crc_engine(entries: &Entries, path: &Pointer<'_>) -> Result<Crc, DocErro
     })
 }
 
-/// A profile kind's header fields as its CRC object reads them.
+/// A profile kind's header fields, as its CRC object and its roles read them.
 pub(crate) trait CrcFields {
     /// The index of the field called `name`.
     fn index_of(&self, name: &str) -> Option<usize>;
@@ -1204,8 +1207,10 @@ pub(crate) struct CrcObject {
     pub(crate) cover: Vec<Option<usize>>,
 }
 
-/// The index of the field `name` names, for a CRC object.
-fn crc_field_named(
+/// The index of the field `name` names, refused at `path` when no field has
+/// it: one body for every kind of profile and every place that names a field.
+#[inline(never)]
+pub(crate) fn field_called(
     fields: &dyn CrcFields,
     name: &str,
     path: &Pointer<'_>,
@@ -1234,7 +1239,7 @@ pub(crate) fn read_crc_object(
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = crc_field_named(fields, field_name, &field_at)?;
+    let field = field_called(fields, field_name, &field_at)?;
     fields.may_hold_crc(field, &field_at)?;
 
     let engine = read_crc_engine(entries, path)?;
@@ -1259,7 +1264,7 @@ pub(crate) fn read_crc_object(
         let entry = if name == body {
             None
         } else {
-            Some(crc_field_named(fields, name, &here)?)
+            Some(field_called(fields, name, &here)?)
         };
         if entry == Some(field) {
             return Err(here.refuse(format!(
@@ -1298,7 +1303,7 @@ fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocEr
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     plain(&fields[field], "length", &field_at)?;
 
     let counts_at = path.key("counts");
@@ -1324,7 +1329,7 @@ fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocEr
             for (i, item) in items.iter().enumerate() {
                 let here = list_at.index(i);
                 let name = here.read_string(item)?;
-                let index = field_named(fields, name, &here)?;
+                let index = field_called(&fields, name, &here)?;
                 if skipped.contains(&index) {
                     return Err(here.refuse(format!("`{name}` is listed twice")));
                 }
@@ -1360,7 +1365,7 @@ fn read_slot(
         for (i, item) in list_at.array(v)?.iter().enumerate() {
             let here = list_at.index(i);
             let name = here.read_string(item)?;
-            let index = field_named(fields, name, &here)?;
+            let index = field_called(&fields, name, &here)?;
             if judged.contains(&index) {
                 return Err(here.refuse(format!(
                     "`{name}` is the crc, length or counter field: it changes from \
@@ -1387,7 +1392,7 @@ fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, Doc
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     plain(&fields[field], "counter", &field_at)?;
 
     let gap_at = path.key("max_gap");
@@ -1454,7 +1459,7 @@ fn read_rules(
     if let Some(v) = optional(entries, "ident") {
         let here = path.key("ident");
         let name = here.read_string(v)?;
-        let index = field_named(fields, name, &here)?;
+        let index = field_called(&fields, name, &here)?;
         if judged.contains(&index) {
             return Err(here.refuse(format!(
                 "`{name}` is the crc, length or counter field, each judged by a rule of \
@@ -1502,7 +1507,7 @@ fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError>
     path.check_keys(entries, &["field", "kind", "result", "sender"])?;
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     let parts = &fields[field].parts;
     if parts.is_empty() {
         return Err(field_at.refuse(format!(
