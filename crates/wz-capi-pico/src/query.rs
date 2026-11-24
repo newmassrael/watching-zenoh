@@ -97,7 +97,8 @@ pub struct z_loaned_query_t {
 /// whatever the responder does with the reply after the call.
 #[derive(Default)]
 struct ReplyMetaOwned {
-    encoding: Option<wz_session_core::sample::EncodingHint>,
+    /// The encoding the options moved in, sent from where it lies for as long as the reply is.
+    encoding: Option<crate::encoding::OwnedEncoding>,
     timestamp: Option<wz_session_core::sample::TimestampHint>,
     source_info: Option<wz_session_core::sample::SourceInfo>,
     /// The `is_express` its options carried, `false` when there were none. pico
@@ -117,7 +118,11 @@ impl ReplyMetaOwned {
         query_qos: wz_session_core::sample::QosLevel,
     ) -> ReplyMeta<'a> {
         ReplyMeta::new()
-            .with_encoding(self.encoding.as_ref())
+            .with_encoding(
+                self.encoding
+                    .as_ref()
+                    .map(crate::encoding::OwnedEncoding::view),
+            )
             .with_timestamp(self.timestamp.as_ref())
             .with_source_info(self.source_info.as_ref())
             .with_attachment(attachment)
@@ -146,7 +151,7 @@ enum PendingReply<'k> {
     /// `_z_encoding_from_moved(opts.encoding));`).
     Err {
         payload: crate::bytes::ByteBuf,
-        encoding: Option<wz_session_core::sample::EncodingHint>,
+        encoding: Option<crate::encoding::OwnedEncoding>,
     },
 }
 
@@ -218,8 +223,8 @@ fn flush_one(
             // `encoding_id` as the content-type prefix and packs it itself, so the
             // packed word would be shifted twice and put a different content type
             // on the wire. The zenoh-c ABI's Err arm does the same projection.
-            let (id, schema) = match encoding.as_ref() {
-                Some(hint) => (Some(hint.packed_id >> 1), hint.schema.as_deref()),
+            let (id, schema) = match encoding.as_ref().map(crate::encoding::OwnedEncoding::view) {
+                Some(encoding) => (Some(encoding.packed_id >> 1), encoding.schema),
                 None => (None, None),
             };
             out.reply_err(id, schema, &payload)
@@ -1583,9 +1588,7 @@ pub unsafe extern "C" fn z_query_reply(
         } else {
             let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
             let meta = ReplyMetaOwned {
-                encoding: crate::encoding::take_moved_encoding_copy(
-                    (*options).encoding as *mut c_void,
-                ),
+                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 express: (*options).is_express,
@@ -1710,7 +1713,7 @@ pub unsafe extern "C" fn z_query_reply_err(
         let encoding = if options.is_null() {
             None
         } else {
-            crate::encoding::take_moved_encoding_copy((*options).encoding)
+            crate::encoding::take_moved_encoding((*options).encoding)
         };
         let buf = match buf {
             Ok(Some(buf)) => buf,

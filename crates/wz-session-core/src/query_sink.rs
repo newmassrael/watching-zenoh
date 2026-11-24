@@ -287,7 +287,8 @@ pub struct ReplyMeta<'a> {
     /// The value encoding — the inner `MsgPut` E-flag. Put-only on the wire
     /// (zenoh-pico `_z_push_body_encode` reads `_encoding` only under
     /// `_is_put`, `vendor/zenoh-pico/src/protocol/codec/message.c:269-276`).
-    pub encoding: Option<&'a crate::sample::EncodingHint>,
+    /// Read where the replier keeps it, so a reply copies no encoding on its way.
+    pub encoding: Option<crate::sample::EncodingRef<'a>>,
     /// The value timestamp — the inner T-flag. Carried on BOTH arms: the Put
     /// body sets `_Z_FLAG_Z_P_T` and the Del body `_Z_FLAG_Z_D_T`
     /// (`message.c:269-281`).
@@ -342,7 +343,7 @@ impl<'a> ReplyMeta<'a> {
         Self::default()
     }
     /// Set the value encoding (the `MsgPut` E-flag).
-    pub fn with_encoding(mut self, encoding: Option<&'a crate::sample::EncodingHint>) -> Self {
+    pub fn with_encoding(mut self, encoding: Option<crate::sample::EncodingRef<'a>>) -> Self {
         self.encoding = encoding;
         self
     }
@@ -713,12 +714,16 @@ pub trait ReplyOut {
         payload: &[u8],
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
+        // The older arms take an owned hint; a sink that stages the encoding where it lies
+        // overrides this, as `QueryResponder` does.
+        let hint = meta.encoding.map(crate::sample::EncodingRef::to_hint);
+        let encoding = hint.as_ref();
         match (meta.timestamp, meta.attachment) {
             (Some(ts), _) => {
-                self.reply_keyed_sourced(keyexpr, payload, meta.encoding, ts, meta.source_info)
+                self.reply_keyed_sourced(keyexpr, payload, encoding, ts, meta.source_info)
             }
-            (None, Some(att)) => self.reply_keyed_attached(keyexpr, payload, meta.encoding, att),
-            (None, None) => self.reply_keyed_encoded(keyexpr, payload, meta.encoding),
+            (None, Some(att)) => self.reply_keyed_attached(keyexpr, payload, encoding, att),
+            (None, None) => self.reply_keyed_encoded(keyexpr, payload, encoding),
         }
     }
     /// R311y562 — the Del-arm mirror of [`Self::reply_keyed_meta`]: emit a

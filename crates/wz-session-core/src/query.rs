@@ -1978,7 +1978,7 @@ impl<'a> QueryResponder<'a> {
             ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body,
-                encoding: meta.encoding.map(EncodingParts::of),
+                encoding: meta.encoding,
                 timestamp: meta.timestamp.map(TimestampParts::of),
                 attachment: meta.attachment,
                 source_info: meta.source_info,

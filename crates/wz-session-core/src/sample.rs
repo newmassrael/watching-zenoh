@@ -293,6 +293,12 @@ pub struct EncodingRef<'a> {
 }
 
 impl<'a> EncodingRef<'a> {
+    /// The encoding `hint` holds, read where it holds it.
+    #[cfg(feature = "alloc")]
+    pub fn of(hint: &'a EncodingHint) -> Self {
+        hint.view()
+    }
+
     /// A hint of its own with this encoding, the schema copied.
     #[cfg(feature = "alloc")]
     pub fn to_hint(self) -> EncodingHint {
