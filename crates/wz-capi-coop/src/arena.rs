@@ -137,7 +137,9 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{CoopTables, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(any(feature = "listen", feature = "group"))]
+use crate::engine::HELD_SET_BYTES;
+use crate::engine::{CoopTables, FACE_SET_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -447,8 +449,9 @@ const OBSERVER_ROWS: usize = 1;
 /// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
 /// that asks nothing holds no table of gets.
 const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
-/// The faces' sets and the index of the held ones.
-const FACE_ROWS: usize = 2;
+/// The faces' sets, and the index of the held ones where the build takes faces beside its dial
+/// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
+const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
 const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
@@ -1813,7 +1816,9 @@ impl ArenaPlan {
             self.session.peers.sets(),
             FACE_SET_BYTES,
         );
-        // Which face holds which set, a row for each set.
+        // Which face holds which set, a row for each set, in a build that takes faces beside its
+        // dial role's.
+        #[cfg(any(feature = "listen", feature = "group"))]
         self.put(
             ArenaPart::HeldFaces,
             self.session.peers.sets(),

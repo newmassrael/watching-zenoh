@@ -508,7 +508,12 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         );
         assert!(plan.peers().tables <= MAX_FACE_SETS);
         assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
-        assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+        // The index of held sets is a row of a build that takes faces beside the dial role's.
+        if crate::arena::TAKES_FACES {
+            assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+        } else {
+            assert!(plan.rows().all(|laid| laid.part() != "held faces"));
+        }
     }
 }
 

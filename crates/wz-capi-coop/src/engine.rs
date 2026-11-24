@@ -191,10 +191,12 @@ mod deliveries;
 use deliveries::Deliveries;
 
 mod registry;
+pub(crate) use registry::FACE_SET_BYTES;
+#[cfg(any(feature = "listen", feature = "group"))]
+pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
-pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
 use replay::{Replay, TurnEnd};
