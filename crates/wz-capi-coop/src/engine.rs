@@ -4558,9 +4558,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
     fn deliver(&self) {
-        let Some(_delivering) = self.deliveries.enter() else {
-            return;
-        };
+        self.deliveries.within(|entered| {
+            if entered {
+                self.hand_out_entered();
+            }
+        });
+    }
+
+    /// Everything [`Self::deliver`] hands out, inside the delivery it entered.
+    fn hand_out_entered(&self) {
         // A callback can queue more for this delivery than the pass that ran it has already passed
         // over (a queryable's answer to the session's own get lies in the next round): the passes
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
@@ -5189,14 +5195,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut reached = unsafe { self.samples.captured() };
         drop(core);
         let count = reached.len();
-        {
-            // A callback that steps the session from inside the put hands out nothing itself, as
-            // one inside a delivery does; nor does an undeclare inside it wait for this call.
-            let _delivering = self.deliveries.enter();
+        // A callback that steps the session from inside the put hands out nothing itself, as one
+        // inside a delivery does; nor does an undeclare inside it wait for this call.
+        self.deliveries.within(|_| {
             for call in reached.iter() {
                 call.hand(&sample);
             }
-        }
+        });
         // Each call is ended; a row whose last call this was, its subscriber undeclared meanwhile,
         // is let go of by the delivery below, its drop perhaps the program's own, with no lock held.
         while let Some(call) = reached.pop() {
@@ -5474,9 +5479,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if let Some(leg) = reached {
                 // A callback that steps the session from inside the reply hands out nothing
                 // itself, as one inside a delivery does.
-                let delivering = self.deliveries.enter();
-                self.gets.call(leg, &reply);
-                drop(delivering);
+                self.deliveries.within(|_| self.gets.call(leg, &reply));
                 drop(self.gets.release(leg));
                 self.deliver();
             }
@@ -5546,7 +5549,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn hand_history(&self, handle: LivelinessSubscriberHandle) {
         // A callback that steps the session from inside its history hands out nothing itself, as
         // one inside a delivery does.
-        let _delivering = self.deliveries.enter();
+        self.deliveries.within(|_| self.tell_history(handle));
+    }
+
+    /// The history [`Self::hand_history`] hands, inside the delivery it entered.
+    #[cfg(feature = "liveliness")]
+    fn tell_history(&self, handle: LivelinessSubscriberHandle) {
         let begun = self.live().and_then(|core| {
             let tables = tables(&core.0.session.registry);
             let id = tables.liveliness_subscribers().get(handle)?.id();
@@ -5779,15 +5787,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// borrow, from inside itself too, so nothing of the query is kept or copied.
     #[cfg(feature = "local-queryable")]
     fn hand_own_get(&self, asked: query::Asked, get: &query::OwnGet<'_>) {
-        {
-            // A callback that steps the session or asks a get from inside one of these hands out
-            // nothing itself, as one inside a delivery does.
-            let _delivering = self.deliveries.enter();
+        // A callback that steps the session or asks a get from inside one of these hands out
+        // nothing itself, as one inside a delivery does.
+        self.deliveries.within(|_| {
             for call in asked {
                 self.run_queryable(&call, get, query::LOCAL_QUERY);
                 self.samples.end_query_call(call);
             }
-        }
+        });
         // A row whose last call one of these was, its queryable undeclared meanwhile, is let go
         // of by the delivery's walk, its drop perhaps the program's own, with no lock held.
         self.deliver();
