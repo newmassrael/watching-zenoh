@@ -203,9 +203,10 @@ const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) 
 /// The application's tables apart from the session's one table set: liveliness tokens
 /// (`liveliness`), and the declaration watchers.
 const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
-/// a build that asks (`query`): one that asks nothing holds no table of gets.
-const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
+/// The pending gets, the ends of their legs, the legs' callbacks, the session's note of each leg
+/// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
+/// that asks nothing holds no table of gets.
+const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -434,8 +435,10 @@ pub struct GetTables {
 }
 
 impl GetTables {
-    /// How many gets every table together holds pending at once: the rows of the table of the ends
-    /// of the legs (`crate::engine`'s `EndedLegs`). `None` past the address space.
+    /// How many gets every table together holds pending at once: the rows of the tables of the
+    /// ends of the legs, of their callbacks and of the session's note of each leg pending
+    /// (`crate::engine`'s `EndedLegs`, `LegRows` and `PendingGet`). `None` past the address
+    /// space.
     pub const fn legs(&self) -> Option<usize> {
         match self.rows.queries.checked_add(self.rows.liveliness_gets) {
             Some(each) => each.checked_mul(self.tables),
@@ -1175,15 +1178,29 @@ impl ArenaPlan {
                 get_bytes,
             );
         }
-        // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
+        // The ends of the legs, the rows of their callbacks and the session's note of each leg
+        // pending, a row of each for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
+            const BASIS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
             let legs = plan.sized(plan.session.gets.legs());
             plan.put(
                 "ended legs",
-                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                BASIS,
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
+            );
+            plan.put(
+                "leg callbacks",
+                BASIS,
+                legs,
+                core::mem::size_of::<Option<crate::engine::LegRow>>(),
+            );
+            plan.put(
+                "pending legs",
+                BASIS,
+                legs,
+                core::mem::size_of::<crate::engine::PendingGet>(),
             );
         }
         // The replies the gets that consolidate hold to their Finals: one table of rows shared by

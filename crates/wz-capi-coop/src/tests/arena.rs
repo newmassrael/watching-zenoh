@@ -1148,8 +1148,9 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     }
 }
 
-/// The ends of the session's legs are lent a row for each get every table of pending gets holds,
-/// the only place an end waits for its delivery.
+/// The ends of the session's legs, the rows of their callbacks and the session's note of each leg
+/// pending are lent a row for each get every table of pending gets holds: a leg takes one of
+/// each, and none is held anywhere else.
 #[cfg(feature = "query")]
 #[test]
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
@@ -1168,6 +1169,16 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     assert_eq!(
         row(&plan, "ended legs").entry_bytes,
         core::mem::size_of::<crate::engine::Ended>()
+    );
+    assert_eq!(row(&plan, "leg callbacks").count, legs);
+    assert_eq!(
+        row(&plan, "leg callbacks").entry_bytes,
+        core::mem::size_of::<Option<crate::engine::LegRow>>()
+    );
+    assert_eq!(row(&plan, "pending legs").count, legs);
+    assert_eq!(
+        row(&plan, "pending legs").entry_bytes,
+        core::mem::size_of::<crate::engine::PendingGet>()
     );
 }
 
@@ -1766,8 +1777,15 @@ fn the_pico_presets_lane_holds_one_record() {
 }
 
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
-/// its table of pending gets and the ends of their legs.
-const FACE_PARTS: [&str; 3] = ["peer tables", "pending gets", "ended legs"];
+/// its table of pending gets, and the ends of their legs, their callbacks and the session's note
+/// of each.
+const FACE_PARTS: [&str; 5] = [
+    "peer tables",
+    "pending gets",
+    "ended legs",
+    "leg callbacks",
+    "pending legs",
+];
 
 /// The parts of an arena held once for the session whose size follows its faces: the pools of what
 /// the faces' peers write, each one area.

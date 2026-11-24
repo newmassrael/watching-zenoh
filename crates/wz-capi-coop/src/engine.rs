@@ -247,16 +247,17 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
-pub(crate) use get::{Ended, LegHold, LegSink};
+pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 #[cfg(feature = "query")]
 use {
-    get::{EndedLegs, GetKind, GetPlane, PendingGet},
+    crate::round::LegHolders,
+    get::{EndedLegs, GetKind, GetPlane, LegRows},
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
+    wz_session_core::bounded::CapacityFull,
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
-    wz_session_core::reply_sink::{timeout_reply, ConsolidatingSink, ReplyView},
-    wz_session_core::timestamp_visibility::HiddenReplyTimestamp,
+    wz_session_core::reply_sink::{timeout_reply, ConsolidatingSink},
 };
 
 /// How a session is opened: what the ABI's config says, which the engine turns into the
@@ -709,11 +710,13 @@ struct SessionLent {
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
     registry: Registry,
+    /// What the session's gets share with their sinks and the round: the ends of their legs, the
+    /// replies the gets that consolidate hold, and the legs' callbacks.
     #[cfg(feature = "query")]
-    ended: EndedLegs,
-    /// The rows the gets that consolidate hold their replies in (`MAX_PENDING_REPLIES`).
+    gets: Arc<GetPlane>,
+    /// The session's own note of each leg pending, a row for each get its tables hold.
     #[cfg(feature = "query")]
-    held_replies: HeldReplies<u64, Lent>,
+    pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
     /// The places of the publishes the session keeps for its other faces, the engine's.
@@ -730,7 +733,8 @@ struct SessionLent {
 
 /// The plain tables of a session's state, lent by an open's one lender
 /// (`SessionRows::lent_from`): the delivery lane's area, the engine's record of the session's own
-/// declarations, the key arena, and the ends of its legs.
+/// declarations, the key arena, and the ends of its legs, their callbacks and the session's note
+/// of each leg pending.
 struct StateTables {
     #[cfg(not(feature = "rx-lent-only"))]
     lane: LentByteCells,
@@ -740,6 +744,10 @@ struct StateTables {
     keys: LentKeys,
     #[cfg(feature = "query")]
     legs: Rows<Ended, { usize::MAX }>,
+    #[cfg(feature = "query")]
+    leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
+    #[cfg(feature = "query")]
+    pending_gets: Rows<PendingGet, { usize::MAX }>,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
 }
@@ -749,6 +757,8 @@ impl SessionRows {
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
     fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
         let entities = self.entities();
+        #[cfg(feature = "query")]
+        let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
             #[cfg(not(feature = "rx-lent-only"))]
             lane: lend.byte_cells(self.lane_bytes(), 1),
@@ -757,7 +767,11 @@ impl SessionRows {
             matches: lend.table(entities.matching_listeners),
             keys: lend.keys(self.key_bytes(), longest),
             #[cfg(feature = "query")]
-            legs: lend.table(self.gets().legs().unwrap_or(usize::MAX)),
+            legs: lend.table(legs),
+            #[cfg(feature = "query")]
+            leg_rows: lend.table(legs),
+            #[cfg(feature = "query")]
+            pending_gets: lend.table(legs),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
         }
@@ -802,6 +816,10 @@ fn lend_session(
         keys,
         #[cfg(feature = "query")]
         legs,
+        #[cfg(feature = "query")]
+        leg_rows,
+        #[cfg(feature = "query")]
+        pending_gets,
         #[cfg(feature = "advanced-cache")]
         cache,
     } = plan
@@ -834,6 +852,14 @@ fn lend_session(
     #[cfg(feature = "query")]
     let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
         .map_err(ArenaRefused::Lend)?;
+    // What the gets share: made here, so the round is told whose legs' callbacks its replies'
+    // records hold counts of before it is shared.
+    #[cfg(feature = "query")]
+    let gets = Arc::new(GetPlane::new(
+        EndedLegs::over(legs),
+        held_replies,
+        LegRows::over(leg_rows),
+    ));
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
@@ -844,6 +870,8 @@ fn lend_session(
     // arena where they lie.
     if let Some(round) = Arc::get_mut(&mut samples) {
         round.reads_keys_in(keys);
+        #[cfg(feature = "query")]
+        round.calls_legs_of(gets.clone());
     }
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in a table the plan counts.
@@ -882,9 +910,9 @@ fn lend_session(
         plane,
         registry,
         #[cfg(feature = "query")]
-        ended: EndedLegs::over(legs),
+        gets,
         #[cfg(feature = "query")]
-        held_replies,
+        pending_gets,
         handle_place,
         places,
         #[cfg(any(feature = "listen", feature = "group"))]
@@ -1687,9 +1715,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     next_match: MatchId,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
-    /// The legs of the session's gets still pending on its link.
+    /// The legs of the session's gets still pending on its link, in rows the session's arena lent.
     #[cfg(feature = "query")]
-    pending_gets: Vec<PendingGet>,
+    pending_gets: Rows<PendingGet, { usize::MAX }>,
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
     /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
@@ -2366,16 +2394,6 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
     )
 }
 
-/// A get's leg `callback`, shown each reply's timestamp when `expose` and none otherwise
-/// (`entity-timestamp-opt-in`): the one place a reply is handed to a get's callback.
-#[cfg(feature = "query")]
-fn reply_shown(expose: bool, callback: ReplyCallback) -> ReplyCallback {
-    if expose {
-        return callback;
-    }
-    ReplyCallback::shared(move |reply: &dyn ReplyView| callback.call(&HiddenReplyTimestamp(reply)))
-}
-
 /// The `on_event` of a link's session: the registry's dispatch for the face the link serves. A
 /// value of a type that can be named, so the task the link's session runs as can be
 /// (`RouterSessionTask`), and the runtime reserves its cells at the open in the bytes that task
@@ -2660,6 +2678,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Link::Up(wire) => Some((face.id, &wire.actions)),
                 _ => None,
             })
+    }
+
+    /// Note leg `pending` the session's, for its cancellation, its link's loss and the close to
+    /// find: `false` past the rows, which a leg registered in a table of pending gets never
+    /// reaches, as the rows are one for each row of those tables; its entry is dropped then, which
+    /// says its end, and the leg is over.
+    #[cfg(feature = "query")]
+    fn note_pending(&mut self, pending: PendingGet) -> bool {
+        match self.pending_gets.push(pending) {
+            Ok(()) => true,
+            Err(CapacityFull(pending)) => {
+                pending.unregister(&mut self.registry.borrow_mut());
+                false
+            }
+        }
     }
 
     /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:
@@ -4353,9 +4386,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "queryable")]
             plane: lent.plane,
             #[cfg(feature = "query")]
-            pending_gets: Vec::new(),
+            pending_gets: lent.pending_gets,
             #[cfg(feature = "query")]
-            gets: Arc::new(GetPlane::new(lent.ended, lent.held_replies)),
+            gets: lent.gets,
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: lent.samples,
@@ -4972,11 +5005,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn hand_held(&self, ended: Ended) {
         let leg = ended.leg;
         while let Some(reply) = self.gets.take_held(leg) {
-            ended.callback.call(&reply);
+            self.gets.call(ended.row, &reply);
         }
         if let Some(rid) = ended.timed_out {
-            ended.callback.call(&timeout_reply(rid));
+            self.gets.call(ended.row, &timeout_reply(rid));
         }
+        // The end's count of the row, given back last: the callback goes with it unless a record
+        // of a round another delivery hands out holds it still, whose end lets it go.
+        drop(self.gets.release(ended.row));
     }
 
     /// One pass over what the session queued for the program's callbacks, under the delivery
@@ -5779,7 +5815,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn end_leg_now(&self, leg: u64) {
         let ended = self.gets.ended.lock().forget(leg);
         while self.gets.take_held(leg).is_some() {}
-        drop(ended);
+        if let Some(ended) = ended {
+            drop(self.gets.release(ended.row));
+        }
     }
 
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto
@@ -5814,13 +5852,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .deliver_local_reply(&reply);
             let reached = self.gets.captured();
             drop(core);
-            if let Some(callback) = reached {
+            if let Some(leg) = reached {
                 // A callback that steps the session from inside the reply hands out nothing
                 // itself, as one inside a delivery does.
                 let delivering = self.deliveries.enter();
-                callback.call(&reply);
+                self.gets.call(leg, &reply);
                 drop(delivering);
-                drop(callback);
+                drop(self.gets.release(leg));
                 self.deliver();
             }
             return Ok(());
@@ -7241,7 +7279,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             opts.expose_timestamp_by(&guard.0.policy)
         };
         let remote = opts.allowed_destination.allows_remote();
-        let mut leg = || reply_shown(expose, leg());
         let mut issued = 0;
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
@@ -7283,11 +7320,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 }
                 None => continue,
             }
-            // The leg's callback, shared by the entry's sink and the table of callbacks.
-            let callback = Arc::new(leg());
+            // The leg's callback, in a row of the plane's the entry's sink holds.
+            let Some(row) = self.gets.open_leg(leg, expose) else {
+                unheld += 1;
+                continue;
+            };
             let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
-                get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegSink::new(leg_id, row, &self.gets, &self.samples),
                 get::LegHold::new(leg_id, &self.gets),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
@@ -7306,7 +7346,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // A leg no table holds is let go of with no lock held.
                 drop(guard);
                 self.end_leg_now(leg_id);
-                drop(callback);
                 continue;
             }
             // The link names the key as its own key-wire form says.
@@ -7336,11 +7375,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            core.pending_gets.push(PendingGet {
+            if !core.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
-            });
+            }) {
+                unheld += 1;
+                continue;
+            }
             drop(guard);
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
@@ -7394,10 +7436,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 }
                 None => continue,
             }
-            let callback = Arc::new(leg());
+            let Some(row) = self.gets.open_leg(leg, expose) else {
+                unheld += 1;
+                continue;
+            };
             let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
-                get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                get::LegSink::new(leg_id, row, &self.gets, &self.samples),
                 get::LegHold::new(leg_id, &self.gets),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
@@ -7414,7 +7459,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
                 drop(guard);
                 self.end_leg_now(leg_id);
-                drop(callback);
                 continue;
             }
             if !group.ask(rid, keyexpr, wire, opts.query_parts()) {
@@ -7426,11 +7470,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            core.pending_gets.push(PendingGet {
+            if !core.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
-            });
+            }) {
+                unheld += 1;
+                continue;
+            }
             drop(guard);
             issued += 1;
             if !self.cancelling(fan, leg_id) {
@@ -7449,13 +7496,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
             // A get no row holds is refused before its leg's callback is minted.
-            if !core.registry.borrow().local.replies.has_room() {
-                unheld += 1;
+            let row = if core.registry.borrow().local.replies.has_room() {
+                self.gets.open_leg(leg, expose)
             } else {
-                let callback = Arc::new(leg());
+                None
+            };
+            if let Some(row) = row {
                 let sink = ConsolidatingSink::with_hold(
                     opts.resolved_consolidation(),
-                    get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                    get::LegSink::new(leg_id, row, &self.gets, &self.samples),
                     get::LegHold::new(leg_id, &self.gets),
                 );
                 let registered = core.registry.borrow_mut().local.replies.register_sink(
@@ -7469,13 +7518,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     // A leg no table holds is let go of with no lock held.
                     drop(guard);
                     self.end_leg_now(leg_id);
-                    drop(callback);
+                } else if !core.note_pending(PendingGet {
+                    face: LOCAL_FACE,
+                    leg: leg_id,
+                    kind: GetKind::Query(rid),
+                }) {
+                    unheld += 1;
                 } else {
-                    core.pending_gets.push(PendingGet {
-                        face: LOCAL_FACE,
-                        leg: leg_id,
-                        kind: GetKind::Query(rid),
-                    });
                     // Asked once the legs to the peers were, as zenoh-pico asks it only once the
                     // send succeeded.
                     let asked = self.ask_own_queryables(core, own, keyexpr, opts);
@@ -7484,6 +7533,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     let _ = self.cancelling(fan, leg_id);
                     self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
+            } else {
+                unheld += 1;
             }
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
@@ -7546,7 +7597,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 continue;
             }
-            let callback = Arc::new(leg());
+            // A snapshot's replies are tokens, shown as they came.
+            let Some(row) = self.gets.open_leg(leg, true) else {
+                continue;
+            };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core
@@ -7557,14 +7611,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.register(
                         interest_id,
                         deadline_ms,
-                        get::LegSink::new(leg_id, &callback, &self.gets, &self.samples),
+                        get::LegSink::new(leg_id, row, &self.gets, &self.samples),
                     )
                 })
                 .is_some_and(|registered| matches!(registered, Ok(true)));
             if !registered {
                 drop(guard);
                 self.end_leg_now(leg_id);
-                drop(callback);
                 continue;
             }
             // The Interest names the key as the link's own key-wire form says, as a query does.
@@ -7586,11 +7639,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 self.end_leg_now(leg_id);
                 continue;
             }
-            core.pending_gets.push(PendingGet {
+            if !core.note_pending(PendingGet {
                 face,
                 leg: leg_id,
                 kind: GetKind::Liveliness(interest_id),
-            });
+            }) {
+                continue;
+            }
             drop(guard);
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
@@ -7933,7 +7988,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         #[cfg(feature = "query")]
         {
             let mut registry = core.registry.borrow_mut();
-            for pending in core.pending_gets.drain(..) {
+            while let Some(pending) = core.pending_gets.pop() {
                 pending.unregister(&mut registry);
             }
         }
@@ -7975,13 +8030,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         #[cfg(feature = "query")]
         {
-            // Each end, and the leg's callback it holds, is let go of with no lock held.
+            // Each end gives back its count of its leg's row, and the callback goes there when no
+            // record of the round still holds it, with no lock held.
             loop {
                 let next = self.gets.ended.lock().take();
                 let Some(ended) = next else {
                     break;
                 };
-                drop(ended);
+                drop(self.gets.release(ended.row));
             }
             drop(self.gets.take_all_held());
         }
@@ -8258,6 +8314,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // row it reads is dropped with the tables.
         // SAFETY: the last handle is gone, so no delivery runs or starts.
         unsafe { self.samples.let_go() };
+        // The legs' rows and ends lie in the arena too. A session never closed still holds the
+        // entries of its pending gets: they go first, each saying its end, and the plane lets go
+        // of the ends and the rows after, the callbacks still held among them.
+        #[cfg(feature = "query")]
+        {
+            let core = self.core.dropping();
+            let mut registry = core.registry.borrow_mut();
+            while let Some(pending) = core.pending_gets.pop() {
+                pending.unregister(&mut registry);
+            }
+            drop(registry);
+            self.gets.let_go();
+        }
     }
 }
 
