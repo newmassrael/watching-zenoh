@@ -1835,8 +1835,10 @@ where
         let mut lent = false;
         let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
             lent = true;
+            // A slot longer than the batch refuses the frame where it crosses the batch, before
+            // the payload that would carry it past is copied in.
+            slot.hold_to(mtu);
             crate::frame_encode::encode_frame_envelope_into(slot, sn, flags, ext_qos, &body).is_ok()
-                && crate::tx_buf::TxBuf::len(slot) <= mtu
         };
         if queue.enqueue_lent(priority, reliable, sn, want, &mut fill) {
             return PushOutcome::Pushed;
@@ -2499,7 +2501,7 @@ pub fn multicast_tx_emit_lent(
     datagram: &mut [u8],
     send: &mut dyn FnMut(&[u8]),
 ) -> Result<usize, MulticastTxRefused> {
-    use crate::tx_buf::{CappedTxBuf, SliceTxBuf, TxBuf};
+    use crate::tx_buf::{SliceTxBuf, TxBuf};
 
     // Composed before the SN is minted, so a Put past its protocol bounds leaves the
     // conduit's ring as it was.
@@ -2513,13 +2515,13 @@ pub fn multicast_tx_emit_lent(
     let flags = crate::frame_encode::frame_flags(reliable);
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| push.encode(sink);
 
-    // The frame whole, when it fits the batch: the cap makes a refusal mean "past it".
+    // The frame whole, when it fits the batch: the hold makes a refusal mean "past it".
     let whole = {
         let mut buf = SliceTxBuf::new(&mut *datagram);
-        let mut capped = CappedTxBuf::new(&mut buf, mtu);
-        crate::frame_encode::encode_frame_envelope_into(&mut capped, sn, flags, ext_qos, body)
+        buf.hold_to(mtu);
+        crate::frame_encode::encode_frame_envelope_into(&mut buf, sn, flags, ext_qos, body)
             .ok()
-            .map(|()| TxBuf::len(&capped))
+            .map(|()| TxBuf::len(&buf))
     };
     // The length is what the buffer over `datagram` holds.
     if let Some(frame) = whole.and_then(|len| datagram.get(..len)) {
@@ -3655,6 +3657,66 @@ mod lend_tests {
         assert_eq!(sns, [0, 1, 2], "two fragments and the marker");
         let (_, marker, _) = queue.lent.last().expect("the marker");
         assert!(marker.len() < 16, "the marker carries no payload");
+    }
+
+    /// A queue that lends a slot longer than the batch: the frame is held to the batch in it, so a
+    /// frame past the batch is refused before its payload is copied in, and leaves as a chain.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_slot_longer_than_the_batch_holds_the_frame_to_the_batch() {
+        struct Oversized {
+            /// The bytes each lent slot was left holding past the length asked for.
+            past_want: Vec<usize>,
+            lent: usize,
+        }
+        impl MulticastTxQueue for Oversized {
+            fn wait_for_room(&mut self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+                RoomAnswer::at_once(LinkRoom::Free)
+            }
+            fn enqueue(&mut self, _datagram: MulticastTxDatagram) {}
+            fn enqueue_lent(
+                &mut self,
+                _priority: Priority,
+                _reliable: bool,
+                _sn: u64,
+                want: usize,
+                fill: &mut dyn FnMut(&mut SliceTxBuf<'_>) -> bool,
+            ) -> bool {
+                let mut storage = alloc::vec![0u8; want * 4];
+                let filled = fill(&mut SliceTxBuf::new(&mut storage));
+                let past = storage.get(want..).unwrap_or_default();
+                self.past_want
+                    .push(past.iter().filter(|b| **b != 0).count());
+                self.lent += usize::from(filled);
+                filled
+            }
+        }
+        let params = params(256, false);
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Oversized {
+            past_want: Vec::new(),
+            lent: 0,
+        };
+        let outcome = multicast_tx_push(
+            put(&[0xA5u8; 1_000], Priority::DEFAULT),
+            &mut tx,
+            &params,
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
+            &mut queue,
+        );
+        assert_eq!(outcome, PushOutcome::Pushed);
+        assert!(
+            queue.lent > 2,
+            "the frame left as a chain of lent fragments"
+        );
+        assert_eq!(
+            queue.past_want.first(),
+            Some(&0),
+            "the whole frame was refused at the batch: nothing written past it"
+        );
     }
 
     /// A batch window's frame is written into the window's own storage and leaves through a lent

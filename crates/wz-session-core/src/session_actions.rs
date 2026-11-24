@@ -602,9 +602,11 @@ enum LentFill {
     Refused(sce_forge_runtime::codec::CodecError),
 }
 
-/// Write the frame of `sn` with the message `encode_body` writes into `slot`, through a cap at
-/// `mtu`, so a message past the budget is refused where it crosses it and its payload is not
-/// copied in only to be thrown away.
+/// Write the frame of `sn` with the message `encode_body` writes into `slot`, the slot held to
+/// `mtu` ([`TxLease::hold_to`](crate::tx_lease::TxLease::hold_to)), so a message past the budget
+/// is refused where it crosses it and its payload is not copied in only to be thrown away. A
+/// window kept open in the slot keeps the hold, so the messages appended to it later meet the
+/// budget the same way.
 #[cfg(all(
     feature = "transport-tx-lend",
     any(
@@ -633,20 +635,20 @@ where
     D: crate::link::BoxedLinkDriver + ?Sized,
     P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
 {
-    use crate::tx_buf::TxBuf;
     use sce_forge_runtime::codec::CodecError;
     let whole_budget = slot.capacity() >= mtu;
+    slot.hold_to(mtu);
     let written = crate::frame_encode::encode_frame_envelope_into(
-        &mut crate::tx_buf::CappedTxBuf::new(&mut *slot, mtu),
+        slot,
         sn,
         crate::frame_encode::frame_flags(reliable),
         ext_qos,
         encode_body,
     );
     match written {
-        Ok(()) if slot.len() <= mtu => LentFill::Fits,
-        Ok(()) | Err(CodecError::BufferOverflow) if whole_budget => LentFill::PastBudget,
-        Ok(()) | Err(CodecError::BufferOverflow) => LentFill::ShortSlot,
+        Ok(()) => LentFill::Fits,
+        Err(CodecError::BufferOverflow) if whole_budget => LentFill::PastBudget,
+        Err(CodecError::BufferOverflow) => LentFill::ShortSlot,
         Err(refused) => LentFill::Refused(refused),
     }
 }
@@ -6004,7 +6006,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         idx: usize,
         priority: Priority,
         reliable: bool,
-        mtu: usize,
         encode_body: &P,
     ) -> bool
     where
@@ -6034,10 +6035,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
             if open_channel == Reliability::from_reliable_bool(reliable) {
                 let wpos = slot.len();
+                // The slot was held to the budget when the window opened in it
+                // (`fill_lent_frame`): a message that would carry the frame past it is refused.
                 let appended = {
                     let mut sink = crate::tx_buf::TxSink::new(&mut slot);
                     encode_body(&mut sink).is_ok()
-                } && slot.len() <= mtu;
+                };
                 if appended {
                     batch.stage.count = batch.stage.count.saturating_add(1);
                     batch.stage.lent = Some(slot.keep_open());
@@ -12129,8 +12132,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // frame and open a fresh one below.
                     #[cfg(feature = "transport-tx-lend")]
                     if batch.stage.lent.is_some() {
-                        if self.append_lent_batch(batch, idx, priority, reliable, mtu, &encode_body)
-                        {
+                        if self.append_lent_batch(batch, idx, priority, reliable, &encode_body) {
                             return Ok(UnicastPush::Pushed);
                         }
                         continue;

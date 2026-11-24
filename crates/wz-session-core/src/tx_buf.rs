@@ -146,6 +146,16 @@ impl<'a> SliceTxBuf<'a> {
     pub fn remaining(&self) -> usize {
         self.storage.len().saturating_sub(self.len)
     }
+
+    /// Hold the buffer to `end` bytes: a write that would carry it past `end` is refused as one
+    /// past the storage is, before a byte of it is copied, so a frame budget smaller than the
+    /// storage is the buffer's own end. Storage shorter than `end` keeps its end, and the bytes
+    /// already written are never cut.
+    pub fn hold_to(&mut self, end: usize) {
+        let storage = core::mem::take(&mut self.storage);
+        let end = core::cmp::min(core::cmp::max(end, self.len), storage.len());
+        self.storage = storage.split_at_mut(end).0;
+    }
 }
 
 impl TxBuf for SliceTxBuf<'_> {
@@ -480,6 +490,39 @@ mod tests {
         buf.append_byte(7).unwrap();
         assert_eq!(buf.as_slice(), &[9, 9, 9, 7]);
         assert_eq!(buf.append_byte(8), Err(CodecError::BufferOverflow));
+    }
+
+    #[test]
+    fn a_slice_buffer_held_to_a_budget_refuses_a_write_past_it() {
+        let mut storage = [0u8; 8];
+        {
+            let mut buf = SliceTxBuf::new(&mut storage);
+            buf.append(&[1, 2]).unwrap();
+            buf.hold_to(4);
+            assert_eq!((buf.capacity(), buf.remaining()), (4, 2));
+            assert_eq!(buf.append(&[3, 3, 3]), Err(CodecError::BufferOverflow));
+            assert!(matches!(buf.reserve(3), Err(CodecError::BufferOverflow)));
+            buf.append(&[3, 4]).unwrap();
+            assert_eq!(buf.append_byte(5), Err(CodecError::BufferOverflow));
+            buf.hold_to(1);
+            assert_eq!(buf.as_slice(), &[1, 2, 3, 4], "a hold cuts no written byte");
+            buf.hold_to(64);
+            assert_eq!(buf.capacity(), 4, "a hold never moves the end out again");
+        }
+        assert_eq!(
+            &storage[4..],
+            &[0u8; 4],
+            "nothing was written past the budget"
+        );
+
+        let mut storage = [0u8; 3];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.hold_to(16);
+        assert_eq!(
+            buf.capacity(),
+            3,
+            "storage shorter than the budget keeps its end"
+        );
     }
 
     #[test]
