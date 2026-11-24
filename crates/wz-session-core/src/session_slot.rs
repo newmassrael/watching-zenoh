@@ -341,6 +341,10 @@ where
     /// free counts its refusal and drops `make` unrun, so a full table binds no socket and has
     /// no place to build a driver it would only drop. A link that cannot be made into the free
     /// slot is refused as such, takes no slot and is not counted.
+    ///
+    /// The order is the contract a refusal is read by: when the table is full and the link
+    /// could not have been made either (a dial with its socket pool dry too), the refusal is
+    /// the table's, [`ClaimRefused::Full`], counted here, and the link's maker is never asked.
     #[inline(never)]
     pub fn claim_with<Err>(
         &'static self,
@@ -400,7 +404,8 @@ where
     }
 }
 
-/// Why [`SessionSlots::claim_with`] gave no slot.
+/// Why [`SessionSlots::claim_with`] gave no slot. The table is asked first, so a claim that
+/// both finds the table full and could not have made its link is [`Full`](Self::Full).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClaimRefused<Err> {
     /// The link could not be made into the free slot: no slot was taken and nothing counted.
