@@ -870,33 +870,36 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// room. Behind something already owed it is owed whole, so frames leave in the order they
     /// were handed over. Nothing waits here; a stream that cannot try is written by waiting.
     fn send(&self, slot: TxSlot, from: usize, end: usize) -> LinkSendOutcome {
-        if self.lost.get().is_none() && !self.write_owed() {
-            return self.owe(Owed { slot, from, end }, 0);
-        }
-        if self.lost.get().is_some() {
-            self.tx.release(slot);
-            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
-        }
-        // SAFETY: the session handed the slot over and the link holds it: nothing writes it.
-        let frame = unsafe { self.tx.held(slot, from, end) };
-        match self.socket.write(frame) {
-            Ok(taken) if taken >= frame.len() => {
+        // Where the rest that is owed starts, and how much of the frame the stream took: the frame
+        // is owed from one place, whether it waits whole or the stream took part of it.
+        let (from, taken) = if self.lost.get().is_none() && !self.write_owed() {
+            (from, 0)
+        } else {
+            if self.lost.get().is_some() {
                 self.tx.release(slot);
-                // A write that waited took the frame whole and says nothing of the room left.
-                self.room_known.set(S::WRITES_NOW);
-                LinkSendOutcome::Sent
+                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
             }
-            Ok(taken) => {
-                self.room_known.set(false);
-                let from = from.saturating_add(taken);
-                self.owe(Owed { slot, from, end }, taken)
+            // SAFETY: the session handed the slot over and the link holds it: nothing writes it.
+            let frame = unsafe { self.tx.held(slot, from, end) };
+            match self.socket.write(frame) {
+                Ok(taken) if taken >= frame.len() => {
+                    self.tx.release(slot);
+                    // A write that waited took the frame whole and says nothing of the room left.
+                    self.room_known.set(S::WRITES_NOW);
+                    return LinkSendOutcome::Sent;
+                }
+                Ok(taken) => {
+                    self.room_known.set(false);
+                    (from.saturating_add(taken), taken)
+                }
+                Err(e) => {
+                    self.tx.release(slot);
+                    self.fail(e);
+                    return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+                }
             }
-            Err(e) => {
-                self.tx.release(slot);
-                self.fail(e);
-                LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
-            }
-        }
+        };
+        self.owe(Owed { slot, from, end }, taken)
     }
 
     /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
