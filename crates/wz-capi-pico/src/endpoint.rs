@@ -114,20 +114,22 @@ impl<'a> PicoEndpoint<'a> {
         self.malformed
     }
 
-    /// The pairs pico keeps, key and value, in its link's order of the keys.
-    fn pairs(&self) -> impl Iterator<Item = (&'static str, &'a str)> + '_ {
-        self.keys
-            .iter()
-            .zip(&self.values)
-            .filter_map(|(key, value)| value.map(|value| (*key, value)))
-    }
-
     /// Hands `put` the text pico keeps of the endpoint, piece by piece: the locator, then, when
-    /// a pair is kept, `separator` and the pairs, `key=value`, joined by `;`.
+    /// a pair is kept, `separator` and the pairs, `key=value`, in its link's order of the keys,
+    /// joined by `;`.
+    ///
+    /// One loop over the keys, a key with no value passed over in it, and out of line, so the
+    /// link's keys are read as data: inlined with them known, or with a search for the next kept
+    /// pair of its own, the compiler writes the loop out once per key the longest link has and
+    /// its first pair apart from the rest.
+    #[inline(never)]
     fn write_text(&self, separator: &str, mut put: impl FnMut(&str)) {
         put(self.locator);
         let mut before = separator;
-        for (key, value) in self.pairs() {
+        for (at, &key) in self.keys.iter().enumerate() {
+            let Some(&Some(value)) = self.values.get(at) else {
+                continue;
+            };
             put(before);
             put(key);
             put("=");
@@ -265,6 +267,40 @@ mod tests {
             dialled("udp/127.0.0.1:9000#tout=5;iface=lo").as_deref(),
             Ok("udp/127.0.0.1:9000#iface=lo;tout=5")
         );
+    }
+
+    /// The kept pairs follow the link's order of its keys whatever order they were written in, a
+    /// key with no value passed over: the separator comes before the first pair kept, which need
+    /// not be the link's first key, and `;` between the rest. Turned red by a separator written
+    /// before the link's first key only, or by a pair kept in the order it was written.
+    #[test]
+    fn the_kept_pairs_follow_the_links_order_and_pass_over_a_key_with_no_value() {
+        for (written, expected) in [
+            // The link's first key has no value: the separator comes before its second.
+            (
+                "udp/127.0.0.1:9000#join=1;tout=5",
+                "udp/127.0.0.1:9000#tout=5;join=1",
+            ),
+            // The key between two kept ones has no value.
+            (
+                "udp/127.0.0.1:9000#join=1;iface=lo",
+                "udp/127.0.0.1:9000#iface=lo;join=1",
+            ),
+            // Only the link's last key is kept.
+            ("udp/127.0.0.1:9000#join=1", "udp/127.0.0.1:9000#join=1"),
+            (
+                "udp/127.0.0.1:9000#join=1;tout=5;iface=lo",
+                "udp/127.0.0.1:9000#iface=lo;tout=5;join=1",
+            ),
+            (
+                "reth/eth0#whitelist=a;ethtype=8",
+                "reth/eth0#ethtype=8;whitelist=a",
+            ),
+        ] {
+            assert_eq!(dialled(written).as_deref(), Ok(expected), "{written}");
+            let read = PicoEndpoint::read(written, config_keys(scheme_of(written)).unwrap());
+            assert_eq!(read.text_len("#"), expected.len(), "{written}");
+        }
     }
 
     /// A config pico cannot read is refused as pico refuses it; a scheme whose config this ABI

@@ -444,12 +444,14 @@ impl DeclaredKeyexpr {
     /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
     /// refuses it.
     pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
+        // The text is kept first: a refusal then has no hold of the declaration to let go of.
+        let kept = self.literal.beside(literal)?;
         let declaration = self.declaration.clone().filter(|d| {
             literal.get(..d.prefix_len).is_some()
                 && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
         });
         Ok(Self {
-            literal: self.literal.beside(literal)?,
+            literal: kept,
             declaration,
         })
     }

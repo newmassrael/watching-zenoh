@@ -2208,6 +2208,19 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
 
 /// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
 /// for every caller that sends it, so its body and its call through `&dyn TellTo` are made once.
+/// Whether the batch window of the link of `actions` took `step`. Out of line, so the walk over
+/// the links that asks each is one loop: with the step's match inlined in it, the compiler writes
+/// the walk out once per step.
+#[inline(never)]
+fn batch_link<C: ClockSource + 'static>(actions: &McuActions<C>, step: BatchStep) -> bool {
+    match step {
+        BatchStep::Start => actions.batch_start(),
+        BatchStep::Flush => actions.batch_flush(),
+        BatchStep::Stop => actions.batch_stop(),
+    }
+    .is_ok()
+}
+
 fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&McuActions<C>) {
     move |actions| actions.send_undeclare_kexpr(mapping_id)
 }
@@ -6763,14 +6776,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .0
                 .transport
                 .ups()
-                .filter(|actions| {
-                    match step {
-                        BatchStep::Start => actions.batch_start(),
-                        BatchStep::Flush => actions.batch_flush(),
-                        BatchStep::Stop => actions.batch_stop(),
-                    }
-                    .is_ok()
-                })
+                .filter(|&actions| batch_link(actions, step))
                 .count();
             #[cfg(feature = "group")]
             let groups = core
