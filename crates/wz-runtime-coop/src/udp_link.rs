@@ -258,6 +258,60 @@ impl DatagramSocket for NoDatagram {
     }
 }
 
+/// The datagram socket of a stack on a platform whose sockets are `U`, in a build that links no
+/// datagram link: every `udp/` dial and listener is `LinkOpenError::Unsupported`, as on a stack
+/// that carries none ([`NoDatagram`]), and no link over `U` is made, while the stack's other
+/// links are waited on with `U`'s waits. There is no value of it.
+pub struct NoDatagramOf<U> {
+    never: core::convert::Infallible,
+    _socket: core::marker::PhantomData<fn() -> U>,
+}
+
+impl<U: DatagramSocket> DatagramSocket for NoDatagramOf<U> {
+    type Error = ();
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits = U::Waits;
+
+    const CARRIED: bool = false;
+
+    // A socket that opens nothing opens no IPv6 address either.
+    const IPV6: bool = false;
+
+    fn bind(_at: SocketAddr) -> Result<Self, ()> {
+        Err(())
+    }
+
+    // No address is ever opened, so a refused bind is never one to try again.
+    fn refuses_address(_error: &()) -> bool {
+        true
+    }
+
+    fn local(&self) -> SocketAddr {
+        match self.never {}
+    }
+
+    fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), ()> {
+        match self.never {}
+    }
+
+    fn wait_readable(&self, _timeout_ms: c_int) {
+        match self.never {}
+    }
+
+    fn times_out(&self) -> bool {
+        match self.never {}
+    }
+
+    fn recv_waiting(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match self.never {}
+    }
+
+    fn try_recv(&self, _buf: &mut [u8]) -> Result<Option<Received>, ()> {
+        match self.never {}
+    }
+}
+
 /// The unspecified address of `ip`'s family: `0.0.0.0` or `::`.
 pub const fn unspecified_like(ip: IpAddr) -> IpAddr {
     match ip {

@@ -22,8 +22,12 @@
     not(windows)
 ))]
 mod posix_host {
-    /// The host's sockets as the session's links.
+    /// The host's sockets as the session's links: without its datagram links in a build without
+    /// pico's unicast UDP link (`link-udp`).
+    #[cfg(feature = "link-udp")]
     pub(crate) type Links = wz_runtime_posix::links::PosixLinks;
+    #[cfg(not(feature = "link-udp"))]
+    pub(crate) type Links = wz_runtime_posix::links::PosixStreamLinks;
     /// The host's monotonic clock.
     pub(crate) type Clock = wz_runtime_posix::PosixClock;
     /// The host kernel's random source.
@@ -85,8 +89,12 @@ mod posix_host {
     windows
 ))]
 mod windows_host {
-    /// Winsock's sockets as the session's links.
+    /// Winsock's sockets as the session's links: without its datagram links in a build without
+    /// pico's unicast UDP link (`link-udp`).
+    #[cfg(feature = "link-udp")]
     pub(crate) type Links = wz_runtime_posix::windows::links::WindowsLinks;
+    #[cfg(not(feature = "link-udp"))]
+    pub(crate) type Links = wz_runtime_posix::windows::links::WindowsStreamLinks;
     /// The performance counter.
     pub(crate) type Clock = wz_runtime_posix::windows::WindowsClock;
     /// The system's preferred random number generator.
@@ -152,8 +160,12 @@ mod zephyr_host {
     /// kernel's and not a number written here.
     const TICK_HZ: u32 = wz_runtime_zephyr::tick_hz_from_build!();
 
-    /// Zephyr's datagram and stream sockets as the session's links.
+    /// Zephyr's datagram and stream sockets as the session's links: its stream sockets alone in a
+    /// build without pico's unicast UDP link (`link-udp`).
+    #[cfg(feature = "link-udp")]
     pub(crate) type Links = wz_runtime_zephyr::ZephyrIpLinks;
+    #[cfg(not(feature = "link-udp"))]
+    pub(crate) type Links = wz_runtime_zephyr::ZephyrStreamLinks;
     /// The kernel's tick count.
     pub(crate) type Clock = wz_runtime_zephyr::ZephyrClock<TICK_HZ>;
     /// The board's random source (`wzApplicationGetRandom`), which pico's Zephyr backend reads

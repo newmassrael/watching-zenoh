@@ -184,12 +184,15 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 /// switches compile in and answers any other scheme `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` before
 /// it opens anything (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_open_link(`, whose
 /// last arm is `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`). The cooperative engine dials and
-/// listens on `tcp/` and `udp/` in every build; `tls/` with its secure channel
-/// (`tls-mbedtls`) and `serial/` with the host's ttys (`transport-link-serial`).
+/// listens on `tcp/` in every build, as pico's TCP link is in every build of it; `udp/` with
+/// pico's unicast UDP link (`link-udp`, `Z_FEATURE_LINK_UDP_UNICAST`), `tls/` with its secure
+/// channel (`tls-mbedtls`) and `serial/` with the host's ttys (`transport-link-serial`). A group
+/// is no unicast endpoint and is not judged here.
 #[cfg(not(feature = "engine-tokio"))]
 fn link_built(scheme: &str) -> bool {
     match scheme {
-        "tcp" | "udp" => true,
+        "tcp" => true,
+        "udp" => cfg!(feature = "link-udp"),
         "tls" => cfg!(feature = "tls-mbedtls"),
         "serial" => cfg!(feature = "transport-link-serial"),
         _ => false,
@@ -428,7 +431,7 @@ mod tests {
             with_engine_text(&long, |text: &str| String::from(text)),
             long
         );
-        let malformed = "udp/127.0.0.1:9000#iface";
+        let malformed = "tcp/127.0.0.1:9000#tout";
         assert_eq!(checked_endpoint(malformed), Err(Z_ERR_CONFIG_INVALID_VALUE));
         assert_eq!(
             with_engine_text(malformed, |text: &str| String::from(text)),
@@ -466,10 +469,11 @@ mod tests {
                 "{unknown}"
             );
         }
-        for built in ["tcp/127.0.0.1:7447", "udp/127.0.0.1:7447", "no-scheme"] {
+        for built in ["tcp/127.0.0.1:7447", "no-scheme"] {
             assert_eq!(checked_endpoint(built), Ok(()), "{built}");
         }
         for (endpoint, built) in [
+            ("udp/127.0.0.1:7447", cfg!(feature = "link-udp")),
             ("tls/127.0.0.1:7447", cfg!(feature = "tls-mbedtls")),
             (
                 "serial//dev/ttyS0#baudrate=9600",

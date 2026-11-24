@@ -2382,6 +2382,31 @@ mod tests {
         );
     }
 
+    /// Links over a platform's sockets in a build that links no datagram link refuse `udp/` for
+    /// good, to dial, to accept on and to listen on, carry the platform's streams as before, and
+    /// wait with the platform's waits. Turned red by a datagram link made over the absent socket,
+    /// or by a refusal that a later try could lift.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn links_without_their_datagram_link_refuse_udp_and_keep_their_streams() {
+        type Absent = crate::udp_link::NoDatagramOf<Datagrams>;
+        let links = IpLinks::<Absent, Dial>::new(NODE, Dial);
+        assert!(matches!(
+            links.open_initiator(Locator::udp(ROUTER)),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(matches!(
+            links.open_acceptor(7447),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(matches!(
+            links.open_listener(Locator::udp(SocketAddr::new(NODE, 0))),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(links.open_initiator(Locator::tcp(ROUTER)).is_ok());
+        let _: <Datagrams as DatagramSocket>::Waits = links.waits();
+    }
+
     /// Links lent their session's tables claim every link's buffers there, a dial's and an
     /// accepting link's alike, as many links as the tables hold: one past them is refused as
     /// exhausted and never allocated, a protocol the links do not carry is still refused for good,
