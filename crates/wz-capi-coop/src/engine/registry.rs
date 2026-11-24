@@ -268,6 +268,38 @@ impl<'a> Iterator for HeldMut<'a> {
     }
 }
 
+/// The sets the entries of an index of held sets name, in the index's order, each read by `set`.
+/// Every entry names a set the registry lent (a face is recorded only at a set it was given), so
+/// the walk yields one for each entry and says so before it starts; an entry `set` finds no set
+/// for is passed over rather than read out of bounds.
+struct HeldSets<'a, F> {
+    held: core::slice::Iter<'a, HeldSet>,
+    set: F,
+}
+
+impl<'a, F: FnMut(usize) -> Option<&'a FaceTables>> HeldSets<'a, F> {
+    /// The sets `held` names, each read by `set` from its place among the registry's sets.
+    fn of(held: &'a [HeldSet], set: F) -> Self {
+        Self {
+            held: held.iter(),
+            set,
+        }
+    }
+}
+
+impl<'a, F: FnMut(usize) -> Option<&'a FaceTables>> Iterator for HeldSets<'a, F> {
+    type Item = &'a FaceTables;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self { held, set } = self;
+        held.find_map(|held| set(held.at))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.held.size_hint()
+    }
+}
+
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the entries of the index of held sets that
 /// name them.
@@ -285,14 +317,10 @@ struct Others<'a> {
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let (before, after, after_at) = (self.before, self.after, self.after_at);
-        self.held_before
-            .iter()
-            .filter_map(move |held| before.get(held.at))
-            .chain(
-                self.held_after
-                    .iter()
-                    .filter_map(move |held| after.get(held.at.checked_sub(after_at)?)),
-            )
+        HeldSets::of(self.held_before, move |at: usize| before.get(at))
+            .chain(HeldSets::of(self.held_after, move |at: usize| {
+                after.get(at.checked_sub(after_at)?)
+            }))
     }
 }
 
@@ -663,7 +691,7 @@ impl Registry {
 
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.held.iter().filter_map(move |held| self.set(held.at))
+        HeldSets::of(&self.held, move |at: usize| self.set(at))
     }
 
     /// Where the set face `id` holds lies among the sets, while the session holds the face.
