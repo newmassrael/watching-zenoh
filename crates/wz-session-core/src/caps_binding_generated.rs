@@ -226,6 +226,54 @@ pub const MAX_MATCHING_LISTENERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_DECL_WATCHES`] is bound.
+pub const MAX_DECL_WATCHES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_TRANSPORT_EVENTS_LISTENERS`] is bound.
+pub const MAX_TRANSPORT_EVENTS_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_LINK_EVENTS_LISTENERS`] is bound.
+pub const MAX_LINK_EVENTS_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_DECL_WATCH_EVENTS`] is bound.
+pub const MAX_DECL_WATCH_EVENTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_DECLARED_KEYEXPRS`] is bound.
 pub const MAX_DECLARED_KEYEXPRS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -610,6 +658,78 @@ pub const MAX_TICKERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::ADVANCED_CACHE_BYTES`] is bound.
+pub const ADVANCED_CACHE_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_PUBLISHERS`] is bound.
+pub const MAX_ADVANCED_PUBLISHERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_SUBSCRIBERS`] is bound.
+pub const MAX_ADVANCED_SUBSCRIBERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_SAMPLE_MISS_LISTENERS`] is bound.
+pub const MAX_SAMPLE_MISS_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_SOURCES`] is bound.
+pub const MAX_ADVANCED_SOURCES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::ADVANCED_SUBSCRIBER_PENDING_BYTES`] is bound.
+pub const ADVANCED_SUBSCRIBER_PENDING_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Entity],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_LOCATOR_LEN`] is bound.
 pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -618,6 +738,42 @@ pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Runtime, Scope::Link],
     binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_GROUP_ENDPOINT_LEN`] is bound.
+pub const MAX_GROUP_ENDPOINT_LEN: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_GROUP_MEMBERS`] is bound.
+pub const MAX_GROUP_MEMBERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_CONNECTIVITY_REPLAY_EVENTS`] is bound.
+pub const MAX_CONNECTIVITY_REPLAY_EVENTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };

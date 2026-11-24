@@ -192,6 +192,13 @@ pub trait RowCallback {
     /// Retire the row, with the tables held: `true` when no call of it runs, so it may be let go
     /// of now.
     fn retire(&self) -> bool;
+
+    /// Whether the row, retired, has no call left running, with the tables held: the mark a walk
+    /// of a table's retired rows reads to find the ones whose last call ended, so whoever ends a
+    /// call keeps no list of them (`SessionTables::release_drained_subscriber`). Asked only of a
+    /// row its table keeps retired; a callback no call of which outlives the tables' hold is never
+    /// kept so, and answers `true`.
+    fn drained(&self) -> bool;
 }
 
 /// What a C closure's `drop` is.
@@ -216,6 +223,10 @@ macro_rules! called_while_held {
             }
 
             fn retire(&self) -> bool {
+                true
+            }
+
+            fn drained(&self) -> bool {
                 true
             }
         }
@@ -301,6 +312,10 @@ impl<Call: Copy> RowCallback for CClosure<Call> {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A Rust closure and the latch of its calls, shared with every call of it: the form a callback of
@@ -353,6 +368,10 @@ impl<F> RowCallback for ArcCallback<F> {
 
     fn retire(&self) -> bool {
         self.0.latch.retire()
+    }
+
+    fn drained(&self) -> bool {
+        self.0.latch.drained()
     }
 }
 
@@ -420,7 +439,12 @@ mod tests {
         assert_eq!((call.call, call.context), (3, context));
         assert!(!closure.retire(), "a call runs");
         assert!(closure.begin().is_none());
+        assert!(!closure.drained(), "retired, its call still runs");
         assert!(ended(&closure, call));
+        assert!(
+            closure.drained(),
+            "its last call ended: the mark a walk reads"
+        );
         assert_eq!(
             DROPS.load(Ordering::SeqCst),
             0,
@@ -439,6 +463,8 @@ mod tests {
         let moved = row;
         assert_eq!((call.callback())(1), 2);
         assert!(!moved.retire());
+        assert!(!moved.drained());
         assert!(ended(&moved, call));
+        assert!(moved.drained());
     }
 }

@@ -265,7 +265,7 @@ fn do_parse<'a>(
 ) -> bool {
     match (segments, results) {
         // No spec left: what remains must be nothing, or a `**`, which may be taken as nothing.
-        ([], []) => target.map_or(true, keyexpr::is_double_wild),
+        ([], []) => target.is_none_or(keyexpr::is_double_wild),
         ([segment, segments @ ..], [result, results @ ..]) => {
             let prefix = segment.prefix();
             let pattern = segment.pattern();

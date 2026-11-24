@@ -3066,6 +3066,15 @@ fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
     assert_eq!(err, PublishAliasError::UnknownMapping(7));
 }
 
+/// A publish refused because the build has no Push codec keeps that reason through the aliased
+/// surface's projection. Turned red by a projection that folds it into another refusal.
+#[test]
+fn a_publish_refused_for_want_of_the_push_codec_projects_as_itself() {
+    let projected = PublishAliasError::from(PublishError::FeatureDisabled);
+    assert_eq!(projected, PublishAliasError::FeatureDisabled);
+    assert!(projected.to_string().contains("codec-push"), "{projected}");
+}
+
 #[test]
 fn publish_aliased_auto_error_display_names_the_violating_id() {
     // Display impl must surface the id so a logged error line is
@@ -10763,7 +10772,7 @@ fn a_subscriber_retraction_names_its_key_only_when_the_declaring_abi_asks() {
     use wz_session_core::declare_build::{
         build_undeclare_subscriber, build_undeclare_subscriber_on_wire,
     };
-    let names = RetractionKey {
+    let names = RetractionName {
         mapping_id: 8,
         suffix: "/**".to_owned(),
     };
@@ -10819,7 +10828,7 @@ fn a_queryable_retraction_names_its_key_only_when_the_declaring_abi_asks() {
     use wz_session_core::declare_build::{
         build_undeclare_queryable, build_undeclare_queryable_on_wire,
     };
-    let names = RetractionKey {
+    let names = RetractionName {
         mapping_id: 7,
         suffix: "/*/x".to_owned(),
     };
@@ -12513,6 +12522,74 @@ fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
     assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
 }
 
+/// A query for the session alone whose loopback body the codec refuses (a source info that
+/// names no zid) is refused whole before anything is sent: the caller gets the refusal, no
+/// queryable of the session is called and no pending entry is left. CONTROL: the same query with
+/// a source info that names a zid is answered by the queryable.
+#[cfg(all(
+    feature = "declare-queryable",
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-source-info"
+))]
+#[test]
+fn a_loopback_query_whose_body_the_codec_refuses_is_refused_whole() {
+    use crate::sample::SourceInfo;
+
+    let (session, driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _q = session.declare_queryable(
+        "home/temp",
+        QueryableOptions::default(),
+        move |_query, responder| {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"22.5");
+        },
+    );
+    let frames = driver.frame_count();
+    let refused = session.query(
+        "home/temp",
+        QueryOptions::get()
+            .with_allowed_destination(Locality::SessionLocal)
+            .with_source_info(SourceInfo::default()),
+        |_| {},
+        |_| {},
+    );
+    assert!(
+        matches!(refused, Err(QueryAliasError::ExceedsCapacity)),
+        "the codec's refusal is the caller's"
+    );
+    assert_eq!(fired.load(Ordering::SeqCst), 0, "no queryable was called");
+    assert_eq!(
+        session.observer().lock().unwrap().face_ref().replies.len(),
+        0,
+        "a refused query leaves no pending entry",
+    );
+    assert_eq!(driver.frame_count(), frames, "nothing was sent");
+
+    let replies = Arc::new(AtomicUsize::new(0));
+    let r = replies.clone();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_source_info(SourceInfo::new(&[0x5a], 1, 2)),
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        )
+        .expect("CONTROL: a source info that names a zid is carried");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "CONTROL: the queryable ran"
+    );
+    assert_eq!(replies.load(Ordering::SeqCst), 1, "CONTROL: its reply came");
+}
+
 #[cfg(all(
     feature = "codec-declare",
     feature = "declare-keyexpr",
@@ -13592,6 +13669,72 @@ fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
     assert_eq!(watches(), 1, "the refused listener's watch is rolled back");
     assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
     drop(control);
+}
+
+/// A matching listener's watch holds its publisher's key in place: on a key longer than it holds
+/// the listener is refused before anything is registered or emitted, while the poll of the same
+/// publisher, which keeps no key, still answers.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn a_publisher_matching_listener_past_the_watch_key_bound_is_refused() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let long = format!(
+        "home/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let pubr = session.declare_publisher(long, PublishOptions::put());
+    let frames = driver.frame_count();
+    assert_eq!(
+        pubr.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::KeyexprTooLong)
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.remote_subscribers.matching_listener_len()),
+        0,
+        "no watch is registered"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    assert!(
+        !pubr.get_matching_status().matching,
+        "the poll answers over the borrowed key"
+    );
+}
+
+/// The querier's twin of the publisher's refusal above.
+#[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+#[test]
+fn a_querier_matching_listener_past_the_watch_key_bound_is_refused() {
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let long = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let querier = session.declare_querier(long, QueryOptions::default());
+    let frames = driver.frame_count();
+    assert_eq!(
+        querier.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::KeyexprTooLong)
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .read_app(|app_half| app_half.remote_queryables.matching_listener_len()),
+        0,
+        "no watch is registered"
+    );
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+    assert!(
+        !querier.get_matching_status().matching,
+        "the poll answers over the borrowed key"
+    );
 }
 
 /// The querier's twin of the publisher's refusal above.

@@ -3936,6 +3936,16 @@ impl DroppedFrameCensus {
             // OAM needs no generated body codec, so no feature can take it away
             // and no build counts it as `unknown`.
             Ok(crate::inbound::InboundFrame::Oam { .. }) => &mut self.oam,
+            // An observer's read keeps a JOIN and an OAM whole; a participant's read that is
+            // counted here is still one of the two.
+            #[cfg(feature = "alloc")]
+            Ok(crate::inbound::InboundFrame::Refused { mid })
+                if *mid == wz_codecs::wire_const::T_MID_JOIN =>
+            {
+                &mut self.join
+            }
+            #[cfg(feature = "alloc")]
+            Ok(crate::inbound::InboundFrame::Refused { .. }) => &mut self.oam,
             Ok(crate::inbound::InboundFrame::Unknown { .. }) => &mut self.unknown,
             Err(_) => &mut self.undecodable,
         }

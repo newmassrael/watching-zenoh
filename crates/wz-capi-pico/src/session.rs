@@ -556,16 +556,13 @@ fn memory_basis(
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
 /// session's drop glue stays in that engine's crate, and hands out its engine beside it
-/// (`SessionState::into_drive`); the cooperative
-/// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it,
-/// and it is the engine's own type: the one engine of the build, or with `app-transport` either of
-/// the two the build opens ([`PicoDrive`]).
+/// (`SessionState::into_drive`); the cooperative engine hands its own `Arc`, which the handle
+/// keeps by value, so its open makes no box for it, and it is the engine's own type over the
+/// links of the build ([`PicoLinks`]).
 #[cfg(feature = "engine-tokio")]
 pub(crate) type HeldDrive = wz_capi_core::CoreDrive;
-#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
-pub(crate) type HeldDrive = wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>;
-#[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
-pub(crate) type HeldDrive = PicoDrive;
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type HeldDrive = wz_capi_coop::CoopDrive<PicoLinks, SessionClockOf>;
 
 /// The clock a cooperative session runs on: the program's time base where the build takes one,
 /// which may also be the host's (`crate::time_base::SessionClock`), else the host's.
@@ -591,121 +588,14 @@ pub(crate) type HostLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithG
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
 pub(crate) type HostLinks = SecuredLinks;
 
-/// The session of a build that opens over the host's sockets or the program's transport: one of
-/// two engines, a closed set, each held as its own type and reached by a match, not through a
-/// table of functions.
+/// The links a cooperative session opens over: the host's, or with `app-transport` whichever of
+/// the host's and the program's transport the config chose. One type either way, so the engine
+/// over them is built once and reached as its own type, with no table of its functions.
 #[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
-pub(crate) enum PicoDrive {
-    /// Over the host's sockets.
-    Host(wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>),
-    /// Over the program's transport.
-    App(wz_capi_coop::CoopDrive<wz_capi_coop::app_link::AppLinks, SessionClockOf>),
-}
-
-#[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
-impl PicoDrive {
-    /// The engine the session's entities keep.
-    pub(crate) fn engine(&self) -> alloc::sync::Arc<Engine> {
-        match self {
-            Self::Host(drive) => drive.engine(),
-            Self::App(drive) => drive.engine(),
-        }
-    }
-
-    /// The engine, borrowed for the length of one call.
-    pub(crate) fn engine_ref(&self) -> &Engine {
-        match self {
-            Self::Host(drive) => drive.engine_ref(),
-            Self::App(drive) => drive.engine_ref(),
-        }
-    }
-
-    /// The place the session's arena lent the handle.
-    pub(crate) fn handle_place(&self) -> Option<wz_capi_coop::arena::HandlePlace> {
-        match self {
-            Self::Host(drive) => drive.handle_place(),
-            Self::App(drive) => drive.handle_place(),
-        }
-    }
-
-    /// The session's own zid, zero-padded to 16 bytes.
-    pub(crate) fn zid(&self) -> [u8; 16] {
-        match self {
-            Self::Host(drive) => drive.zid(),
-            Self::App(drive) => drive.zid(),
-        }
-    }
-
-    /// Close the session.
-    pub(crate) fn close(&self) {
-        match self {
-            Self::Host(drive) => drive.close(),
-            Self::App(drive) => drive.close(),
-        }
-    }
-
-    /// Whether the session is closed.
-    pub(crate) fn is_closed(&self) -> bool {
-        match self {
-            Self::Host(drive) => drive.is_closed(),
-            Self::App(drive) => drive.is_closed(),
-        }
-    }
-
-    /// Start the read task.
-    #[cfg(feature = "multi-thread")]
-    pub(crate) fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
-        match self {
-            Self::Host(drive) => drive.start_read_task(),
-            Self::App(drive) => drive.start_read_task(),
-        }
-    }
-
-    /// Stop the read task.
-    #[cfg(feature = "multi-thread")]
-    pub(crate) fn stop_read_task(&self) -> Result<(), wz_capi_port::CalledFromReadTask> {
-        match self {
-            Self::Host(drive) => drive.stop_read_task(),
-            Self::App(drive) => drive.stop_read_task(),
-        }
-    }
-
-    /// Whether the read task runs.
-    #[cfg(feature = "multi-thread")]
-    pub(crate) fn read_task_is_running(&self) -> bool {
-        match self {
-            Self::Host(drive) => drive.read_task_is_running(),
-            Self::App(drive) => drive.read_task_is_running(),
-        }
-    }
-
-    /// Read what the session's links hold.
-    #[cfg(not(feature = "multi-thread"))]
-    pub(crate) fn read(&self, single: bool) -> Result<(), wz_capi_port::SessionClosed> {
-        match self {
-            Self::Host(drive) => drive.read(single),
-            Self::App(drive) => drive.read(single),
-        }
-    }
-
-    /// Send a keep-alive on each link.
-    #[cfg(not(feature = "multi-thread"))]
-    pub(crate) fn send_keep_alive(&self) -> Result<(), wz_capi_port::SessionClosed> {
-        match self {
-            Self::Host(drive) => drive.send_keep_alive(),
-            Self::App(drive) => drive.send_keep_alive(),
-        }
-    }
-
-    /// Run one turn of the session's work.
-    #[cfg(not(feature = "multi-thread"))]
-    pub(crate) fn spin_once(&self) -> bool {
-        match self {
-            Self::Host(drive) => drive.spin_once(),
-            Self::App(drive) => drive.spin_once(),
-        }
-    }
-}
+pub(crate) type PicoLinks =
+    wz_capi_coop::either_links::EitherLinks<HostLinks, wz_capi_coop::app_link::AppLinks>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
+pub(crate) type PicoLinks = HostLinks;
 
 /// What a C session handle points at: the engine's session, behind the port, and what this ABI
 /// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
@@ -714,10 +604,6 @@ pub(crate) struct PicoSessionHandle {
     pub(crate) drive: HeldDrive,
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
-    /// The release latches of the closures the program declared with no handle to undeclare them
-    /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
-    /// undeclare waits on its own.
-    background: crate::ffi::LatchList,
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
@@ -728,7 +614,6 @@ impl PicoSessionHandle {
         Self {
             drive,
             ext,
-            background: crate::ffi::LatchList::default(),
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -745,16 +630,6 @@ impl PicoSessionHandle {
     /// `_Z_ERR_SESSION_CLOSED`, and the closure the call consumed runs its `drop(context)`.
     pub(crate) fn is_closed(&self) -> bool {
         self.drive.is_closed()
-    }
-
-    /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
-    pub(crate) fn keep_background(&self, latch: alloc::sync::Arc<crate::ffi::ReleaseLatch>) {
-        self.background.keep(latch);
-    }
-
-    /// Block until every such closure has run its `drop(context)`.
-    fn wait_background(&self) {
-        self.background.wait_all();
     }
 }
 
@@ -803,9 +678,108 @@ pub(crate) unsafe fn open_session_handle<'a>(
     Ok(handle)
 }
 
-/// The place a cooperative session's handle lies in, a span of the session's arena.
+/// The place a session's handle lies in, and what stays in it once the handle is let go of: a span
+/// of the session's arena on the cooperative engine, the session's object slot on the tokio engine.
+pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle, SessionTail>;
+
+/// What stays in the place of a session's handle after the handle is let go of, until the last
+/// closure the session answers for (each get it issued) is let go of too: the count of those
+/// closures, which its close waits on and which a closure let go of after the handle (a close or a
+/// drop made from inside its own callback) still tells, and on the cooperative engine a hold on the
+/// session's engine, whose arena the place lies in. Whichever of the handle and those closures goes
+/// last gives the place back (`give_back_session_place`), so no closure takes memory of its own.
+pub(crate) struct SessionTail {
+    open: crate::ffi::OpenClosures,
+    #[cfg(not(feature = "engine-tokio"))]
+    arena: core::mem::ManuallyDrop<alloc::sync::Arc<Engine>>,
+}
+
+impl SessionTail {
+    /// What stays beside `handle` in its place: no closure counted yet.
+    fn of(handle: &PicoSessionHandle) -> Self {
+        #[cfg(feature = "engine-tokio")]
+        let _ = handle;
+        Self {
+            open: crate::ffi::OpenClosures::default(),
+            #[cfg(not(feature = "engine-tokio"))]
+            arena: core::mem::ManuallyDrop::new(engine_of(handle)),
+        }
+    }
+}
+
+/// What stays beside the handle of the session `zs` names.
+///
+/// # Safety
+/// `zs` names a session [`open_session_handle`] read, whose place still stands.
+unsafe fn session_tail<'a>(zs: *const z_loaned_session_t) -> &'a SessionTail {
+    // SAFETY: the caller's: `_val` is the place `z_open` filled, and it stands.
+    unsafe { (*((*zs)._val as *const SessionPlace)).beside() }
+}
+
+/// The count of the session `zs` names, to count what its close waits for in: a closure, or a
+/// background entity's place, either of which keeps the place of the session's handle standing
+/// until it is let go of.
+///
+/// # Safety
+/// `zs` names a session [`open_session_handle`] read, whose handle is not let go of before what is
+/// counted is.
+pub(crate) unsafe fn session_count(zs: *const z_loaned_session_t) -> crate::ffi::CountIn {
+    // SAFETY: the caller's: the session's place stands, as its handle is held.
+    let tail = unsafe { session_tail(zs) };
+    // SAFETY: the count lies in the place `_val` names, which goes back only through
+    // `give_back_session_place`, called by whichever of the handle's release and the last
+    // hold counted goes last.
+    unsafe {
+        crate::ffi::CountIn::new(
+            &tail.open,
+            core::ptr::NonNull::new_unchecked((*zs)._val),
+            give_back_session_place,
+        )
+    }
+}
+
+/// Count `closure` in the session `zs` names: its close waits for the closure's `drop(context)`,
+/// and the place of the session's handle stands until it has run.
+///
+/// # Safety
+/// As [`session_count`].
+#[cfg(feature = "query")]
+pub(crate) unsafe fn count_in_session<C>(
+    zs: *const z_loaned_session_t,
+    closure: &mut crate::ffi::CClosure<C>,
+) {
+    // SAFETY: the caller's.
+    closure.count_in(unsafe { session_count(zs) });
+}
+
+/// Give back the place of a session's handle once neither the handle nor a closure counted in the
+/// session is left: let go of what stays beside the handle, and with it the hold on the engine,
+/// which may be the session's last and give back the arena the place lies in.
+///
+/// # Safety
+/// `place` is a [`SessionPlace`] whose handle was taken out and in which no closure is counted;
+/// called once.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle>;
+unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
+    let place = place.cast::<SessionPlace>();
+    // SAFETY: the caller's: nothing reads what lies beside the handle again, and it is read out
+    // once, here, while the hold it carries keeps the place standing.
+    let SessionTail { open, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
+    drop(open);
+    drop(core::mem::ManuallyDrop::into_inner(arena));
+}
+
+/// Give back the session's object slot once neither the handle nor a closure counted in the
+/// session is left, dropping what stays beside the handle.
+///
+/// # Safety
+/// As the cooperative engine's twin; the place is the slot `z_open` filled.
+#[cfg(feature = "engine-tokio")]
+unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
+    // SAFETY: the caller's: the slot holds a `SessionPlace` whose handle is taken out, and it is
+    // let go of once.
+    unsafe { crate::object_slot::release(place.cast::<SessionPlace>().as_ptr()) };
+}
 
 #[cfg(not(feature = "engine-tokio"))]
 const _: () = assert!(
@@ -813,43 +787,34 @@ const _: () = assert!(
     "the handle's place starts where a span of the arena does"
 );
 
-/// The handle at `val`, a place [`z_open`] filled.
+/// The handle at `val`, while its place still holds it: a copy of the owned session kept past
+/// `z_session_drop`, while the place stands, finds it vacant.
 ///
 /// # Safety
 /// `val` is the `_val` of an owned session [`z_open`] made, whose memory still stands.
-#[cfg(feature = "engine-tokio")]
-unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
-    Some(&*(val as *const PicoSessionHandle))
-}
-
-/// The handle at `val`, while its place still holds it: a copy of the owned session kept past
-/// `z_session_drop` finds the place vacant.
-///
-/// # Safety
-/// As the tokio engine's twin.
-#[cfg(not(feature = "engine-tokio"))]
 unsafe fn held_at<'a>(val: *mut c_void) -> Option<&'a PicoSessionHandle> {
     (*(val as *const SessionPlace)).held()
 }
 
-/// Let go of the handle at `val`, which closes its session.
-///
-/// # Safety
-/// `val` is the `_val` of an owned session [`z_open`] made, given up by its owner.
-#[cfg(feature = "engine-tokio")]
-unsafe fn release_handle(val: *mut c_void) {
-    crate::object_slot::release(val as *mut PicoSessionHandle);
-}
-
 /// Let go of the handle at `val`, which closes its session. The handle is moved out of its place
-/// before it is dropped: its drive may hold the session's last hold, whose drop gives back the
-/// arena the place lies in. A place already vacant (a copy dropped twice) lets go of nothing.
+/// before it is dropped, and the place goes back with the last of the handle and the closures
+/// counted in the session ([`SessionTail`]). A place already vacant (a copy dropped twice while
+/// the place stands) lets go of nothing.
 ///
 /// # Safety
-/// As the tokio engine's twin, and the session's memory still stands.
-#[cfg(not(feature = "engine-tokio"))]
+/// `val` is the `_val` of an owned session [`z_open`] made, given up by its owner, and the
+/// session's memory still stands.
 unsafe fn release_handle(val: *mut c_void) {
-    drop(SessionPlace::take(val as *mut SessionPlace));
+    let place = val as *mut SessionPlace;
+    let Some(handle) = SessionPlace::take(place) else {
+        return;
+    };
+    drop(handle);
+    // The place stands until it is given back, which only this retire or the last closure counted
+    // in the session does.
+    if (*place).beside().open.retire() {
+        give_back_session_place(core::ptr::NonNull::new_unchecked(val));
+    }
 }
 
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
@@ -876,12 +841,12 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// name no engine (`docs/capi-pico-on-coop-engine.md`, decision D1).
 ///
 /// [`SessionEngine`]: wz_capi_port::SessionEngine
-#[cfg(any(feature = "engine-tokio", feature = "app-transport"))]
+#[cfg(feature = "engine-tokio")]
 pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
-/// A build of one engine reaches it as its own type, every call to it resolved when the build is
+/// The cooperative engine is reached as its own type, every call to it resolved when the build is
 /// made: no table of its functions is made, so the operations the build never calls are not linked.
-#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
-pub(crate) type Engine = wz_capi_coop::CoopEngine<HostLinks, SessionClockOf>;
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 
 /// The engine behind a session handle, to keep: what an entity declared on the session holds for
 /// its own life. The engine hands itself out, so this crate never turns an engine's own type into
@@ -894,15 +859,6 @@ pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> 
 /// engine without touching its reference count.
 pub(crate) fn engine_ref(handle: &PicoSessionHandle) -> &Engine {
     handle.drive.engine_ref()
-}
-
-/// The engine as the port's trait object, for what serves any engine (the advanced plane's host
-/// and its periodic jobs, an open set): a clone of the entity's hold.
-#[cfg(feature = "advanced")]
-pub(crate) fn port_engine(
-    engine: &alloc::sync::Arc<Engine>,
-) -> alloc::sync::Arc<dyn wz_capi_port::SessionEngine> {
-    engine.clone()
 }
 
 // --- z_open / z_close ------------------------------------------------------
@@ -1212,24 +1168,27 @@ fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = [0u8; 16];
-    let mut at = 0;
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        // The dashes come before the 5th, 7th, 9th and 11th byte (`i == 8, 12, 16, 18` over the
-        // hex digits in pico's loop).
-        if matches!(i, 4 | 6 | 8 | 10) {
-            if digits[at] != b'-' {
+    let mut out = bytes.iter_mut();
+    // The high digit of the byte being read, held until its low digit comes. Walked byte by byte
+    // at fixed places: a `str` pattern search would pull its searcher into a no_std build.
+    let mut high = None;
+    for (at, digit) in digits.iter().enumerate() {
+        // The dashes part the digits into groups of 8, 4, 4, 4 and 12.
+        if matches!(at, 8 | 13 | 18 | 23) {
+            if *digit != b'-' {
                 return None;
             }
-            at += 1;
+            continue;
         }
-        let hi = (digits[at] as char).to_digit(16)?;
-        let lo = (digits[at + 1] as char).to_digit(16)?;
-        *byte = ((hi << 4) | lo) as u8;
-        at += 2;
+        let nibble = char::from(*digit).to_digit(16)?;
+        match high.take() {
+            None => high = Some(nibble),
+            Some(hi) => *out.next()? = ((hi << 4) | nibble) as u8,
+        }
     }
     // Written up to the last non-zero byte, as zenoh writes an id.
-    let length = bytes.iter().rposition(|byte| *byte != 0)? + 1;
-    Some(bytes[..length].to_vec())
+    let last = bytes.iter().rposition(|byte| *byte != 0)?;
+    bytes.get(..=last).map(<[u8]>::to_vec)
 }
 
 #[cfg(test)]
@@ -1272,6 +1231,9 @@ mod zid_tests {
             "ff00000-00000-0000-0000-000000000001",
             "gf000000-0000-0000-0000-000000000001",
             "00000000-0000-0000-0000-000000000000",
+            "ff000000-0000-0000-0000-000000000001-",
+            "ff000000-0000-0000-0000-0000000000\u{e9}",
+            "+f000000-0000-0000-0000-000000000001",
         ] {
             assert!(
                 pico_uuid_wire(text).is_none(),
@@ -1398,7 +1360,7 @@ mod open_config_tests {
 struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
     #[cfg(feature = "engine-tokio")]
-    slot: crate::object_slot::Slot<PicoSessionHandle>,
+    slot: crate::object_slot::Slot<SessionPlace>,
     /// The locators dialled and the one listened on, as the tokio engine holds them.
     #[cfg(feature = "engine-tokio")]
     connect: Vec<String>,
@@ -1677,15 +1639,16 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             if let Some(refused) = ext.face_watch_refused() {
                 drop(ext);
                 drive.close();
-                return crate::result::refusal_code(refused, crate::result::Door::Session);
+                return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
             }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
             #[cfg(feature = "session-memory")]
             let handle = handle.with_memory(memory);
+            let beside = SessionTail::of(&handle);
             *zs = z_owned_session_t {
-                _val: slot.fill(handle) as *mut c_void,
+                _val: slot.fill(SessionPlace::holding(handle, beside)) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
             };
             #[cfg(feature = "admin-space")]
@@ -1928,7 +1891,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let unicast_dials = if joins_a_group {
         0
     } else {
-        usize::from(stated.is_some()) + request.scouted.len()
+        request
+            .scouted
+            .len()
+            .saturating_add(usize::from(stated.is_some()))
     };
     let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
@@ -2054,44 +2020,21 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
     #[cfg(feature = "app-transport")]
-    let opened = match request.app_transport {
-        Some(transport) => wz_capi_coop::CoopEngine::open_made_in(
-            app_links_on(
-                wz_capi_coop::app_link::AppLinks::new(
-                    wz_session_core::app_transport::SessionTransport::new(transport, &limits),
-                )
-                .with_rx_capacity(limits.pico_unicast_batch_bytes())
-                .waited_by_owner(),
-                &clock,
-            ),
-            clock,
-            crate::coop_host::entropy(),
-            source,
-            policy,
-            request.key_ids,
-            wz_capi_coop::arena::OpenStorage {
-                memory: &wz_capi_coop::arena::AllocatorMemory,
-                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
-            },
-        )
-        .map(|engine| PicoDrive::App(engine.into_drive())),
-        None => wz_capi_coop::CoopEngine::open_made_in(
-            links.waited_by_owner(),
-            clock,
-            crate::coop_host::entropy(),
-            source,
-            policy,
-            request.key_ids,
-            wz_capi_coop::arena::OpenStorage {
-                memory: &wz_capi_coop::arena::AllocatorMemory,
-                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
-            },
-        )
-        .map(|engine| PicoDrive::Host(engine.into_drive())),
+    let links = match request.app_transport {
+        Some(transport) => PicoLinks::Right(app_links_on(
+            wz_capi_coop::app_link::AppLinks::new(
+                wz_session_core::app_transport::SessionTransport::new(transport, &limits),
+            )
+            .with_rx_capacity(limits.pico_unicast_batch_bytes())
+            .waited_by_owner(),
+            &clock,
+        )),
+        None => PicoLinks::Left(links.waited_by_owner()),
     };
     #[cfg(not(feature = "app-transport"))]
+    let links = links.waited_by_owner();
     let opened = wz_capi_coop::CoopEngine::open_made_in(
-        links.waited_by_owner(),
+        links,
         clock,
         crate::coop_host::entropy(),
         source,
@@ -2136,7 +2079,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     if let Some(refused) = ext.face_watch_refused() {
         drop(ext);
         drive.close();
-        return crate::result::refusal_code(refused, crate::result::Door::Session);
+        return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
     }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2144,10 +2087,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
     debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
+    let beside = SessionTail::of(&handle);
     *zs = z_owned_session_t {
         // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
-        // to this handle alone, and it stands while the engine the handle holds does.
-        _val: SessionPlace::fill(place.as_ptr(), handle) as *mut c_void,
+        // to this handle alone, and it stands while the engine the tail beside it holds does.
+        _val: SessionPlace::fill(place.as_ptr(), handle, beside) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     // The multi-threaded arm's read task starts with the open unless the options say not to. A
@@ -2283,7 +2227,7 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         handle.ext.close_listeners();
         // The close let go of every closure the session held; a callback still running on a
         // dispatch thread finishes before this returns, and then the drops have run.
-        handle.wait_background();
+        session_tail(zs).open.wait_none();
         Z_OK
     })
 }
@@ -2619,7 +2563,7 @@ pub unsafe extern "C" fn zp_send_join(
         if live == Z_OK {
             if let Some(handle) = session_handle(zs) {
                 if let Err(refused) = engine_ref(handle).send_join_on_groups() {
-                    return crate::result::refusal_code(refused, crate::result::Door::Session);
+                    return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
                 }
             }
         }
@@ -2893,7 +2837,7 @@ pub unsafe extern "C" fn z_subscriber_id(
             crate::pubsub::z_loaned_subscriber_t,
             crate::pubsub::SubscriberState,
         >(subscriber)
-        .map(|s| (s.shared.zid(), s.id)),
+        .and_then(|s| Some((s.shared.zid(), s.id()?))),
     )
 }
 
@@ -3780,6 +3724,47 @@ mod session_place_tests {
         }
     }
 
+    /// A closure counted in a session outlives the session's drop: the place of its handle, and the
+    /// engine whose arena it lies in, stand until the closure is let go of, whose drop then gives
+    /// them back. Turned red by a count kept in the handle, which goes with the drop.
+    #[cfg(feature = "query")]
+    #[test]
+    fn a_closure_counted_in_a_session_keeps_its_place_past_the_drop() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn counted_drop(context: *mut c_void) {
+            // SAFETY: the test hands the address of its own counter, which outlives the closure.
+            unsafe { (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst) };
+        }
+
+        let dropped = AtomicUsize::new(0);
+        // SAFETY: every pointer is to a live owned value of this frame.
+        unsafe {
+            let mut session = listening_on_loopback();
+            let engine = alloc::sync::Arc::downgrade(&engine_of(
+                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
+            ));
+            let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
+                core::ptr::from_ref(&dropped).cast_mut().cast(),
+                None,
+                Some(counted_drop),
+            );
+            count_in_session(z_session_loan(&session), &mut closure);
+            z_session_drop(z_session_move(&mut session));
+            assert!(
+                engine.upgrade().is_some(),
+                "the closure keeps the session's place"
+            );
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(closure);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert!(
+                engine.upgrade().is_none(),
+                "the last closure gave the place back"
+            );
+        }
+    }
+
     /// The doors that declare or ask on a session read it through one body: an open session is
     /// read, and once closed it is refused with pico's code for a closed session.
     #[test]
@@ -3824,20 +3809,20 @@ mod open_session_handle_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "engine-tokio"), not(feature = "app-transport")))]
+#[cfg(all(test, not(feature = "engine-tokio")))]
 mod static_dispatch_tests {
     use core::any::TypeId;
 
-    use super::{Engine, HeldDrive, HostLinks, SessionClockOf};
+    use super::{Engine, HeldDrive, PicoLinks, SessionClockOf};
 
-    /// A build of one engine reaches it as its own type: the engine an entity keeps and the drive
-    /// the handle holds are the cooperative engine over the links the open composes, not the
-    /// port's trait objects, so no table of the engine's functions is made.
+    /// The cooperative engine is reached as its own type: the engine an entity keeps and the drive
+    /// the handle holds are the engine over the links the open composes, not the port's trait
+    /// objects, so no table of the engine's functions is made.
     #[test]
     fn a_build_of_one_engine_reaches_it_as_its_own_type() {
         assert_eq!(
             TypeId::of::<Engine>(),
-            TypeId::of::<wz_capi_coop::CoopEngine<HostLinks, SessionClockOf>>()
+            TypeId::of::<wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>>()
         );
         assert_ne!(
             TypeId::of::<Engine>(),
@@ -3845,7 +3830,23 @@ mod static_dispatch_tests {
         );
         assert_eq!(
             TypeId::of::<HeldDrive>(),
-            TypeId::of::<wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>>()
+            TypeId::of::<wz_capi_coop::CoopDrive<PicoLinks, SessionClockOf>>()
+        );
+    }
+
+    /// A build that opens over the host's sockets or the program's transport opens both over one
+    /// type of links, so its engine is built once and not once for each.
+    #[cfg(feature = "app-transport")]
+    #[test]
+    fn both_transports_open_one_engine() {
+        assert_eq!(
+            TypeId::of::<PicoLinks>(),
+            TypeId::of::<
+                wz_capi_coop::either_links::EitherLinks<
+                    super::HostLinks,
+                    wz_capi_coop::app_link::AppLinks,
+                >,
+            >()
         );
     }
 }

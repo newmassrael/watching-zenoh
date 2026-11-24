@@ -60,3 +60,6 @@ pub mod advanced_publisher;
 #[cfg(feature = "advanced-subscriber")]
 pub mod advanced_subscriber;
 pub mod time_range;
+
+#[cfg(all(test, feature = "advanced-recovery"))]
+mod test_alloc;

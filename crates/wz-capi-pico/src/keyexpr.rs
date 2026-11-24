@@ -15,7 +15,7 @@ use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, WireKey};
+use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, SessionKeys, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::keyexpr_canon::KeyexprCanonError;
 use wz_session_core::WhatAmI;
@@ -101,6 +101,27 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// ([`keyexpr_str`]), which refuses a null or non-UTF-8 key, so the text is not
 /// read again here: only the declaration is.
 ///
+/// The key holds the declaration it names, for a declaration that records it; whoever takes it
+/// out of the record gives the hold back ([`WireKey::into_holds`]). A message sent once names
+/// its key by [`wire_key_of`], which holds nothing.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+#[must_use = "the key holds a declaration, given back by whoever lets the key go"]
+pub(crate) unsafe fn wire_key_holding_declaration_of(
+    ke: *const z_loaned_keyexpr_t,
+    shared: &Engine,
+) -> WireKey {
+    match declared_of(ke) {
+        Some(declared) => declared.wire_holding_declaration(shared),
+        None => WireKey::literal(),
+    }
+}
+
+/// How `ke` goes on `shared`'s wire, holding nothing: for a message sent once, which records
+/// nothing. The rest of the key is named by its length, read against the key's text that goes
+/// with it ([`WireKey::names_in`]).
+///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
@@ -117,15 +138,78 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
 /// `void _z_keyexpr_wire_declaration_clear(`).
 ///
 /// Each holder keeps one hold of the engine's own count of the declaration's holders
-/// ([`KeyHold`]): a copy takes one more and a drop lets its own go, so the count has one owner and
-/// a holder keeps nothing on the heap. The session is held WEAKLY, as pico holds
+/// ([`KeyHold`]): a copy takes one more and a drop gives its own back, so the count has one owner
+/// and a holder keeps nothing on the heap. The session is held WEAKLY, as pico holds
 /// `_z_session_weak_t`: a key that outlives its session does not keep it alive, and a hold on a
-/// session that is gone lets go of nothing.
-#[derive(Clone)]
+/// session that is gone gives nothing back. This object of the program's is what names the
+/// session; a key handed to the session's own tables holds the bare id (`Self::share_on`).
 pub(crate) struct WireDeclaration {
-    hold: KeyHold,
+    /// The session the declaration was made on.
+    session: Weak<Engine>,
+    /// Taken only by the drop.
+    hold: ManuallyDrop<KeyHold>,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
+}
+
+impl WireDeclaration {
+    /// The hold on `mapping_id` the caller took of `shared`, covering `prefix_len` bytes of the
+    /// key.
+    fn taken(
+        shared: &Arc<Engine>,
+        mapping_id: wz_session_core::wire_id::ExprId,
+        prefix_len: usize,
+    ) -> Self {
+        Self {
+            session: Arc::downgrade(shared),
+            hold: ManuallyDrop::new(KeyHold::taken(mapping_id)),
+            prefix_len,
+        }
+    }
+
+    /// The declaration's id.
+    fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
+        self.hold.mapping_id()
+    }
+
+    /// Whether the declaration was made on `shared`, by ADDRESS: on the tokio engine both are
+    /// fat pointers to one engine, and their vtable halves are not guaranteed to be one copy, so
+    /// comparing them whole could say a session is not itself.
+    fn is_on(&self, shared: &Engine) -> bool {
+        core::ptr::addr_eq(self.session.as_ptr(), shared as *const Engine)
+    }
+
+    /// One more hold of the declaration, taken of `shared`, the session it was made on
+    /// (`Self::is_on`), for what that session records.
+    fn share_on(&self, shared: &Engine) -> KeyHold {
+        self.hold.share(shared)
+    }
+}
+
+impl Clone for WireDeclaration {
+    fn clone(&self) -> Self {
+        let hold = match self.session.upgrade() {
+            Some(engine) => self.hold.share(Arc::as_ref(&engine)),
+            // A session that is gone counts nothing: the copy gives nothing back either.
+            None => KeyHold::taken(self.mapping_id()),
+        };
+        Self {
+            session: self.session.clone(),
+            hold: ManuallyDrop::new(hold),
+            prefix_len: self.prefix_len,
+        }
+    }
+}
+
+impl Drop for WireDeclaration {
+    fn drop(&mut self) {
+        // SAFETY: the hold is taken here, once, and the field is not read again.
+        let hold = unsafe { ManuallyDrop::take(&mut self.hold) };
+        match self.session.upgrade() {
+            Some(engine) => hold.release(Arc::as_ref(&engine)),
+            None => hold.outlived_its_session(),
+        }
+    }
 }
 
 /// A key's text as an object of this ABI keeps it: a block of its session's key arena when the
@@ -160,7 +244,8 @@ impl KeyText {
     /// which keeps nothing more.
     #[inline(never)]
     pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
-        let refused = match shared.key_arena().map(|keys| keys.key(KeyAsk::Hold(text))) {
+        let refused = match key_arena(shared).map(|keys| SessionKeys::key(keys, KeyAsk::Hold(text)))
+        {
             Some(Ok(Some(key))) => {
                 return Ok(Self {
                     key: ManuallyDrop::new(key),
@@ -181,15 +266,23 @@ impl KeyText {
         self.key.as_str()
     }
 
+    /// `text` kept where this key's text is: in the same session's key arena when this is a block
+    /// of one, refused as [`Self::of_session`] refuses; a copy of its own otherwise.
+    pub(crate) fn beside(&self, text: &str) -> Result<Self, ZResult> {
+        match &self.engine {
+            Some(engine) => Self::of_session(engine, text),
+            None => Ok(Self::owned(text)),
+        }
+    }
+
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
     /// copy for one of its own.
     #[inline(never)]
     pub(crate) fn share(&self) -> Self {
         if let Some(engine) = &self.engine {
             // An engine that keeps no key arena made no key of one; a copy reads the same.
-            if let Some(Ok(Some(key))) = engine
-                .key_arena()
-                .map(|keys| keys.key(KeyAsk::Share(&self.key)))
+            if let Some(Ok(Some(key))) =
+                key_arena(engine).map(|keys| SessionKeys::key(keys, KeyAsk::Share(&self.key)))
             {
                 return Self {
                     key: ManuallyDrop::new(key),
@@ -214,14 +307,30 @@ impl Drop for KeyText {
         let key = unsafe { ManuallyDrop::take(&mut self.key) };
         match self.engine.take() {
             Some(engine) => {
-                if let Some(keys) = engine.key_arena() {
-                    let _ = keys.key(KeyAsk::Release(key));
+                if let Some(keys) = key_arena(&engine) {
+                    let _ = SessionKeys::key(keys, KeyAsk::Release(key));
                 }
             }
             // SAFETY: with no engine the key is a copy of its own (`Self::owned`), freed here once.
             None => unsafe { key.free_own() },
         }
     }
+}
+
+/// The key arena of `engine`'s session: the cooperative engine always keeps one and is reached as
+/// its own type, so a key's hold, share and release are calls resolved when the build is made.
+///
+/// Both arms take the `Arc` a holder keeps: on the tokio engine `Engine` is a trait object, and an
+/// `&Arc<Engine>` handed where an `&Engine` is asked would be unsized, not dereferenced.
+#[cfg(not(feature = "engine-tokio"))]
+fn key_arena(engine: &Arc<Engine>) -> Option<&Engine> {
+    Some(Arc::as_ref(engine))
+}
+
+/// The key arena of the session behind the port, when its engine keeps one.
+#[cfg(feature = "engine-tokio")]
+fn key_arena(engine: &Arc<Engine>) -> Option<&dyn SessionKeys> {
+    engine.key_arena()
 }
 
 /// The code a key the session kept no room for is refused with, as zenoh-pico refuses what its heap
@@ -263,16 +372,30 @@ impl DeclaredKeyexpr {
         }
     }
 
+    /// A key with no declaration, its text kept for an object of `shared`'s session
+    /// ([`KeyText::of_session`]): a block of the session's key arena when it keeps one, so a share
+    /// of it is one more holder of the block and not a copy. Refused as that is.
+    #[cfg(any(
+        feature = "advanced",
+        all(test, not(feature = "engine-tokio"), feature = "peer")
+    ))]
+    pub(crate) fn literal_of_session(shared: &Arc<Engine>, literal: &str) -> Result<Self, ZResult> {
+        Ok(Self {
+            literal: KeyText::of_session(shared, literal)?,
+            declaration: None,
+        })
+    }
+
     /// The literal key.
     pub(crate) fn literal(&self) -> &str {
         self.literal.as_str()
     }
 
-    /// Another holder of the declaration that covers a prefix of the key, if any, without the
-    /// key's text: what keeps the declaration on the session for something that names the key by
-    /// it.
-    pub(crate) fn declaration_hold(&self) -> Option<KeyHold> {
-        self.declaration.as_ref().map(|d| d.hold.clone())
+    /// Another hold of the declaration that covers a prefix of the key, when it is `shared`'s,
+    /// without the key's text: what keeps the declaration on the session for something the
+    /// session records that names the key by it, given back by whoever takes it out of the record.
+    pub(crate) fn declaration_hold(&self, shared: &Engine) -> Option<KeyHold> {
+        self.declared_on(shared).map(|d| d.share_on(shared))
     }
 
     /// Another holder of the literal key's text, without the declaration.
@@ -310,48 +433,70 @@ impl DeclaredKeyexpr {
     /// the joined text, which can in principle rewrite the seam, and a
     /// declaration naming bytes the key no longer starts with would put the
     /// wrong key on the wire.
-    pub(crate) fn extended(&self, literal: &str) -> Self {
+    ///
+    /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
+    /// refuses it.
+    pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
         let declaration = self.declaration.clone().filter(|d| {
             literal.get(..d.prefix_len).is_some()
                 && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
         });
-        Self {
-            literal: KeyText::owned(literal),
+        Ok(Self {
+            literal: self.literal.beside(literal)?,
             declaration,
-        }
+        })
     }
 
     fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
-        self.declaration
-            .as_ref()
-            // By ADDRESS: both are fat pointers to one engine, and their vtable halves are
-            // not guaranteed to be one copy, so comparing them whole could say a session is
-            // not itself.
-            .filter(|d| d.hold.is_on((shared as *const Engine).cast::<()>()))
+        self.declaration.as_ref().filter(|d| d.is_on(shared))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
     /// remainder of the key when the declaration is `shared`'s, the literal
     /// otherwise.
     ///
-    /// An aliased key KEEPS its declaration: whatever records it — a registry
-    /// entry replayed onto later faces — holds the id declared for as long as
-    /// it names it.
+    /// It holds nothing: for a message sent once, or a record that keeps this key itself. The
+    /// remainder is named by its length, read against this key's literal, which every engine
+    /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
+        match self.declared_rest(shared) {
+            Some((d, rest)) => WireKey::aliased_tail(d.mapping_id(), rest.len()),
+            None => WireKey::literal(),
+        }
+    }
+
+    /// [`Self::wire`], KEEPING the declaration: whatever records it — a registry entry replayed
+    /// onto later faces — holds the id declared for as long as it names it, and gives the hold
+    /// back when it lets the key go ([`WireKey::into_holds`]).
+    #[must_use = "the key holds a declaration, given back by whoever lets the key go"]
+    pub(crate) fn wire_holding_declaration(&self, shared: &Engine) -> WireKey {
+        match self.declared_rest(shared) {
+            Some((d, rest)) => {
+                WireKey::aliased_tail(d.mapping_id(), rest.len()).holding(d.share_on(shared))
+            }
+            None => WireKey::literal(),
+        }
+    }
+
+    /// The declaration's id and the remainder of the key, borrowed from this key, when the
+    /// declaration is `shared`'s: what [`Self::wire`] names, for a holder that keeps this key
+    /// and lends the remainder from it.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn aliased_parts(
+        &self,
+        shared: &Engine,
+    ) -> Option<(wz_session_core::wire_id::ExprId, &str)> {
+        self.declared_rest(shared)
+            .map(|(d, rest)| (d.mapping_id(), rest))
+    }
+
+    /// The declaration that is `shared`'s and the remainder of the key past it.
+    fn declared_rest(&self, shared: &Engine) -> Option<(&WireDeclaration, &str)> {
         // Every constructor keeps the declared prefix at the front of the
         // literal (see `extended`), so the remainder always exists; the `get`
         // turns a broken invariant into the literal rather than a panic.
-        match self
-            .declared_on(shared)
+        self.declared_on(shared)
             .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
-        {
-            Some((d, rest)) => WireKey::aliased(
-                d.hold.mapping_id(),
-                (!rest.is_empty()).then(|| rest.to_owned()),
-            )
-            .holding(d.hold.clone()),
-            None => WireKey::literal(),
-        }
     }
 
     /// What an entity held on this key names when it retracts itself, or `None`
@@ -379,17 +524,9 @@ impl DeclaredKeyexpr {
     /// (`vendor/zenoh-pico/src/net/liveliness.c` @
     /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
     pub(crate) fn retraction_key(&self, shared: &Engine) -> RetractionKey {
-        let wire = self.wire(shared);
-        if wire.mapping_id == 0 {
-            RetractionKey {
-                mapping_id: 0,
-                suffix: self.literal().to_owned(),
-            }
-        } else {
-            RetractionKey {
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix.unwrap_or_default(),
-            }
+        match self.declared_rest(shared) {
+            Some((d, rest)) => RetractionKey::declared(d.mapping_id(), rest),
+            None => RetractionKey::literal(),
         }
     }
 
@@ -453,23 +590,13 @@ impl DeclaredKeyexpr {
         // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
         // back with `text`.
         let id = shared.acquire_keyexpr(prefix).map_err(|refused| {
-            crate::result::refusal_code(refused, crate::result::Door::Keyexpr)
+            crate::refusal::refusal_code(refused, crate::refusal::Door::Keyexpr)
         })?;
         Ok(Self {
             literal: text,
-            declaration: Some(WireDeclaration {
-                hold: KeyHold::taken(engine_hold_of(shared), id),
-                prefix_len,
-            }),
+            declaration: Some(WireDeclaration::taken(shared, id, prefix_len)),
         })
     }
-}
-
-/// The session `shared` as a key's hold names it: weakly, through the engine's door for keys.
-fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine> {
-    // The engine's own type named, so the downgrade is of it and the coercion to the door's
-    // object follows it, on an engine of a concrete type and on the door's object alike.
-    Arc::<Engine>::downgrade(shared)
 }
 
 /// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
@@ -1163,14 +1290,17 @@ pub unsafe extern "C" fn z_keyexpr_concat(
 
 /// The result of extending `left` to `literal`: `left`'s declaration kept when
 /// `left` is a declared key (pico `_z_declared_keyexpr_concat` / `_join`), a
-/// plain literal otherwise.
+/// plain literal otherwise. Refused as [`DeclaredKeyexpr::extended`] refuses.
 ///
 /// # Safety
 /// `left` must be null or a live loaned keyexpr.
-unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> DeclaredKeyexpr {
+unsafe fn extended_from(
+    left: *const z_loaned_keyexpr_t,
+    literal: &str,
+) -> Result<DeclaredKeyexpr, ZResult> {
     match declared_of(left) {
         Some(declared) => declared.extended(literal),
-        None => DeclaredKeyexpr::literal_only(literal),
+        None => Ok(DeclaredKeyexpr::literal_only(literal)),
     }
 }
 
@@ -1206,8 +1336,13 @@ unsafe fn store_joined(
     else {
         return Z_ERR_INVALID;
     };
-    store_owned_keyexpr(key, extended_from(left, canon));
-    Z_OK
+    match extended_from(left, canon) {
+        Ok(joined) => {
+            store_owned_keyexpr(key, joined);
+            Z_OK
+        }
+        Err(code) => code,
+    }
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1697,8 +1832,10 @@ mod tests {
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
         let wire = key.wire(Arc::as_ref(&engine));
-        assert_eq!(wire.mapping_id, declarations[0].0);
-        assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
+        assert_eq!(
+            wire.names_in(key.literal()),
+            (declarations[0].0, Some("/*/x"))
+        );
 
         let other = session().as_engine();
         assert_eq!(
@@ -1706,6 +1843,64 @@ mod tests {
             0,
             "another session's id is not ours"
         );
+    }
+
+    /// What a retraction names is the declaration and the length of the rest of the key, read
+    /// against the entity's key, so making it takes no memory; on a session that did not make the
+    /// declaration it names the literal.
+    ///
+    /// # Control
+    ///
+    /// A retraction that copies the rest of the key reds the count.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_retraction_names_the_rest_of_its_own_key_and_takes_no_memory() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/ret/**", None)
+            .expect("declared");
+        let declared = shared.keyexpr_declarations()[0].0;
+        let mut named = None;
+        let taken = crate::connectivity::tests::allocations(|| {
+            named = Some(key.retraction_key(Arc::as_ref(&engine)));
+        });
+        assert_eq!(taken, 0, "a retraction copies nothing of the key");
+        let named = named.expect("the retraction was made");
+        assert_eq!(named.names(key.literal()), (declared, "/**"));
+        let other = session().as_engine();
+        assert_eq!(
+            key.retraction_key(&*other).names(key.literal()),
+            (0, "demo/kd/ret/**")
+        );
+    }
+
+    /// A wire key names the rest of its key by its length, read against the key's literal, so
+    /// making one takes no memory, whether it holds the declaration or not.
+    ///
+    /// # Control
+    ///
+    /// A wire key that copies the rest of the key (`WireKey::aliased` over `to_owned`) reds the
+    /// count; one whose length is not the rest's reds the `names_in` assertions.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_wire_key_names_the_rest_of_its_key_and_takes_no_memory() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/wire/*/x", None)
+            .expect("declared");
+        let declared = shared.keyexpr_declarations()[0].0;
+        let mut plain = None;
+        let mut holding = None;
+        let taken = crate::connectivity::tests::allocations(|| {
+            plain = Some(key.wire(Arc::as_ref(&engine)));
+            holding = Some(key.wire_holding_declaration(Arc::as_ref(&engine)));
+        });
+        assert_eq!(taken, 0, "a wire key copies nothing of the key");
+        let plain = plain.expect("the plain key was made");
+        let holding = holding.expect("the holding key was made");
+        assert_eq!(plain.names_in(key.literal()), (declared, Some("/*/x")));
+        assert_eq!(holding.names_in(key.literal()), (declared, Some("/*/x")));
+        holding.let_go(Arc::as_ref(&engine));
     }
 }
 
@@ -2028,7 +2223,6 @@ mod arena_key_tests {
         listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
         z_session_loan_mut, z_session_move,
     };
-    use wz_capi_port::SessionKeys;
 
     /// A session that listens on a port of the loopback, opened as a program opens one, and the
     /// engine it runs on.
@@ -2048,9 +2242,18 @@ mod arena_key_tests {
 
     /// The session's key arena, which the cooperative engine always keeps.
     fn keys(engine: &Arc<Engine>) -> &dyn SessionKeys {
-        engine
-            .key_arena()
-            .expect("the cooperative engine keeps a key arena")
+        super::key_arena(engine).expect("the cooperative engine keeps a key arena")
+    }
+
+    /// The arena a key of an object is held in is the engine's own, reached as its type and not
+    /// through the port's object.
+    #[test]
+    fn the_key_arena_is_the_engine_itself() {
+        let (session, engine) = listening();
+        let arena: *const Engine = super::key_arena(&engine).expect("the engine keeps a key arena");
+        assert!(core::ptr::eq(arena, Arc::as_ptr(&engine)));
+        drop(engine);
+        close(session);
     }
 
     /// `text` held in the session's key arena, or why not.
@@ -2146,7 +2349,8 @@ mod arena_key_tests {
     /// A declaration stays as long as any key holds it, each holder one hold of the engine's own
     /// count: a share and a wire key outlive the key they were made from, and the last holder let
     /// go retracts it. Turned red by a copy that takes no hold of its own, which lets the
-    /// declaration go with the first holder.
+    /// declaration go with the first holder, or by a wire key that holds nothing (`share_on` in
+    /// `DeclaredKeyexpr::wire_holding_declaration` dropped).
     #[test]
     fn a_declaration_lasts_as_long_as_its_last_holder() {
         let (session, engine) = listening();
@@ -2160,7 +2364,7 @@ mod arena_key_tests {
             "the declaration takes the last block"
         );
         let shared = key.share();
-        let wire = key.wire(Arc::as_ref(&engine));
+        let wire = key.wire_holding_declaration(Arc::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
         assert!(!room_for(&engine, text.len()), "the share holds it");
@@ -2169,7 +2373,7 @@ mod arena_key_tests {
             !room_for(&engine, text.len()),
             "the wire key holds the declaration, and the declaration its key"
         );
-        drop(wire);
+        wire.let_go(Arc::as_ref(&engine));
         assert!(
             room_for(&engine, text.len()),
             "the last holder retracts it and its key's block goes back"
@@ -2189,16 +2393,39 @@ mod arena_key_tests {
         let text = "demo/hold/entity";
         let held = fill_leaving(&engine, text.len(), 1);
         let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
-        let wire =
-            WireKey::literal().holding_also(key.declaration_hold().expect("the key is declared"));
+        let wire = WireKey::literal().holding_also(
+            key.declaration_hold(Arc::as_ref(&engine))
+                .expect("the key is declared"),
+        );
         assert!(wire.is_literal(), "the wire names no declaration");
         drop(key);
         assert!(
             !room_for(&engine, text.len()),
             "the announcing key holds the declaration, and the declaration its key"
         );
-        drop(wire);
+        wire.let_go(Arc::as_ref(&engine));
         assert!(room_for(&engine, text.len()), "and lets it go");
+        give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key named for a message sent once holds nothing: the declaration goes with the last key
+    /// that holds it while the named one still stands, and is dropped giving nothing back. Turned
+    /// red by a named key that takes a hold, which keeps the declaration past its last holder.
+    #[test]
+    fn a_wire_key_holds_no_declaration() {
+        let (session, engine) = listening();
+        let text = "demo/hold/named";
+        let held = fill_leaving(&engine, text.len(), 1);
+        let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
+        let named = key.wire(Arc::as_ref(&engine));
+        assert_ne!(named.mapping_id, 0, "the key names the declaration");
+        drop(key);
+        assert!(
+            room_for(&engine, text.len()),
+            "the named key held nothing, so the declaration went with the key"
+        );
+        drop(named);
         give_back(&engine, held);
         close(session);
     }
@@ -2238,6 +2465,61 @@ mod arena_key_tests {
             "every declaration went, and its block with it"
         );
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key with no declaration kept for the session's own object is a block of its key arena, and
+    /// a share of it another holder of the block, so neither copies the text; a key past the
+    /// session's `MAX_KEYEXPR_BYTES` is refused. Turned red by keeping it as a copy of its own.
+    #[test]
+    fn a_literal_of_the_session_is_a_block_and_so_is_its_share() {
+        let (session, engine) = listening();
+        let key = DeclaredKeyexpr::literal_of_session(&engine, "demo/adv/base").expect("room");
+        assert!(key.literal.is_session(), "the text is a block of the arena");
+        assert!(
+            key.declaration_hold(Arc::as_ref(&engine)).is_none(),
+            "nothing is declared"
+        );
+        let shared = key.share();
+        assert!(shared.literal.is_session(), "a share holds the block");
+        assert_eq!(shared.literal(), "demo/adv/base");
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            DeclaredKeyexpr::literal_of_session(&engine, &"k".repeat(longest + 1)).err(),
+            Some(Z_EINVAL)
+        );
+        drop((key, shared));
+        close(session);
+    }
+
+    /// A key extended from a key of the session's arena (a concatenation, a join, an advanced
+    /// subscriber's carriers) is a block of the same arena and keeps the declaration its literal
+    /// still begins with; one too long for the session is refused.
+    ///
+    /// # Control
+    ///
+    /// Extending into a copy of its own reds the first assertion.
+    #[test]
+    fn an_extended_key_is_a_block_of_the_session() {
+        let (session, engine) = listening();
+        let base =
+            DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/ext/**", None).expect("room");
+        let extended = base.extended("demo/ext/**/x").expect("room");
+        assert!(
+            extended.literal.is_session(),
+            "the text is a block of the arena"
+        );
+        assert_eq!(extended.literal(), "demo/ext/**/x");
+        extended
+            .declaration_hold(Arc::as_ref(&engine))
+            .expect("the declared prefix still begins the key")
+            .release(Arc::as_ref(&engine));
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            base.extended(&"k".repeat(longest + 1)).err(),
+            Some(Z_EINVAL)
+        );
+        drop((base, extended));
         close(session);
     }
 

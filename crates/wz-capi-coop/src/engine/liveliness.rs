@@ -20,7 +20,7 @@
 
 use core::ptr::NonNull;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
+use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -29,7 +29,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-use wz_session_core::session_tables::LivelinessSubscriberHandle;
 #[cfg(feature = "group")]
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
@@ -71,24 +70,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
         &self,
         handle: wz_session_core::session_tables::TokenHandle,
     ) {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let Some(row) = tables.tokens().get(handle) else {
             return;
         };
         let form = tables.wire_of(row.key());
         let wire = wire_key_of(form);
-        let retraction = row.key().names_key().then(|| RetractionKey {
-            mapping_id: form.mapping,
-            suffix: String::from(form.suffix),
-        });
-        self.announce_to_groups(super::group::GroupEntity {
-            what: wz_session_core::declare_form::GroupDeclaration::Token,
-            entity: row.id(),
-            keyexpr: row.key().as_str(),
-            wire: &wire,
-            retraction: retraction.as_ref(),
-            allowed_origin: wz_session_core::locality::Locality::Any,
-        });
+        let retraction = row
+            .key()
+            .names_key()
+            .then(|| RetractionKey::declared(form.mapping, form.suffix));
+        self.transport
+            .announce_to_groups(super::group::GroupEntity {
+                what: wz_session_core::declare_form::GroupDeclaration::Token,
+                entity: row.id(),
+                keyexpr: row.key().as_str(),
+                wire: &wire,
+                retraction: retraction.as_ref(),
+                allowed_origin: wz_session_core::locality::Locality::Any,
+            });
     }
 }
 
@@ -122,6 +122,12 @@ pub(crate) struct LivelinessRow {
     sink: LivelinessSink,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
     latch: CallLatch,
+}
+
+impl super::RowHolds for LivelinessRow {
+    fn into_holds(self) -> WireHolds {
+        self.wire.into_holds()
+    }
 }
 
 impl LivelinessRow {
@@ -160,17 +166,10 @@ impl LivelinessRow {
     ) -> bool {
         let id = u64::from(id);
         let wire = super::on_link(actions, keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_interest_liveliness_subscriber(id, history, 0, Some(keyexpr))
-        } else {
-            actions.send_interest_liveliness_subscriber(
-                id,
-                history,
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-            )
-        }
-        .is_ok()
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        actions
+            .send_interest_liveliness_subscriber(id, history, mapping_id, suffix)
+            .is_ok()
     }
 }
 
@@ -197,22 +196,24 @@ impl RowCallback for LivelinessRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A call of a liveliness subscriber's callback the session began under its lock and a delivery
-/// makes after it, as a subscriber's ([`super::SubscriberCall`]): the call, and the handle its row
-/// is let go of by when it ends the last call of an undeclared subscriber. Each is ended once
-/// ([`Self::end`]), or its row would keep its slot for good.
+/// makes after it, as a subscriber's ([`super::SubscriberCall`]): where its row lies, and nothing
+/// else. Each is ended once ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct LivelinessCall {
     call: LivelinessRowCall,
-    handle: LivelinessSubscriberHandle,
 }
 
 impl LivelinessCall {
-    /// `call`, begun on the row `handle` names.
-    pub(crate) fn new(call: LivelinessRowCall, handle: LivelinessSubscriberHandle) -> Self {
-        Self { call, handle }
+    /// `call`, begun on a liveliness subscriber's row.
+    pub(crate) fn new(call: LivelinessRowCall) -> Self {
+        Self { call }
     }
 
     /// Whether `other` is a call of the same row.
@@ -227,13 +228,13 @@ impl LivelinessCall {
         unsafe { self.call.0.as_ref() }.hand(sample);
     }
 
-    /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
-    /// which the caller lets go of (`SessionTables::release_liveliness_subscriber`).
-    pub(crate) fn end(self) -> Option<LivelinessSubscriberHandle> {
+    /// End the call: `true` when it was the last call of an undeclared subscriber, whose row the
+    /// session's walk of its tables then lets go of
+    /// (`SessionTables::release_drained_liveliness_subscriber`).
+    pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
         // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
-        let last = unsafe { <LivelinessRow as RowCallback>::end(self.call) };
-        last.then_some(self.handle)
+        unsafe { <LivelinessRow as RowCallback>::end(self.call) }
     }
 }

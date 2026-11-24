@@ -116,7 +116,7 @@ pub fn id_and_suffix<S: WireexprStorage>(
 /// with NO keyexpr resolution at all (`dispatcher/queries.rs:595-635`).
 pub fn wireexpr_is_empty<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
-    id == 0 && suffix_opt.map_or(true, str::is_empty)
+    id == 0 && suffix_opt.is_none_or(str::is_empty)
 }
 
 /// R2908 — whether a Wireexpr names a DECLARED keyexpr whole: an id with no
@@ -128,7 +128,7 @@ pub fn wireexpr_is_empty<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> 
 /// answered here.
 pub fn wireexpr_names_a_declaration<S: WireexprStorage>(body: &WireexprOwnedVariant<S>) -> bool {
     let (id, suffix_opt) = id_and_suffix(body);
-    id != 0 && suffix_opt.map_or(true, str::is_empty)
+    id != 0 && suffix_opt.is_none_or(str::is_empty)
 }
 
 /// The TWO id spaces a Wireexpr's mapping bit can name.
@@ -453,6 +453,15 @@ impl<'a> PeerSpace<'a> {
     /// The lent policy's table, as a peer space.
     pub(crate) fn of_lent_table(table: &'a PeerAliases<crate::bounded::Lent>) -> Self {
         Self(PeerSpaceRepr::LentTable(table))
+    }
+
+    /// The key the peer declared for `id`, when its table keeps it in the session's key arena (the
+    /// lent policy's): the row's own key, whose block a holder may keep. `None` on any other table.
+    fn held(&self, id: crate::wire_id::ExprId) -> Option<&'a crate::key_arena::KeyRef> {
+        match self.0 {
+            PeerSpaceRepr::LentTable(table) => table.find(crate::wire_id::peer_key(id)),
+            _ => None,
+        }
     }
 
     /// The literal keyexpr the peer declared for `id`.
@@ -825,6 +834,28 @@ pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
     resolve_parts(arm, id, suffix, spaces, own, out)
 }
 
+/// [`resolve_wireexpr_view_over`], with the key of the session's key arena the answer is the
+/// whole text of, when it is one: an `M=1` id of the peer's with no suffix, read out of a table
+/// that keeps its keys there (`PeerSpace::held`). Every other answer, a suffix joined, our own
+/// space's key copied, the shared dictionary's, is as `resolve_wireexpr_view_over` gives it, with
+/// no key.
+pub fn resolve_wireexpr_view_held_over<'k, 'f: 'k, D: WireexprLentStorage>(
+    body: &WireexprVariantIn<Lent<'f, D>>,
+    spaces: MappingSpaces<'k>,
+    own: Option<OwnSpace<'_>>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    if let WireexprVariantIn::WireexprLocal(_) = body {
+        let (id, suffix) = id_and_suffix_view(body);
+        if id != 0 && suffix.is_none() {
+            if let Some(held) = spaces.peer.held(id) {
+                return Ok(Some((held.as_str(), Some(held))));
+            }
+        }
+    }
+    resolve_wireexpr_view_over(body, spaces, own, out).map(|text| text.map(|text| (text, None)))
+}
+
 /// The `(id, suffix)` a wireexpr read as its view (`WireexprView`) carries, as
 /// [`id_and_suffix_view`] reads them, and whether its id names the sender's space (`M=1`, the
 /// codec's `WireexprLocal` arm): what a Request lent by the in-place receive is kept by.
@@ -857,6 +888,22 @@ pub fn resolve_wireexpr_viewed<'k, 'f: 'k>(
         V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
     };
     resolve_wireexpr_view(&body, spaces, out)
+}
+
+/// [`resolve_wireexpr_viewed`], with the key of the session's key arena the answer is the whole
+/// text of, when it is one ([`resolve_wireexpr_view_held_over`]).
+#[cfg(any(feature = "codec-request", feature = "codec-response"))]
+pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    use wz_codecs::wireexpr::WireexprViewVariant as V;
+    let body = match body {
+        V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
+        V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
+    };
+    resolve_wireexpr_view_held_over(&body, spaces, None, out)
 }
 
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an

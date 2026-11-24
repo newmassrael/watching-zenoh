@@ -91,7 +91,7 @@ pub const ZBUF: &str = "zbuf";
 fn fixes_no_encoding(carrier: &Field) -> bool {
     carrier.name == "Oam"
         || (carrier.name == "ext"
-            && ext_label(carrier).map_or(true, |name| SEVERAL_ENCODINGS.contains(&name)))
+            && ext_label(carrier).is_none_or(|name| SEVERAL_ENCODINGS.contains(&name)))
 }
 
 /// The named extension entries whose body the protocol writes in more than one

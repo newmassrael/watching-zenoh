@@ -187,7 +187,10 @@ mod keepalive_emitter {
         let (rec, actions, mut engine) = recording_setup();
         drive_to_established(&mut engine);
         assert!(
-            *actions.link.keepalive_armed.lock().unwrap(),
+            actions
+                .link
+                .keepalive_armed
+                .load(core::sync::atomic::Ordering::SeqCst),
             "Established entry starts the keepalive worker"
         );
         assert!(keepalive_wake_deadline(&actions).is_some());
@@ -195,7 +198,10 @@ mod keepalive_emitter {
         engine.process_event(E::SessionClose);
         assert_eq!(engine.get_current_state(), S::Closing);
         assert!(
-            !*actions.link.keepalive_armed.lock().unwrap(),
+            !actions
+                .link
+                .keepalive_armed
+                .load(core::sync::atomic::Ordering::SeqCst),
             "the exit from Established stops the keepalive worker"
         );
         assert!(

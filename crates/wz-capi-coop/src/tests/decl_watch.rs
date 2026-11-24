@@ -13,6 +13,10 @@ use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchSink, Refusal, SessionEng
 
 use super::{open, CatchAll, Router};
 
+/// A Rust closure a watch's sink shares, so a test reads from its count whether the engine still
+/// holds the sink.
+type SharedCall = Arc<dyn Fn(DeclWatchEvent<'_>) + Send + Sync>;
+
 #[cfg(not(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
@@ -21,7 +25,7 @@ use super::{open, CatchAll, Router};
 fn a_declaration_watch_is_refused_by_name_and_holds_nothing() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let sink: DeclWatchSink = Arc::new(|_: DeclWatchEvent<'_>| {});
+    let sink: SharedCall = Arc::new(|_: DeclWatchEvent<'_>| {});
 
     for plane in [
         DeclPlane::Subscribers,
@@ -29,7 +33,7 @@ fn a_declaration_watch_is_refused_by_name_and_holds_nothing() {
         DeclPlane::Tokens,
     ] {
         assert_eq!(
-            engine.declare_decl_watch(plane, Arc::clone(&sink)),
+            engine.declare_decl_watch(plane, DeclWatchSink::Shared(Arc::clone(&sink))),
             Err(Refusal::NotBuilt),
             "{plane:?}"
         );
@@ -63,6 +67,7 @@ mod watched {
         Declared(u64, String),
         Undeclared(u64),
         Synced,
+        Lost(u64),
     }
 
     /// Each event a watch was told, with the peer it named.
@@ -70,7 +75,7 @@ mod watched {
 
     /// A watch's sink and what it was told, with the peer each event named.
     struct Log {
-        sink: DeclWatchSink,
+        sink: SharedCall,
         seen: Heard,
     }
 
@@ -78,13 +83,14 @@ mod watched {
         fn new() -> Self {
             let seen = Arc::new(Mutex::new(Vec::new()));
             let into = Arc::clone(&seen);
-            let sink: DeclWatchSink = Arc::new(move |event: DeclWatchEvent<'_>| {
+            let sink: SharedCall = Arc::new(move |event: DeclWatchEvent<'_>| {
                 let what = match event {
                     DeclWatchEvent::Declared { id, keyexpr, .. } => {
                         Seen::Declared(id, keyexpr.to_owned())
                     }
                     DeclWatchEvent::Undeclared { id, .. } => Seen::Undeclared(id),
                     DeclWatchEvent::Synced { .. } => Seen::Synced,
+                    DeclWatchEvent::Lost { count } => Seen::Lost(count),
                 };
                 into.lock()
                     .unwrap()
@@ -124,7 +130,7 @@ mod watched {
 
     fn watch(engine: &Engine, plane: DeclPlane, log: &Log) -> u64 {
         engine
-            .declare_decl_watch(plane, Arc::clone(&log.sink))
+            .declare_decl_watch(plane, DeclWatchSink::Shared(Arc::clone(&log.sink)))
             .expect("a watch of a kind this build hears")
     }
 
@@ -224,7 +230,10 @@ mod watched {
         SessionDrive::close(&*engine);
         assert_eq!(Arc::strong_count(&log.sink), 1);
         assert_eq!(
-            engine.declare_decl_watch(DeclPlane::Subscribers, Arc::clone(&log.sink)),
+            engine.declare_decl_watch(
+                DeclPlane::Subscribers,
+                DeclWatchSink::Shared(Arc::clone(&log.sink))
+            ),
             Err(Refusal::Closed)
         );
         assert_eq!(
@@ -265,7 +274,10 @@ mod watched {
         let engine = open(&router);
         let log = Log::new();
         assert_eq!(
-            engine.declare_decl_watch(DeclPlane::Queryables, Arc::clone(&log.sink)),
+            engine.declare_decl_watch(
+                DeclPlane::Queryables,
+                DeclWatchSink::Shared(Arc::clone(&log.sink))
+            ),
             Err(Refusal::NotBuilt)
         );
         assert_eq!(Arc::strong_count(&log.sink), 1);
@@ -278,7 +290,10 @@ mod watched {
         let engine = open(&router);
         let log = Log::new();
         assert_eq!(
-            engine.declare_decl_watch(DeclPlane::Tokens, Arc::clone(&log.sink)),
+            engine.declare_decl_watch(
+                DeclPlane::Tokens,
+                DeclWatchSink::Shared(Arc::clone(&log.sink))
+            ),
             Err(Refusal::NotBuilt)
         );
         assert_eq!(Arc::strong_count(&log.sink), 1);

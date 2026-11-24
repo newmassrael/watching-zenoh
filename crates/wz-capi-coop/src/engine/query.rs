@@ -7,8 +7,8 @@
 //!
 //! A C callback never runs under the session's lock (decision D8), and the observer asks a
 //! queryable from inside its dispatch, which runs under it. So a query that reaches a queryable's
-//! row ([`QueryableRow`]) only begins a call on the row, is copied out ([`OwnedQuery`]) and HOLDS
-//! its `ResponseFinal`
+//! row ([`QueryableRow`]) only begins a call on the row, is held in the session's round of
+//! deliveries where its parts lie (`crate::round`) and HOLDS its `ResponseFinal`
 //! ([`FinalHolds`]); the C callback runs when the deliveries are handed out, writes its replies
 //! into a responder built as the dispatch's would have been, and the replies go out on the query's
 //! link before the hold is let go. The dispatch's own Final for that request id waits for the last
@@ -17,13 +17,17 @@
 //! `z_result_t _z_trigger_queryables(`), and zenoh keeps by sending the Final when the last `Query` is
 //! dropped (`zenoh/src/api/queryable.rs` @ `impl Drop for QueryInner {`).
 //!
-//! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
-//! program drops it; until then it answers on its own link.
+//! A query the callback keeps ([`QueryHolder::keep_query`]) is one hold more, released when the C
+//! program lets it go; until then it answers on its own link. Its row keeps what a reply is built
+//! from beside the key (the replies its parameters accept and its QoS); the program's copy keeps
+//! the key and the parameters and hands the key to each reply, so a keep takes no memory of the
+//! session but the row and copies nothing onto the heap.
 //!
-//! The session's own get is the exception to the copy (`local-queryable`): the queryables it
+//! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted ([`QueryPlane::take_asked`]) and the get hands each of them its own view
-//! ([`OwnGet`]) once the session's lock is let go, inside the call. Only a queryable whose callback
-//! the asking thread is inside of has the query copied, to be handed when that callback returns.
+//! ([`OwnGet`]) once the session's lock is let go, inside the call. Nothing of the query is copied:
+//! a queryable whose callback the asking thread is inside of is called there too, as zenoh-pico
+//! calls it.
 //!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
 //! arrives when every row is taken is refused and counted: it is not handed to a callback, and
@@ -36,12 +40,11 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::ptr::NonNull;
 #[cfg(feature = "local-queryable")]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 use portable_atomic::AtomicU64;
 
 #[allow(unused_imports)]
@@ -49,11 +52,13 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, WireKey};
+use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::bounded::{BoundedVec, Static};
+#[cfg(feature = "local-queryable")]
+use wz_session_core::bounded::Static;
+use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
@@ -64,11 +69,11 @@ use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo};
-use wz_session_core::session_tables::QueryableHandle;
+use wz_session_core::sample::QosLevel;
+#[cfg(feature = "local-queryable")]
+use wz_session_core::sample::{EncodingHint, SourceInfo};
 use wz_session_mcu::dial::McuActions;
 
-use super::queued::Queued;
 use super::{key_on_link, lock, CoopEngine};
 
 /// One of the session's own queryables, as a row of the session's tables holds it: the row keeps
@@ -83,25 +88,48 @@ pub(crate) struct QueryableRow {
     retraction: Option<RetractionKey>,
     /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
     /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
-    /// session held. A build without groups reads none of it and holds it for that alone.
-    #[cfg_attr(not(feature = "group"), allow(dead_code))]
+    /// session held.
+    #[cfg(feature = "group")]
     wire: WireKey,
-    /// The program's callback, minted once the tables took the row ([`Self::mint`]), so a refused
-    /// declaration mints none. Called where the row lies, one call at a time, as it is `FnMut`.
-    call: Mutex<Option<QueryCallback>>,
+    /// The key as the ABI named it, held for what it keeps alive alone (the declaration the ABI
+    /// made it on): a build without groups tells no one the key, and the declaration goes with
+    /// the row, let go of with no lock of the session held.
+    #[cfg(not(feature = "group"))]
+    keeps: WireKey,
+    /// The program's callback, called where the row lies through a shared borrow, with the holder
+    /// of the face each query came in on; a refused declaration lets it go with the row.
+    sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
 }
 
+impl super::RowHolds for QueryableRow {
+    fn into_holds(self) -> WireHolds {
+        #[cfg(feature = "group")]
+        let wire = self.wire;
+        #[cfg(not(feature = "group"))]
+        let wire = self.keeps;
+        wire.into_holds()
+    }
+}
+
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it, its
-    /// callback not minted yet.
-    pub(super) fn new(id: QblId, retraction: Option<RetractionKey>, wire: WireKey) -> Self {
+    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
+    /// answering through `sink`.
+    pub(crate) fn new(
+        id: QblId,
+        retraction: Option<RetractionKey>,
+        wire: WireKey,
+        sink: QueryableSink,
+    ) -> Self {
         Self {
             id,
             retraction,
+            #[cfg(feature = "group")]
             wire,
-            call: Mutex::new(None),
+            #[cfg(not(feature = "group"))]
+            keeps: wire,
+            sink,
             latch: CallLatch::new(),
         }
     }
@@ -117,21 +145,14 @@ impl QueryableRow {
         &self.wire
     }
 
-    /// Hold `call`, the callback the program's sink minted for this row once the tables took it.
-    pub(super) fn mint(&self, call: QueryCallback) {
-        *lock(&self.call) = Some(call);
-    }
-
-    /// Hand `query` to the callback, its replies made through `responder`, unless the queryable
-    /// was undeclared since the call was begun: the one place a query is handed to a queryable's
-    /// callback.
-    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
+    /// Hand `query` to the callback, its replies made through `responder` and its holds taken
+    /// through `holder`, unless the queryable was undeclared since the call was begun: the one
+    /// place a query is handed to a queryable's callback.
+    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut, holder: &dyn QueryHolder) {
         if self.latch.retired() {
             return;
         }
-        if let Some(call) = lock(&self.call).as_mut() {
-            call(query, responder);
-        }
+        self.sink.call(query, responder, holder);
     }
 
     /// Declare this queryable, on `key`, answering for the whole of it when `complete`, over
@@ -147,16 +168,17 @@ impl QueryableRow {
             .is_ok()
     }
 
-    /// Retract queryable `id` over `actions`, naming its key as `retraction` does when its
-    /// declaration asked to. Read off the row before it is undeclared, as a subscriber's is.
+    /// Retract queryable `id` over `actions`, naming its key as `names` says (the declaration's
+    /// id and the rest of the key) when its declaration asked to. Read off the row before it is
+    /// undeclared, as a subscriber's is.
     pub(super) fn retract<C: ClockSource + 'static>(
         id: QblId,
-        retraction: Option<&RetractionKey>,
+        names: Option<(wz_session_core::wire_id::ExprId, &str)>,
         actions: &McuActions<C>,
     ) {
-        match retraction {
-            Some(key) => {
-                actions.send_undeclare_queryable_naming(u64::from(id), key.mapping_id, &key.suffix)
+        match names {
+            Some((mapping, suffix)) => {
+                actions.send_undeclare_queryable_naming(u64::from(id), mapping, suffix)
             }
             None => actions.send_undeclare_queryable(u64::from(id)),
         }
@@ -186,21 +208,24 @@ impl RowCallback for QueryableRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
-/// A call of a queryable's callback the session began under its lock as a query arrived, and the
-/// handle its row is let go of by when it ends the last call of an undeclared queryable. Neither
+/// A call of a queryable's callback the session began under its lock as a query arrived: where its
+/// row lies, and nothing else, since the row whose last call it ends is found by its latch. Neither
 /// copied nor dropped unended: each is ended once ([`Self::end`]), or its row would keep its slot
 /// for good.
 #[must_use = "a call is ended, or its row is never let go of"]
-pub(super) struct QueryableCall {
+pub(crate) struct QueryableCall {
     call: QueryableRowCall,
-    handle: QueryableHandle,
 }
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for threads: its latch, and its
-// callback behind its mutex, a callback that is `Send`. The row lies in the session's arena, which
+// callback, which is `Send + Sync` and called through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
 
@@ -212,86 +237,40 @@ impl QueryableCall {
         unsafe { self.call.0.as_ref() }
     }
 
-    /// The queryable's id: what a get of the session's own made from inside its callback reads it
-    /// running by.
-    #[cfg(feature = "local-queryable")]
-    pub(super) fn id(&self) -> QblId {
-        self.row().id
-    }
-
     /// Whether the queryable was undeclared since the call was begun: its callback is handed
     /// nothing more.
     pub(super) fn retired(&self) -> bool {
         self.row().latch.retired()
     }
 
-    /// Hand `query` to the queryable's callback, its replies made through `responder`.
-    pub(super) fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
-        self.row().ask(query, responder);
+    /// Hand `query` to the queryable's callback, its replies made through `responder` and its
+    /// holds taken through `holder`.
+    pub(super) fn ask(
+        &self,
+        query: &dyn QueryView,
+        responder: &mut dyn ReplyOut,
+        holder: &dyn QueryHolder,
+    ) {
+        self.row().ask(query, responder, holder);
     }
 
-    /// End the call: the handle of its row when it was the last call of an undeclared queryable,
-    /// which the caller lets go of (`SessionTables::release_queryable`).
-    pub(super) fn end(self) -> Option<QueryableHandle> {
+    /// End the call: `true` when it was the last call of an undeclared queryable, whose row the
+    /// session's walk of its tables then lets go of (`SessionTables::release_drained_queryable`).
+    pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
         // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
-        let last = unsafe { <QueryableRow as RowCallback>::end(self.call) };
-        last.then_some(self.handle)
+        unsafe { <QueryableRow as RowCallback>::end(self.call) }
     }
 }
 
-/// A query copied out of the dispatch that delivered it, for a callback that runs after.
-pub(super) struct OwnedQuery {
-    keyexpr: String,
-    parameters: Option<Vec<u8>>,
-    payload: Option<Vec<u8>>,
-    attachment: Option<Vec<u8>>,
-    encoding: Option<EncodingHint>,
-    source_info: Option<SourceInfo>,
-    rid: wz_session_core::wire_id::RequestId,
-    qos: QosLevel,
-}
-
-impl OwnedQuery {
-    pub(super) fn of(view: &dyn QueryView) -> Self {
+#[cfg(test)]
+impl QueryableCall {
+    /// A call begun on `row`: what a test hands the round as the dispatch would.
+    pub(crate) fn begun(row: &QueryableRow) -> Self {
         Self {
-            keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec),
-            payload: view.payload().map(<[u8]>::to_vec),
-            attachment: view.attachment().map(<[u8]>::to_vec),
-            encoding: view.encoding().cloned(),
-            source_info: view.source_info().cloned(),
-            rid: view.rid(),
-            qos: view.qos(),
+            call: RowCallback::begin(row).expect("a live row begins a call"),
         }
-    }
-}
-
-impl QueryView for OwnedQuery {
-    fn keyexpr(&self) -> &str {
-        &self.keyexpr
-    }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters.as_deref()
-    }
-    fn attachment(&self) -> Option<&[u8]> {
-        self.attachment.as_deref()
-    }
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.source_info.as_ref()
-    }
-    fn payload(&self) -> Option<&[u8]> {
-        self.payload.as_deref()
-    }
-    fn encoding(&self) -> Option<&EncodingHint> {
-        self.encoding.as_ref()
-    }
-    fn rid(&self) -> wz_session_core::wire_id::RequestId {
-        self.rid
-    }
-    fn qos(&self) -> QosLevel {
-        self.qos
     }
 }
 
@@ -299,13 +278,15 @@ impl QueryView for OwnedQuery {
 /// accept (`_anyke` admits any key), its QoS.
 pub(super) fn responder_for<'a>(
     rid: wz_session_core::wire_id::RequestId,
-    keyexpr: &str,
+    keyexpr: &'a str,
     parameters: Option<&[u8]>,
     qos: QosLevel,
     replies: &'a mut dyn StagesReplies,
 ) -> QueryResponder<'a> {
     let accept = ReplyKeyExpr::from_parameter_bytes(parameters);
-    QueryResponder::new(rid, keyexpr.to_owned(), accept, qos, replies)
+    // The key is borrowed where the query lies for as long as its callback runs: nothing of it is
+    // copied to answer.
+    QueryResponder::borrowing(rid, keyexpr, accept, qos, replies)
 }
 
 /// Where a query's replies go as its queryable makes them: each one onto the link the query came in
@@ -338,16 +319,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> StagesReplies
 }
 
 /// One request's Final, held while a callback or a kept query may still answer it.
-struct FinalHold {
+pub(crate) struct FinalHold {
     generation: u64,
     rid: wz_session_core::wire_id::RequestId,
     holds: usize,
     /// The QoS of the Final the dispatch owes, once it owes one.
     due: Option<QosLevel>,
+    /// What the session keeps of the query while a program keeps it past its callback.
+    kept: Option<KeptQuery>,
+}
+
+/// What the session keeps of a query a program keeps past its callback
+/// ([`QueryHolder::keep_query`]): what a reply to it is built from beside its key, which the
+/// program's copy keeps and hands to each reply, and how many of its row's holds are keeps.
+struct KeptQuery {
+    /// The replies the query's parameters accept.
+    accept: ReplyKeyExpr,
+    qos: QosLevel,
+    keeps: usize,
+}
+
+/// What a reply to a kept query is built from beside its key: the replies it accepts and its QoS.
+pub(super) type KeptAnswer = (ReplyKeyExpr, QosLevel);
+
+/// What the end of a turn of an answer lets go of ([`CoopEngine::answer`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Release {
+    /// One hold of the query's Final: its callback returned.
+    Hold,
+    /// One keep of the query, and its hold: the program let the query go.
+    Kept,
 }
 
 /// The Finals held open, by the link generation and request id they answer: one row for each
-/// query a callback is still to answer or a C program keeps, at most `rows` of them, the value of
+/// query a callback is still to answer or a C program keeps, as many as it was lent, the value of
 /// `MAX_PENDING_FINALS` the session's open resolved under the build's (the deploy `limits` key
 /// `pending_finals`), as the Finals a dispatch owes are held to. A request that would need a row
 /// the table has no room for is REFUSED before its callback runs: it is not copied out, nothing
@@ -355,35 +360,51 @@ struct FinalHold {
 /// (`vendor/zenoh-pico/src/session/queryable.c` @ `z_result_t _z_trigger_queryables(`, which
 /// returns before any callback and sends no Final) and as the session's own stage refuses a
 /// request it cannot owe a Final for (`wz_session_core::caps::MAX_PENDING_FINALS`). The table is
-/// the plane's own and fixed in size, as the plane is shared with what answers outside the
-/// session's lock.
+/// lent from the session's arena at its open, and let go of before the arena is given back
+/// ([`QueryPlane::let_go`]): the plane is shared with what answers outside the session's lock,
+/// and everything that shares it lies in the engine, which a kept query reaches by a weak handle
+/// alone, so none of them reads a row after the arena went.
+#[derive(Default)]
 pub(super) struct FinalHolds {
-    holds: BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, Static>,
-    rows: usize,
+    holds: HeldFinals,
     /// The requests refused for want of a row in the dispatch now running, whose Final that
     /// dispatch owes and must not send. A request that reached a queryable owes its Final in the
     /// same dispatch, so [`Self::owe`] takes each out before the dispatch ends; a dispatch owes no
-    /// more Finals than the build's `MAX_PENDING_FINALS`, which bounds this list as it does the
+    /// more Finals than the session's `MAX_PENDING_FINALS`, which sizes this list as it does the
     /// rows.
-    refused: BoundedVec<
-        (u64, wz_session_core::wire_id::RequestId),
-        { caps::MAX_PENDING_FINALS },
-        Static,
-    >,
+    refused: RefusedFinals,
 }
 
+/// A request refused for want of a row: the link generation and the request id it came with.
+pub(crate) type RefusedFinal = (u64, wz_session_core::wire_id::RequestId);
+
+/// The rows the Finals held lie in, lent from the session's arena.
+pub(crate) type HeldFinals = BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, Lent>;
+
+/// The rows the requests refused in the running dispatch lie in, lent from the session's arena.
+pub(crate) type RefusedFinals = BoundedVec<RefusedFinal, { caps::MAX_PENDING_FINALS }, Lent>;
+
 impl FinalHolds {
-    /// No Final held, and room for the Finals of `rows` queries.
-    pub(super) fn holding(rows: usize) -> Self {
-        Self {
-            holds: BoundedVec::new_static(),
-            rows,
-            refused: BoundedVec::new_static(),
-        }
+    /// No Final held, in `holds` and `refused`, rows the session's arena lent, as many of each
+    /// as the queries whose Finals it holds at once.
+    pub(super) fn over(holds: HeldFinals, refused: RefusedFinals) -> Self {
+        Self { holds, refused }
+    }
+
+    /// The row of the Final of `rid` on link `generation`.
+    fn row(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<&mut FinalHold> {
+        self.holds
+            .iter_mut()
+            .find(|h| h.generation == generation && h.rid == rid)
     }
 
     /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing and
-    /// noting nothing, when no hold of that query is open and every row is taken.
+    /// noting nothing, when no hold of that query is open and every row is taken, or when its
+    /// holds are as many as a count holds.
     pub(super) fn take(
         &mut self,
         generation: u64,
@@ -394,19 +415,91 @@ impl FinalHolds {
             .iter_mut()
             .find(|h| h.generation == generation && h.rid == rid)
         {
-            hold.holds += 1;
+            let Some(holds) = hold.holds.checked_add(1) else {
+                return false;
+            };
+            hold.holds = holds;
             return true;
         }
-        self.holds.len() < self.rows
-            && self
-                .holds
-                .push(FinalHold {
-                    generation,
-                    rid,
-                    holds: 1,
-                    due: None,
-                })
-                .is_ok()
+        self.holds
+            .push(FinalHold {
+                generation,
+                rid,
+                holds: 1,
+                due: None,
+                kept: None,
+            })
+            .is_ok()
+    }
+
+    /// One keep more of the query of `rid` on link `generation`, which a program keeps already,
+    /// and one hold more of its Final, with what its replies are built from: `None` when the query
+    /// is not kept, and refused with [`Refusal::TableFull`], taking nothing, when its holds are as
+    /// many as a count holds.
+    pub(super) fn keep_again(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<Result<KeptAnswer, Refusal>> {
+        let hold = self.row(generation, rid)?;
+        let kept = hold.kept.as_mut()?;
+        let (Some(holds), Some(keeps)) = (hold.holds.checked_add(1), kept.keeps.checked_add(1))
+        else {
+            return Some(Err(Refusal::TableFull));
+        };
+        hold.holds = holds;
+        kept.keeps = keeps;
+        Some(Ok((kept.accept, kept.qos)))
+    }
+
+    /// The first keep of the query of `rid` on link `generation`, whose callback runs and so holds
+    /// its row, its replies built as `answer` says: one hold more of its Final. `false`, keeping
+    /// nothing, when no row holds the query, it is kept already, or its holds are as many as a
+    /// count holds.
+    pub(super) fn keep(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        answer: KeptAnswer,
+    ) -> bool {
+        let Some(hold) = self.row(generation, rid) else {
+            return false;
+        };
+        let (None, Some(holds)) = (&hold.kept, hold.holds.checked_add(1)) else {
+            return false;
+        };
+        hold.holds = holds;
+        hold.kept = Some(KeptQuery {
+            accept: answer.0,
+            qos: answer.1,
+            keeps: 1,
+        });
+        true
+    }
+
+    /// Let go of one keep of the query of `rid` on link `generation`, and of its hold: the row
+    /// forgets the query with the last keep, and answers the Final's QoS when it was owed and
+    /// this was the row's last hold. A query not kept lets go of nothing.
+    pub(super) fn release_kept(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<QosLevel> {
+        let (at, hold) = self
+            .holds
+            .iter_mut()
+            .enumerate()
+            .find(|(_, h)| h.generation == generation && h.rid == rid)?;
+        let kept = hold.kept.as_mut()?;
+        kept.keeps = kept.keeps.saturating_sub(1);
+        if kept.keeps == 0 {
+            hold.kept = None;
+        }
+        hold.holds = hold.holds.saturating_sub(1);
+        if hold.holds > 0 {
+            return None;
+        }
+        self.holds.remove(at).due
     }
 
     /// A query of the dispatch now running reaches a queryable: one hold more on its Final, or
@@ -448,11 +541,7 @@ impl FinalHolds {
             self.refused.remove(at);
             return false;
         }
-        match self
-            .holds
-            .iter_mut()
-            .find(|h| h.generation == generation && h.rid == rid)
-        {
+        match self.row(generation, rid) {
             Some(hold) => {
                 hold.due = Some(qos);
                 false
@@ -467,11 +556,11 @@ impl FinalHolds {
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
     ) -> Option<QosLevel> {
-        let at = self
+        let (at, hold) = self
             .holds
-            .iter()
-            .position(|h| h.generation == generation && h.rid == rid)?;
-        let hold = &mut self.holds[at];
+            .iter_mut()
+            .enumerate()
+            .find(|(_, h)| h.generation == generation && h.rid == rid)?;
         hold.holds = hold.holds.saturating_sub(1);
         if hold.holds > 0 {
             return None;
@@ -543,6 +632,9 @@ impl Drop for OwnFinalHold<'_> {
 pub(super) struct OwnGet<'a> {
     keyexpr: &'a str,
     opts: &'a QueryOptionsOf<'a>,
+    /// The parameters as the get sends them (`QueryOptionsOf::sent_parameters`): the options' own
+    /// bytes, copied only for a get that appends the reply-keyexpr-any flag to stated ones.
+    parameters: Option<alloc::borrow::Cow<'a, [u8]>>,
     /// The value's encoding as the view hands it to a queryable of the session: the one the get
     /// states, else the default one when it carries a value. A view hands an encoding out as a
     /// hint, so a lent one is copied for the session's own queryables.
@@ -568,6 +660,7 @@ impl<'a> OwnGet<'a> {
         Self {
             keyexpr,
             opts,
+            parameters: opts.sent_parameters(),
             encoding: carries_value.then(|| {
                 stated
                     .map(|encoding| encoding.to_hint())
@@ -586,8 +679,7 @@ impl QueryView for OwnGet<'_> {
         self.keyexpr
     }
     fn parameters(&self) -> Option<&[u8]> {
-        self.opts
-            .parameters
+        self.parameters
             .as_deref()
             .filter(|parameters| !parameters.is_empty())
     }
@@ -632,9 +724,6 @@ pub(super) struct QueryPlane {
     #[cfg(feature = "local-queryable")]
     asking: AtomicBool,
     pub(super) holds: Mutex<FinalHolds>,
-    /// The queries waiting for their callbacks, in the order they arrived: the call begun on the
-    /// row of the queryable each matched, the query, and the generation of its link.
-    pub(super) queries: Queued<VecDeque<(QueryableCall, OwnedQuery, u64)>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -643,48 +732,66 @@ pub(super) struct QueryPlane {
     /// nothing of the query is copied (`local-queryable`).
     #[cfg(feature = "local-queryable")]
     asked: Mutex<Asked>,
-    /// The rows of undeclared queryables taken out of the session's tables whose drop has not
-    /// ended ([`LettingGo`]): an undeclaration that waits for its row reads that none is under way.
-    letting_go: AtomicUsize,
 }
 
 /// The calls begun on the queryables of the session one of its own gets reached, as many as the
 /// session can declare.
+///
+/// A fixed array the get takes out of the plane whole and holds in its own frame while it hands
+/// the calls out with no lock held ([`QueryPlane::take_asked`]), so it takes no heap after the
+/// open; its cost is stack. One is `MAX_QUERYABLES` calls of a row's address each (8 bytes on a
+/// 64-bit target, 4 on a 32-bit one) and a length: at the build's default of 100 queryables, 808
+/// bytes on a 64-bit target and 404 on a 32-bit one. A queryable's
+/// callback that asks a get of its own session from inside the call holds a second one in a frame
+/// above the first, and so on: each get nested so holds a row of the plane's held Finals until
+/// its calls are handed ([`FinalHolds`]), so the nesting is at most the session's
+/// `MAX_PENDING_FINALS` deep (8 at the build's default, 6,464 bytes of these arrays on a 64-bit
+/// target), and the get past it is refused before it asks. Shared rows of the arena would hand a
+/// nested get's calls to the round when they overflow, which reorders the calls zenoh-pico makes
+/// inline, so the frame keeps its own.
 #[cfg(feature = "local-queryable")]
 pub(super) type Asked = BoundedVec<QueryableCall, { caps::MAX_QUERYABLES }, Static>;
 
-/// A row of an undeclared queryable being let go of, counted from before it leaves its table,
-/// under the session's lock, until this is dropped, after the row was ([`QueryPlane::letting_go`]).
-pub(super) struct LettingGo<'p>(&'p AtomicUsize);
-
-impl Drop for LettingGo<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
+// A call is a row's address alone; the stack cost stated on `Asked` holds while it stays so.
+#[cfg(feature = "local-queryable")]
+const _: () = assert!(core::mem::size_of::<QueryableCall>() <= core::mem::size_of::<usize>());
 
 impl QueryPlane {
-    /// A plane that holds the Finals of at most `rows` queries at once ([`FinalHolds`]).
-    pub(super) fn holding(rows: usize) -> Self {
+    /// A plane that holds the Finals of its queries in `holds` ([`FinalHolds`]), rows the
+    /// session's arena lent.
+    pub(super) fn over(holds: FinalHolds) -> Self {
         Self {
             generation: AtomicU64::new(0),
             arriving: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asking: AtomicBool::new(false),
-            holds: Mutex::new(FinalHolds::holding(rows)),
-            queries: Queued::new(VecDeque::new()),
+            holds: Mutex::new(holds),
             refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
-            letting_go: AtomicUsize::new(0),
         }
     }
 
-    /// What a query that reached the queryable `row`, the row `handle` names, does: hold its
-    /// Final and begin a call on the row, the query copied out for it; or, with no row left for
-    /// its Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it
-    /// and it is counted. Under the session's lock, from its dispatch.
-    pub(super) fn arrive(&self, handle: QueryableHandle, row: &QueryableRow, view: &dyn QueryView) {
+    /// Let go of the rows the held Finals lie in before the arena that lent them is given back:
+    /// what the session's last handle does, once its round ended the calls its records held. No
+    /// query is held after it: a kept query reaches the plane only through the engine, which is
+    /// being let go of.
+    pub(super) fn let_go(&self) {
+        let lent = core::mem::take(&mut *lock(&self.holds));
+        drop(lent);
+    }
+
+    /// What a query that reached the queryable `row` does: hold its
+    /// Final and begin a call on the row, the query held in `round` where its parts lie
+    /// ([`Round::offer_query`](wz_session_core::round::Round::offer_query)); or, with no row left for its
+    /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
+    /// it is counted. Under the session's lock, from its dispatch.
+    pub(super) fn arrive(
+        &self,
+        round: &crate::round::Round,
+        row: &QueryableRow,
+        view: &dyn QueryView,
+    ) {
         let generation = self.arriving_on();
         if !lock(&self.holds).admit(generation, view.rid()) {
             self.refused.fetch_add(1, Ordering::Relaxed);
@@ -696,7 +803,7 @@ impl QueryPlane {
             lock(&self.holds).release(generation, view.rid());
             return;
         };
-        let call = QueryableCall { call, handle };
+        let call = QueryableCall { call };
         // The session's own get is handed to the queryables it matched by the get itself, from its
         // own view, so this notes only which; one past the list waits as a link's query does.
         #[cfg(feature = "local-queryable")]
@@ -708,22 +815,13 @@ impl QueryPlane {
         } else {
             call
         };
-        self.queries
-            .lock()
-            .push_back((call, OwnedQuery::of(view), generation));
-    }
-
-    /// Count a row of an undeclared queryable as being let go of: taken before the row leaves its
-    /// table, under the session's lock, and dropped once the row was dropped, with no lock held.
-    pub(super) fn letting_go(&self) -> LettingGo<'_> {
-        self.letting_go.fetch_add(1, Ordering::AcqRel);
-        LettingGo(&self.letting_go)
-    }
-
-    /// Whether no row of an undeclared queryable is being let go of: what an undeclaration that
-    /// waits for its row reads once the row left its table.
-    pub(super) fn let_go_settled(&self) -> bool {
-        self.letting_go.load(Ordering::Acquire) == 0
+        // A link's query is held in the round of deliveries, read where its parts lie, and handed
+        // to the callback in the order it came among the records; one the round has no room for
+        // owes its Final as one that reached no queryable.
+        // SAFETY: a query arrives from the session's dispatch, under the session's lock.
+        if !unsafe { round.offer_query(call, view, generation) } {
+            lock(&self.holds).release(generation, view.rid());
+        }
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty.
@@ -749,6 +847,37 @@ impl QueryPlane {
         let result = ask();
         self.asking.store(false, Ordering::Release);
         result
+    }
+}
+
+#[cfg(test)]
+impl FinalHolds {
+    /// Room for the Finals of `rows` queries, in rows lent from an arena the test leaks.
+    pub(super) fn leaked(rows: usize) -> Self {
+        use wz_session_core::bounded::Arena;
+        let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
+        let refused =
+            Arena::table_bytes::<RefusedFinal>(rows).expect("rows the address space holds");
+        let arena: &'static mut crate::arena::SessionArena = Box::leak(Box::new(
+            crate::arena::SessionArena::of_bytes(
+                held.saturating_add(refused),
+                &crate::arena::AllocatorMemory,
+            )
+            .expect("the host has the memory"),
+        ));
+        let mut lend = arena.lender();
+        let holds = Self::over(lend.table(rows), lend.table(rows));
+        lend.finish().expect("the arena has the rows");
+        holds
+    }
+}
+
+#[cfg(test)]
+impl QueryPlane {
+    /// A plane that holds the Finals of at most `rows` queries at once, in rows lent from an
+    /// arena the test leaks.
+    pub(super) fn leaked(rows: usize) -> Self {
+        Self::over(FinalHolds::leaked(rows))
     }
 }
 
@@ -806,33 +935,23 @@ pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone +
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
-    fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery> {
-        let answering = Answering::innermost();
-        let held = self.engine.upgrade().and_then(|engine| {
-            let (at, generation, rid) = answering?;
-            // Only the query this thread is answering, of this engine, can be held: a hold taken
-            // anywhere else would come after the Final it was meant to keep.
-            if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
-                return None;
-            }
-            // The query is being answered, so its Final is held already and this takes no row.
-            lock(&engine.plane.holds)
-                .take(generation, rid)
-                .then_some((generation, rid))
-        });
-        Box::new(CoopHeld {
-            engine: self.engine.clone(),
-            held,
-            keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec),
-            qos: view.qos(),
-        })
+    fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
+        let engine = self.engine.upgrade().ok_or(Refusal::Closed)?;
+        let Some((at, generation, rid)) = Answering::innermost() else {
+            return Ok(None);
+        };
+        // Only the query this thread is answering, of this engine, can be kept: a hold taken
+        // anywhere else would come after the Final it was meant to keep.
+        if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
+            return Ok(None);
+        }
+        engine.keep(generation, view)
     }
 
     fn session_closed(&self) -> bool {
         self.engine
             .upgrade()
-            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
+            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
     }
 }
 
@@ -842,50 +961,56 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     pub(crate) fn queries_refused(&self) -> u64 {
         self.plane.refused.load(Ordering::Relaxed)
     }
-}
 
-/// A query a C program keeps past its callback ([`HeldQuery`]). `held` is the generation and
-/// request id of the hold it took, `None` for one taken outside a callback, which holds nothing
-/// and answers nothing.
-struct CoopHeld<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    engine: Weak<CoopEngine<L, C>>,
-    held: Option<(u64, wz_session_core::wire_id::RequestId)>,
-    keyexpr: String,
-    parameters: Option<Vec<u8>>,
-    qos: QosLevel,
-}
+    /// Keep the query `view` describes, which this thread's callback answers under link
+    /// `generation` and whose row its call holds: the row keeps what its replies are built from
+    /// beside its key, which the caller keeps, and one hold more of its Final. A query kept already
+    /// is kept once more. Refused, holding nothing, as [`QueryHolder::keep_query`] says.
+    fn keep(&self, generation: u64, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
+        if super::SessionEngine::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        let id = HeldQueryId {
+            generation,
+            rid: view.rid(),
+        };
+        let mut holds = lock(&self.plane.holds);
+        if let Some(again) = holds.keep_again(generation, id.rid) {
+            return again.map(|_| Some(id));
+        }
+        let answer = (
+            ReplyKeyExpr::from_parameter_bytes(view.parameters()),
+            view.qos(),
+        );
+        if holds.keep(generation, id.rid, answer) {
+            Ok(Some(id))
+        } else {
+            Err(Refusal::TableFull)
+        }
+    }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for CoopHeld<L, C> {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-        let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) else {
+    /// Answer the kept query `id`, whose key is `key`, with what `answer` writes
+    /// ([`super::SessionEngine::reply_held`]). The reply holds a keep of its own while it answers,
+    /// so a release of the caller's keep from another thread meanwhile sends no Final before it.
+    pub(super) fn reply_kept(
+        &self,
+        id: HeldQueryId,
+        key: &str,
+        answer: &mut dyn FnMut(&mut dyn ReplyOut),
+    ) {
+        if super::SessionEngine::is_closed(self) {
+            return;
+        }
+        let kept = lock(&self.plane.holds).keep_again(id.generation, id.rid);
+        let Some(Ok((accept, qos))) = kept else {
             return;
         };
-        let mut onward = Onward::to(&engine, generation);
+        let mut onward = Onward::to(self, id.generation);
         {
-            let mut responder = responder_for(
-                rid,
-                &self.keyexpr,
-                self.parameters.as_deref(),
-                self.qos,
-                &mut onward,
-            );
+            let mut responder = QueryResponder::borrowing(id.rid, key, accept, qos, &mut onward);
             answer(&mut responder);
         }
-        engine.answer(generation, rid, false);
-    }
-
-    fn session_closed(&self) -> bool {
-        self.engine
-            .upgrade()
-            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
-    }
-}
-
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {
-    fn drop(&mut self) {
-        if let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) {
-            engine.answer(generation, rid, true);
-        }
+        self.answer(id.generation, id.rid, Release::Kept);
     }
 }
 
@@ -917,7 +1042,7 @@ mod tests {
     #[test]
     fn a_full_table_refuses_the_row_and_keeps_the_one_held() {
         let (first, refused, still_full, next) = within_five_seconds("a refused take", || {
-            let holds = Mutex::new(FinalHolds::holding(1));
+            let holds = Mutex::new(FinalHolds::leaked(1));
             let first = OwnFinalHold::take(&holds, 1);
             let refused = OwnFinalHold::take(&holds, 2).is_none();
             let still_full = OwnFinalHold::take(&holds, 3).is_none();
@@ -944,7 +1069,7 @@ mod refusal_tests {
     /// first request, held, whose Final waits for its hold.
     #[test]
     fn a_request_no_row_holds_is_refused_with_its_final() {
-        let mut holds = FinalHolds::holding(1);
+        let mut holds = FinalHolds::leaked(1);
         assert!(
             holds.admit(1, 7),
             "CONTROL: the one row holds the first request"
@@ -976,16 +1101,239 @@ mod refusal_tests {
         );
     }
 
+    /// A hold past the most a count holds is refused, and the holds already counted keep the
+    /// Final held: a release lets go of one of them, not of the row.
+    ///
+    /// # Control
+    ///
+    /// A `take` that wraps or saturates the count reds the refusal or the release.
+    #[test]
+    fn a_hold_past_the_counts_bound_is_refused_and_the_final_stays_held() {
+        let mut holds = FinalHolds::leaked(1);
+        assert!(holds.take(1, 7), "CONTROL: the one row is taken");
+        for hold in holds.holds.iter_mut() {
+            hold.holds = usize::MAX;
+        }
+        assert!(!holds.take(1, 7), "no count past the bound");
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the Final waits for the holds counted"
+        );
+        assert!(
+            holds.release(1, 7).is_none(),
+            "one release lets go of one hold, not the row"
+        );
+        assert_eq!(holds.holds.len(), 1, "the row is still held");
+    }
+
+    /// A query kept past its callback holds its Final, and what its replies are built from, until
+    /// its last keep is let go of: a second keep answers what the first kept, the callback's own
+    /// hold ending leaves the Final held, and the last keep sends the Final owed and forgets the
+    /// query. The CONTROL is the first release, which lets go of a keep and nothing else. Turned
+    /// red by a release that sends the Final before the last keep, or that leaves the query kept.
+    #[test]
+    fn a_kept_query_holds_its_final_until_its_last_keep() {
+        let mut holds = FinalHolds::leaked(1);
+        assert!(holds.admit(1, 7), "the callback's hold");
+        assert_eq!(holds.keep_again(1, 7), None, "not kept yet");
+        let answer = (ReplyKeyExpr::Any, QosLevel::DEFAULT);
+        assert!(holds.keep(1, 7, answer), "the first keep");
+        assert!(!holds.keep(1, 7, answer), "a first keep of a kept query");
+        assert_eq!(holds.keep_again(1, 7), Some(Ok(answer)), "a second keep");
+        assert!(holds.release(1, 7).is_none(), "the callback returned");
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the keeps hold the Final"
+        );
+        assert_eq!(holds.release_kept(1, 7), None, "CONTROL: one keep is left");
+        assert_eq!(
+            holds.release_kept(1, 7),
+            Some(QosLevel::DEFAULT),
+            "the Final owed goes out with the last keep"
+        );
+        assert_eq!(holds.keep_again(1, 7), None, "nothing is kept");
+        assert!(holds.holds.is_empty(), "the row went with the last hold");
+    }
+
+    /// A keep of a query no row holds keeps nothing, a keep past the most a count holds is refused
+    /// and keeps the holds counted, and a query nothing keeps lets go of nothing at a release of
+    /// a keep.
+    #[test]
+    fn a_keep_no_row_holds_is_refused_and_a_query_not_kept_releases_nothing() {
+        let mut holds = FinalHolds::leaked(1);
+        let answer = (ReplyKeyExpr::MatchingQuery, QosLevel::DEFAULT);
+        assert!(!holds.keep(1, 7, answer), "no row holds the query");
+        assert!(holds.admit(1, 7), "CONTROL: the callback's hold");
+        assert_eq!(holds.release_kept(1, 7), None);
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the callback's hold still holds the Final"
+        );
+        assert!(holds.keep(1, 7, answer), "kept");
+        for hold in holds.holds.iter_mut() {
+            hold.holds = usize::MAX;
+        }
+        assert_eq!(
+            holds.keep_again(1, 7),
+            Some(Err(Refusal::TableFull)),
+            "no count past the bound"
+        );
+    }
+
     /// A hold taken outside a dispatch (a get of the session's own) and refused notes no
     /// refusal: the Final of that request id is not withheld from the dispatch that owes it.
     #[test]
     fn a_refused_take_withholds_no_final() {
-        let mut holds = FinalHolds::holding(1);
+        let mut holds = FinalHolds::leaked(1);
         assert!(holds.take(0, 1), "CONTROL: the one row is taken");
         assert!(!holds.take(0, 2), "every row taken: refused");
         assert!(
             holds.owe(0, 2, QosLevel::DEFAULT),
             "a refused take noted nothing, so the Final goes out"
         );
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod round_tests {
+    //! A link's query held in the session's round of deliveries: handed to the queryable it reached
+    //! with its parts read where they lie, its call ended by the round.
+    use super::*;
+    use crate::round::{AnswersQueries, CoopCalls};
+
+    /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
+    /// where they lie, the generation it came in under, and its encoding's packed id with where
+    /// its schema lies.
+    type Noted = std::sync::Mutex<Vec<(String, Option<Vec<u8>>, usize, u64, Option<(u32, usize)>)>>;
+
+    /// An engine stand-in that notes what it is asked to answer.
+    struct Noting(Noted);
+
+    impl AnswersQueries<CoopCalls> for Noting {
+        fn answer_query(&self, _call: &QueryableCall, query: &dyn QueryView, generation: u64) {
+            self.0.lock().unwrap().push((
+                query.keyexpr().to_owned(),
+                query.parameters().map(<[u8]>::to_vec),
+                query
+                    .parameters()
+                    .map_or(0, |parameters| parameters.as_ptr() as usize),
+                generation,
+                query.encoding_parts().map(|(packed_id, schema)| {
+                    (
+                        packed_id,
+                        schema.map_or(0, |schema| schema.as_ptr() as usize),
+                    )
+                }),
+            ));
+        }
+    }
+
+    /// A query whose key, parameters and encoding lie where the test lends them.
+    struct Asked<'d> {
+        key: &'d str,
+        parameters: &'d [u8],
+        encoding: Option<(u32, Option<&'d [u8]>)>,
+    }
+
+    impl QueryView for Asked<'_> {
+        fn keyexpr(&self) -> &str {
+            self.key
+        }
+
+        fn parameters(&self) -> Option<&[u8]> {
+            Some(self.parameters)
+        }
+
+        fn attachment(&self) -> Option<&[u8]> {
+            None
+        }
+
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            self.encoding
+        }
+
+        fn rid(&self) -> wz_session_core::wire_id::RequestId {
+            3
+        }
+
+        fn qos(&self) -> QosLevel {
+            QosLevel::DEFAULT
+        }
+    }
+
+    /// A queryable's row, boxed so it lies where it is while a call of it runs.
+    fn row() -> Box<QueryableRow> {
+        Box::new(QueryableRow::new(
+            1,
+            None,
+            WireKey::literal(),
+            QueryableSink::shared(|_, _, _| {}),
+        ))
+    }
+
+    /// The datagram a query of key `demo/q` and parameters `a=1` lies in.
+    const DATAGRAM: [u8; 10] = *b"demo/q?a=1";
+
+    /// A query that lies in a lent datagram is held in the round and handed, on its delivery, to
+    /// the engine that answers it, its key, parameters and encoding's schema read where they lie
+    /// and its link's generation with it; the round ends its call, so the row has none running
+    /// after. Turned red by a round that copies the query's parts, drops its encoding or keeps
+    /// its call.
+    #[test]
+    fn a_query_is_handed_where_its_parts_lie_and_its_call_ended() {
+        let datagram = DATAGRAM;
+        let key = core::str::from_utf8(&datagram[..6]).expect("a key");
+        let round = crate::round::leaked(4);
+        let noting = Arc::new(Noting(Noted::default()));
+        // Made of the stand-in's own type, then unsized where the round takes it.
+        let answering: Weak<Noting> = Arc::downgrade(&noting);
+        round.answer_queries_with(answering);
+        let row = row();
+        // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+        unsafe { round.set_lending(Some(&datagram[..])) };
+        // The schema is a range of the datagram as a frame's would be: here, its key's first part.
+        let asked = Asked {
+            key,
+            parameters: &datagram[7..],
+            encoding: Some((0x0B, Some(&datagram[..4]))),
+        };
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row), &asked, 7) });
+        unsafe { round.set_lending(None) };
+        unsafe { round.seal() };
+        assert!(round.deliver());
+        assert_eq!(
+            *noting.0.lock().unwrap(),
+            [(
+                "demo/q".to_owned(),
+                Some(b"a=1".to_vec()),
+                datagram[7..].as_ptr() as usize,
+                7,
+                Some((0x0B, datagram.as_ptr() as usize))
+            )],
+            "handed where its parameters and schema lie, under its link's generation"
+        );
+        assert!(row.retire(), "the round ended the call");
+    }
+
+    /// The CONTROL: a round no engine answers through hands the query to none, and ends its call
+    /// all the same.
+    #[test]
+    fn a_round_no_engine_answers_through_ends_the_call_unhanded() {
+        let datagram = DATAGRAM;
+        let key = core::str::from_utf8(&datagram[..6]).expect("a key");
+        let round = crate::round::leaked(4);
+        let row = row();
+        // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
+        unsafe { round.set_lending(Some(&datagram[..])) };
+        let asked = Asked {
+            key,
+            parameters: &datagram[7..],
+            encoding: None,
+        };
+        assert!(unsafe { round.offer_query(QueryableCall::begun(&row), &asked, 7) });
+        unsafe { round.set_lending(None) };
+        unsafe { round.seal() };
+        assert!(round.deliver());
+        assert!(row.retire(), "the round ended the call");
     }
 }

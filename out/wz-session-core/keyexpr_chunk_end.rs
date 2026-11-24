@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_chunk_end.scxml:10 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -19,8 +19,8 @@ pub fn keyexpr_chunk_end(k: &[u8], s: u32) -> u32 {
         return n;
     }
     let mut i: u32 = s;
-    while i < n && k[(i) as usize] != 47 {
-        i = i + 1;
+    while i < n && sce_forge_runtime::algorithm::proven::at(&k, i) != 47 {
+        i = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
     }
     return i;
 }

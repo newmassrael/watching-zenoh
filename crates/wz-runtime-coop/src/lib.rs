@@ -236,9 +236,12 @@ pub mod session_runtime;
 // from `wz-session-lwip`, where it was typed on lwIP, so that a profile whose
 // network stack is not lwIP (Zephyr's own sockets) drives the same loop.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-203 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod session_drive;
+
+// An endpoint's text read into the locator a link opens towards, for every engine over this
+// runtime that dials or listens. Documented in its own `//!`.
+#[cfg(feature = "session-unicast")]
+pub mod locator_text;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
@@ -315,12 +318,38 @@ pub mod faces;
     target_has_atomic = "ptr"
 ))]
 pub mod face_life;
+// The decisions of a face's sends as a value: what a publish behind a held session does, what is
+// kept for the faces it is still owed to, and the order of a publish's fan-outs.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod face_send;
+// The refusals of the transport of a session over those faces. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod transport;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket
 // of the system's. Documented in its own `//!`.
 #[cfg(all(feature = "app-link", feature = "alloc", not(feature = "session-slot")))]
 pub mod app_link;
+
+// Two stacks as one, for a library that opens a session over either of them: the engine over
+// them is one type and is built once. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub mod either_links;
 
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no

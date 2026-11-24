@@ -77,7 +77,11 @@ const SLACK_DIVISOR: u64 = 4;
 /// Start the backstop for the establishment `actions` is in now. Returns at
 /// once; a session whose keepalive worker is not running has nothing to pace.
 pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: TokioTime) {
-    if !TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed) {
+    if !actions
+        .link
+        .keepalive_armed
+        .load(core::sync::atomic::Ordering::SeqCst)
+    {
         return;
     }
     let Some(generation) = established_at(actions) else {
@@ -122,7 +126,10 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
 /// reads the lateness would take, an interval after its cut, for the cut not having worked.
 fn worker_runs(weak: &Weak<SessionLinkActions>) -> bool {
     weak.upgrade().is_some_and(|actions| {
-        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed)
+        actions
+            .link
+            .keepalive_armed
+            .load(core::sync::atomic::Ordering::SeqCst)
     })
 }
 

@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_dsl_matches.scxml:20 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -35,19 +35,19 @@ pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u3
         let mut after: u32 = pe;
         while last && q < pe {
             let mut star: bool = false;
-            if p[(q) as usize] == 36 {
-                let q1: u32 = q + 1;
+            if sce_forge_runtime::algorithm::proven::at(&p, q) == 36 {
+                let q1: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(q, 1);
                 if q1 < pe {
-                    if p[(q1) as usize] == 42 {
+                    if sce_forge_runtime::algorithm::proven::at(&p, q1) == 42 {
                         star = true;
-                        after = q1 + 1;
+                        after = sce_forge_runtime::algorithm::proven::add::<u32>(q1, 1);
                     }
                 }
             }
             if star {
                 last = false;
             } else {
-                q = q + 1;
+                q = sce_forge_runtime::algorithm::proven::add::<u32>(q, 1);
             }
         }
         if first {
@@ -57,11 +57,11 @@ pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u3
                 if lx >= te {
                     return false;
                 }
-                if p[(lk) as usize] != t[(lx) as usize] {
+                if sce_forge_runtime::algorithm::proven::at(&p, lk) != sce_forge_runtime::algorithm::proven::at(&t, lx) {
                     return false;
                 }
-                lk = lk + 1;
-                lx = lx + 1;
+                lk = sce_forge_runtime::algorithm::proven::add::<u32>(lk, 1);
+                lx = sce_forge_runtime::algorithm::proven::add::<u32>(lx, 1);
             }
             r = lx;
             first = false;
@@ -82,18 +82,18 @@ pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u3
                         if tx >= te {
                             tsame = false;
                         } else {
-                            if p[(tk) as usize] != t[(tx) as usize] {
+                            if sce_forge_runtime::algorithm::proven::at(&p, tk) != sce_forge_runtime::algorithm::proven::at(&t, tx) {
                                 tsame = false;
                             } else {
-                                tk = tk + 1;
-                                tx = tx + 1;
+                                tk = sce_forge_runtime::algorithm::proven::add::<u32>(tk, 1);
+                                tx = sce_forge_runtime::algorithm::proven::add::<u32>(tx, 1);
                             }
                         }
                     }
                     if tsame && tx == te {
                         return true;
                     }
-                    ts_ = ts_ + 1;
+                    ts_ = sce_forge_runtime::algorithm::proven::add::<u32>(ts_, 1);
                 }
                 return false;
             } else {
@@ -108,11 +108,11 @@ pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u3
                             if mx >= te {
                                 msame = false;
                             } else {
-                                if p[(mk) as usize] != t[(mx) as usize] {
+                                if sce_forge_runtime::algorithm::proven::at(&p, mk) != sce_forge_runtime::algorithm::proven::at(&t, mx) {
                                     msame = false;
                                 } else {
-                                    mk = mk + 1;
-                                    mx = mx + 1;
+                                    mk = sce_forge_runtime::algorithm::proven::add::<u32>(mk, 1);
+                                    mx = sce_forge_runtime::algorithm::proven::add::<u32>(mx, 1);
                                 }
                             }
                         }
@@ -120,7 +120,7 @@ pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u3
                             r = mx;
                             mfound = true;
                         } else {
-                            ms = ms + 1;
+                            ms = sce_forge_runtime::algorithm::proven::add::<u32>(ms, 1);
                         }
                     }
                     if !mfound {

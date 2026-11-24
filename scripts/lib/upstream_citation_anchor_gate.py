@@ -1047,7 +1047,7 @@ def rootless_candidate_teachers(
     teachers: dict[str, set[str]] = {}
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         for pat in (BARE_CITE, LINE_CITE, ANCHOR_CITE):
@@ -1076,7 +1076,7 @@ def segment_occurrences_by_file(
     by_seg: dict[str, collections.Counter[str]] = {}
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         text = GONE_CITE.sub(lambda m: " " * len(m.group(0)), text)
@@ -1258,7 +1258,7 @@ def upstream_roots_missing(
     seen: set[str] = set()
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         for m in pat.finditer(text):
@@ -1299,6 +1299,91 @@ def tracked_files(root: pathlib.Path) -> list[str]:
         check=True,
     ).stdout.split()
     return [f for f in out if not f.startswith(SKIP_PREFIXES)]
+
+
+_TOML_ESCAPES = {
+    "b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\",
+}
+
+
+def toml_decoded(text: str) -> str:
+    """`text` with each TOML basic string's escapes replaced by the characters
+    they stand for, and everything else -- comments, literal strings, keys and
+    the delimiters themselves -- left as written.
+
+    A citation in a TOML string is a claim made by the string's VALUE: that is
+    what the generators emit and what a reader of the configuration reads, so a
+    needle quoting C source written as `\\"a\\"` in a basic string names the
+    `"a"` the source has. Read raw, the backslash would be looked for in the
+    source and the needle would never resolve. A literal string has no escapes,
+    so its backslash stays and is looked for as written."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "#":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(text[i:end])
+            i = end
+        elif c == "'":
+            delim = "'''" if text.startswith("'''", i) else "'"
+            end = text.find(delim, i + len(delim))
+            end = n if end < 0 else end + len(delim)
+            out.append(text[i:end])
+            i = end
+        elif c == '"':
+            multi = text.startswith('"""', i)
+            delim = '"""' if multi else '"'
+            out.append(delim)
+            i += len(delim)
+            while i < n and not text.startswith(delim, i):
+                ch = text[i]
+                if ch == "\n" and not multi:
+                    break
+                if ch == "\\" and i + 1 < n:
+                    esc = text[i + 1]
+                    if esc in _TOML_ESCAPES:
+                        out.append(_TOML_ESCAPES[esc])
+                        i += 2
+                        continue
+                    width = {"u": 4, "U": 8}.get(esc, 0)
+                    digits = text[i + 2:i + 2 + width]
+                    if width and len(digits) == width and all(
+                            d in "0123456789abcdefABCDEF" for d in digits):
+                        code = int(digits, 16)
+                        if code <= 0x10FFFF:
+                            out.append(chr(code))
+                            i += 2 + width
+                            continue
+                    if multi and esc in " \t\r\n":
+                        # A line-ending backslash: the value skips the
+                        # whitespace and newlines up to the next character.
+                        i += 1
+                        while i < n and text[i] in " \t\r\n":
+                            i += 1
+                        continue
+                out.append(ch)
+                i += 1
+            if multi:
+                # Up to two quotes before the closing three belong to the value.
+                while text.startswith('""""', i):
+                    out.append('"')
+                    i += 1
+            if text.startswith(delim, i):
+                out.append(delim)
+                i += len(delim)
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def cited_text(path: pathlib.Path) -> str:
+    """The text of a tracked file as its citations are read: a TOML file's
+    basic strings decoded (`toml_decoded`), every other file as written."""
+    text = path.read_text(errors="replace")
+    return toml_decoded(text) if path.suffix == ".toml" else text
 
 
 def upstream_root() -> pathlib.Path | None:
@@ -1390,7 +1475,7 @@ def scan(
 
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         # THE ABSENCE MARKER IS MASKED FIRST, before every other form.
@@ -1616,7 +1701,7 @@ def scan_pico(
     blank = lambda _m: " " * len(_m.group(0))  # noqa: E731
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         spans: list[tuple[int, int]] = []
@@ -1673,7 +1758,7 @@ def scan_basenames(files: list[str], root: pathlib.Path, names: set[str]) -> int
     n = 0
     for rel in files:
         try:
-            text = (root / rel).read_text(errors="replace")
+            text = cited_text(root / rel)
         except (OSError, UnicodeError):
             continue
         n += sum(1 for m in BASENAME_LINE_CITE.finditer(text) if m.group(1) not in names)
@@ -3134,6 +3219,31 @@ def selftest() -> int:
             failures.append(
                 "pico axis: a wrapped anchor, a line and a template path must "
                 f"count one each with no finding, got {c} {f}")
+        # A TOML basic string is read as its value: an escaped quote in a needle
+        # is the quote the source has. A literal string and a Rust comment keep
+        # the backslash, so the same text there names nothing.
+        toml_in = (r'a = "x\"y\u0041" # "\"' + "\n" + r"b = '\"'" + "\n"
+                   + 'c = """q\\' + "\n" + '   r""""' + "\n")
+        toml_want = (r'a = "x"yA" # "\"' + "\n" + r"b = '\"'" + "\n"
+                     + 'c = """qr""""' + "\n")
+        if toml_decoded(toml_in) != toml_want:
+            failures.append(
+                "toml_decoded: escapes in basic strings only, comments and literal "
+                f"strings as written: got {toml_decoded(toml_in)!r}, want {toml_want!r}")
+        PICO_NAMES = _p(PICO_ROOT, "src", "net", "names.c")
+        (pico_ref / "src" / "net" / "names.c").write_text('const char *uri = "a/b";\n')
+        quoted = "`" + PICO_NAMES + "` @ `const char *uri = " + r'\"a/b\";' + "`"
+        for name, body, want_findings in (
+            ("q.toml", f'reason = "{quoted}"\n', 0),
+            ("q.toml", f"reason = '{quoted}'\n", 1),
+            ("q.rs", f"// {quoted}\n", 1),
+        ):
+            (psrc / name).write_text(body)
+            qc, qf = scan_pico([name], psrc, pico_ref)
+            if qc["anchored"] != 1 or len(qf) != want_findings:
+                failures.append(
+                    f"pico axis: an escaped-quote needle in {body.strip()!r} must "
+                    f"count one anchor with {want_findings} finding(s), got {qc} {qf}")
         saved = {k: globals()[k] for k in _BUDGETS[-3:]}
         try:
             globals().update(PICO_LINE_BUDGET=0, PICO_BARE_BUDGET=0, BASENAME_LINE_BUDGET=0)

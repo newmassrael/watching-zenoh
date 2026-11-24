@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, QblId, QueryCallback, QueryHolder, Refusal, ReplyCallback,
-    SessionDrive, SessionEngine, WireKey,
+    FilterPlane, HeldQueryId, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
@@ -22,13 +22,14 @@ use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+use wz_session_core::sample::SourceInfo;
 
 use super::get::{ask, settle, Leg};
 use super::{open, until, CatchAll, Command, Engine, Router};
 
-/// What the queryable of `a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns`
-/// saw of the get it made from inside its callback: whether it was issued, whether it was still
-/// open with no reply when the get returned, and its leg.
+/// What the queryable of `a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once`
+/// saw of the get it made from inside its callback: whether it was issued, whether the callback had
+/// been called on the get's query by the time the get returned, and its leg.
 type InnerGet = Arc<Mutex<Option<(Result<usize, Refusal>, bool, Arc<Mutex<Leg>>)>>>;
 
 /// What a queryable was shown of each get: its parameters, payload and attachment, and whether it
@@ -40,9 +41,8 @@ fn declare(
     engine: &Engine,
     keyexpr: &str,
     origin: Locality,
-    answer: impl Fn(&Arc<dyn QueryHolder>, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
+    answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
 ) -> QblId {
-    let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -50,12 +50,7 @@ fn declare(
             false,
             origin,
             None,
-            Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                let answer = answer.clone();
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    answer(&holder, query, out)
-                }) as QueryCallback
-            }),
+            QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build")
 }
@@ -298,14 +293,14 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::new(Mutex::new(None));
     let slot = kept.clone();
     declare(
         &engine,
         "demo/lq/**",
         Locality::Any,
         move |holder, query, _out| {
-            *slot.lock().unwrap() = Some(holder.hold_query(query));
+            *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
         },
     );
 
@@ -331,7 +326,7 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
     );
 
     let held = kept.lock().unwrap().take().expect("the kept query");
-    held.reply(&mut |out| {
+    engine.reply_held(held, "demo/lq/a", &mut |out| {
         out.reply_keyed("demo/lq/a", b"later")
             .expect("a reply on the query's own key");
     });
@@ -343,7 +338,7 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
             [(ReplyKind::Put, "demo/lq/a".to_owned(), b"later".to_vec())]
         );
     }
-    drop(held);
+    engine.release_held(held);
     assert!(leg.lock().unwrap().ended, "the last hold let go: the Final");
 }
 
@@ -365,7 +360,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
             .declare_matching_listener(
                 plane,
                 "demo/lq/x",
-                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
                 count_local,
             )
             .expect("a session with rows left declares");
@@ -425,43 +420,53 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
 }
 
 /// A get a queryable of the session makes from inside its own callback, on a key that queryable
-/// answers, cannot reach that callback while it runs: its query waits for the callback to return
-/// and is answered then, still inside the outer get. The CONTROL is the inner get as the callback
-/// saw it: issued, and open with no reply.
+/// answers, reaches that callback there and then, inside the running call, as zenoh-pico calls a
+/// queryable's callback where the get stands (`vendor/zenoh-pico/src/session/queryable.c` @
+/// `qle_info->_callback(&query, qle_info->_arg);`): the callback is entered on the inner query
+/// and returns before the outer call does, and both gets end answered inside the outer get. Turned
+/// red by a session that keeps the inner query until the callback returns.
 #[test]
-fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
+fn a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let session = Arc::downgrade(&engine);
     let inner: InnerGet = Arc::default();
     let into = inner.clone();
+    // Each entry and return of the callback, by the key of the query it was called on.
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = calls.clone();
     declare(
         &engine,
         "demo/lq/**",
         Locality::Any,
         move |_, query, out| {
+            log.lock()
+                .unwrap()
+                .push(format!("enter {}", query.keyexpr()));
             out.reply_keyed(query.keyexpr(), b"own")
                 .expect("a reply on the query's own key");
-            if query.keyexpr() != "demo/lq/outer" {
-                return;
+            if query.keyexpr() == "demo/lq/outer" {
+                if let Some(engine) = session.upgrade() {
+                    let (issued, leg) = ask(
+                        &engine,
+                        "demo/lq/inner",
+                        &get_for(Locality::SessionLocal),
+                        None,
+                        None,
+                        None,
+                    );
+                    let reached = log
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|call| call == "exit demo/lq/inner");
+                    *into.lock().unwrap() = Some((issued, reached, leg));
+                }
             }
-            let Some(engine) = session.upgrade() else {
-                return;
-            };
-            let (issued, leg) = ask(
-                &engine,
-                "demo/lq/inner",
-                &get_for(Locality::SessionLocal),
-                None,
-                None,
-                None,
-            );
-            let open = {
-                let seen = leg.lock().unwrap();
-                !seen.ended && seen.replies.is_empty()
-            };
-            *into.lock().unwrap() = Some((issued, open, leg));
+            log.lock()
+                .unwrap()
+                .push(format!("exit {}", query.keyexpr()));
         },
     );
 
@@ -482,21 +487,28 @@ fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
             [(ReplyKind::Put, "demo/lq/outer".to_owned(), b"own".to_vec())]
         );
     }
-    let (inner_issued, open_inside, leg) = inner
+    let (inner_issued, reached_inside, leg) = inner
         .lock()
         .unwrap()
         .take()
         .expect("the callback made its get");
     assert_eq!(inner_issued, Ok(1));
     assert!(
-        open_inside,
-        "CONTROL: inside the callback the inner get was asked and not answered"
+        reached_inside,
+        "the inner query reached the callback before the inner get returned"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            "enter demo/lq/outer",
+            "enter demo/lq/inner",
+            "exit demo/lq/inner",
+            "exit demo/lq/outer",
+        ],
+        "the callback was entered on the inner query inside the outer call"
     );
     let leg = leg.lock().unwrap();
-    assert!(
-        leg.ended,
-        "answered once the callback returned, inside the outer get"
-    );
+    assert!(leg.ended, "the inner get ended inside the outer get");
     assert_eq!(
         leg.replies,
         [(ReplyKind::Put, "demo/lq/inner".to_owned(), b"own".to_vec())]
@@ -512,7 +524,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
     settle(&router, &engine, Command::Silence);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::new(Mutex::new(None));
     let asked = Arc::new(AtomicUsize::new(0));
     let (slot, count) = (kept.clone(), asked.clone());
     declare(
@@ -521,7 +533,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
         Locality::Any,
         move |holder, query, _out| {
             count.fetch_add(1, Ordering::SeqCst);
-            *slot.lock().unwrap() = Some(holder.hold_query(query));
+            *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
         },
     );
     let (issued, first) = ask(
@@ -562,8 +574,8 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
     }
     assert_eq!(router.seen(|s| s.queries), 0, "nothing was sent");
 
-    let held = kept.lock().unwrap().take();
-    drop(held);
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    engine.release_held(held);
     assert!(
         first.lock().unwrap().ended,
         "the kept query let go: its Final"
@@ -618,5 +630,106 @@ fn a_queryable_of_the_session_reads_what_its_own_get_carries() {
             ),
             (None, None, None, false),
         ]
+    );
+}
+
+/// A queryable that undeclares itself from inside its call on the session's own get does not wait
+/// for itself: the undeclaration returns inside the call, and the row is let go of once the call
+/// has returned, before the get does, by one walk of the session's tables. A get after it is
+/// answered by none and walks no table; the CONTROL is the first get, which the queryable answered.
+#[test]
+fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_get_returns() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let own: Arc<Mutex<Option<QblId>>> = Arc::default();
+    let guard = Dropped(dropped.clone());
+    let session = Arc::downgrade(&engine);
+    let id = declare(&engine, "demo/lq/self/**", Locality::Any, {
+        let own = own.clone();
+        move |_, query, out| {
+            let _held = &guard;
+            out.reply_keyed(query.keyexpr(), b"v")
+                .expect("a reply on the query's own key");
+            let id = own.lock().unwrap().take();
+            if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                engine.undeclare_queryable(id);
+            }
+        }
+    });
+    *own.lock().unwrap() = Some(id);
+    let walks = || engine.takes.walks.load(Ordering::SeqCst);
+    let before = walks();
+    let (issued, leg) = ask(
+        &engine,
+        "demo/lq/self/a",
+        &get_for(Locality::SessionLocal),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(issued, Ok(1));
+    assert_eq!(
+        leg.lock().unwrap().replies.len(),
+        1,
+        "CONTROL: the queryable answered"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "let go of once its own call returned, before the get did"
+    );
+    assert_eq!(walks() - before, 1, "one walk let the marked row go");
+    let (_, leg) = ask(
+        &engine,
+        "demo/lq/self/b",
+        &get_for(Locality::SessionLocal),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        leg.lock().unwrap().replies.is_empty(),
+        "nothing is left to answer"
+    );
+    assert_eq!(
+        walks() - before,
+        1,
+        "a get that leaves no row waiting walks no table"
+    );
+}
+
+/// A get for the session alone whose body the codec refuses (a source info that names no zid) asks
+/// none of the session's queryables, and its Final comes inside the call, as for a get no queryable
+/// matched. CONTROL: the same get with a source info that names a zid is answered.
+#[test]
+fn a_get_whose_body_the_codec_refuses_asks_no_own_queryable_and_ends() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    answering(&engine, "demo/lq/**", Locality::Any, b"any");
+
+    let refused = get_for(Locality::SessionLocal).with_source_info(SourceInfo::default());
+    let (issued, leg) = ask(&engine, "demo/lq/a", &refused, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let leg = leg.lock().unwrap();
+    assert!(leg.ended, "the Final came inside the get");
+    assert!(leg.replies.is_empty(), "no queryable was asked");
+    drop(leg);
+
+    let named = get_for(Locality::SessionLocal).with_source_info(SourceInfo::new(&[0x5a], 1, 2));
+    let (issued, leg) = ask(&engine, "demo/lq/a", &named, None, None, None);
+    assert_eq!(issued, Ok(1));
+    assert_eq!(
+        leg.lock().unwrap().replies.len(),
+        1,
+        "CONTROL: the queryable answered"
     );
 }

@@ -229,7 +229,7 @@ fn judge(
     frame: &[u8],
     now_ms: u64,
 ) -> Option<wz_ext_e2e_verdict_t> {
-    let mut verdict: wz_ext_e2e_verdict_t = unsafe { core::mem::zeroed() };
+    let mut verdict = wz_ext_e2e_verdict_t::default();
     // SAFETY: `rx` is an owned receiver or the gravestone; `frame` is readable; `verdict` writable.
     let rc = unsafe {
         wz_ext_e2e_receiver_judge(
@@ -446,7 +446,7 @@ fn protect_and_judge(
     if !unsafe { wz_ext_internal_e2e_receiver_check(trip) } {
         return;
     }
-    let mut verdict: wz_ext_e2e_verdict_t = unsafe { core::mem::zeroed() };
+    let mut verdict = wz_ext_e2e_verdict_t::default();
     // SAFETY: `trip` is a live owned receiver; `frame` is readable; `verdict` writable.
     let rc = unsafe {
         wz_ext_e2e_receiver_judge(

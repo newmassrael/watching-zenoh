@@ -58,12 +58,17 @@ use wz_session_core::session_memory::{session_tables, Captures, MemoryRow, Sessi
 
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
-use crate::session::{session_handle, z_loaned_session_t, PicoSessionHandle};
+use crate::session::{session_handle, z_loaned_session_t, SessionPlace};
+use crate::sized::{Out, SizedOut};
 
-/// The most memory a session holds, as `wz_ext_session_memory` reports it.
+/// The most memory a session holds, as `wz_ext_session_memory` reports it, into a struct the
+/// program sized (`crate::sized`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_session_memory_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// The sum of the rows that have a count: the most the session holds when `bounded` is 1.
     pub total_bytes: usize,
     /// How many rows `wz_ext_session_memory_row` reports.
@@ -75,10 +80,14 @@ pub struct wz_ext_session_memory_t {
     pub reserved: [u8; 6],
 }
 
-/// One part of what a session holds, as `wz_ext_session_memory_row` reports it.
+/// One part of what a session holds, as `wz_ext_session_memory_row` reports it, into a struct the
+/// program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_session_memory_row_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// What holds the bytes: a static string of the library.
     pub part: *const c_char,
     /// The limit, or the build's value, whose number sizes the row: a static string of the
@@ -223,7 +232,8 @@ impl MemoryBasis {
                 part: c"session handle",
                 basis: c"",
                 count: Some(1),
-                entry_bytes: core::mem::size_of::<PicoSessionHandle>(),
+                // The handle's place: the handle and the count of the session's closures beside it.
+                entry_bytes: core::mem::size_of::<SessionPlace>(),
                 enforced: true,
             },
             MemoryRow {
@@ -249,9 +259,7 @@ impl MemoryBasis {
             },
         ];
         for row in rows {
-            memory
-                .push(row)
-                .expect("the rows fit: asserted when the build is made");
+            put(&mut memory, row);
         }
         push_process_rows(&mut memory, process);
         memory
@@ -264,41 +272,76 @@ impl MemoryBasis {
 #[allow(unused_variables)]
 fn push_process_rows(memory: &mut SessionMemory, process: &ProcessRows) {
     #[cfg(feature = "supervision")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"process supervisor",
             basis: c"SUPERVISION_CHECKPOINTS",
             count: Some(1),
             entry_bytes: core::mem::size_of::<wz_session_core::supervisor::BuildSupervisor>(),
             enforced: true,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
     #[cfg(feature = "message-catalog")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"message catalog entries",
             basis: c"MESSAGE_CATALOG_ENTRIES",
             count: Some(process.message_catalog_entries),
             entry_bytes: core::mem::size_of::<wz_app_frame::message_catalog::Message>(),
             enforced: false,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
     #[cfg(feature = "e2e-supervision")]
-    memory
-        .push(MemoryRow {
+    put(
+        memory,
+        MemoryRow {
             part: c"stream supervisor rows",
             basis: c"E2E_SUPERVISED_STREAMS",
             count: Some(process.e2e_supervised_streams),
             entry_bytes: core::mem::size_of::<wz_session_core::stream_supervisor::StreamSlot>(),
             enforced: true,
-        })
-        .expect("the rows fit: asserted when the build is made");
+        },
+    );
+}
+
+/// Add `row` to a report the session core's tables began. The rows of those tables, this ABI's and
+/// the process's fit a report together, as the assertion beside `PROCESS_ROWS` checks when the
+/// build is made, so a push here is never refused.
+fn put(memory: &mut SessionMemory, row: MemoryRow) {
+    let _ = memory.push(row);
+}
+
+impl Default for wz_ext_session_memory_t {
+    /// Nothing reported, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            total_bytes: 0,
+            rows: 0,
+            bounded: 0,
+            enforced: 0,
+            reserved: [0; 6],
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_session_memory_t {
+    const BASE: usize = core::mem::size_of::<Self>();
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_session_memory_row_t {
+    const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// `row` as the C door hands it over.
 fn row_of(row: &MemoryRow) -> wz_ext_session_memory_row_t {
     let total = row.total();
     wz_ext_session_memory_row_t {
+        struct_size: core::mem::size_of::<wz_ext_session_memory_row_t>(),
         part: row.part.as_ptr(),
         basis: row.basis.as_ptr(),
         count: total.and(row.count).unwrap_or(0),
@@ -314,31 +357,35 @@ fn row_of(row: &MemoryRow) -> wz_ext_session_memory_row_t {
 /// how many rows there are, and whether every row has a count and whether the build refuses past
 /// every one. A closed session reports what it held while open.
 ///
-/// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`, a null session or one with no handle.
+/// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`, a null session or one with no handle;
+/// `Z_EINVAL` for a `struct_size` short of the struct, nothing written then.
 ///
 /// # Safety
-/// `session` is null or a loaned session of this library; `out` is null or writable.
+/// `session` is null or a loaned session of this library; `out` is null or a struct of
+/// `struct_size` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_session_memory(
     session: *const z_loaned_session_t,
     out: *mut wz_ext_session_memory_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         let Some(handle) = session_handle(session) else {
             return Z_ERR_NULL;
         };
         let memory = handle.memory.report();
         let total = memory.total();
-        *out = wz_ext_session_memory_t {
+        out.put(&wz_ext_session_memory_t {
+            struct_size: 0,
             total_bytes: memory.bounded_bytes(),
             rows: memory.rows().len(),
             bounded: u8::from(total.is_some()),
             enforced: u8::from(memory.is_enforced()),
             reserved: [0; 6],
-        };
+        });
         Z_OK
     })
 }
@@ -347,10 +394,12 @@ pub unsafe extern "C" fn wz_ext_session_memory(
 /// `wz_ext_session_memory` sums them.
 ///
 /// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`, a null session or one with no handle;
-/// `Z_EINVAL` for an index past the last row, leaving `*out` as it was.
+/// `Z_EINVAL` for an index past the last row, leaving `*out` as it was, and for a `struct_size`
+/// short of the struct, nothing written then.
 ///
 /// # Safety
-/// `session` is null or a loaned session of this library; `out` is null or writable.
+/// `session` is null or a loaned session of this library; `out` is null or a struct of
+/// `struct_size` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_session_memory_row(
     session: *const z_loaned_session_t,
@@ -358,9 +407,10 @@ pub unsafe extern "C" fn wz_ext_session_memory_row(
     out: *mut wz_ext_session_memory_row_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         let Some(handle) = session_handle(session) else {
             return Z_ERR_NULL;
         };
@@ -368,7 +418,7 @@ pub unsafe extern "C" fn wz_ext_session_memory_row(
         let Some(row) = memory.rows().get(index) else {
             return Z_EINVAL;
         };
-        *out = row_of(row);
+        out.put(&row_of(row));
         Z_OK
     })
 }
@@ -378,6 +428,26 @@ mod tests {
     use core::ffi::CStr;
 
     use super::*;
+
+    /// Both doors refuse, untouched, a struct a byte short of theirs, before the session is read.
+    /// Turned red by a write before the size is read.
+    #[test]
+    fn a_report_short_of_its_struct_is_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_session_memory_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size; no session is named.
+                unsafe { wz_ext_session_memory(core::ptr::null(), out) }
+            },
+            Z_EINVAL,
+        );
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_session_memory_row_t, _>(
+            |out| {
+                // SAFETY: as above.
+                unsafe { wz_ext_session_memory_row(core::ptr::null(), 0, out) }
+            },
+            Z_EINVAL,
+        );
+    }
 
     /// A row with no count is handed over as unbounded, with no count and no total, and never as
     /// enforced; a row with one carries its count, its entry and their product.
@@ -481,10 +551,7 @@ mod tests {
         assert_eq!(&memory.rows()[..tables.rows().len()], tables.rows());
         let handle = memory.rows()[tables.rows().len()];
         assert_eq!(handle.part, c"session handle");
-        assert_eq!(
-            handle.total(),
-            Some(core::mem::size_of::<PicoSessionHandle>())
-        );
+        assert_eq!(handle.total(), Some(core::mem::size_of::<SessionPlace>()));
         assert_eq!(memory.total(), None);
     }
 

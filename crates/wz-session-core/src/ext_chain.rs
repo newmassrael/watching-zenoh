@@ -788,26 +788,15 @@ pub(crate) fn collect_ext_chain<'a>(
 
 /// The verdict [`collect_ext_chain`] gives the chain `walked` yields, entry by entry, with
 /// nothing kept and nothing copied: for a reader that refuses the message whatever its chain
-/// says and needs only the refusals the decoder would have answered with (the in-place reader of
-/// a JOIN and of a transport OAM).
+/// says and needs only the refusals the decoder would have answered with (a participant's reads
+/// of a JOIN and of a transport OAM, in place and into the receive's slot).
 ///
 /// Each entry is lent where it lies, which is the step of `received_entry` that can refuse:
 /// its second step stores the lent entry at the transport profile, which is the heap in every
 /// build this is compiled in, and the heap refuses no body. So a ZBuf extension's body is judged
 /// without the copy of it the stored entry would make. The walk of a group datagram reads a
 /// transport OAM's chain through it too, to step past the OAM (`inbound::control_extent`).
-#[cfg(all(
-    feature = "alloc",
-    feature = "codec-frame",
-    any(
-        feature = "session-unicast",
-        all(
-            feature = "session-multicast",
-            feature = "codec-join",
-            feature = "codec-close"
-        )
-    )
-))]
+#[cfg(feature = "alloc")]
 pub(crate) fn check_ext_chain<'a>(
     mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
@@ -817,18 +806,7 @@ pub(crate) fn check_ext_chain<'a>(
 /// [`check_ext_chain`] over the walk as a trait object: each message's document has a walk type
 /// of its own, and the check is compiled once for all of them. A chain is a few entries at most,
 /// so a call through the table per entry costs nothing a receive can see.
-#[cfg(all(
-    feature = "alloc",
-    feature = "codec-frame",
-    any(
-        feature = "session-unicast",
-        all(
-            feature = "session-multicast",
-            feature = "codec-join",
-            feature = "codec-close"
-        )
-    )
-))]
+#[cfg(feature = "alloc")]
 #[inline(never)]
 fn check_walk<'a>(
     walked: &mut dyn crate::ext_view::EntryWalk<'a>,

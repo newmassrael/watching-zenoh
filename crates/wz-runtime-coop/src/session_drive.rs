@@ -628,13 +628,12 @@ impl Locator {
     }
 
     /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt` into text of [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes.
-    ///
-    /// Every IPv4 locator fits: the bound is held at compile time to at least
-    /// [`LONGEST_IPV4_LOCATOR_LEN`]. An IPv6 locator is up to [`LONGEST_IP_LOCATOR_LEN`] bytes,
-    /// inside the default bound; in a build whose bound is shorter, the text of a longer one is
-    /// refused, which [`FixedText::finish`] reports, never a locator cut short.
-    pub fn text(&self) -> FixedText<{ caps::MAX_LOCATOR_LEN }> {
+    /// `core::fmt` into text of [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written
+    /// whole. Whether a row of the build holds it, at most
+    /// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's question
+    /// ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at compile
+    /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
+    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
         let mut text = FixedText::new();
         text.push_str(self.proto.scheme());
         text.push('/');
@@ -651,7 +650,8 @@ pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 
 /// The longest IP locator text, 62 bytes: an IPv6 end with every group written out and the widest
 /// scope, `tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535`. A bound below it still
-/// builds; the text of an end longer than the bound is refused (see [`Locator::text`]).
+/// builds; a link with an end longer than the bound is refused where it is admitted
+/// ([`crate::udp_link::ends_fit`]).
 pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
@@ -674,8 +674,9 @@ pub enum LinkOpenError {
     /// again later, which is why a dial that meets it is retried.
     Exhausted,
     /// The stack cannot open a link of the locator's protocol at all (an lwIP
-    /// image asked for `tcp/`). Permanent for the locator: a retry would meet
-    /// the same answer.
+    /// image asked for `tcp/`), or the link's ends are longer than a row of the
+    /// build names them in (`crate::udp_link::ends_fit`). Permanent for the
+    /// locator: a retry would meet the same answer.
     Unsupported,
     /// The stack tried and the other end did not take the link (a TCP
     /// connection refused or unreachable). Worth trying again later.
@@ -772,6 +773,15 @@ pub trait SessionLinks {
     /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
     fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells) {
         let _ = cells;
+    }
+
+    /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
+    /// sorted for them in, for the session the ports serve: a peer or a datagram the rows have no
+    /// room for is dropped and counted, and none is kept on the heap. The default ignores them, as
+    /// a stack that opens no udp port does.
+    #[cfg(feature = "udp-listen")]
+    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+        let _ = rows;
     }
 
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the

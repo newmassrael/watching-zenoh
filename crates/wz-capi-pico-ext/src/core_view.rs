@@ -192,7 +192,7 @@ pub mod ext_interface {
     /// The major version of the interface these doors were written against.
     pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
     /// The minor version of the interface these doors were written against.
-    pub const WZ_EXT_INTERFACE_MINOR: u16 = 2;
+    pub const WZ_EXT_INTERFACE_MINOR: u16 = 3;
 
     /// `replay_reply_shape`: one reply per frame, as it was sent.
     pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
@@ -665,6 +665,8 @@ pub mod decl_watch {
     pub const WZ_EXT_DECL_DECLARED: u8 = 0;
     /// `kind` of an event: the peer retracted the entity.
     pub const WZ_EXT_DECL_UNDECLARED: u8 = 1;
+    /// `kind` of an event: the watch lost events, `id` of them (added in minor version 3).
+    pub const WZ_EXT_DECL_LOST: u8 = 3;
     /// `entity` of a watch and an event: a queryable.
     pub const WZ_EXT_DECL_QUERYABLE: u8 = 1;
 

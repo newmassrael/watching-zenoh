@@ -105,8 +105,8 @@ use wz_runtime_tokio::session::{DeclEvent, DeclListener};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryAliasError, QueryOptions, Queryable,
-    QueryableOptions, RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
-    WireProbe, WireReservation, WireRoom,
+    QueryableOptions, RetractionKey, RetractionName, SubscribeOptions, Subscriber,
+    TokioQueryHolder, TokioSession, WireProbe, WireReservation, WireRoom,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -892,18 +892,18 @@ impl QueryLeg<'_> {
         // A face's link names the key as its own key-wire form says.
         let linked = match self {
             QueryLeg::Face(session) => on_link(session, keyexpr, wire),
-            _ => std::borrow::Cow::Borrowed(wire),
+            _ => wz_capi_port::LinkKey::Lent(wire),
         };
-        let wire: &WireKey = &linked;
-        match self {
-            QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-                keyexpr,
-                opts.with_allowed_destination(self.locality()),
-                on_reply,
-                |_rid| {},
-            ),
+        match (self, linked.names_in(keyexpr)) {
+            (QueryLeg::Face(session), (mapping_id, suffix)) if mapping_id != 0 => session
+                .query_aliased(
+                    mapping_id,
+                    suffix,
+                    keyexpr,
+                    opts.with_allowed_destination(self.locality()),
+                    on_reply,
+                    |_rid| {},
+                ),
             _ => self.query(keyexpr, opts, on_reply),
         }
     }
@@ -1001,15 +1001,13 @@ fn declare_subscriber_on(
         ));
         callback(sample);
     };
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_subscriber(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_subscriber_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_subscriber_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1020,10 +1018,10 @@ fn on_link<'w>(
     session: &TokioSession,
     keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
+) -> wz_capi_port::LinkKey<'w> {
     match wz_capi_port::wire_on_link(session.actions().key_wire_on_link(keyexpr)) {
-        Some(linked) => std::borrow::Cow::Owned(linked),
-        None => std::borrow::Cow::Borrowed(wire),
+        Some(linked) => wz_capi_port::LinkKey::Made(linked),
+        None => wz_capi_port::LinkKey::Lent(wire),
     }
 }
 
@@ -1034,8 +1032,8 @@ fn on_link<'w>(
     _session: &TokioSession,
     _keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
-    std::borrow::Cow::Borrowed(wire)
+) -> wz_capi_port::LinkKey<'w> {
+    wz_capi_port::LinkKey::Lent(wire)
 }
 
 /// Declare a queryable on one face in `wire`'s form.
@@ -1046,15 +1044,13 @@ fn declare_queryable_on(
     options: QueryableOptions,
     callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
 ) -> Option<Queryable<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_queryable(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_queryable_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_queryable_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1065,13 +1061,11 @@ fn declare_token_on(
     wire: &WireKey,
     options: LivelinessOptions,
 ) -> Option<LivelinessToken<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session.declare_token(keyexpr.to_string(), options).ok()
-    } else {
-        session
-            .declare_token_aliased(wire.mapping_id, wire.suffix.as_deref(), options)
-            .ok()
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session.declare_token(keyexpr.to_string(), options).ok(),
+        (mapping_id, suffix) => session
+            .declare_token_aliased(mapping_id, suffix, options)
+            .ok(),
     }
 }
 
@@ -1084,20 +1078,13 @@ fn declare_liveliness_subscriber_on(
     options: LivelinessSubscriberOptions,
     sink: impl for<'a> FnMut(LivelinessSample<'a>) + Send + 'static,
 ) -> Option<LivelinessSubscriber<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_liveliness_subscriber(keyexpr.to_string(), options, sink)
-            .ok()
-    } else {
-        session
-            .declare_liveliness_subscriber_aliased(
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-                options,
-                sink,
-            )
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_liveliness_subscriber_aliased(mapping_id, suffix, options, sink)
+            .ok(),
     }
 }
 
@@ -1590,7 +1577,8 @@ const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 struct DeclWatchEntry {
     id: DeclWatchId,
     plane: DeclPlane,
-    sink: DeclWatchSink,
+    /// Shared by the watch's listener on each face, so it is let go of with the last of them.
+    sink: Arc<DeclWatchSink>,
 }
 
 /// Whether this build hears the peers' declarations of `plane`: the runtime's registry of that
@@ -1621,12 +1609,12 @@ const fn hears_declarations_of(plane: DeclPlane) -> bool {
 fn install_decl_watch(
     session: &TokioSession,
     plane: DeclPlane,
-    sink: &DeclWatchSink,
+    sink: &Arc<DeclWatchSink>,
 ) -> Option<DeclListener> {
     let sink = Arc::clone(sink);
     let callback = move |event: DeclEvent| {
         if let Some(event) = port_decl_event(&event) {
-            sink(event);
+            sink.call(event);
         }
     };
     // A subscriber or a queryable the peer declared before the watch was installed (a watch
@@ -1808,7 +1796,7 @@ fn deliver_matching_flip(
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
             let _guard = MatchingDeliveryGuard::enter();
-            sink(now);
+            sink.call(now);
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -1982,6 +1970,27 @@ impl TransportsCell {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .groups = groups;
+    }
+}
+
+/// A hold of the registry's lock and this thread's mark of it, let go of together.
+struct InnerGuard<'a> {
+    guard: MutexGuard<'a, Inner>,
+    // Read by a debug build only; let go of after the lock.
+    _held: wz_capi_port::sync::SessionHeld,
+}
+
+impl core::ops::Deref for InnerGuard<'_> {
+    type Target = Inner;
+
+    fn deref(&self) -> &Inner {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for InnerGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Inner {
+        &mut self.guard
     }
 }
 
@@ -2389,7 +2398,15 @@ pub struct SharedSession {
     /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
     /// query replies and the batch calls).
     closed: Arc<std::sync::atomic::AtomicBool>,
-    /// The periodic jobs a C ABI started on the session ([`SessionEngine::start_ticker`]), each a
+    /// What each connectivity listener whose history is being replayed was told of the faces
+    /// ([`wz_capi_port::SessionEngine::told_ledger`]), on the heap, as the faces are read.
+    pub(crate) told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
+    /// The queries a program keeps past their handlers on this node's faces
+    /// ([`wz_capi_port::QueryHolder::keep_query`]), each under the id its keep answers. The
+    /// faces' holders hold it weakly, so a keep the program never releases goes with the session.
+    #[cfg(feature = "queryable")]
+    pub(crate) kept_queries: Arc<wz_capi_port::HeldSlab<crate::engine_port::FaceKept>>,
+    /// The periodic jobs a C ABI started on the session ([`wz_capi_port::Tickers::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
     /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
     /// starts one, so a build without it carries neither the table nor the task.
@@ -2912,6 +2929,9 @@ impl SharedSession {
             policy,
             aggregation,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
+            #[cfg(feature = "queryable")]
+            kept_queries: Arc::new(wz_capi_port::HeldSlab::new()),
             #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
             #[cfg(feature = "advanced")]
@@ -3069,7 +3089,7 @@ impl SharedSession {
         id: u64,
         peer_zid: Option<&[u8]>,
         dialled: bool,
-    ) -> Option<MutexGuard<'_, Inner>> {
+    ) -> Option<InnerGuard<'_>> {
         // Decided under the lock that inserts the face, so two faces that come up
         // together cannot both pass: the one that takes the lock second sees the
         // first.
@@ -3233,15 +3253,32 @@ impl SharedSession {
         }
     }
 
+    /// Give back to the session what `wire` held of its declarations ([`WireKey::into_holds`]),
+    /// the key let go of: an entry taken out of the registry, or a key the session refused. With
+    /// no lock held, since the last hold of a declaration retracts it, which takes the lock.
+    fn give_back(&self, wire: WireKey) {
+        wire.let_go(self);
+    }
+
     /// The registry lock, poison-tolerant. A C callback that panics is caught
     /// at the FFI boundary (`crate::ffi`), so poisoning should not happen; if
     /// it somehow does, the registry is still structurally sound (a panic
     /// cannot leave a `BTreeMap` torn), and refusing to serve the session
     /// afterwards would be a worse failure than continuing.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ///
+    /// The thread marks the hold before it takes it, as the cooperative engine marks its own
+    /// (`wz_capi_port::sync::SessionHeld`): a take on the thread that holds the lock already (a
+    /// drop made under it that reaches the session again) fails a debug build there instead of
+    /// waiting on itself.
+    fn lock(&self) -> InnerGuard<'_> {
+        let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(&self.inner).cast());
+        InnerGuard {
+            guard: self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            _held: held,
+        }
     }
 
     /// A face reached Established: build its session and replay the whole
@@ -3510,7 +3547,11 @@ impl SharedSession {
                 &entry.wire,
                 SubscribeOptions::default()
                     .with_allowed_origin(entry.allowed_origin)
-                    .with_retraction_naming(entry.retraction.clone()),
+                    .with_retraction_naming(
+                        entry
+                            .retraction
+                            .map(|key| RetractionName::of(key, &entry.keyexpr)),
+                    ),
                 FaceEnds::new(&self.zid, held.peer_zid.as_deref()),
                 (entry.sink)(),
             ) {
@@ -3534,8 +3575,11 @@ impl SharedSession {
                 &session,
                 &entry.keyexpr,
                 &entry.wire,
-                queryable_options(entry.complete, entry.allowed_origin)
-                    .with_retraction_naming(entry.retraction.clone()),
+                queryable_options(entry.complete, entry.allowed_origin).with_retraction_naming(
+                    entry
+                        .retraction
+                        .map(|key| RetractionName::of(key, &entry.keyexpr)),
+                ),
                 (entry.sink)(&TokioQueryHolder::Unicast(session.clone())),
             ) {
                 qbls.insert(entry.id, qbl);
@@ -3997,7 +4041,19 @@ impl SharedSession {
                 .collect();
             (entries, copies)
         };
-        drop(dropped);
+        // What each entry's key held goes back with the entry, outside the lock.
+        let ((subs, qbls, live_subs, matches), copies) = dropped;
+        for entry in subs {
+            self.give_back(entry.wire);
+        }
+        for entry in qbls {
+            self.give_back(entry.wire);
+        }
+        for entry in live_subs {
+            self.give_back(entry.wire);
+        }
+        drop(matches);
+        drop(copies);
     }
 
     /// One inbound iteration event for `id` — dispatched into that face's own
@@ -4614,7 +4670,8 @@ impl SharedSession {
         payload: wz_session_core::extshm::ShmSendHandle,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        if wire.is_literal() {
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        if mapping_id == 0 {
             self.fan_out_with(
                 opts,
                 PutKey::Literal(keyexpr),
@@ -4626,8 +4683,6 @@ impl SharedSession {
                 },
             )
         } else {
-            let mapping_id = wire.mapping_id;
-            let suffix = wire.suffix.as_deref();
             self.fan_out_with(
                 opts,
                 PutKey::Declared {
@@ -4667,16 +4722,11 @@ impl SharedSession {
         if self.key_ids.names_keys_by_link() {
             return self.publish_by_link(keyexpr, wire, payload, opts);
         }
-        if wire.is_literal() {
-            self.publish_all(keyexpr, payload, opts)
-        } else {
-            self.publish_aliased_all_for(
-                Some(keyexpr),
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-                payload,
-                opts,
-            )
+        match wire.names_in(keyexpr) {
+            (0, _) => self.publish_all(keyexpr, payload, opts),
+            (mapping_id, suffix) => {
+                self.publish_aliased_all_for(Some(keyexpr), mapping_id, suffix, payload, opts)
+            }
         }
     }
 
@@ -4692,87 +4742,75 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        let key = if wire.is_literal() {
-            PutKey::Literal(keyexpr)
-        } else {
-            PutKey::Declared {
+        let key = match wire.names_in(keyexpr) {
+            (0, _) => PutKey::Literal(keyexpr),
+            (mapping_id, suffix) => PutKey::Declared {
                 literal: keyexpr,
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix.as_deref(),
-            }
+                mapping_id,
+                suffix,
+            },
         };
         self.fan_out(
             opts,
             key,
             payload,
-            |session, leg| {
-                let wire = on_link(session, keyexpr, wire);
-                if wire.is_literal() {
-                    Leg::of_publish(session.publish(keyexpr, payload, leg))
-                } else {
-                    Leg::of_alias(session.publish_aliased_auto(
-                        wire.mapping_id,
-                        wire.suffix.as_deref(),
-                        payload,
-                        leg,
-                    ))
+            |session, leg| match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                (0, _) => Leg::of_publish(session.publish(keyexpr, payload, leg)),
+                (mapping_id, suffix) => {
+                    Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
                 }
             },
             WireCalls {
-                probe: |session: &TokioSession, leg: PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
-                    } else {
-                        Leg::of_probe_alias(session.publish_aliased_auto_probe(
-                            wire.mapping_id,
-                            wire.suffix.as_deref(),
-                            payload,
-                            leg,
-                        ))
-                    }
+                probe: |session: &TokioSession, leg: PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => Leg::of_probe(session.publish_probe(keyexpr, payload, leg)),
+                    (mapping_id, suffix) => Leg::of_probe_alias(
+                        session.publish_aliased_auto_probe(mapping_id, suffix, payload, leg),
+                    ),
                 },
-                reserve: |session: &TokioSession, leg: &PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
+                reserve: |session: &TokioSession, leg: &PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => {
                         Reserved::of_reserve(session.reserve_wire_chain(keyexpr, payload, leg))
-                    } else if session
-                        .actions()
-                        .resolve_outbound_mapping(wire.mapping_id)
-                        .is_none()
+                    }
+                    (mapping_id, _)
+                        if session
+                            .actions()
+                            .resolve_outbound_mapping(mapping_id)
+                            .is_none() =>
                     {
                         Reserved::Absent
-                    } else {
-                        Reserved::of_reserve(session.reserve_wire_chain_aliased(
-                            wire.mapping_id,
-                            wire.suffix.as_deref(),
-                            payload,
-                            leg,
-                        ))
                     }
+                    (mapping_id, suffix) => Reserved::of_reserve(
+                        session.reserve_wire_chain_aliased(mapping_id, suffix, payload, leg),
+                    ),
                 },
                 reserved: |session: &TokioSession,
                            leg: PublishOptions,
                            reservation: WireReservation| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(
+                    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                        (0, _) => Leg::of_probe(
                             session
                                 .publish_reserved(keyexpr, payload, leg, reservation)
                                 .map(|()| WireProbe::Queued),
-                        )
-                    } else {
-                        Leg::of_probe_alias(
+                        ),
+                        (mapping_id, suffix) => Leg::of_probe_alias(
                             session
                                 .publish_aliased_auto_reserved(
-                                    wire.mapping_id,
-                                    wire.suffix.as_deref(),
+                                    mapping_id,
+                                    suffix,
                                     payload,
                                     leg,
                                     reservation,
                                 )
                                 .map(|()| WireProbe::Queued),
-                        )
+                        ),
                     }
                 },
             },
@@ -5154,7 +5192,11 @@ impl SharedSession {
         links: LinkRestriction,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -5230,7 +5272,9 @@ impl SharedSession {
         // The per-face tokens go first, so their retractions reach the wire
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         // And the session's own liveliness subscribers, last: the token is gone from the wire
         // when they hear of it.
         if let Some((legs, keyexpr)) = told {
@@ -5290,7 +5334,11 @@ impl SharedSession {
         sink: LivelinessSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -5457,9 +5505,12 @@ impl SharedSession {
                 (Some(fan), Ok(interest_id)) => {
                     let undo = session.clone();
                     let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo.cancel_pending_liveliness_get(interest_id);
-                    })
+                    !crate::fan_undo::record(
+                        fan,
+                        Box::new(move || {
+                            undo.cancel_pending_liveliness_get(interest_id);
+                        }),
+                    )
                 }
                 _ => false,
             };
@@ -6004,7 +6055,7 @@ impl SharedSession {
         // `false` when the token cancelled while the fan was running.
         let mut issue_recorded = |leg: QueryLeg<'_>| -> bool {
             match (issue(leg), fan) {
-                (Some(rid), Some(fan)) => fan.record(leg.canceller(rid)),
+                (Some(rid), Some(fan)) => crate::fan_undo::record(fan, leg.canceller(rid)),
                 _ => true,
             }
         };
@@ -6198,7 +6249,11 @@ impl SharedSession {
         sink: SubscriberSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
             zid_text(&self.zid),
@@ -6225,7 +6280,9 @@ impl SharedSession {
                 &wire,
                 SubscribeOptions::default()
                     .with_allowed_origin(allowed_origin)
-                    .with_retraction_naming(retraction.clone()),
+                    .with_retraction_naming(
+                        retraction.map(|key| RetractionName::of(key, &keyexpr)),
+                    ),
                 FaceEnds::new(&self.zid, face.peer_zid.as_deref()),
                 sink(),
             ) {
@@ -6918,6 +6975,7 @@ impl SharedSession {
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;
+        let sink = Arc::new(sink);
         for face in guard.faces.values_mut() {
             if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
                 face.decl_watches.insert(id, listener);
@@ -7028,9 +7086,13 @@ impl SharedSession {
         drop(dropped_groups);
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
         drop(dropped_group_live);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         drop(dropped_live);
-        drop(dropped_live_entry);
+        if let Some(entry) = dropped_live_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
@@ -7185,7 +7247,11 @@ impl SharedSession {
         sink: QueryableSink,
     ) -> Option<QblId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
@@ -7198,8 +7264,9 @@ impl SharedSession {
                 &face.session,
                 &keyexpr,
                 &wire,
-                queryable_options(complete, allowed_origin)
-                    .with_retraction_naming(retraction.clone()),
+                queryable_options(complete, allowed_origin).with_retraction_naming(
+                    retraction.map(|key| RetractionName::of(key, &keyexpr)),
+                ),
                 callback,
             ) {
                 face.qbls.insert(id, qbl);
@@ -7272,7 +7339,9 @@ impl SharedSession {
         drop(dropped);
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
         drop(dropped_groups);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(
                 FilterPlane::Queryables {
@@ -7727,7 +7796,8 @@ mod matching_aggregate_tests {
             .expect("a session with ids left declares");
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
-        let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
+        let sink: MatchingSink =
+            MatchingSink::shared(move |matching| log.lock().unwrap().push(matching));
         shared.declare_plane_matching_listener(
             FilterPlane::Subscribers,
             "wz/local/a".to_owned(),
@@ -7769,13 +7839,13 @@ mod matching_aggregate_tests {
     #[test]
     fn a_periodic_job_runs_until_it_is_stopped() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use wz_capi_port::SessionEngine;
+        use wz_capi_port::Tickers;
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
         let runs = Arc::new(AtomicUsize::new(0));
         let count = runs.clone();
-        let id = SessionEngine::start_ticker(
+        let id = Tickers::start_ticker(
             &shared,
             10,
             Arc::new(move || {
@@ -7790,8 +7860,8 @@ mod matching_aggregate_tests {
             assert!(std::time::Instant::now() < deadline, "no third run in 5 s");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        SessionEngine::stop_ticker(&shared, id);
-        SessionEngine::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
+        Tickers::stop_ticker(&shared, id);
         std::thread::sleep(std::time::Duration::from_millis(30));
         let after = runs.load(Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(80));
@@ -8408,7 +8478,7 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
                 log.lock().unwrap().push(now);
                 let probe = probe
                     .upgrade()
@@ -8436,7 +8506,7 @@ mod matching_aggregate_tests {
     fn the_verdict_is_the_or_across_faces() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8461,7 +8531,7 @@ mod matching_aggregate_tests {
     fn a_purge_after_an_ordinary_false_is_silent() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
@@ -8493,7 +8563,7 @@ mod matching_aggregate_tests {
             let inflight = inflight.clone();
             let overlaps = overlaps.clone();
             let log = observed.clone();
-            Arc::new(move |now| {
+            MatchingSink::shared(move |now| {
                 if inflight.fetch_add(1, Ordering::SeqCst) != 0 {
                     overlaps.fetch_add(1, Ordering::SeqCst);
                 }
@@ -8569,12 +8639,14 @@ mod matching_aggregate_tests {
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
-                // Keep the probe owned BY the closure, exactly as a C sink owns
-                // its context, so the probe's drop is the closure's drop.
-                let _ = &probe;
-                log.lock().unwrap().push(now);
-            }))))
+            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+                move |now| {
+                    // Keep the probe owned BY the closure, exactly as a C sink owns
+                    // its context, so the probe's drop is the closure's drop.
+                    let _ = &probe;
+                    log.lock().unwrap().push(now);
+                },
+            ))))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8621,14 +8693,16 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
-            entered_tx.send(()).expect("the test thread is waiting");
-            release_rx
-                .lock()
-                .unwrap()
-                .recv()
-                .expect("the test thread releases the sink");
-        }))));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+            move |_now| {
+                entered_tx.send(()).expect("the test thread is waiting");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("the test thread releases the sink");
+            },
+        ))));
 
         let deliverer = {
             let state = state.clone();
@@ -8681,7 +8755,7 @@ mod matching_aggregate_tests {
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
                 let state = weak.upgrade().expect("alive during its own call");
                 // The re-entrant undeclare. It must RETURN, and it must decline
                 // to take the sink rather than block on this frame's own lock.

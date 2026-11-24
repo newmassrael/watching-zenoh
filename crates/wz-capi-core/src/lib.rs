@@ -62,6 +62,7 @@ pub mod caller_span;
 pub mod codec;
 pub mod drive;
 pub mod encoding_ids;
+pub mod fan_undo;
 // This engine as the port's `SessionEngine` (wz-capi-port): the face registry's own operations,
 // reached by an ABI that names no engine.
 mod engine_port;

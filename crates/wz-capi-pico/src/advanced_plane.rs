@@ -23,8 +23,8 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use wz_capi_port::{QueryHolder, QueryRowSink, Ticker, WireKey};
-use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
+use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine, Ticker, WireKey};
+use wz_ext_pubsub::advanced_cache::{CacheBytes, CacheConfig, CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
@@ -74,6 +74,21 @@ impl PicoPlane {
     }
 }
 
+/// The ring a session's caches keep their samples in, holding the session's engine so the ring
+/// stands for as long as a cache in it does.
+struct SessionCacheBytes(Arc<crate::session::Engine>);
+
+impl CacheBytes for SessionCacheBytes {
+    fn with_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
+        match SessionEngine::cache_bytes(&*self.0) {
+            Some(ring) => ring.with_cache_bytes(with),
+            // An engine that keeps no ring is never asked for one: its caches keep their samples
+            // on the heap (`PicoPlane::cache_store`).
+            None => with(&mut []),
+        }
+    }
+}
+
 /// The options every plain publish of this ABI carries: reliable, and the
 /// destination a pico put takes by default.
 ///
@@ -97,8 +112,10 @@ impl AdvancedPublisherPlane for PicoPlane {
     type Beacon = PlainPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
-    /// periodic jobs, whose publisher then declares and sends no heartbeat.
-    type Timer = Option<Ticker>;
+    /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
+    /// engine as the session holds it, so a build that reaches its engine as its own type makes no
+    /// table of the engine's periodic jobs for it.
+    type Timer = Option<Ticker<crate::session::Engine>>;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
@@ -108,15 +125,10 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Option<Ticker> {
+    ) -> Option<Ticker<crate::session::Engine>> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start(
-            &crate::session::port_engine(&self.session.engine),
-            period_ms,
-            tick,
-        )
-        .ok()
+        Ticker::start_on(self.session.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -169,7 +181,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // One handler for the queryable, kept in its row: it needs no face's session, as a reply
         // goes out on the query's own.
         let answer = store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64);
-        let sink = QueryRowSink::shared(
+        let sink = QueryableSink::shared(
             move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answer(query, out)
             },
@@ -178,6 +190,20 @@ impl AdvancedPublisherPlane for PicoPlane {
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
+    }
+
+    /// In the session's ring of cached samples when the session keeps one (the cooperative engine,
+    /// which reserved it at its open), so a put takes no memory; a ring that holds no record
+    /// refuses the cache. On the heap on an engine that keeps none.
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
+            return Ok(CacheStore::new(config));
+        }
+        CacheStore::in_ring(
+            config,
+            Box::new(SessionCacheBytes(Arc::clone(&self.session.engine))),
+        )
+        .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {
@@ -248,6 +274,27 @@ impl AdvancedPublisherPlane for PicoPlane {
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go.
         Some(Retained::new(Arc::new(publisher.key().share())))
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use core::any::TypeId;
+
+    use super::*;
+
+    /// The heartbeat's job holds the session's engine as the session does, not as the port's
+    /// object of periodic jobs, so no table of the engine's jobs is made for it.
+    #[test]
+    fn the_beacon_timer_holds_the_engine_as_the_session_does() {
+        assert_eq!(
+            TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
+            TypeId::of::<Option<Ticker<crate::session::Engine>>>()
+        );
+        assert_ne!(
+            TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
+            TypeId::of::<Option<Ticker>>()
+        );
     }
 }
 

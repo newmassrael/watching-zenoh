@@ -688,10 +688,7 @@ pub mod common {
                 newest_rust_file(&path, newest);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 if let Ok(t) = entry.metadata().and_then(|m| m.modified()) {
-                    // `is_none_or` is 1.82 and this workspace's MSRV is 1.81,
-                    // so the match is spelled out rather than borrowed from a
-                    // newer std (clippy's msrv lint caught it).
-                    if newest.as_ref().map_or(true, |(best, _)| t > *best) {
+                    if newest.as_ref().is_none_or(|(best, _)| t > *best) {
                         *newest = Some((t, path));
                     }
                 }

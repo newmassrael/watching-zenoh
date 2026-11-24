@@ -18,10 +18,8 @@
 //! because a file named `advanced_subscriber.rs` is also the tokio host's, and a bare mention of
 //! that name in a record would then name two files.
 
-/// The subscriber's keyed tables. Iteration follows the hash and not the key; the seed is fixed,
+/// The subscriber's keyed sets. Iteration follows the hash and not the key; the seed is fixed,
 /// so it is the same in every run and a build without `std` needs no entropy for it.
-type HashMap<K, V> = hashbrown::HashMap<K, V, foldhash::fast::FixedState>;
-/// The set twin of `HashMap`.
 #[cfg(feature = "advanced-recovery")]
 type HashSet<T> = hashbrown::HashSet<T, foldhash::fast::FixedState>;
 
@@ -32,7 +30,7 @@ pub mod plans;
 pub mod state;
 
 #[cfg(feature = "engine-host")]
-pub use host::{EngineSubscriber, HostError};
+pub use host::{EngineSubscriber, HostError, LentCore, SubscriberCore};
 
 #[cfg(feature = "advanced-history")]
 pub use options::HistoryConfig;
@@ -44,10 +42,14 @@ pub use options::{
 #[cfg(feature = "advanced-history")]
 pub use plans::history_selector;
 #[cfg(feature = "advanced-recovery")]
+pub use plans::GetParameters;
+#[cfg(feature = "advanced-recovery")]
 pub use plans::{
     parse_heartbeat_source, recovered_sample_from_reply, recovery_query_timeout_ms,
-    AdvPublisherSource, PendingGets,
+    AdvPublisherSource, PendingGets, RecoveredView,
 };
 #[cfg(feature = "advanced-recovery")]
 pub use state::RecoveryRequest;
-pub use state::{Miss, MissHandlers, SampleMissListener, State};
+pub use state::{
+    owned_samples, Delivery, Miss, MissHandlers, OnSample, SampleMissListener, State, StateCell,
+};

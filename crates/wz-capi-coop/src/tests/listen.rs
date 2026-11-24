@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    BatchStep, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    BatchStep, QueryHolder, QueryableSink, ReplyCallback, SessionDrive, SessionEngine,
     SubscriberSink, WireKey,
 };
 use wz_session_core::locality::Locality;
@@ -155,12 +155,12 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
             false,
             Locality::Any,
             None,
-            Arc::new(move |_: Arc<dyn QueryHolder>| {
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     out.reply_keyed(query.keyexpr(), text)
                         .expect("a reply on the query's own key");
-                }) as QueryCallback
-            }),
+                },
+            ),
         )
         .expect("the engine has queryables in this build");
     }

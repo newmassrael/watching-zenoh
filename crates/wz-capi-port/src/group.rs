@@ -143,13 +143,11 @@ impl GroupDeclarations {
     /// ([`Self::declares_keyexprs`]), and by the literal otherwise, as zenoh-pico names a key on
     /// a multicast transport at its default.
     pub fn key<'a>(self, keyexpr: &'a str, wire: &'a WireKey) -> GroupKey<'a> {
-        if self.declares_keyexprs() && wire.mapping_id != 0 {
-            GroupKey {
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix.as_deref(),
+        match wire.names_in(keyexpr) {
+            (mapping_id, suffix) if self.declares_keyexprs() && mapping_id != 0 => {
+                GroupKey { mapping_id, suffix }
             }
-        } else {
-            GroupKey::literal(keyexpr)
+            _ => GroupKey::literal(keyexpr),
         }
     }
 
@@ -163,10 +161,13 @@ impl GroupDeclarations {
         retraction: Option<&'a RetractionKey>,
     ) -> GroupKey<'a> {
         match retraction {
-            Some(own) if self.declares_keyexprs() && own.mapping_id != 0 => GroupKey {
-                mapping_id: own.mapping_id,
-                suffix: Some(own.suffix.as_str()),
-            },
+            Some(own) if self.declares_keyexprs() && own.mapping_id != 0 => {
+                let (mapping_id, rest) = own.names(keyexpr);
+                GroupKey {
+                    mapping_id,
+                    suffix: Some(rest),
+                }
+            }
             _ => self.key(keyexpr, wire),
         }
     }
@@ -305,10 +306,7 @@ mod tests {
         assert!(!GroupDeclarations::None.retracts());
 
         let wire = WireKey::aliased(3, Some("rest".to_string()));
-        let own = RetractionKey {
-            mapping_id: 5,
-            suffix: "own".to_string(),
-        };
+        let own = RetractionKey::declared(5, "/a");
         assert_eq!(
             GroupDeclarations::Entities.key("demo/a", &wire),
             GroupKey::literal("demo/a")
@@ -328,7 +326,7 @@ mod tests {
             GroupDeclarations::Mapped.retraction_key("demo/a", &wire, Some(&own)),
             GroupKey {
                 mapping_id: 5,
-                suffix: Some("own")
+                suffix: Some("/a")
             }
         );
     }

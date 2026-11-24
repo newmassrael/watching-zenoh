@@ -161,6 +161,20 @@ pub trait MatchingReport {}
 #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
 impl<T> MatchingReport for T {}
 
+/// Whether the remote-declaration tables of `M` can hold a matching watch: not where the sink type
+/// makes no value ([`matching::MatchingSink::WATCHES`]). A holder's consult of its own tables,
+/// the one such tables would re-evaluate a watch by, tests this first: a constant `false` there
+/// answers no without reading the tables, and the reads leave the build.
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+pub const fn holds_watches<M: MatchingReport>() -> bool {
+    <M as matching::MatchingSink>::WATCHES
+}
+/// See the form with matching listeners: a build without them holds no watch.
+#[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+pub const fn holds_watches<M: MatchingReport>() -> bool {
+    false
+}
+
 /// The sink a table keeps when its holder names none: the heap closure where there are matching
 /// listeners, nothing where there are none.
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
@@ -169,16 +183,28 @@ pub type DefaultMatchingReport = matching::BoxedMatchingSink;
 #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
 pub type DefaultMatchingReport = ();
 
-/// S9e -- the text of a matching criterion's keyexpr: an owned `String` on the heap
-/// profile, where a watch owns its key, and the bounded buffer of a keyexpr with no
-/// allocator. The criterion is the argument the registries' re-evaluation hands the
-/// session's own table (`local_matching`), so it exists on both profiles; only the heap
-/// profile builds one (a matching watch needs `session-matching`, which needs the
-/// heap), and both read the key through `as_str`.
-#[cfg(feature = "alloc")]
-pub(crate) type CriterionKey = alloc::string::String;
-#[cfg(all(not(feature = "alloc"), feature = "storage-profile"))]
-pub(crate) type CriterionKey = crate::wireexpr_resolve::KeyexprBuf;
+/// S9e -- the text of a matching criterion's keyexpr: a buffer of
+/// [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES) inside the criterion on every
+/// profile, so a watch keeps its key with no allocation after the session opens. The
+/// criterion is the argument the registries' re-evaluation hands the session's own table
+/// (`local_matching`), and the key is read through `as_str`.
+#[cfg(feature = "storage-profile")]
+pub(crate) type CriterionKey =
+    crate::bounded::BoundedString<{ crate::caps::MAX_KEYEXPR_BYTES }, crate::bounded::Static>;
+
+/// `keyexpr` as a criterion holds it; [`RegisterError::KeyexprTooLong`] when it is longer
+/// than the buffer, which holds nothing of it then.
+///
+/// [`RegisterError::KeyexprTooLong`]: crate::registry_error::RegisterError::KeyexprTooLong
+#[cfg(feature = "storage-profile")]
+pub(crate) fn criterion_key(
+    keyexpr: &str,
+) -> Result<CriterionKey, crate::registry_error::RegisterError> {
+    let mut key = CriterionKey::new_static();
+    key.push_str(keyexpr)
+        .map_err(|_| crate::registry_error::RegisterError::KeyexprTooLong)?;
+    Ok(key)
+}
 
 // R311ds — cross-registry composability tests (R311dr-wider-tests
 // carry closure). Gated on `codec-declare` as well as `test` because

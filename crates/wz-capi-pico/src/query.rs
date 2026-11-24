@@ -24,14 +24,20 @@
 //! call `z_query_take_from_loaned` / `z_query_move` / `z_query_drop`, so a
 //! program that keeps a query and answers it later links against these.
 //!
-//! What lets a kept query answer after its callback is the engine's
-//! [`HeldQuery`] (R2953, open-debt item 836): it answers on the query's own
-//! route and holds the `ResponseFinal` until the copy is let go, as pico's
-//! `_z_query_clear` does. The family was withheld until that seam existed,
-//! because exporting it without one would have made every channel-based
-//! queryable link and then silently fail to answer; the owned query is now
-//! deferred through the held query and does not depend on the callback's
-//! `ReplyOut`, which is lent to a query only for its callback's own call.
+//! What lets a kept query answer after its callback is the engine's keep of it
+//! (R2953, open-debt item 836): it answers on the query's own route and holds
+//! the `ResponseFinal` until the copy is let go, as pico's `_z_query_clear`
+//! does. Either engine keeps the query under an id
+//! (`QueryHolder::keep_query`), and the copy owns its key and parameters (in
+//! the payloads' area of the process pools, or on the heap in a library without
+//! them) and holds its session weakly, as pico's `_z_query_t` owns its key and
+//! parameters and holds a weak session, so a copy kept past its session holds
+//! none of the session's memory. The family
+//! was withheld until that seam existed, because exporting it without one would
+//! have made every channel-based queryable link and then silently fail to
+//! answer; the owned query is now deferred through the held query and does not
+//! depend on the callback's `ReplyOut`, which is lent to a query only for its
+//! callback's own call.
 //!
 //! ## Replies
 //!
@@ -48,7 +54,7 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryRowSink};
+use wz_capi_port::{QblId, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
@@ -62,7 +68,7 @@ use crate::prelude::*;
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{session_handle, z_loaned_session_t, Engine};
+use crate::session::{z_loaned_session_t, Engine};
 
 // The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
 // `crate::qos`. Both are documented "Deprecated: ignored, taken from query" on the
@@ -164,18 +170,19 @@ enum PendingReply<'k> {
 /// until the escaped query is dropped (pico's `_z_query_clear`,
 /// `src/net/query.c:54-61`).
 ///
-/// R2953 (open-debt item 836) — both are the engine's [`HeldQuery`], which
-/// answers on the query's own route (the wire, or this session's own pending
-/// GET for a query it asked of itself) and releases the Final on drop. This ABI
-/// only formats the reply, through the same [`flush_one`] the dispatch's
-/// responder is handed replies by. Until R2953 it carried its own wire-only responder.
+/// R2953 (open-debt item 836) — both are the engine's keep of the query
+/// ([`Deferred`]), which answers on the query's own route (the wire, or this
+/// session's own pending GET for a query it asked of itself) and releases the
+/// Final on drop. This ABI only formats the reply, through the same
+/// [`flush_one`] the dispatch's responder is handed replies by.
 fn emit_held(
-    held: &dyn HeldQuery,
+    held: &Deferred,
+    query_key: &str,
     reply: PendingReply<'_>,
     query_qos: wz_session_core::sample::QosLevel,
 ) {
     let mut reply = Some(reply);
-    held.reply(&mut |out| {
+    held.reply(query_key, &mut |out| {
         if let Some(reply) = reply.take() {
             let mut out = out;
             flush_one(&mut out, reply, query_qos);
@@ -267,12 +274,17 @@ fn abi_reads_anyke(parameters: &[u8]) -> bool {
 
 /// A text a query's marshal reads: where the view holds it, for the one call the marshal is handed
 /// to ([`QueryMarshal::new`]), or a copy of the marshal's own, for a query kept past it
-/// ([`QueryMarshal::deep_copy_deferred`]).
+/// ([`QueryMarshal::kept_texts`]).
 enum QueryText<T: ?Sized> {
     /// The view's, which outlives the marshal that reads it.
     Lent(*const T),
-    /// The marshal's own.
+    /// The marshal's own, on the heap, in a library without the process pools.
+    #[cfg(not(wz_process_pools))]
     Owned(Box<T>),
+    /// The marshal's own, in the block of the payloads' area the payload holds, where the pointer
+    /// reads it: a block stays where it lies while its holder moves.
+    #[cfg(wz_process_pools)]
+    Pooled(*const T, crate::bytes::ByteBuf),
 }
 
 impl<T: ?Sized> QueryText<T> {
@@ -280,7 +292,67 @@ impl<T: ?Sized> QueryText<T> {
         match self {
             // SAFETY: a lent text outlives the marshal that holds it (`QueryMarshal::new`).
             Self::Lent(text) => unsafe { &**text },
+            #[cfg(not(wz_process_pools))]
             Self::Owned(text) => text,
+            // SAFETY: the text lies in the block the payload beside it holds, for as long as it.
+            #[cfg(wz_process_pools)]
+            Self::Pooled(text, _) => unsafe { &**text },
+        }
+    }
+}
+
+#[cfg(wz_process_pools)]
+impl QueryText<str> {
+    /// A copy of `text` of the marshal's own, in the payloads' area of the process pools.
+    fn pooled_text(text: &str) -> Result<Self, crate::bytes::NoRoom> {
+        let block = crate::bytes::ByteBuf::copy_of(text.as_bytes())?;
+        // The bytes are a copy of a text's, so they are UTF-8 as it is.
+        let at = block.as_slice() as *const [u8] as *const str;
+        Ok(Self::Pooled(at, block))
+    }
+}
+
+#[cfg(wz_process_pools)]
+impl QueryText<[u8]> {
+    /// A copy of `bytes` of the marshal's own, in the payloads' area of the process pools.
+    fn pooled_bytes(bytes: &[u8]) -> Result<Self, crate::bytes::NoRoom> {
+        let block = crate::bytes::ByteBuf::copy_of(bytes)?;
+        let at = block.as_slice() as *const [u8];
+        Ok(Self::Pooled(at, block))
+    }
+}
+
+/// A query kept past its dispatch: the id of the engine's keep, released once, at the drop, and
+/// the session, held weakly as zenoh-pico's `_z_query_t` holds its session, so a copy kept past its
+/// session holds none of the session's memory. The query's key and parameters are the copy's own
+/// ([`QueryMarshal::kept_texts`]).
+struct Deferred {
+    engine: alloc::sync::Weak<Engine>,
+    id: wz_capi_port::HeldQueryId,
+}
+
+impl Deferred {
+    /// Answer the query, whose key is `query_key`, now, on its own route
+    /// ([`wz_capi_port::SessionEngine::reply_held`]); a session gone answers nothing.
+    fn reply(&self, query_key: &str, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        if let Some(engine) = self.engine.upgrade() {
+            wz_capi_port::SessionEngine::reply_held(&*engine, self.id, query_key, answer);
+        }
+    }
+
+    /// Whether the session the query came in on has been closed, or is gone.
+    fn session_closed(&self) -> bool {
+        self.engine
+            .upgrade()
+            .is_none_or(|engine| wz_capi_port::SessionEngine::is_closed(&*engine))
+    }
+}
+
+impl Drop for Deferred {
+    fn drop(&mut self) {
+        // A session gone took its keep of the query with its memory.
+        if let Some(engine) = self.engine.upgrade() {
+            wz_capi_port::SessionEngine::release_held(&*engine, self.id);
         }
     }
 }
@@ -346,8 +418,12 @@ pub(crate) struct QueryMarshal {
     /// `_z_session_weak_upgrade_if_open`). Only an ESCAPED query can meet a closed
     /// session: a callback's own query cannot outlive the session it runs on.
     holder: Option<NonNull<dyn QueryHolder>>,
+    /// The session a query is kept on, lent with [`Self::holder`] for the callback's call by the
+    /// queryable's place, which keeps it weakly ([`QueryableKept`]), as an escape keeps it
+    /// ([`Deferred`]).
+    session: Option<NonNull<alloc::sync::Weak<Engine>>>,
     /// R2953 — whether the session asked this query of itself: the half of
-    /// the query's route the rid alone does not name ([`HeldQuery`]).
+    /// the query's route the rid alone does not name.
     is_local: bool,
     /// Present only on an ESCAPED marshal: the query held past its dispatch,
     /// which a reply issued long after it goes through. `None` means this
@@ -355,7 +431,7 @@ pub(crate) struct QueryMarshal {
     /// responder while the callback runs ([`Self::answer_with`]). Each escape is its own hold (pushing the same
     /// query into two channels is legal), released on its own drop; an escaped
     /// marshal is the end of the chain and is not escaped again.
-    deferred: Option<Box<dyn HeldQuery>>,
+    deferred: Option<Deferred>,
     /// The dispatch's responder, while the callback this marshal is handed to runs
     /// ([`Self::answer_with`]), and none otherwise.
     ///
@@ -399,9 +475,9 @@ impl QueryMarshal {
                 .unwrap_or_default(),
             // Read where the view holds it, as the payload is: the marshal is dropped before the
             // view's borrow ends, and an escaped copy keeps a copy of its own.
-            encoding: view.encoding().map(|hint| {
-                crate::encoding::EncodingState::lent(hint.packed_id, hint.schema.as_deref())
-            }),
+            encoding: view
+                .encoding_parts()
+                .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema)),
             // R311y559 — carried through the SAME projection the sample plane
             // uses, so a `(zid, eid, sn)` read off a query and one read off a
             // sample cannot render differently.
@@ -419,6 +495,7 @@ impl QueryMarshal {
             rid: view.rid(),
             qos: view.qos(),
             holder: None,
+            session: None,
             is_local: view.is_local(),
             deferred: None,
             responder: Cell::new(None),
@@ -441,6 +518,22 @@ impl QueryMarshal {
         self
     }
 
+    /// Lend the session the face's queries are kept on, which an escape holds while the program
+    /// holds the query. Called only by the dispatch, with [`Self::with_holder`].
+    ///
+    /// # Safety
+    /// The marshal is dropped before the borrow of `session` ends.
+    unsafe fn with_session(mut self, session: &alloc::sync::Weak<Engine>) -> Self {
+        self.session = Some(NonNull::from(session));
+        self
+    }
+
+    /// The session the face's queries are kept on, while the dispatch lends it.
+    fn session(&self) -> Option<&alloc::sync::Weak<Engine>> {
+        // SAFETY: `Self::with_session`'s contract: the pointer is live for as long as this marshal.
+        self.session.map(|session| unsafe { &*session.as_ptr() })
+    }
+
     /// What the face's queries are held through, while the dispatch lends it.
     fn holder(&self) -> Option<&dyn QueryHolder> {
         // SAFETY: `Self::with_holder`'s contract: the pointer is live for as long as this marshal.
@@ -450,10 +543,28 @@ impl QueryMarshal {
     /// Whether the session this query arrived on has been closed: the held query's answer for an
     /// escaped copy, the face's while the callback runs.
     fn session_closed(&self) -> bool {
-        match self.deferred.as_deref() {
+        match self.deferred.as_ref() {
             Some(held) => held.session_closed(),
             None => self.holder().is_some_and(|holder| holder.session_closed()),
         }
+    }
+
+    /// The key and the parameters of a copy kept past the dispatch, the copy's own: in the
+    /// payloads' area of the process pools, reserved before the first session opened, whose having
+    /// no room for them refuses the copy as zenoh-pico refuses a copy it cannot allocate; on the
+    /// heap in a library without the pools, as its other objects are.
+    fn kept_texts(&self) -> Result<(QueryText<str>, QueryText<[u8]>), crate::bytes::NoRoom> {
+        #[cfg(not(wz_process_pools))]
+        let texts = (
+            QueryText::Owned(Box::from(self.keyexpr.get())),
+            QueryText::Owned(Box::from(self.parameters.get())),
+        );
+        #[cfg(wz_process_pools)]
+        let texts = (
+            QueryText::pooled_text(self.keyexpr.get())?,
+            QueryText::pooled_bytes(self.parameters.get())?,
+        );
+        Ok(texts)
     }
 
     /// An INDEPENDENT copy bound to a DEFERRED responder — what
@@ -463,18 +574,21 @@ impl QueryMarshal {
     /// long as the C program keeps it; the cached views stay UNBOUND until
     /// [`Self::bind`] runs at the copy's final address (see
     /// [`crate::pubsub::SampleMarshal::deep_copy`]). It holds no responder of
-    /// the dispatch: its replies go through `held`. `payload` and `attachment` are the copy's own, made before the
-    /// hold is taken, so that no room for them holds nothing open.
+    /// the dispatch: its replies go through `held`. `texts` ([`Self::kept_texts`]), `payload`
+    /// and `attachment` are the copy's own, made before the hold is taken, so that no room for
+    /// them holds nothing open.
     fn deep_copy_deferred(
         &self,
-        held: Box<dyn HeldQuery>,
+        held: Deferred,
+        texts: (QueryText<str>, QueryText<[u8]>),
         payload: crate::bytes::ByteBuf,
         attachment: crate::bytes::ByteBuf,
         encoding: Option<crate::encoding::EncodingState>,
     ) -> Self {
+        let (keyexpr, parameters) = texts;
         Self {
-            keyexpr: QueryText::Owned(Box::from(self.keyexpr.get())),
-            parameters: QueryText::Owned(Box::from(self.parameters.get())),
+            keyexpr,
+            parameters,
             anyke: self.anyke,
             encoding,
             source_info: self.source_info,
@@ -496,6 +610,7 @@ impl QueryMarshal {
             // makes it un-escapable ([`clone_query_marshal`]) and what says whether its session
             // has since been closed; the face's holder was lent for the callback alone.
             holder: None,
+            session: None,
             is_local: self.is_local,
             deferred: Some(held),
             responder: Cell::new(None),
@@ -560,8 +675,8 @@ impl QueryMarshal {
     /// Caller must be inside the callback that owns this marshal (the pico
     /// single-threaded-callback contract), so nothing else uses the responder.
     unsafe fn reply(&self, reply: PendingReply<'_>) -> ZResult {
-        if let Some(held) = self.deferred.as_deref() {
-            emit_held(held, reply, self.qos);
+        if let Some(held) = self.deferred.as_ref() {
+            emit_held(held, self.keyexpr.get(), reply, self.qos);
             return Z_OK;
         }
         let Some(mut lent) = self.responder.get() else {
@@ -576,7 +691,7 @@ impl QueryMarshal {
 }
 
 /// R2953 — the marshal IS the query the dispatch handed the callback, so it is
-/// what an escape holds ([`QueryHolder::hold_query`]). Only what the hold
+/// what an escape keeps ([`QueryHolder::keep_query`]). Only what the hold
 /// reads is answered from the marshal's own fields; an empty payload or
 /// attachment reads as absent, as the view it was built from would.
 impl QueryView for QueryMarshal {
@@ -657,8 +772,8 @@ impl z_owned_closure_query_t {
 }
 
 /// A C queryable's closure as its row holds it: the queryable plane's instantiation of the shared
-/// [`crate::ffi::CClosure`] mechanism, moved into one allocation at the declaration, its address
-/// the context of the row's raw callback ([`queryable_sink`]). Its `Drop` invokes the C
+/// [`crate::ffi::CClosure`] mechanism, kept in the queryable's place, the place's object the
+/// context of the row's raw callback ([`queryable_sink_at`]). Its `Drop` invokes the C
 /// `drop(context)` exactly once, when the engine lets the row's callback go after its last call.
 pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 
@@ -697,14 +812,19 @@ fn hand_query(
     view: &dyn QueryView,
     out: &mut dyn ReplyOut,
     holder: &dyn QueryHolder,
+    session: &alloc::sync::Weak<Engine>,
 ) {
     let call = match closure.call {
         Some(f) => f,
         None => return,
     };
-    // SAFETY: the marshal is dropped at the end of this call, inside the borrows of `view` and
-    // `holder`.
-    let mut marshal = unsafe { QueryMarshal::new(view).with_holder(holder) };
+    // SAFETY: the marshal is dropped at the end of this call, inside the borrows of `view`,
+    // `holder` and `session`.
+    let mut marshal = unsafe {
+        QueryMarshal::new(view)
+            .with_holder(holder)
+            .with_session(session)
+    };
     // Bind AFTER the move out of `new` — the marshal is at its final
     // address only here. See `QueryMarshal::bind`.
     marshal.bind();
@@ -723,42 +843,54 @@ fn hand_query(
     });
 }
 
-/// A C queryable's closure as the engine holds it in the queryable's row: the closure moved into
-/// one allocation at the declaration, its address the context of a raw callback
-/// ([`QueryRowSink::raw`]). The engine calls it through a shared borrow, from any thread and from
-/// inside itself, and lets go of it once, after its last call, which drops the closure: its C
-/// `drop(context)` runs and its latch opens. The subscriber's door holds its closure the same way
-/// (`crate::pubsub`).
-fn queryable_sink(closure: CQueryClosure) -> QueryRowSink {
+/// A C queryable's closure as the engine holds it in the queryable's row: the closure lies in the
+/// queryable's place ([`QueryablePlace`]), whose object, at `object`, is the context of a raw
+/// callback ([`QueryableSink::raw`]). The engine calls it through a shared borrow, from any thread
+/// and from inside itself, and lets go of it once, after its last call, which takes the closure out
+/// of the place and drops it: its C `drop(context)` runs, and the place goes back if its owner let
+/// go of it first. Nothing is allocated for it.
+///
+/// # Safety
+/// `object` is the object of a live place filled for an
+/// `Answering<T, QueryableKept>` (`crate::object_slot::Answering`), whose kept closure is
+/// counted in it and taken out by nothing but the sink made here.
+unsafe fn queryable_sink_at<T>(object: *mut T) -> QueryableSink {
     /// # Safety
-    /// `context` is the closure `queryable_sink` moved into its allocation, not yet dropped.
-    unsafe fn call(
+    /// `context` is the object of a place whose kept closure the sink's release has not taken out.
+    unsafe fn call<T>(
         context: *mut c_void,
         view: &dyn QueryView,
         out: &mut dyn ReplyOut,
         holder: &dyn QueryHolder,
     ) {
-        // SAFETY: the caller's contract.
-        let closure = unsafe { &*context.cast::<CQueryClosure>().cast_const() };
-        hand_query(closure, view, out, holder);
+        // SAFETY: the caller's contract: the closure stands in the place, read through a shared
+        // borrow.
+        let kept =
+            unsafe { &*crate::object_slot::kept_at::<T, QueryableKept>(context.cast::<T>()) };
+        hand_query(&kept.closure, view, out, holder, &kept.engine);
     }
     /// # Safety
-    /// As `call`'s, and nothing calls it again.
-    unsafe fn release(context: *mut c_void) {
-        // SAFETY: the caller's contract: the allocation is `queryable_sink`'s, given back once.
-        drop(unsafe { Box::from_raw(context.cast::<CQueryClosure>()) });
+    /// As `call`'s, and nothing calls either again.
+    unsafe fn release<T>(context: *mut c_void) {
+        // SAFETY: the caller's contract: what the place keeps is taken out once, here, and dropped
+        // out of it, as its closure's drop may give the place back.
+        let kept = unsafe {
+            core::ptr::read(crate::object_slot::kept_at::<T, QueryableKept>(
+                context.cast::<T>(),
+            ))
+        };
+        drop(kept);
     }
-    let context = Box::into_raw(Box::new(closure)).cast::<c_void>();
-    // SAFETY: `call` reads the closure behind `context` through a shared borrow, which a C
-    // closure admits from any thread and from inside itself (pico calls it so, and
-    // `CQueryClosure` is `Sync` for this plane); `release` gives the allocation back once,
-    // which the engine does after the last call.
-    unsafe { QueryRowSink::raw(call, context, Some(release)) }
+    // SAFETY: `call` reads the closure in the place through a shared borrow, which a C closure
+    // admits from any thread and from inside itself (pico calls it so, and `CQueryClosure` is
+    // `Sync` for this plane); `release` takes it out once, which the engine does after the last
+    // call, and the place stands until then, as the closure is counted in it.
+    unsafe { QueryableSink::raw(call::<T>, object.cast::<c_void>(), Some(release::<T>)) }
 }
 
-/// Release a boxed [`QueryMarshal`].
+/// Release a [`QueryMarshal`] in its place.
 ///
-/// Dropping it drops its [`HeldQuery`], which is what emits the
+/// Dropping it drops its keep of the query ([`Deferred`]), which is what emits the
 /// `ResponseFinal` — pico's `_z_query_clear` contract.
 ///
 /// # Safety
@@ -808,11 +940,31 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
         Ok(encoding) => encoding,
         Err(no_room) => return Err(no_room.code()),
     };
+    // And the key and the parameters, which the copy owns.
+    let texts = match marshal.kept_texts() {
+        Ok(texts) => texts,
+        Err(no_room) => return Err(no_room.code()),
+    };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
-    let held = holder.hold_query(marshal);
-    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment, encoding));
+    // The escape holds its session weakly; a keep the session has no row for is pico's failed
+    // allocation of the copy, and a query the engine cannot keep is not escaped.
+    let held = {
+        let Some(engine) = marshal.session() else {
+            return Err(crate::result::Z_ERR_GENERIC);
+        };
+        match holder.keep_query(marshal) {
+            Ok(Some(id)) => Deferred {
+                engine: engine.clone(),
+                id,
+            },
+            Ok(None) => return Err(crate::result::Z_ERR_GENERIC),
+            Err(wz_capi_port::Refusal::Closed) => return Err(Z_ERR_SESSION_CLOSED),
+            Err(_) => return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
+        }
+    };
+    let owned = slot.fill(marshal.deep_copy_deferred(held, texts, payload, attachment, encoding));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -1142,30 +1294,46 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 // --- queryable handle ------------------------------------------------------
 
 /// Behind a `z_owned_queryable_t` handle: the C queryable's id in the session's
-/// responder SSOT. Dropping it retracts the declaration — removing it from the
+/// responder SSOT. Letting go of it retracts the declaration — removing it from the
 /// SSOT (so no future face replays it) and dropping every live face's wz
-/// queryable, which emits each wire undeclare and releases the last closure
-/// reference (→ the C `drop(context)`).
+/// queryable, which emits each wire undeclare and lets the row's callback go
+/// (→ the C `drop(context)`). It lies in its place ([`QueryablePlace`]) beside the C
+/// closure the row calls, which outlives it until the row lets go of it.
 pub(crate) struct QueryableState {
     engine: Arc<Engine>,
+    /// The declaration, once made: the place is filled before the queryable is declared, as the
+    /// closure its row calls lies in it, and one whose declaration was refused is let go of with
+    /// none.
+    declared: Option<DeclaredQueryable>,
+    /// Cached loan of the declaration's key, so `z_queryable_keyexpr` hands back a borrow of
+    /// stable storage rather than of a temporary.
+    loaned_keyexpr: z_loaned_keyexpr_t,
+}
+
+/// A queryable's declaration: its id and its key.
+struct DeclaredQueryable {
     id: QblId,
     /// R2959 — the queryable's key with the non-wild-prefix declaration pico
     /// makes for it; dropped after the queryable, so the retraction follows.
     key: DeclaredKeyexpr,
-    /// Cached loan of `key`, so `z_queryable_keyexpr` hands back a borrow of
-    /// stable storage rather than of a temporary.
-    loaned_keyexpr: z_loaned_keyexpr_t,
-    /// Opens when the queryable's closure has run its `drop(context)`; the undeclare waits on it
-    /// so it returns only when no query is still being answered (pico's `_z_sync_group_wait`).
-    released: Arc<crate::ffi::ReleaseLatch>,
 }
 
-impl Drop for QueryableState {
-    fn drop(&mut self) {
-        self.engine.undeclare_queryable(self.id);
-        self.released.wait();
-    }
+/// What a queryable's place keeps for its row past the queryable's handle: the C closure the row
+/// calls and lets go of after its last call, and for a background queryable a hold on its
+/// session's count, so the session's close waits for the closure as pico's does
+/// (`_z_sync_group_wait`). Let go of in that order, by the row's release.
+pub(crate) struct QueryableKept {
+    closure: CQueryClosure,
+    // Held for its drop, which lets the session's count go after the closure; never read.
+    _session: Option<crate::ffi::HeldIn>,
+    /// The session the queryable is declared on, which a query its callback keeps holds while the
+    /// program does: weakly here, so the row the session keeps this in holds no count of it.
+    engine: alloc::sync::Weak<Engine>,
 }
+
+/// A queryable's place: its state, which its owner lets go of, and what its row keeps past it; the
+/// last of the owner and the row gives the place back (`crate::object_slot::Answering`).
+pub(crate) type QueryablePlace = crate::object_slot::Answering<QueryableState, QueryableKept>;
 
 /// Owned queryable (pico `z_owned_queryable_t`). Handle model, as publisher /
 /// subscriber (see [`crate::abi`]).
@@ -1198,10 +1366,20 @@ impl z_owned_queryable_t {
     }
 }
 
+/// Let go of a queryable: its declaration is retracted, which lets its row's callback go after
+/// its last call, the release waits for the closure to be let go of (pico's `_z_sync_group_wait`)
+/// unless it is made from inside a callback, and the key goes after. The place goes back with the
+/// last of the handle and the closure.
+///
 /// # Safety
-/// `h` must be a live `QueryableState` handle.
+/// `h` must be a live `QueryableState` handle, let go of once.
 unsafe fn free_queryable(h: *mut c_void) {
-    crate::object_slot::release_entity(h as *mut QueryableState);
+    let state = h as *mut QueryableState;
+    if let Some(declared) = &(*state).declared {
+        (*state).engine.undeclare_queryable(declared.id);
+    }
+    crate::object_slot::closures_of::<QueryableState, QueryableKept>(state).wait_none();
+    crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
 }
 
 impl_handle_ownership7!(
@@ -1221,47 +1399,63 @@ impl_handle_ownership7!(
 // --- declare / undeclare ---------------------------------------------------
 
 /// Shared body of `z_declare_queryable` / `z_declare_background_queryable`:
-/// consume the moved closure, validate, and record the SSOT entry.
+/// consume the moved closure, validate, put the closure in the queryable's place, `slot`, and
+/// declare the queryable with its row calling it there.
 ///
-/// Returns the queryable id on success. The moved closure is consumed on EVERY
-/// path (pico's contract): `CQueryClosure` owns the C `drop(context)` from the
-/// moment it is built, so an early error drops it and frees the context.
-unsafe fn declare_queryable_inner(
+/// Answers the queryable's state, declared. The moved closure is consumed on EVERY path (pico's
+/// contract): `CQueryClosure` owns the C `drop(context)` from the moment it is built, so an
+/// early error drops it and frees the context, and a refused declaration lets go of the row's
+/// callback, which drops it, and of the place. A `background` queryable's closure holds its
+/// session's count open until it is let go of.
+///
+/// # Safety
+/// The pointers are null or valid values of their types; `handle` is the session `zs` names, read
+/// open.
+unsafe fn declare_queryable_in(
     zs: *const z_loaned_session_t,
+    handle: &crate::session::PicoSessionHandle,
+    slot: crate::object_slot::Slot<QueryablePlace>,
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_query_t,
     options: *const z_queryable_options_t,
-) -> Result<
-    (
-        Arc<Engine>,
-        QblId,
-        DeclaredKeyexpr,
-        Arc<crate::ffi::ReleaseLatch>,
-    ),
-    ZResult,
-> {
-    if callback.is_null() {
-        return Err(Z_ERR_NULL);
-    }
+    background: bool,
+) -> Result<*mut QueryableState, ZResult> {
     let owned = &mut (*callback)._this;
-    let cclosure = CQueryClosure::new(owned.context, owned.call, owned.drop);
+    let closure = CQueryClosure::uncounted(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_query_t::null_value();
-    let released = cclosure.release_latch();
 
-    // A closed session takes no declaration; the closure consumed above runs its drop.
-    let handle = crate::session::open_session_handle(zs)?;
     // A non-canonical / pico-unsafe keyexpr is refused UP FRONT — the same
     // outbound gate `z_declare_subscriber` applies, and for the same reason:
     // the registry declares best-effort per face, so a per-face reject would
     // be swallowed and the call would report `Z_OK` for a dead SSOT entry.
-    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?.to_owned();
+    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
     let (complete, allowed_origin) = if options.is_null() {
         (false, crate::locality::default_locality!("local-queryable"))
     } else {
         ((*options).complete, (*options).allowed_origin())
     };
     let session = crate::write_filter::PicoSession::of(handle);
-    let (id, key) = declare_queryable_on(
+    let state = slot
+        .fill(crate::object_slot::Answering::keeping(
+            QueryableState {
+                engine: Arc::clone(&session.engine),
+                declared: None,
+                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            },
+            QueryableKept {
+                closure,
+                _session: background.then(|| crate::session::session_count(zs).hold()),
+                engine: Arc::downgrade(&session.engine),
+            },
+        ))
+        .cast::<QueryableState>();
+    // The closure lies in the place now, counted there before the row can call it or let it go.
+    let kept = crate::object_slot::kept_at::<QueryableState, QueryableKept>(state);
+    crate::object_slot::count_in_entity::<QueryableState, QueryableKept, _>(
+        state,
+        &mut (*kept).closure,
+    );
+    match declare_queryable_on(
         &session,
         ke,
         declared_of(keyexpr),
@@ -1269,9 +1463,18 @@ unsafe fn declare_queryable_inner(
         allowed_origin,
         // One callback for the queryable, kept in its row and lent each face's holder per query,
         // as the subscriber's and the liveliness subscriber's doors hand theirs.
-        queryable_sink(cclosure),
-    )?;
-    Ok((session.engine, id, key, released))
+        queryable_sink_at(state),
+    ) {
+        Ok((id, key)) => {
+            (*state).declared = Some(DeclaredQueryable { id, key });
+            Ok(state)
+        }
+        Err(code) => {
+            // The refused row let go of the closure; the place goes back with the state.
+            crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
+            Err(code)
+        }
+    }
 }
 
 /// Declare a queryable the way pico's `z_declare_queryable` does, for whatever
@@ -1294,18 +1497,18 @@ unsafe fn declare_queryable_inner(
 /// differs.
 pub(crate) fn declare_queryable_on(
     session: &crate::write_filter::PicoSession,
-    keyexpr: String,
+    keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
-    sink: QueryRowSink,
+    sink: QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, &keyexpr, existing)?;
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, keyexpr, existing)?;
     let id = session
         .engine
-        .declare_queryable_row_on_wire(
-            &keyexpr,
-            key.wire(Arc::as_ref(&session.engine)),
+        .declare_queryable_on_wire(
+            keyexpr,
+            key.wire_holding_declaration(Arc::as_ref(&session.engine)),
             complete,
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key
@@ -1313,7 +1516,7 @@ pub(crate) fn declare_queryable_on(
             key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
             sink,
         )
-        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
+        .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
     Ok((id, key))
 }
 
@@ -1336,13 +1539,13 @@ impl PlainQueryable {
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         complete: bool,
-        sink: QueryRowSink,
+        sink: QueryableSink,
     ) -> Result<Self, ZResult> {
         // Declared as pico declares its own (`z_declare_queryable` with NULL options):
         // the default origin.
         let (id, key) = declare_queryable_on(
             session,
-            keyexpr.to_owned(),
+            keyexpr,
             existing,
             complete,
             crate::locality::default_locality!("local-queryable"),
@@ -1380,44 +1583,58 @@ pub unsafe extern "C" fn z_declare_queryable(
         if callback.is_null() {
             return Z_ERR_NULL;
         }
-        // The queryable's place is taken from its session before it is declared, so a session
-        // with no place left refuses the declaration and declares nothing; a session that is not
-        // open is refused as the declaration refuses it. The closure is consumed as on every
-        // refusal.
-        let handle = match crate::session::open_session_handle(zs) {
-            Ok(handle) => handle,
-            Err(code) => {
-                z_closure_query_drop(callback);
-                return code;
-            }
+        let state = match queryable_place(zs, callback).and_then(|(handle, slot)| {
+            declare_queryable_in(zs, handle, slot, keyexpr, callback, options, false)
+        }) {
+            Ok(state) => state,
+            Err(code) => return code,
         };
-        let Some(slot) = crate::object_slot::Slot::take_entity(
-            &crate::session::engine_of(handle),
-            crate::object_slot::Kind::Queryable,
-        ) else {
-            z_closure_query_drop(callback);
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
-        };
-        match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok((engine, id, key, released)) => {
-                let state = slot.fill(QueryableState {
-                    engine,
-                    id,
-                    key,
-                    loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-                    released,
-                });
-                // Point the cached view at the placed keyexpr's final address.
-                (*state).loaned_keyexpr = (*state).key.loaned();
-                *queryable = z_owned_queryable_t {
-                    handle: state as *mut c_void,
-                    _pad: [core::ptr::null_mut(); 3],
-                };
-                Z_OK
-            }
-            Err(code) => code,
+        // Point the cached view at the placed keyexpr's final address.
+        if let Some(declared) = &(*state).declared {
+            (*state).loaned_keyexpr = declared.key.loaned();
         }
+        *queryable = z_owned_queryable_t {
+            handle: state as *mut c_void,
+            _pad: [core::ptr::null_mut(); 3],
+        };
+        Z_OK
     })
+}
+
+/// The open session `zs` names and a place of its for a queryable, taken before anything is
+/// declared, so a session with no place left refuses the declaration and declares nothing. A
+/// session that is not open is refused as a declaration is; on either refusal the moved closure is
+/// consumed, its drop run.
+///
+/// # Safety
+/// `zs` is null or a valid loaned session; `callback` a non-null moved query closure.
+unsafe fn queryable_place<'a>(
+    zs: *const z_loaned_session_t,
+    callback: *mut z_moved_closure_query_t,
+) -> Result<
+    (
+        &'a crate::session::PicoSessionHandle,
+        crate::object_slot::Slot<QueryablePlace>,
+    ),
+    ZResult,
+> {
+    let handle = match crate::session::open_session_handle(zs) {
+        Ok(handle) => handle,
+        Err(code) => {
+            z_closure_query_drop(callback);
+            return Err(code);
+        }
+    };
+    match crate::object_slot::Slot::take_entity(
+        &crate::session::engine_of(handle),
+        crate::object_slot::Kind::Queryable,
+    ) {
+        Some(slot) => Ok((handle, slot)),
+        None => {
+            z_closure_query_drop(callback);
+            Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        }
+    }
 }
 
 /// Declare a background queryable (pico `z_declare_background_queryable`): the
@@ -1427,7 +1644,9 @@ pub unsafe extern "C" fn z_declare_queryable(
 /// The declaration is simply never retracted by a handle drop — the engine
 /// holds it (and so the C closure) until the session is closed or dropped,
 /// which is exactly pico's "until the corresponding session is closed or
-/// dropped" contract.
+/// dropped" contract. Its closure lies in a place of the session's, as a
+/// queryable's with a handle does, given back once the row lets go of it, and
+/// holds the session's count open meanwhile, so the close waits for it.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_background_queryable(
     zs: *const z_loaned_session_t,
@@ -1435,18 +1654,22 @@ pub unsafe extern "C" fn z_declare_background_queryable(
     callback: *mut z_moved_closure_query_t,
     options: *const z_queryable_options_t,
 ) -> ZResult {
-    guarded(
-        || match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok((_, _, _, released)) => {
-                // No handle will undeclare it, so the session's close waits for it.
-                if let Some(handle) = session_handle(zs) {
-                    handle.keep_background(released);
-                }
+    guarded(|| {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        match queryable_place(zs, callback).and_then(|(handle, slot)| {
+            declare_queryable_in(zs, handle, slot, keyexpr, callback, options, true)
+        }) {
+            Ok(state) => {
+                // No handle will undeclare it: its owner lets go of it at once, with no wait, and
+                // the place stays with the row's callback until the session's close lets it go.
+                crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
                 Z_OK
             }
             Err(code) => code,
-        },
-    )
+        }
+    })
 }
 
 /// Undeclare a queryable (pico `z_undeclare_queryable`): drops every face's wz
@@ -1459,8 +1682,8 @@ pub unsafe extern "C" fn z_undeclare_queryable(queryable: *mut z_moved_queryable
         }
         let handle = (*queryable)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release_entity(handle as *mut QueryableState);
             (*queryable)._this = z_owned_queryable_t::null_value();
+            free_queryable(handle);
         }
         Z_OK
     })
@@ -1810,8 +2033,10 @@ pub unsafe extern "C" fn z_query_encoding(
 pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
 ) -> Option<([u8; 16], QblId)> {
-    handle_ref::<z_loaned_queryable_t, QueryableState>(queryable)
-        .map(|state| (state.engine.zid(), state.id))
+    handle_ref::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
+        let declared = state.declared.as_ref()?;
+        Some((state.engine.zid(), declared.id))
+    })
 }
 
 /// Borrow a query's source info, or NULL when it carried none (pico
@@ -2300,14 +2525,27 @@ mod tests {
         }
     }
 
-    /// A hold that answers nothing: the kept copy below is never replied on.
-    struct NoHold;
+    /// A session that is gone, as a copy made by a test holds it: a reply on the copy is refused as
+    /// on a closed session, and its drop releases nothing.
+    #[cfg(feature = "engine-tokio")]
+    fn no_session() -> alloc::sync::Weak<Engine> {
+        alloc::sync::Weak::<wz_capi_core::faces::SharedSession>::new()
+    }
 
-    impl HeldQuery for NoHold {
-        fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
+    /// As the tokio engine's: the cooperative engine's session is a type of its own.
+    #[cfg(not(feature = "engine-tokio"))]
+    fn no_session() -> alloc::sync::Weak<Engine> {
+        alloc::sync::Weak::new()
+    }
 
-        fn session_closed(&self) -> bool {
-            false
+    /// A keep of a query held by a session that is gone.
+    fn held_by_no_session() -> Deferred {
+        Deferred {
+            engine: no_session(),
+            id: wz_capi_port::HeldQueryId {
+                generation: 0,
+                rid: 7,
+            },
         }
     }
 
@@ -2335,7 +2573,9 @@ mod tests {
             .map(crate::encoding::EncodingState::kept)
             .transpose()
             .expect("room for the copy");
-        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment, encoding);
+        let texts = marshal.kept_texts().expect("room for the copy");
+        let kept =
+            marshal.deep_copy_deferred(held_by_no_session(), texts, payload, attachment, encoding);
         drop(marshal);
         assert_ne!(kept.payload.as_slice().as_ptr(), view.payload.as_ptr());
         assert_eq!(kept.payload.as_slice(), b"in place");
@@ -2373,27 +2613,31 @@ mod tests {
         let hint = unsafe { crate::encoding::encoding_view(loaned) }.expect("bound");
         assert_eq!((hint.packed_id, hint.schema), (7, Some(&b"utf8"[..])));
 
-        let held: Box<dyn HeldQuery> = Box::new(NoHold);
-        let payload = marshal.payload.try_clone().expect("room for the copy");
-        let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let encoding = marshal
-            .encoding
-            .as_ref()
-            .map(crate::encoding::EncodingState::kept)
-            .transpose()
-            .expect("room for the copy");
-        let mut kept = marshal.deep_copy_deferred(held, payload, attachment, encoding);
-        drop(marshal);
-        kept.bind();
-        let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
-        // SAFETY: the kept copy, bound at its final address.
-        let kept_loaned = unsafe { z_query_encoding(kept_query) };
-        // SAFETY: the loaned encoding of the live copy.
-        let kept_hint = unsafe { crate::encoding::encoding_view(kept_loaned) }.expect("kept");
-        assert_eq!(
-            (kept_hint.packed_id, kept_hint.schema),
-            (7, Some(&b"utf8"[..]))
-        );
+        // A copy kept past the callback.
+        {
+            let held = held_by_no_session();
+            let payload = marshal.payload.try_clone().expect("room for the copy");
+            let attachment = marshal.attachment.try_clone().expect("room for the copy");
+            let encoding = marshal
+                .encoding
+                .as_ref()
+                .map(crate::encoding::EncodingState::kept)
+                .transpose()
+                .expect("room for the copy");
+            let texts = marshal.kept_texts().expect("room for the copy");
+            let mut kept = marshal.deep_copy_deferred(held, texts, payload, attachment, encoding);
+            drop(marshal);
+            kept.bind();
+            let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
+            // SAFETY: the kept copy, bound at its final address.
+            let kept_loaned = unsafe { z_query_encoding(kept_query) };
+            // SAFETY: the loaned encoding of the live copy.
+            let kept_hint = unsafe { crate::encoding::encoding_view(kept_loaned) }.expect("kept");
+            assert_eq!(
+                (kept_hint.packed_id, kept_hint.schema),
+                (7, Some(&b"utf8"[..]))
+            );
+        }
 
         let plain = FakeQuery {
             keyexpr: "demo/plain".to_owned(),
@@ -2450,162 +2694,94 @@ mod tests {
         assert!(tap.seen.is_empty(), "nothing reached the responder");
     }
 
-    /// What a kept query's replies reach: the replies' keys, in order.
-    #[derive(Default)]
-    struct Kept {
-        keys: std::sync::Mutex<Vec<String>>,
-        /// What the hold says of its session: open until a test closes it.
-        closed: core::sync::atomic::AtomicBool,
+    /// A face's holder whose keep answers `answer`, counting the keeps it is asked for.
+    struct Keeping {
+        answer: Result<Option<wz_capi_port::HeldQueryId>, wz_capi_port::Refusal>,
+        asked: AtomicUsize,
     }
 
-    /// A hold that records each reply's key into `Kept`.
-    struct KeptHold(Arc<Kept>);
-
-    impl HeldQuery for KeptHold {
-        fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-            let mut out = KeyTap(self.0.clone());
-            answer(&mut out);
-        }
-
-        fn session_closed(&self) -> bool {
-            self.0.closed.load(Ordering::SeqCst)
+    impl Keeping {
+        fn answering(
+            answer: Result<Option<wz_capi_port::HeldQueryId>, wz_capi_port::Refusal>,
+        ) -> Self {
+            Self {
+                answer,
+                asked: AtomicUsize::new(0),
+            }
         }
     }
 
-    /// A responder that records the key of each keyed reply.
-    struct KeyTap(Arc<Kept>);
-
-    impl ReplyOut for KeyTap {
-        fn reply(&mut self, _payload: &[u8]) {}
-        fn reply_del(&mut self) {}
-        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
-        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
-        fn clear_responder(&mut self) {}
-        fn responder(&self) -> Option<(&[u8], u32)> {
-            None
-        }
-        fn reply_keyed_meta(
-            &mut self,
-            keyexpr: &str,
-            _payload: &[u8],
-            _meta: ReplyMeta<'_>,
-        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
-            self.0
-                .keys
-                .lock()
-                .expect("a held lock")
-                .push(keyexpr.to_owned());
-            Ok(())
-        }
-        fn reply_keyed_del_meta(
-            &mut self,
-            _keyexpr: &str,
-            _meta: ReplyMeta<'_>,
-        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
-            Ok(())
-        }
-    }
-
-    /// What a dispatch's queries are held through, here a hold that records into `Kept`.
-    struct KeptHolder(Arc<Kept>);
-
-    impl QueryHolder for KeptHolder {
-        fn hold_query(&self, _view: &dyn QueryView) -> Box<dyn HeldQuery> {
-            Box::new(KeptHold(self.0.clone()))
+    impl QueryHolder for Keeping {
+        fn keep_query(
+            &self,
+            _view: &dyn QueryView,
+        ) -> Result<Option<wz_capi_port::HeldQueryId>, wz_capi_port::Refusal> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.answer
         }
         fn session_closed(&self) -> bool {
             false
         }
     }
 
-    /// A query cloned inside its callback is answered after the callback returned, as pico lets a
-    /// program answer one it kept: the reply goes through the hold, not the dispatch's responder,
-    /// which is no longer lent. Turned red by a kept query that answers through the responder.
-    #[test]
-    fn a_query_cloned_in_its_callback_answers_after_it() {
-        let view = FakeQuery {
-            keyexpr: "demo/kept".to_owned(),
-            payload: Vec::new(),
-            attachment: Vec::new(),
-        };
-        let kept = Arc::new(Kept::default());
-        // SAFETY: the marshal is dropped before `view`.
-        let holder = KeptHolder(kept.clone());
-        // SAFETY: the marshal is dropped before `view` and `holder`.
-        let mut marshal = unsafe { QueryMarshal::new(&view).with_holder(&holder) };
+    /// A keep the holder answers, by its id.
+    const KEPT: Result<Option<wz_capi_port::HeldQueryId>, wz_capi_port::Refusal> =
+        Ok(Some(wz_capi_port::HeldQueryId {
+            generation: 1,
+            rid: 7,
+        }));
+
+    /// Clone the query `view` describes inside its callback, kept through `holder` on `session`
+    /// (none lent when `None`): what `z_query_clone` answered, and the copy.
+    fn clone_in_callback(
+        view: &FakeQuery,
+        holder: &dyn QueryHolder,
+        session: Option<&alloc::sync::Weak<Engine>>,
+    ) -> (ZResult, z_owned_query_t) {
+        // SAFETY: the marshal is dropped before `view`, `holder` and `session`.
+        let mut marshal = unsafe { QueryMarshal::new(view).with_holder(holder) };
+        if let Some(session) = session {
+            // SAFETY: as above.
+            marshal = unsafe { marshal.with_session(session) };
+        }
         marshal.bind();
         let mut owned = z_owned_query_t::null_value();
+        let mut code = Z_OK;
         let mut tap = QosTap::default();
         marshal.answer_with(&mut tap, |marshal| {
             let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
             // SAFETY: the callback's own loaned query, and a live destination.
-            assert_eq!(unsafe { z_query_clone(&mut owned, query) }, Z_OK);
+            code = unsafe { z_query_clone(&mut owned, query) };
         });
-        drop(marshal);
-        // SAFETY: the kept query is live, and the keys and payloads are this frame's.
-        unsafe {
-            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
-            assert_eq!(
-                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/kept".as_ptr()),
-                Z_OK
-            );
-            let mut payload = core::mem::zeroed();
-            assert_eq!(
-                crate::bytes::z_bytes_copy_from_str(&mut payload, c"later".as_ptr()),
-                Z_OK
-            );
-            assert_eq!(
-                z_query_reply(
-                    z_query_loan(&owned),
-                    crate::keyexpr::z_view_keyexpr_loan(&ke),
-                    crate::bytes::z_bytes_move(&mut payload),
-                    core::ptr::null()
-                ),
-                Z_OK
-            );
-            z_query_drop(z_query_move(&mut owned));
-        }
-        assert!(tap.seen.is_empty(), "the dispatch's responder is not used");
-        assert_eq!(
-            *kept.keys.lock().expect("a held lock"),
-            vec!["demo/kept".to_owned()]
-        );
+        assert!(tap.seen.is_empty(), "a clone answers nothing");
+        (code, owned)
     }
 
-    /// The query a closed session's kept copy is refused a reply on: the copy asks its held query,
-    /// as the face's holder was lent for the callback alone. Turned red by a kept copy that reads
-    /// the face's holder, which says the session is open, or keeps none and says so.
+    /// A query cloned inside its callback keeps its own key, holds its session weakly and asks it,
+    /// not the face's holder (lent for the callback alone, and saying the session is open), whether
+    /// the session is closed: a session gone refuses the copy's reply as a closed one. The CONTROL
+    /// is the clone, kept once. Turned red by a copy that reads the face's holder, or that lends
+    /// its key from the dispatch.
     #[test]
-    fn a_kept_query_asks_its_hold_whether_the_session_closed() {
+    fn a_kept_copy_asks_its_session_whether_it_closed() {
         let view = FakeQuery {
             keyexpr: "demo/kept/closed".to_owned(),
             payload: Vec::new(),
             attachment: Vec::new(),
         };
-        let kept = Arc::new(Kept::default());
-        let holder = KeptHolder(kept.clone());
-        // SAFETY: the marshal is dropped before `view` and `holder`.
-        let mut marshal = unsafe { QueryMarshal::new(&view).with_holder(&holder) };
-        marshal.bind();
-        let mut owned = z_owned_query_t::null_value();
-        let mut tap = QosTap::default();
-        marshal.answer_with(&mut tap, |marshal| {
-            assert!(
-                !marshal.session_closed(),
-                "the face says the session is open"
-            );
-            let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
-            // SAFETY: the callback's own loaned query, and a live destination.
-            assert_eq!(unsafe { z_query_clone(&mut owned, query) }, Z_OK);
-        });
-        drop(marshal);
-        kept.closed.store(true, Ordering::SeqCst);
+        let holder = Keeping::answering(KEPT);
+        let session = no_session();
+        let (code, mut owned) = clone_in_callback(&view, &holder, Some(&session));
+        assert_eq!(code, Z_OK, "CONTROL: the query is cloned");
+        assert_eq!(holder.asked.load(Ordering::SeqCst), 1, "kept once");
+        drop(view);
         // SAFETY: the kept query is live, and the keys and payloads are this frame's.
         unsafe {
-            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+            let query = z_query_loan(&owned);
             assert_eq!(
-                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/kept/closed".as_ptr()),
-                Z_OK
+                keyexpr_str(z_query_keyexpr(query)),
+                Some("demo/kept/closed"),
+                "the copy reads its own key"
             );
             let mut payload = core::mem::zeroed();
             assert_eq!(
@@ -2614,8 +2790,8 @@ mod tests {
             );
             assert_eq!(
                 z_query_reply(
-                    z_query_loan(&owned),
-                    crate::keyexpr::z_view_keyexpr_loan(&ke),
+                    query,
+                    z_query_keyexpr(query),
                     crate::bytes::z_bytes_move(&mut payload),
                     core::ptr::null()
                 ),
@@ -2623,7 +2799,43 @@ mod tests {
             );
             z_query_drop(z_query_move(&mut owned));
         }
-        assert!(kept.keys.lock().expect("a held lock").is_empty());
+    }
+
+    /// A query its session refuses to keep is not cloned, answered as zenoh-pico answers the copy
+    /// it cannot make: a closed session as closed, no room for the keep as no memory, a query the
+    /// holder does not answer as a failure; a dispatch that lent no session takes no keep at all.
+    /// The CONTROL is the keep the holder grants. Turned red by a refusal mapped to another code,
+    /// or a keep taken before the session is known.
+    #[test]
+    fn a_refused_keep_clones_nothing() {
+        let view = FakeQuery {
+            keyexpr: "demo/kept/refused".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        let session = no_session();
+        let (granted, mut owned) =
+            clone_in_callback(&view, &Keeping::answering(KEPT), Some(&session));
+        assert_eq!(granted, Z_OK, "CONTROL: a keep granted clones the query");
+        // SAFETY: the copy is live and owned here.
+        unsafe { z_query_drop(z_query_move(&mut owned)) };
+        for (answer, expected) in [
+            (Err(wz_capi_port::Refusal::Closed), Z_ERR_SESSION_CLOSED),
+            (
+                Err(wz_capi_port::Refusal::TableFull),
+                crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            ),
+            (Ok(None), crate::result::Z_ERR_GENERIC),
+        ] {
+            let holder = Keeping::answering(answer);
+            let (code, _) = clone_in_callback(&view, &holder, Some(&session));
+            assert_eq!(code, expected, "{answer:?}");
+            assert_eq!(holder.asked.load(Ordering::SeqCst), 1);
+        }
+        let holder = Keeping::answering(KEPT);
+        let (code, _) = clone_in_callback(&view, &holder, None);
+        assert_eq!(code, crate::result::Z_ERR_GENERIC, "no session lent");
+        assert_eq!(holder.asked.load(Ordering::SeqCst), 0, "and nothing kept");
     }
 
     /// The context the C callback of the row test was last handed, and how many times the
@@ -2644,22 +2856,31 @@ mod tests {
         ROW_DROPS.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// The callback a queryable's row keeps hands each query to the C callback with the program's
-    /// context, through a shared borrow, and letting it go runs the C drop once and opens the
-    /// closure's latch. Turned red by a sink that calls nothing, or one whose drop is not the
-    /// closure's.
+    /// The callback a queryable's row keeps hands each query to the C callback kept in the
+    /// queryable's place, with the program's context, through a shared borrow, and letting it go
+    /// takes the closure out and runs the C drop once. Turned red by a sink that calls nothing, or
+    /// one whose drop is not the closure's.
     #[test]
     fn a_queryable_rows_callback_calls_the_c_closure_and_drops_it_once() {
         let context = 0x5a_usize as *mut c_void;
-        let closure = CQueryClosure::new(context, Some(row_call), Some(row_drop));
-        let released = closure.release_latch();
-        let sink = queryable_sink(closure);
+        let closure = CQueryClosure::uncounted(context, Some(row_call), Some(row_drop));
+        let mut place = crate::object_slot::Answering::keeping(
+            0_u8,
+            QueryableKept {
+                closure,
+                _session: None,
+                engine: no_session(),
+            },
+        );
+        // SAFETY: `place` holds an `Answering<u8, QueryableKept>` that outlives the sink, whose
+        // closure only the sink takes out.
+        let sink = unsafe { queryable_sink_at(core::ptr::from_mut(&mut place).cast::<u8>()) };
         let view = FakeQuery {
             keyexpr: "demo/row".to_owned(),
             payload: Vec::new(),
             attachment: Vec::new(),
         };
-        let holder = KeptHolder(Arc::new(Kept::default()));
+        let holder = Keeping::answering(Ok(None));
         let mut tap = QosTap::default();
         sink.call(&view, &mut tap, &holder);
         sink.call(&view, &mut tap, &holder);
@@ -2668,6 +2889,415 @@ mod tests {
         assert_eq!(ROW_DROPS.load(Ordering::SeqCst), 0);
         drop(sink);
         assert_eq!(ROW_DROPS.load(Ordering::SeqCst), 1);
-        released.wait();
+    }
+
+    /// A queryable whose owner lets go of it while its row still holds the closure (an undeclare
+    /// from inside its own callback) leaves its place to the row: the place goes back when the row
+    /// lets the closure go, after its C drop ran. Turned red by a place given back under the
+    /// closure, or never.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_queryables_place_goes_back_when_its_row_lets_go_of_the_closure() {
+        use crate::object_slot::{count_in_entity, kept_at, retire_entity, Answering, Kind, Slot};
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn counted_drop(_context: *mut c_void) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many queryable places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Queryable)).collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+        assert!(places > 0, "the session's limit admits queryables");
+
+        let state = Slot::<QueryablePlace>::take_entity(&engine, Kind::Queryable)
+            .expect("a queryable's place")
+            .fill(Answering::keeping(
+                QueryableState {
+                    engine: Arc::clone(&engine),
+                    declared: None,
+                    loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+                },
+                QueryableKept {
+                    closure: CQueryClosure::uncounted(
+                        core::ptr::null_mut(),
+                        None,
+                        Some(counted_drop),
+                    ),
+                    _session: None,
+                    engine: Arc::downgrade(&engine),
+                },
+            ))
+            .cast::<QueryableState>();
+        // SAFETY: `state` was filled just above; its closure is counted in it before the sink
+        // takes it, and its owner lets go of it once.
+        let sink = unsafe {
+            let kept = kept_at::<QueryableState, QueryableKept>(state);
+            count_in_entity::<QueryableState, QueryableKept, _>(state, &mut (*kept).closure);
+            let sink = queryable_sink_at(state);
+            retire_entity::<QueryableState, QueryableKept>(state);
+            sink
+        };
+        assert_eq!(
+            free(&engine),
+            places - 1,
+            "the row's closure holds the place"
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(sink);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
+        assert_eq!(
+            free(&engine),
+            places,
+            "the closure's drop gave the place back"
+        );
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+}
+
+/// The key and the parameters a kept copy owns lie in the payloads' area of the process pools, in a
+/// library that has them.
+#[cfg(all(test, wz_process_pools))]
+mod pooled_text_tests {
+    use super::*;
+
+    /// A text copied for a kept query reads what it copied from a place of its own, and one longer
+    /// than the payloads' area holds is refused, as zenoh-pico refuses a copy it cannot allocate.
+    /// The CONTROL is the short text, copied. Turned red by a copy that lends the source's bytes,
+    /// or that falls back to the heap.
+    #[test]
+    fn a_kept_text_is_a_copy_in_the_pools_and_one_past_them_is_refused() {
+        let source = String::from("demo/kept/text");
+        let text = QueryText::pooled_text(&source).expect("CONTROL: room for a short text");
+        assert_eq!(text.get(), "demo/kept/text");
+        assert_ne!(text.get().as_ptr(), source.as_ptr(), "a copy of its own");
+        let bytes = QueryText::pooled_bytes(b"a=1;b=two").expect("room for the parameters");
+        assert_eq!(bytes.get(), b"a=1;b=two");
+        let empty = QueryText::pooled_bytes(b"").expect("no parameters take no block");
+        assert!(empty.get().is_empty());
+
+        let long = "k".repeat(wz_session_core::caps::HELD_PAYLOAD_BYTES + 1);
+        assert!(
+            QueryText::pooled_text(&long).is_err(),
+            "a text past the payloads' area is refused"
+        );
+    }
+}
+
+/// A query a program keeps past its callback on the cooperative engine, asked by a second session
+/// over the loopback: the copy owns its key and parameters, holds its session weakly, and takes
+/// no memory of the heap.
+#[cfg(all(
+    test,
+    not(feature = "engine-tokio"),
+    feature = "std",
+    feature = "peer",
+    feature = "query",
+    feature = "multi-thread"
+))]
+mod kept_query_tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::ffi::CString;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use crate::session::{engine_of, listening_on_loopback, session_handle};
+    use crate::{
+        z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_reply, z_closure_reply_move,
+        z_config_default, z_config_loan_mut, z_config_move, z_get, z_get_options_default,
+        z_get_options_t, z_loaned_reply_t, z_open, z_owned_bytes_t, z_owned_closure_reply_t,
+        z_owned_config_t, z_owned_session_t, z_reply_is_ok, z_session_drop, z_session_loan,
+        z_session_loan_mut, z_session_move, z_view_keyexpr_from_str, z_view_keyexpr_loan,
+        z_view_keyexpr_t, zp_config_insert, Z_CONFIG_CONNECT_KEY,
+    };
+
+    /// Every allocation of the calling thread while `run` runs, counted.
+    fn allocations(run: impl FnOnce()) -> usize {
+        COUNTING.with(|count| count.set(Some(0)));
+        run();
+        COUNTING.with(|count| count.take()).unwrap_or(0)
+    }
+
+    std::thread_local! {
+        static COUNTING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// The test binary's allocator: the system's, counting on a thread that asked
+    /// ([`allocations`]).
+    struct Counting;
+
+    // SAFETY: every call is the system allocator's; the count is a thread's own cell.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = COUNTING.try_with(|count| {
+                if let Some(seen) = count.get() {
+                    count.set(Some(seen.saturating_add(1)));
+                }
+            });
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.dealloc(at, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// The key the queryable answers and the get asks, and the parameters the get carries.
+    const KEY: &core::ffi::CStr = c"demo/kept/q";
+    const PARAMETERS: &core::ffi::CStr = c"a=1;b=two";
+
+    /// What the queryable's callback and the get's replies hand back across the sessions' threads.
+    #[derive(Default)]
+    struct Seen {
+        /// The copy the callback made of the first query it was handed.
+        kept: Mutex<Option<z_owned_query_t>>,
+        /// What that `z_query_clone` answered, and how many allocations it made.
+        cloned: Mutex<Option<(ZResult, usize)>>,
+        /// The replies the asking session heard.
+        replies: AtomicUsize,
+    }
+
+    /// The queryable's callback: the first query it is handed is cloned and kept, unanswered.
+    unsafe extern "C" fn keep_first(query: *const z_loaned_query_t, context: *mut c_void) {
+        // SAFETY: the context is the test's `Seen`, which outlives the queryable.
+        let seen = unsafe { &*context.cast::<Seen>() };
+        let mut kept = seen.kept.lock().expect("an unpoisoned lock");
+        if kept.is_some() {
+            return;
+        }
+        let mut copy = z_owned_query_t::null_value();
+        let mut code = Z_OK;
+        let cloning = allocations(|| {
+            // SAFETY: the query is the callback's own, and the copy a place of this frame.
+            code = unsafe { z_query_clone(&mut copy, query) };
+        });
+        *seen.cloned.lock().expect("an unpoisoned lock") = Some((code, cloning));
+        if code == Z_OK {
+            *kept = Some(copy);
+        }
+    }
+
+    /// The get's callback: each data reply is counted.
+    unsafe extern "C" fn heard(reply: *mut z_loaned_reply_t, context: *mut c_void) {
+        // SAFETY: the context is the test's `Seen`, which outlives the get.
+        let seen = unsafe { &*context.cast::<Seen>() };
+        // SAFETY: the reply is the callback's own.
+        if unsafe { z_reply_is_ok(reply) } {
+            seen.replies.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Wait until `done`, at most ten seconds; whether it came.
+    fn within_ten_seconds(done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    /// A payload of `text`.
+    fn payload(text: &core::ffi::CStr) -> z_owned_bytes_t {
+        // SAFETY: a zeroed payload is the null one, which the constructor overwrites.
+        let mut bytes: z_owned_bytes_t = unsafe { core::mem::zeroed() };
+        // SAFETY: a local payload and a C string.
+        assert_eq!(
+            unsafe { z_bytes_copy_from_str(&mut bytes, text.as_ptr()) },
+            Z_OK
+        );
+        bytes
+    }
+
+    /// A query cloned inside its callback is answered while its session is open, and outlives the
+    /// session: once the session is closed and let go of, the copy still reads its key and its
+    /// parameters, a reply on it is refused as on a closed session, and the session's engine,
+    /// with the arena it lies in, is gone though the copy is still held. Cloning, replying and
+    /// letting the copy go allocate nothing. The CONTROL is the reply that reaches the asking
+    /// session while the listener is open. Turned red by a copy that holds its session strongly
+    /// (the engine stays), or that reads its texts where the session kept them.
+    #[test]
+    fn a_kept_query_owns_its_texts_and_holds_none_of_its_session() {
+        let seen = Seen::default();
+        let context = core::ptr::from_ref(&seen).cast_mut().cast::<c_void>();
+        // SAFETY: every pointer is to a live owned value of this frame, and `seen` outlives both
+        // sessions, whose callbacks read it.
+        unsafe {
+            let mut listener = listening_on_loopback();
+            let engine = engine_of(
+                session_handle(z_session_loan(&listener)).expect("an open session has its handle"),
+            );
+            let session = Arc::downgrade(&engine);
+            let locator = engine
+                .listening()
+                .into_iter()
+                .next()
+                .expect("the listener is bound");
+            let locator = CString::new(locator).expect("a locator");
+            drop(engine);
+
+            let mut key: z_view_keyexpr_t = core::mem::zeroed();
+            assert_eq!(z_view_keyexpr_from_str(&mut key, KEY.as_ptr()), Z_OK);
+            let mut closure: z_owned_closure_query_t = core::mem::zeroed();
+            assert_eq!(
+                z_closure_query(&mut closure, Some(keep_first), None, context),
+                Z_OK
+            );
+            let mut options: z_queryable_options_t = core::mem::zeroed();
+            z_queryable_options_default(&mut options);
+            let mut queryable: z_owned_queryable_t = core::mem::zeroed();
+            assert_eq!(
+                z_declare_queryable(
+                    z_session_loan(&listener),
+                    &mut queryable,
+                    z_view_keyexpr_loan(&key),
+                    z_closure_query_move(&mut closure),
+                    &options,
+                ),
+                Z_OK
+            );
+
+            let mut config: z_owned_config_t = core::mem::zeroed();
+            assert_eq!(z_config_default(&mut config), Z_OK);
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut config),
+                    Z_CONFIG_CONNECT_KEY,
+                    locator.as_ptr()
+                ),
+                Z_OK
+            );
+            let mut dialler: z_owned_session_t = core::mem::zeroed();
+            assert_eq!(
+                z_open(&mut dialler, z_config_move(&mut config), core::ptr::null()),
+                Z_OK
+            );
+
+            // The dialler asks until a query reaches the queryable: the first may leave before
+            // the queryable's declaration reached it.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while seen.kept.lock().expect("an unpoisoned lock").is_none() {
+                assert!(Instant::now() < deadline, "no query reached the queryable");
+                let mut reply: z_owned_closure_reply_t = core::mem::zeroed();
+                assert_eq!(
+                    z_closure_reply(&mut reply, Some(heard), None, context),
+                    Z_OK
+                );
+                let mut get: z_get_options_t = core::mem::zeroed();
+                z_get_options_default(&mut get);
+                get.timeout_ms = 10_000;
+                let _ = z_get(
+                    z_session_loan(&dialler),
+                    z_view_keyexpr_loan(&key),
+                    PARAMETERS.as_ptr(),
+                    z_closure_reply_move(&mut reply),
+                    &mut get,
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let cloned = *seen.cloned.lock().expect("an unpoisoned lock");
+            let (code, cloning) = cloned.expect("the callback cloned the query");
+            assert_eq!(code, Z_OK);
+            let mut copy = seen
+                .kept
+                .lock()
+                .expect("an unpoisoned lock")
+                .take()
+                .expect("the copy");
+            let query = z_query_loan(&copy);
+
+            let mut answer = payload(c"kept");
+            let mut answered = crate::result::Z_ERR_GENERIC;
+            let replying = allocations(|| {
+                answered = z_query_reply(
+                    query,
+                    z_query_keyexpr(query),
+                    z_bytes_move(&mut answer),
+                    core::ptr::null(),
+                );
+            });
+            assert_eq!(answered, Z_OK, "CONTROL: the open session takes the reply");
+            assert!(
+                within_ten_seconds(|| seen.replies.load(Ordering::SeqCst) >= 1),
+                "CONTROL: the reply reaches the asking session"
+            );
+
+            assert_eq!(
+                z_undeclare_queryable(z_queryable_move(&mut queryable)),
+                Z_OK
+            );
+            assert_eq!(
+                z_close(z_session_loan_mut(&mut listener), core::ptr::null()),
+                Z_OK
+            );
+            z_session_drop(z_session_move(&mut listener));
+            assert!(
+                within_ten_seconds(|| session.upgrade().is_none()),
+                "the copy holds nothing of its session"
+            );
+
+            assert_eq!(
+                keyexpr_str(z_query_keyexpr(query)),
+                Some("demo/kept/q"),
+                "the copy reads its own key"
+            );
+            let mut parameters: z_view_string_t = core::mem::zeroed();
+            z_query_parameters(query, &mut parameters);
+            assert_eq!(
+                core::slice::from_raw_parts(parameters._start, parameters._len),
+                PARAMETERS.to_bytes(),
+                "the copy reads its own parameters"
+            );
+
+            let mut late = payload(c"late");
+            let mut refused = Z_OK;
+            let refusing = allocations(|| {
+                refused = z_query_reply(
+                    query,
+                    z_query_keyexpr(query),
+                    z_bytes_move(&mut late),
+                    core::ptr::null(),
+                );
+            });
+            assert_eq!(
+                refused, Z_ERR_SESSION_CLOSED,
+                "a closed session refuses the reply"
+            );
+            let dropping = allocations(|| z_query_drop(z_query_move(&mut copy)));
+            assert_eq!(
+                (cloning, replying, refusing, dropping),
+                (0, 0, 0, 0),
+                "a kept query takes no memory of the heap"
+            );
+
+            assert_eq!(
+                z_close(z_session_loan_mut(&mut dialler), core::ptr::null()),
+                Z_OK
+            );
+            z_session_drop(z_session_move(&mut dialler));
+        }
     }
 }

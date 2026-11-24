@@ -77,7 +77,8 @@ use wz_session_core::session_zid::ZID_MAX;
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_view_keyexpr_t};
 use crate::decl_watch::{
     wz_ext_decl_event_t, wz_ext_decl_watch_declare, wz_ext_decl_watch_drop,
-    wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_QUERYABLE, WZ_EXT_DECL_UNDECLARED,
+    wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_LOST, WZ_EXT_DECL_QUERYABLE,
+    WZ_EXT_DECL_UNDECLARED,
 };
 use crate::e2e::{
     bytes_arg, keyexpr_text, locked, session_facts, unlocked, utf8_arg, Mutex, ReplayPolicies,
@@ -102,6 +103,7 @@ use crate::result::{
     Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
 use crate::session::z_loaned_session_t;
+use crate::sized::{Out, SizedOut};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
 // The peer a get is addressed to is the zenoh id the watch named, in the layout of `z_id_t`.
@@ -139,7 +141,7 @@ const _: () = assert!(
 pub type wz_ext_replay_clock_fn =
     unsafe extern "C" fn(context: *mut c_void, now_ms: *mut u32) -> i8;
 
-/// One sample handed to the program. 120 bytes on a 64-bit target.
+/// One sample handed to the program. 128 bytes on a 64-bit target.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct wz_ext_replay_sample_t {
@@ -147,7 +149,7 @@ pub struct wz_ext_replay_sample_t {
     pub frame: *const u8,
     /// Its length.
     pub len: usize,
-    /// The judge's verdict; zero when `judged` is 0.
+    /// The judge's verdict; zero but its `struct_size` when `judged` is 0.
     pub verdict: wz_ext_e2e_verdict_t,
     /// 1 for a reply of a replay, 0 for a live sample.
     pub from_replay: u8,
@@ -222,10 +224,13 @@ impl Default for wz_ext_replay_subscriber_options_t {
     }
 }
 
-/// What a subscriber counted.
+/// What a subscriber counted, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_replay_subscriber_counts_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// Replies of an abandoned round's query, dropped.
     pub late_replies: u64,
     /// Replies of no query in flight, dropped.
@@ -244,6 +249,35 @@ pub struct wz_ext_replay_subscriber_counts_t {
     pub frames_given_up: u64,
     /// Under `segmented`, payloads that joined nothing: not a piece, a wrong CRC, no place.
     pub unjoined_pieces: u64,
+    /// Declarations of the publishers' queryables the session's watch lost
+    /// (`WZ_EXT_DECL_LOST`): when not zero, the rounds may miss a publisher that appeared, or
+    /// wait on one that went, until the subscriber is made again. Added in minor version 3, so a
+    /// struct of an older program ends before it.
+    pub declarations_lost: u64,
+}
+
+impl Default for wz_ext_replay_subscriber_counts_t {
+    /// Nothing counted, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            late_replies: 0,
+            unknown_replies: 0,
+            duplicates: 0,
+            stale: 0,
+            held: 0,
+            table_full: 0,
+            abandoned: 0,
+            frames_given_up: 0,
+            unjoined_pieces: 0,
+            declarations_lost: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_replay_subscriber_counts_t {
+    const BASE: usize = core::mem::offset_of!(Self, declarations_lost);
 }
 
 /// An owned subscriber: the handle in its one word, null for the gravestone.
@@ -298,6 +332,8 @@ impl Clock {
 struct Dropped {
     duplicates: u64,
     stale: u64,
+    /// What the watch told it lost (`wz_ext_replay_subscriber_counts_t::declarations_lost`).
+    declarations_lost: u64,
 }
 
 struct State {
@@ -591,6 +627,14 @@ impl Shared {
         }
     }
 
+    /// The watch lost `count` declarations: the rounds' picture of the publishers may be stale,
+    /// which the counts tell the program.
+    fn lost(&self, count: u64) {
+        let mut guard = locked(&self.state);
+        let dropped = &mut guard.dropped;
+        dropped.declarations_lost = dropped.declarations_lost.saturating_add(count);
+    }
+
     /// Look at the deadlines now, and hand on what a round that ended released.
     fn poll(&self) {
         let mut guard = locked(&self.state);
@@ -699,33 +743,59 @@ unsafe extern "C" fn on_share_drop(context: *mut c_void) {
     drop(Arc::from_raw(context.cast_const().cast::<Shared>()));
 }
 
-/// A declaration the watch was told: a replay queryable appearing or leaving.
+/// What an event of the watch means to the subscriber.
+#[derive(Debug, PartialEq, Eq)]
+enum Heard<'a> {
+    /// A queryable on the replay key, declared by the zenoh id under the declaration.
+    Appeared(&'a [u8], u64),
+    /// The queryable the zenoh id declared under the declaration, retracted.
+    Gone(&'a [u8], u64),
+    /// Declarations the watch lost, this many.
+    Lost(u64),
+    /// Nothing the subscriber watches for.
+    Nothing,
+}
+
+/// What `event` means to a subscriber whose publishers declare their queryables on `replay_key`.
+///
+/// # Safety
+/// The key of a `WZ_EXT_DECL_DECLARED` is null or `keyexpr_len` readable bytes.
+unsafe fn heard<'a>(event: &'a wz_ext_decl_event_t, replay_key: &[u8]) -> Heard<'a> {
+    let zid = event
+        .zid
+        .get(..usize::from(event.zid_len).min(ZID_MAX))
+        .unwrap_or_default();
+    match event.kind {
+        WZ_EXT_DECL_DECLARED => {
+            if event.keyexpr.is_null() {
+                return Heard::Nothing;
+            }
+            let key = core::slice::from_raw_parts(event.keyexpr.cast::<u8>(), event.keyexpr_len);
+            if key == replay_key {
+                Heard::Appeared(zid, event.id)
+            } else {
+                Heard::Nothing
+            }
+        }
+        WZ_EXT_DECL_UNDECLARED => Heard::Gone(zid, event.id),
+        WZ_EXT_DECL_LOST => Heard::Lost(event.id),
+        _ => Heard::Nothing,
+    }
+}
+
+/// A declaration the watch was told: a replay queryable appearing or leaving, or what it lost.
 unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const wz_ext_decl_event_t) {
     // The watch holds the share; this borrows it, to hand a clone to a get.
     let shared = ManuallyDrop::new(Arc::from_raw(context.cast_const().cast::<Shared>()));
-    let _ = catch(|| {
-        let event = &*event;
-        let zid = event
-            .zid
-            .get(..usize::from(event.zid_len).min(ZID_MAX))
-            .unwrap_or_default();
-        match event.kind {
-            WZ_EXT_DECL_DECLARED => {
-                if event.keyexpr.is_null() {
-                    return;
-                }
-                let key =
-                    core::slice::from_raw_parts(event.keyexpr.cast::<u8>(), event.keyexpr_len);
-                if key != shared.replay_key.as_bytes() {
-                    return;
-                }
-                if let Some(next) = shared.appeared(zid, event.id) {
-                    ask(&shared, next);
-                }
+    let _ = catch(|| match heard(&*event, shared.replay_key.as_bytes()) {
+        Heard::Appeared(zid, declaration) => {
+            if let Some(next) = shared.appeared(zid, declaration) {
+                ask(&shared, next);
             }
-            WZ_EXT_DECL_UNDECLARED => shared.gone(zid, event.id),
-            _ => {}
         }
+        Heard::Gone(zid, declaration) => shared.gone(zid, declaration),
+        Heard::Lost(count) => shared.lost(count),
+        Heard::Nothing => {}
     });
 }
 
@@ -1066,19 +1136,22 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_phase(
 }
 
 /// What the subscriber counted, written to `out`. `Z_ERR_NULL` for a null subscriber, the
-/// gravestone or a null `out`.
+/// gravestone or a null `out`; `Z_EINVAL` for a `struct_size` short of the struct, nothing written
+/// then.
 ///
 /// # Safety
-/// `this_` is null or a loaned subscriber; `out` is null or writable.
+/// `this_` is null or a loaned subscriber; `out` is null or a struct of `struct_size` writable
+/// bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
     this_: *const wz_ext_loaned_replay_subscriber_t,
     out: *mut wz_ext_replay_subscriber_counts_t,
 ) -> ZResult {
     guarded(|| {
-        if out.is_null() {
-            return Z_ERR_NULL;
-        }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         let Some(handle) = handle_of(this_) else {
             return Z_ERR_NULL;
         };
@@ -1087,7 +1160,8 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
             return Z_ERR_NULL;
         };
         let counts = round.counts();
-        *out = wz_ext_replay_subscriber_counts_t {
+        out.put(&wz_ext_replay_subscriber_counts_t {
+            struct_size: 0,
             late_replies: counts.late_replies,
             unknown_replies: counts.unknown_replies,
             duplicates: state.dropped.duplicates,
@@ -1097,7 +1171,8 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
             abandoned: counts.abandoned,
             frames_given_up: state.joiner.as_ref().map_or(0, PieceJoiner::abandoned),
             unjoined_pieces: state.joiner.as_ref().map_or(0, PieceJoiner::unjoined),
-        };
+            declarations_lost: state.dropped.declarations_lost,
+        });
         Z_OK
     })
 }
@@ -1187,12 +1262,78 @@ mod tests {
     #[test]
     fn the_sample_has_the_layout_the_header_declares() {
         use core::mem::{offset_of, size_of};
-        assert_eq!(size_of::<wz_ext_e2e_verdict_t>(), 80);
-        assert_eq!(size_of::<wz_ext_replay_sample_t>(), 120);
+        assert_eq!(size_of::<wz_ext_e2e_verdict_t>(), 88);
+        assert_eq!(size_of::<wz_ext_replay_sample_t>(), 128);
         assert_eq!(offset_of!(wz_ext_replay_sample_t, verdict), 16);
-        assert_eq!(offset_of!(wz_ext_replay_sample_t, from_replay), 96);
-        assert_eq!(offset_of!(wz_ext_replay_sample_t, zid), 100);
+        assert_eq!(offset_of!(wz_ext_replay_sample_t, from_replay), 104);
+        assert_eq!(offset_of!(wz_ext_replay_sample_t, zid), 108);
         assert_eq!(size_of::<wz_ext_replay_publisher_slot_t>(), 32);
+    }
+
+    /// The counts are refused, untouched, to a struct a byte short of theirs, before the
+    /// subscriber is read. Turned red by a write before the size is read.
+    #[test]
+    fn counts_short_of_their_struct_are_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_replay_subscriber_counts_t, _>(
+            |out| {
+                // SAFETY: `out` is a live struct of this build's size; no subscriber is named.
+                unsafe { wz_ext_replay_subscriber_counts(core::ptr::null(), out) }
+            },
+            Z_EINVAL,
+        );
+    }
+
+    /// A program compiled before `declarations_lost` was added states a struct that ends where
+    /// it begins, and is served. Turned red by a base that counts the field added later.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_older_counts_struct_ends_before_the_declarations_lost() {
+        assert_eq!(<wz_ext_replay_subscriber_counts_t as SizedOut>::BASE, 80);
+        assert_eq!(
+            core::mem::size_of::<wz_ext_replay_subscriber_counts_t>(),
+            88
+        );
+    }
+
+    /// What the watch's events mean to the subscriber: a queryable on its key appearing, any
+    /// retraction, and a loss with its count; a declaration on another key means nothing.
+    /// Turned red by a loss read as nothing.
+    #[test]
+    fn a_loss_is_heard_with_its_count() {
+        let key = b"demo/replay/@r";
+        let other = b"demo/other";
+        let event = |kind: u8, id: u64, keyexpr: Option<&[u8]>| wz_ext_decl_event_t {
+            kind,
+            entity: WZ_EXT_DECL_QUERYABLE,
+            zid_len: 2,
+            reserved: 0,
+            reserved2: 0,
+            id,
+            keyexpr: keyexpr.map_or(core::ptr::null(), |key| key.as_ptr().cast()),
+            keyexpr_len: keyexpr.map_or(0, <[u8]>::len),
+            zid: [7; ZID_MAX],
+        };
+        let declared = event(WZ_EXT_DECL_DECLARED, 3, Some(key));
+        let elsewhere = event(WZ_EXT_DECL_DECLARED, 4, Some(other));
+        let gone = event(WZ_EXT_DECL_UNDECLARED, 3, None);
+        let lost = event(WZ_EXT_DECL_LOST, 5, None);
+        // SAFETY: each key is null or the bytes of a live slice of its length.
+        unsafe {
+            assert_eq!(heard(&declared, key), Heard::Appeared(&[7, 7], 3));
+            assert_eq!(heard(&elsewhere, key), Heard::Nothing);
+            assert_eq!(heard(&gone, key), Heard::Gone(&[7, 7], 3));
+            assert_eq!(heard(&lost, key), Heard::Lost(5));
+        }
+    }
+
+    /// A sample's verdict states its own size, as a struct the program sized would, judged or
+    /// not.
+    #[test]
+    fn a_samples_verdict_states_its_size() {
+        assert_eq!(
+            wz_ext_e2e_verdict_t::default().struct_size,
+            core::mem::size_of::<wz_ext_e2e_verdict_t>()
+        );
     }
 
     /// A count of the C interface is read once as a quota, `0` as no bound, and the subscriber is

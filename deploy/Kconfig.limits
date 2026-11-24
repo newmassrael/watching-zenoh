@@ -29,16 +29,18 @@ config WZ_LIMIT_MAX_KEYEXPR_BYTES
 config WZ_LIMIT_KEY_ARENA_BYTES
 	int "KEY_ARENA_BYTES"
 	range 1 4294967291
-	default 4096 if WZ_LIMITS_ZENOH_PICO
-	default 97152
+	default 4320 if WZ_LIMITS_ZENOH_PICO
+	default 11984
 	help
-	  How many bytes of key text the rows of a session's tables hold at once, in one
-	  arena each row keeps its key in: the session's own declarations, the
-	  application's tables, its pending gets and what each peer declares to it. Each
-	  key takes 8 bytes and its length, rounded up to 4. A declaration of the session
-	  whose key finds no room is refused, as one that finds its table full is; one
-	  a peer sends is dropped and counted. A key given back is taken again. It must
-	  be at least 1.
+	  How many bytes of key text a session holds at once, in one arena every keyed
+	  row keeps its key in: its declared key expressions, its entities with their
+	  write filters, Interests and matching listeners, its pending gets and what each
+	  peer declares to it. A key takes 8 bytes and its length, rounded up to 4, and
+	  rows that name the same key share its block. It is a budget of key text, not a
+	  block for each row: a declaration of the session whose key finds no room is
+	  refused with an out-of-memory error, as one that finds its table full is; one a
+	  peer sends is dropped and counted. A key given back is taken again. It must be
+	  at least 1.
 
 config WZ_LIMIT_MAX_SUBSCRIPTIONS
 	int "MAX_SUBSCRIPTIONS"
@@ -120,8 +122,8 @@ config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
 	default 100
 	help
-	  The queryables a session holds at once. Declaring one more is refused
-	  while the table is full.
+	  The queryables a session holds at once, a background one included until
+	  the session closes. Declaring one more is refused while the table is full.
 
 config WZ_LIMIT_MAX_PENDING_QUERIES
 	int "MAX_PENDING_QUERIES"
@@ -191,6 +193,45 @@ config WZ_LIMIT_MAX_MATCHING_LISTENERS
 	help
 	  The matching listeners a session holds at once, over all its publishers
 	  and queriers. Declaring one more is refused while the table is full.
+
+config WZ_LIMIT_MAX_DECL_WATCHES
+	int "MAX_DECL_WATCHES"
+	default 4
+	help
+	  The declaration watches a session holds at once (what its peers declare
+	  and retract, told to the program), over every kind of entity watched.
+	  Declaring one more is refused while the table is full.
+
+config WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS
+	int "MAX_TRANSPORT_EVENTS_LISTENERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The transport events listeners a session holds at once, each told when a
+	  transport to a peer opens or closes. Declaring one more is refused while
+	  the table is full.
+
+config WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS
+	int "MAX_LINK_EVENTS_LISTENERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The link events listeners a session holds at once, each told when a link
+	  to a peer comes up or goes. Declaring one more is refused while the table
+	  is full. Apart from the transport events listeners' bound, so a profile
+	  that holds more of one kind spends nothing on the other.
+
+config WZ_LIMIT_MAX_DECL_WATCH_EVENTS
+	int "MAX_DECL_WATCH_EVENTS"
+	default 8 if WZ_LIMITS_ZENOH_PICO
+	default 32
+	help
+	  The events of what the peers declare and retract that a session holds
+	  for its declaration watches until each watch is told, one row for each
+	  event however many watches it reaches. An event that finds every row
+	  taken is not held: each watch it would reach is told how many it lost
+	  before its next event. A watch declared while what the peers hold now
+	  does not fit is refused.
 
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
@@ -277,7 +318,8 @@ config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	default 131072
 	help
 	  The bytes the owned payloads, strings and slices a program of the pico C ABI
-	  holds carry at once: the payloads' area the library reserves at its first
+	  holds carry at once, and the keys and parameters of the queries it keeps
+	  past their callbacks: the payloads' area the library reserves at its first
 	  object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
 	  smallest that holds its bytes and a 16-byte head. A payload no free block
 	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
@@ -421,7 +463,9 @@ config WZ_LIMIT_MAX_PENDING_REPLIES
 	help
 	  The replies a session's queryables may have ready to send between two
 	  sends. One more is refused and counted, and the handler that made it is
-	  told.
+	  told. The same count bounds the keys whose latest reply the session's
+	  consolidating gets hold until their Final: a reply of a key past them is
+	  handed to the get's callback at once, unconsolidated, and counted.
 
 config WZ_LIMIT_MAX_PENDING_FINALS
 	int "MAX_PENDING_FINALS"
@@ -502,6 +546,71 @@ config WZ_LIMIT_MAX_TICKERS
 	  session reserves when it opens. Starting one more is refused, as an engine
 	  with no periodic jobs refuses it.
 
+config WZ_LIMIT_ADVANCED_CACHE_BYTES
+	int "ADVANCED_CACHE_BYTES"
+	default 1552 if WZ_LIMITS_ZENOH_PICO
+	default 1712
+	help
+	  The bytes the caches of a session's advanced publishers keep their samples in
+	  together, reserved when the session opens: one ring of records, each a
+	  sample's header, key, encoding schema, payload and attachment, as long as they
+	  are. A cache keeps at most its own max_samples records; a new record that finds
+	  no room lets the oldest records go first. A put whose record is longer than the
+	  whole ring is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent.
+
+config WZ_LIMIT_MAX_ADVANCED_PUBLISHERS
+	int "MAX_ADVANCED_PUBLISHERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced publishers a session holds at once, each the C object over
+	  the publisher, its cache and its detection token, which are counted in
+	  their own tables. Declaring one more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+
+config WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS
+	int "MAX_ADVANCED_SUBSCRIBERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced subscribers a session holds at once, owned or background,
+	  each the C object over the subscriber, its history and recovery and its
+	  detection token, which are counted in their own tables. Declaring one more
+	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+
+config WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS
+	int "MAX_SAMPLE_MISS_LISTENERS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The sample-miss listeners one advanced subscriber of the zenoh-pico
+	  interface holds at once, owned or background, each in a room of the
+	  subscriber's place. Declaring one more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every room is taken.
+
+config WZ_LIMIT_MAX_ADVANCED_SOURCES
+	int "MAX_ADVANCED_SOURCES"
+	default 16
+	help
+	  The publishers one advanced subscriber orders at once, of each of its two
+	  kinds (those that number their samples and those that only timestamp them):
+	  the rows of the tables kept with the subscriber. A publisher met while every
+	  row is taken takes the row of the one met longest ago that holds no sample
+	  back and waits on no get; while every row does, its samples are delivered as
+	  they come, unordered.
+
+config WZ_LIMIT_ADVANCED_SUBSCRIBER_PENDING_BYTES
+	int "ADVANCED_SUBSCRIBER_PENDING_BYTES"
+	default 1552 if WZ_LIMITS_ZENOH_PICO
+	default 1712
+	help
+	  The bytes one advanced subscriber holds samples back in while what comes
+	  before them is on its way (a recovery or history get): one ring of records,
+	  each a sample's header, key, encoding schema, payload and attachment, as long
+	  as they are. A sample that finds no room is not held: what its publisher holds
+	  goes on first, in order, with a miss reported for each hole given up, and then
+	  it.
+
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
 	default 64
@@ -510,6 +619,39 @@ config WZ_LIMIT_MAX_LOCATOR_LEN
 	  to, or one it listens on (for example udp/192.168.1.10:7447). A longer one
 	  is skipped, never cut short. The default fits an IPv6 locator with its
 	  scheme and port.
+
+config WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN
+	int "MAX_GROUP_ENDPOINT_LEN"
+	default 96
+	help
+	  The longest endpoint, in bytes, a session joins a multicast group by, its
+	  socket keys included (for example udp/224.0.0.224:7447#iface=eth0): the
+	  text a connectivity row reports a group member's link by. A longer one is
+	  refused when the group is joined, never cut short. Apart from
+	  MAX_LOCATOR_LEN, so the keys of a group endpoint do not lengthen every
+	  locator row of a node. The default holds a raweth group endpoint with an
+	  interface name of fifteen bytes and two whitelisted addresses (90 bytes).
+
+config WZ_LIMIT_MAX_GROUP_MEMBERS
+	int "MAX_GROUP_MEMBERS"
+	default 32
+	help
+	  The members a session holds of each multicast group it joined, each the
+	  row of a peer whose JOIN it heard: the row a connectivity reader reads the
+	  member's transport and link from, and the member table of the group's
+	  session. A JOIN from one more member is not admitted while every row is
+	  held, and is heard again once a member is lost.
+
+config WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS
+	int "MAX_CONNECTIVITY_REPLAY_EVENTS"
+	default 8
+	help
+	  The transport or link events a connectivity listener declared with history
+	  holds while its history is replayed, each told after it in order. A put
+	  followed by a delete of the same transport cancel out, and a delete then a
+	  put of it (a reconnect) are both told. When every row is held, the rest of
+	  the replay's window is told by comparing the transports that stand with
+	  those the listener was told, which may lose one reconnect.
 
 config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"

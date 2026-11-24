@@ -208,10 +208,13 @@ pub enum GroupSend {
 /// the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
 /// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
 /// it cut one past a buffer of the transport's own.
+///
+/// `O` is the transport's own buffer, made by the transport's crate: this one takes no memory of
+/// the heap, so a build that links no allocator here (`session-slot`) has the type too.
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-pub enum GroupRx {
+pub enum GroupRx<O> {
     /// The transport's own, made when the group was joined.
-    Own(alloc::vec::Vec<u8>),
+    Own(O),
     /// A buffer the session lent.
     Lent(ByteBuf),
     /// The lent buffer, given back: the group was left and receives nothing more.
@@ -219,20 +222,20 @@ pub enum GroupRx {
 }
 
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-impl GroupRx {
-    /// The buffer `lent` names, when the session lent one, or one of the transport's own of
-    /// `own_len` bytes.
-    pub fn lent_or_own(lent: Option<ByteBuf>, own_len: usize) -> Self {
+impl<O: AsRef<[u8]> + AsMut<[u8]>> GroupRx<O> {
+    /// The buffer `lent` names, when the session lent one, or one of the transport's own that
+    /// `own` makes.
+    pub fn lent_or_own(lent: Option<ByteBuf>, own: impl FnOnce() -> O) -> Self {
         match lent {
             Some(buf) => Self::Lent(buf),
-            None => Self::Own(alloc::vec![0; own_len]),
+            None => Self::Own(own()),
         }
     }
 
     /// The buffer's bytes; none once given back.
     pub fn as_slice(&self) -> &[u8] {
         match self {
-            Self::Own(bytes) => bytes,
+            Self::Own(bytes) => bytes.as_ref(),
             Self::Lent(buf) => buf.as_slice(),
             Self::GivenBack => &[],
         }
@@ -241,7 +244,7 @@ impl GroupRx {
     /// The buffer's bytes, to receive into; none once given back.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
-            Self::Own(bytes) => bytes,
+            Self::Own(bytes) => bytes.as_mut(),
             Self::Lent(buf) => buf.as_mut_slice(),
             Self::GivenBack => &mut [],
         }
@@ -392,13 +395,13 @@ mod tests {
         use wz_session_core::byte_cells::{ByteCells, ByteSource};
 
         static CELLS: ByteCells<4, 1> = ByteCells::new();
-        let mut own = GroupRx::lent_or_own(None, 6);
+        let mut own = GroupRx::lent_or_own(None, || [0u8; 6]);
         assert!(!own.is_lent());
         assert_eq!(own.as_mut_slice().len(), 6, "its own, as long as asked");
         assert!(own.give_back().is_none(), "its own is not given back");
         assert_eq!(own.as_slice().len(), 6, "and stays");
 
-        let mut lent = GroupRx::lent_or_own(CELLS.claim(), 6);
+        let mut lent = GroupRx::lent_or_own(CELLS.claim(), || [0u8; 6]);
         assert!(lent.is_lent());
         lent.as_mut_slice().copy_from_slice(b"abcd");
         assert_eq!(lent.as_slice(), b"abcd", "the lent cell, as long as it is");

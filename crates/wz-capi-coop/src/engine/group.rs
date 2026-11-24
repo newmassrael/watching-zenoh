@@ -24,6 +24,7 @@
 //! leaves.
 
 use alloc::rc::Rc;
+use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 
@@ -32,7 +33,9 @@ use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
+use wz_runtime_coop::transport::GroupRecord;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
+use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::InterestKinds;
@@ -45,6 +48,7 @@ use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_dispatch::MulticastMember;
 use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
+use wz_session_core::multicast_peer_lost::MulticastPeerId;
 use wz_session_core::multicast_reply_sink::{
     asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
 };
@@ -54,6 +58,8 @@ use wz_session_core::multicast_tx::{
 };
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
+#[cfg(feature = "queryable")]
+use wz_session_core::response_sink::ResponseSink;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -63,8 +69,9 @@ use wz_session_mcu::group_drive::{
 };
 #[cfg(feature = "connectivity")]
 use {
-    super::faces::FacePlane,
-    wz_session_core::face::{FaceEventKind, FaceSnapshot, GroupMemberLink},
+    super::FacePlane,
+    wz_capi_port::told::{ToldBits, ToldKey, ToldPlane},
+    wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, GroupMemberLink},
 };
 #[cfg(feature = "query")]
 use {
@@ -78,18 +85,262 @@ use {
 use crate::prelude::*;
 
 use super::registry::{FaceId, Registry};
+use crate::round::Round;
 
-/// The rows of each group's member table: a member whose JOIN finds them all held is turned
-/// away, as a group whose `max_sessions` is reached turns one away. A table that does not grow,
-/// so that what a group holds is what it was given when it was joined; the tokio engine's group
-/// face starts from the same count of rows and grows past it, and zenoh-pico states no cap.
-pub(super) const GROUP_MEMBERS: usize = 32;
+/// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
+/// held is turned away, as a group whose `max_sessions` is reached turns one away. A table that
+/// does not grow, so that what a group holds is what it was given when it was joined; the tokio
+/// engine's group face starts from the same count of rows and grows past it, and zenoh-pico states
+/// no cap.
+pub(super) const GROUP_MEMBERS: usize = caps::MAX_GROUP_MEMBERS;
+
+/// A member as a row of the group's member table holds it. With `connectivity`, the row notes the
+/// connectivity listeners whose history is being replayed that were told the member stands, and a
+/// member that went while one of them is still to be told so stays in its row, gone, as its tomb
+/// (`wz_capi_port::told`).
+#[derive(Clone, Copy)]
+struct MemberRow {
+    member: MulticastMember,
+    #[cfg(feature = "connectivity")]
+    told: ToldBits,
+    #[cfg(feature = "connectivity")]
+    gone: bool,
+}
+
+impl MemberRow {
+    fn of(member: MulticastMember) -> Self {
+        Self {
+            member,
+            #[cfg(feature = "connectivity")]
+            told: ToldBits::default(),
+            #[cfg(feature = "connectivity")]
+            gone: false,
+        }
+    }
+
+    /// Whether the member stands: a tomb is a member that went.
+    fn stands(&self) -> bool {
+        #[cfg(feature = "connectivity")]
+        {
+            !self.gone
+        }
+        #[cfg(not(feature = "connectivity"))]
+        {
+            true
+        }
+    }
+}
+
+/// The key a member's row is told under: its zid, as its row holds it, of a group's member.
+#[cfg(feature = "connectivity")]
+fn member_key(member: &MulticastMember) -> ToldKey {
+    let mut zid = [0u8; 16];
+    for (into, byte) in zid.iter_mut().zip(member.peer.as_slice()) {
+        *into = *byte;
+    }
+    ToldKey {
+        zid,
+        is_multicast: true,
+        link: 0,
+    }
+}
+
+/// The members a group holds, in the order they came, in as many rows as its session's member
+/// table: reserved when the group is joined, so a member that comes or goes allocates nothing and
+/// a reader of the session's faces reads each member in place. A member's tomb holds its row until
+/// the listeners it is owed to were told it went, or until a member the group admits finds no
+/// other row: a member that stands comes before a departure owed.
+struct MemberRows {
+    rows: [Option<MemberRow>; GROUP_MEMBERS],
+    len: usize,
+}
+
+impl MemberRows {
+    const fn new() -> Self {
+        Self {
+            rows: [None; GROUP_MEMBERS],
+            len: 0,
+        }
+    }
+
+    /// Note `member`; `false` when every row is held by a member that stands.
+    fn push(&mut self, member: MulticastMember) -> bool {
+        // The oldest tomb is given up: its listeners are not told that member left.
+        #[cfg(feature = "connectivity")]
+        if self.len >= GROUP_MEMBERS {
+            if let Some(at) = self.position(|row| row.gone) {
+                self.drop_row(at);
+            }
+        }
+        let Some(row) = self.rows.get_mut(self.len) else {
+            return false;
+        };
+        *row = Some(MemberRow::of(member));
+        // The row just filled lies below the rows' count, so the count after it is at most that.
+        self.len = self.len.saturating_add(1);
+        true
+    }
+
+    /// The member `peer` went: hand it back, its row let go of, the ones after it moving up a
+    /// row, or kept as its tomb while a replaying listener told it stands is owed its departure.
+    fn remove(&mut self, peer: &MulticastPeerId) -> Option<MulticastMember> {
+        let at = self.position(|row| row.stands() && row.member.peer == *peer)?;
+        let member = self.rows.get(at)?.as_ref()?.member;
+        #[cfg(feature = "connectivity")]
+        if let Some(row) = self
+            .rows
+            .get_mut(at)
+            .and_then(Option::as_mut)
+            .filter(|row| !row.told.is_empty())
+        {
+            row.gone = true;
+            return Some(member);
+        }
+        self.drop_row(at);
+        Some(member)
+    }
+
+    /// The place of the first row that `found` says is the one.
+    fn position(&self, mut found: impl FnMut(&MemberRow) -> bool) -> Option<usize> {
+        self.rows
+            .iter()
+            .take(self.len)
+            .position(|row| row.as_ref().is_some_and(&mut found))
+    }
+
+    /// Let go of the row at `at`, below the rows' count, the ones after it moving up a row.
+    fn drop_row(&mut self, at: usize) {
+        if let Some(row) = self.rows.get_mut(at) {
+            *row = None;
+        }
+        if let Some(after) = self.rows.get_mut(at..self.len) {
+            if !after.is_empty() {
+                after.rotate_left(1);
+            }
+        }
+        self.len = self.len.saturating_sub(1);
+    }
+
+    /// The members that stand, in the order they came.
+    fn iter(&self) -> impl Iterator<Item = &MulticastMember> {
+        self.rows
+            .iter()
+            .take(self.len)
+            .flatten()
+            .filter(|row| row.stands())
+            .map(|row| &row.member)
+    }
+
+    #[cfg(feature = "query")]
+    fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// Note `listener` of `plane` told the member of `key` stands: whether it is to be told,
+    /// `false` for a member of no known role (no row reports it) and one it was told already.
+    #[cfg(feature = "connectivity")]
+    fn came(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.rows
+            .iter_mut()
+            .take(self.len)
+            .flatten()
+            .find(|row| {
+                row.stands() && row.member.whatami.is_some() && member_key(&row.member) == *key
+            })
+            .is_some_and(|row| row.told.set(plane, listener))
+    }
+
+    /// Whether the tomb of the member of `key` owes `listener` of `plane` its departure.
+    #[cfg(feature = "connectivity")]
+    fn owes(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.position(|row| {
+            row.gone && member_key(&row.member) == *key && row.told.has(plane, listener)
+        })
+        .is_some()
+    }
+
+    /// Note `listener` of `plane` told the member of `key` went: whether a tomb owed it that.
+    #[cfg(feature = "connectivity")]
+    fn went(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        let Some(at) = self.position(|row| {
+            row.gone && member_key(&row.member) == *key && row.told.has(plane, listener)
+        }) else {
+            return false;
+        };
+        self.forget_at(at, plane, listener);
+        true
+    }
+
+    /// The first member whose departure `listener` of `plane` is owed.
+    #[cfg(feature = "connectivity")]
+    fn first_gone(&self, plane: ToldPlane, listener: usize) -> Option<MulticastMember> {
+        self.rows
+            .iter()
+            .take(self.len)
+            .flatten()
+            .find(|row| row.gone && row.told.has(plane, listener))
+            .map(|row| row.member)
+    }
+
+    /// Note nothing more for `listener` of `plane`: a tomb owed only to it is let go of.
+    #[cfg(feature = "connectivity")]
+    fn forget(&mut self, plane: ToldPlane, listener: usize) {
+        // From the last row, so a row let go of moves none still to be looked at.
+        let mut at = self.len;
+        while let Some(before) = at.checked_sub(1) {
+            at = before;
+            self.forget_at(at, plane, listener);
+        }
+    }
+
+    /// Take `listener` of `plane` off the row at `at`, let go of when it is a tomb owed to no one.
+    #[cfg(feature = "connectivity")]
+    fn forget_at(&mut self, at: usize, plane: ToldPlane, listener: usize) {
+        let spent = self
+            .rows
+            .get_mut(at)
+            .and_then(Option::as_mut)
+            .is_some_and(|row| {
+                row.told.clear(plane, listener);
+                row.gone && row.told.is_empty()
+            });
+        if spent {
+            self.drop_row(at);
+        }
+    }
+
+    /// Keep, as tombs, the members of `ended` some replaying listener was told stand: the rows of
+    /// a join that ended, its members gone with it, which this table takes over.
+    #[cfg(feature = "connectivity")]
+    fn keep_tombs_of(&mut self, ended: &Self) {
+        for row in ended.rows.iter().take(ended.len).flatten() {
+            if row.told.is_empty() {
+                continue;
+            }
+            let Some(into) = self.rows.get_mut(self.len) else {
+                return;
+            };
+            *into = Some(MemberRow { gone: true, ..*row });
+            self.len = self.len.saturating_add(1);
+        }
+    }
+}
+
+impl Default for MemberRows {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The tick of a group's lease sweep, in milliseconds, which its task is due on while it holds a
 /// member (and while its socket holds back a datagram), and the longest a read waits for a group
 /// whose stack gives no wait for its input: the tick of the tokio engine's group face, shorter
 /// than any beacon interval an ABI advertises.
 pub(super) const GROUP_TICK_MS: u32 = 50;
+
+/// `GROUP_TICK_MS` on the session's clock, in microseconds: a product the build evaluates, so
+/// one that did not fit a `u64` would not compile.
+const GROUP_TICK_US: u64 = GROUP_TICK_MS as u64 * 1_000;
 
 /// What a group's dispatch hands what it staged to: the group's stage, which its task writes.
 pub(super) type GroupReplies = MulticastReplySink<GroupTxStage>;
@@ -153,10 +404,24 @@ impl MemberEvents {
 /// The stack's group transport as the group's task holds it, marked each time it hands the task
 /// a datagram: the task takes one datagram a step, as the group's loop always has, so a group
 /// that took one may hold more, and the session's read steps it again at once rather than after
-/// a tick.
+/// a tick. A transport that leaves what it lends where it lies until its next receive lends it to
+/// the session's round of deliveries, whose records read it there, and the buffer it gives back
+/// as the group is left goes back through the round ([`Round::keep_rx`]).
 struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
+    /// The session's round of deliveries.
+    lane: Arc<Round>,
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        if let Some(buf) = self.inner.give_back_rx() {
+            // SAFETY: the group's transport is let go of by the session's step, or by the engine's
+            // drop, which holds the session's state alone, and nothing borrows the round's table.
+            unsafe { self.lane.keep_rx(buf) };
+        }
+    }
 }
 
 impl GroupTransport for Watched {
@@ -197,11 +462,29 @@ impl GroupTransport for Watched {
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        let took = self.inner.recv_with(f);
+        let took = if self.inner.lends_until_next_receive() {
+            let lane = &self.lane;
+            self.inner.recv_with(&mut |datagram, from| {
+                // SAFETY: a group's transport is read by the session's step alone, under its lock,
+                // and this one leaves the bytes where they lie until it is next asked to receive,
+                // which the group's input gate holds back while a record lies in them
+                // (`round::takes_a_group_read`).
+                unsafe { lane.set_lending(Some(datagram)) };
+                f(datagram, from);
+                // SAFETY: as above.
+                unsafe { lane.set_lending(None) };
+            })
+        } else {
+            self.inner.recv_with(f)
+        };
         if took {
             self.took.set(true);
         }
         took
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.inner.lends_until_next_receive()
     }
 
     fn keeps_input(&self) -> bool {
@@ -246,9 +529,12 @@ pub(super) struct GroupJoining {
     pub(super) id: FaceId,
     pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
-    /// Whether the session has room for what the group delivers: the delivery lane's room for one
-    /// record of the group's batch.
+    /// Whether the session has room for what the group delivers: the round's room for one record
+    /// of the group's batch.
     pub(super) input_gate: GroupInputGate,
+    /// The session's round of deliveries, which reads what the group's transport lends where it
+    /// lies and keeps the buffer it gives back while a record still reads it.
+    pub(super) lane: Arc<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
@@ -289,7 +575,7 @@ pub(super) struct GroupFace<W> {
     input: Option<WaitOn>,
     /// When the group's session is next due with nothing arriving on it, as its last step said.
     due: GroupDue,
-    members: Rc<RefCell<Vec<MulticastMember>>>,
+    members: Rc<RefCell<MemberRows>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
@@ -342,6 +628,7 @@ impl<W: LinkWaits> GroupFace<W> {
             join,
             transport,
             input_gate,
+            lane,
             params,
             policy,
             limits,
@@ -363,7 +650,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let room = transport.room_wait();
         let input = transport.input_wait();
         let due = GroupDue::default();
-        let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
+        let members = Rc::new(RefCell::new(MemberRows::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
         let join_ask = JoinAsk::default();
@@ -375,6 +662,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let link = GroupLink::new(Watched {
             inner: transport,
             took: Rc::clone(&took),
+            lane,
         });
         let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
             config,
@@ -639,14 +927,18 @@ impl<W: LinkWaits> GroupFace<W> {
             return None;
         }
         let task = self.task.take()?;
-        // The members go with the group's link, and a watcher of the faces is told each went.
+        // The members go with the group's link, and a watcher of the faces is told each went. Those
+        // a replaying listener was told stand stay as tombs until it was told they went.
         let gone = core::mem::take(&mut *self.members.borrow_mut());
         #[cfg(feature = "connectivity")]
-        for member in &gone {
-            self.events.tell(FaceEventKind::Down, member);
+        {
+            for member in gone.iter() {
+                self.events.tell(FaceEventKind::Down, member);
+            }
+            self.members.borrow_mut().keep_tombs_of(&gone);
         }
         #[cfg(not(feature = "connectivity"))]
-        drop(gone);
+        let _ = gone;
         // A finished task's output is taken without stepping anything.
         local.block_on_local(task).ok()
     }
@@ -692,10 +984,7 @@ impl<W: LinkWaits> GroupFace<W> {
         match &self.task {
             Some(task) if task.is_finished() => Some(0),
             Some(_) if self.tx.holds() => {
-                let tick_us = self
-                    .pace
-                    .now_us()
-                    .saturating_add(u64::from(GROUP_TICK_MS) * 1_000);
+                let tick_us = self.pace.now_us().saturating_add(GROUP_TICK_US);
                 Some(self.due.due_us().map_or(0, |due_us| due_us.min(tick_us)))
             }
             Some(_) if !self.tx.is_empty() => Some(0),
@@ -744,6 +1033,79 @@ impl<W: LinkWaits> GroupFace<W> {
             .iter()
             .filter_map(|member| self.events.label.snapshot(member))
             .collect()
+    }
+
+    /// How many rows the group's members are read in (`connectivity`): one for each member of a
+    /// known role, as [`Self::member_snapshots`] lists them; a group whose session ended holds
+    /// none.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn member_rows(&self) -> usize {
+        if self.has_ended() {
+            return 0;
+        }
+        self.members
+            .borrow()
+            .iter()
+            .filter(|member| member.whatami.is_some())
+            .count()
+    }
+
+    /// The `at`-th of the rows [`Self::member_rows`] counts, read in place: the member's transport
+    /// and its one link, every text in the row, so nothing is allocated (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    pub(super) fn member_row(&self, at: usize) -> Option<FaceLinkRow> {
+        if self.has_ended() {
+            return None;
+        }
+        let members = self.members.borrow();
+        let member = members
+            .iter()
+            .filter(|member| member.whatami.is_some())
+            .nth(at)?;
+        let label = &self.events.label;
+        FaceLinkRow::of_group_member(member, &label.group, &label.endpoint, label.is_shm)
+    }
+
+    /// Note `listener` of `plane` told the member of `key` stands (`SessionEngine::tell_came`):
+    /// whether it is to be told; a group whose session ended holds none that stands.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        !self.has_ended() && self.members.borrow_mut().came(plane, listener, key)
+    }
+
+    /// Whether `listener` of `plane` is still to be told the member of `key` went.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn owes_departure(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.members.borrow().owes(plane, listener, key)
+    }
+
+    /// Note `listener` of `plane` told the member of `key` went (`SessionEngine::tell_went`):
+    /// whether a tomb of the group owed it that.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.members.borrow_mut().went(plane, listener, key)
+    }
+
+    /// The row of the first member whose departure `listener` of `plane` is owed, read from its
+    /// tomb as `member_row` reads a member that stands.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn first_told_gone(&self, plane: ToldPlane, listener: usize) -> Option<FaceLinkRow> {
+        let member = self.members.borrow().first_gone(plane, listener)?;
+        let label = &self.events.label;
+        FaceLinkRow::of_group_member(&member, &label.group, &label.endpoint, label.is_shm)
+    }
+
+    /// Note nothing more for `listener` of `plane` (`SessionEngine::forget_told`).
+    #[cfg(feature = "connectivity")]
+    pub(super) fn forget_told(&self, plane: ToldPlane, listener: usize) {
+        self.members.borrow_mut().forget(plane, listener);
+    }
+
+    /// Take over the tombs of `ended`, the join of this group that ended, which this one replaces.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn keep_tombs_of(&self, ended: &Self) {
+        let ended = ended.members.borrow();
+        self.members.borrow_mut().keep_tombs_of(&ended);
     }
 
     /// Tell the group of `entity`, which the session declared, as the group's declarations say
@@ -978,6 +1340,65 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 }
 
+/// What the session's transport reads of the group (`wz_runtime_coop::transport`): each a reading
+/// of the group's own.
+impl<W: LinkWaits> GroupRecord for GroupFace<W> {
+    fn id(&self) -> FaceId {
+        self.id
+    }
+
+    fn took_input(&self) -> bool {
+        GroupFace::took_input(self)
+    }
+
+    fn input(&self) -> Option<LinkWait> {
+        GroupFace::input(self)
+    }
+
+    fn unwaited(&self) -> bool {
+        GroupFace::unwaited(self)
+    }
+
+    fn due_us(&self) -> Option<u64> {
+        GroupFace::due_us(self)
+    }
+
+    fn stop(&self) {
+        GroupFace::stop(self);
+    }
+
+    #[cfg(feature = "query")]
+    fn asks_queries(&self) -> bool {
+        self.declarations().asks_queries()
+    }
+
+    #[cfg(feature = "queryable")]
+    fn answer_sink(&self, generation: u64) -> Option<&dyn ResponseSink> {
+        self.answers_as(generation)
+            .then_some(self.replies() as &dyn ResponseSink)
+    }
+
+    #[cfg(feature = "queryable")]
+    fn write_staged(&self) {
+        GroupFace::write_staged(self);
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_rows(&self) -> usize {
+        GroupFace::member_rows(self)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_row(&self, at: usize) -> Option<FaceLinkRow> {
+        GroupFace::member_row(self, at)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn member_snapshots(&self) -> Vec<FaceSnapshot> {
+        GroupFace::member_snapshots(self)
+    }
+}
+
 /// A message of the session that waits for room on the group's stage writes what the group's
 /// socket takes, runs the session's tasks, waits on the group's socket, and spends the session's
 /// clock; a group whose session ended has nothing to wait for.
@@ -1034,7 +1455,7 @@ where
 /// noted, each told to the session's watchers of its faces (`connectivity`), and then the event
 /// goes through `dispatch` with the sink the group's replies are queued on.
 fn noting_members<D>(
-    members: Rc<RefCell<Vec<MulticastMember>>>,
+    members: Rc<RefCell<MemberRows>>,
     replies: GroupReplies,
     mut dispatch: D,
     #[cfg(feature = "connectivity")] events: Rc<MemberEvents>,
@@ -1050,16 +1471,16 @@ where
                     whatami: arrived.whatami,
                     locator: arrived.locator,
                 };
-                members.borrow_mut().push(member);
+                // The session's member table has as many rows, so it admits no member past them.
+                let noted = members.borrow_mut().push(member);
+                debug_assert!(noted, "a member past the group's rows was admitted");
                 #[cfg(feature = "connectivity")]
-                events.tell(FaceEventKind::Up, &member);
+                if noted {
+                    events.tell(FaceEventKind::Up, &member);
+                }
             }
             IterationEvent::MulticastPeerLost(lost) => {
-                let gone = {
-                    let mut held = members.borrow_mut();
-                    let at = held.iter().position(|member| member.peer == lost.peer);
-                    at.map(|at| held.remove(at))
-                };
+                let gone = members.borrow_mut().remove(&lost.peer);
                 #[cfg(feature = "connectivity")]
                 if let Some(member) = gone {
                     events.tell(FaceEventKind::Down, &member);
@@ -1143,4 +1564,100 @@ pub(super) fn dispatch(
     face: FaceId,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
+}
+
+#[cfg(all(test, feature = "connectivity"))]
+mod told_tests {
+    use super::*;
+
+    fn member(first: u8) -> MulticastMember {
+        MulticastMember {
+            peer: MulticastPeerId::from_wire(&[first; 16]),
+            whatami: Some(wz_session_core::WhatAmI::Peer),
+            locator: core::net::SocketAddr::from(([127, 0, 0, 1], 7447)),
+        }
+    }
+
+    const PLANE: ToldPlane = ToldPlane::Transports;
+
+    /// A member a replaying listener was told stays in its row, gone, until the listener was told
+    /// it went; one no listener was told leaves its row at once.
+    ///
+    /// # Control
+    ///
+    /// Letting go of the row whatever its bits (the member table before the told bits) reds the
+    /// `owes` assertion.
+    #[test]
+    fn a_member_told_stays_as_its_tomb_until_its_departure_is_told() {
+        let mut rows = MemberRows::new();
+        assert!(rows.push(member(1)));
+        assert!(rows.push(member(2)));
+        let key = member_key(&member(1));
+        assert!(rows.came(PLANE, 0, &key));
+        assert!(!rows.came(PLANE, 0, &key), "told once");
+
+        assert_eq!(rows.remove(&member(2).peer), Some(member(2)));
+        assert_eq!(rows.len, 1, "a member no listener was told leaves its row");
+        assert_eq!(rows.remove(&member(1).peer), Some(member(1)));
+        assert_eq!(rows.len, 1, "a member told stays as its tomb");
+        assert_eq!(rows.iter().count(), 0, "a tomb is no member that stands");
+        assert!(rows.owes(PLANE, 0, &key));
+        assert!(!rows.owes(PLANE, 1, &key), "only to the listener told it");
+        assert!(
+            !rows.came(PLANE, 1, &key),
+            "a tomb is told to no one as standing"
+        );
+        assert_eq!(rows.first_gone(PLANE, 0), Some(member(1)));
+        assert!(rows.went(PLANE, 0, &key));
+        assert!(!rows.went(PLANE, 0, &key), "told once");
+        assert_eq!(rows.len, 0, "the tomb owed to no one is let go of");
+    }
+
+    /// A member the group admits when every row is held takes the oldest tomb's row: a member that
+    /// stands comes before a departure owed.
+    ///
+    /// # Control
+    ///
+    /// A push that refuses a full table without looking for a tomb reds the first assertion.
+    #[test]
+    fn a_member_admitted_to_full_rows_takes_the_oldest_tomb() {
+        let mut rows = MemberRows::new();
+        for first in 0..GROUP_MEMBERS {
+            assert!(rows.push(member(u8::try_from(first).expect("a few members"))));
+        }
+        let key = member_key(&member(0));
+        assert!(rows.came(PLANE, 0, &key));
+        assert!(rows.remove(&member(0).peer).is_some());
+        assert!(rows.push(member(200)), "the tomb's row is taken");
+        assert!(!rows.owes(PLANE, 0, &key), "the tomb was given up");
+        assert_eq!(rows.iter().count(), GROUP_MEMBERS);
+        assert!(!rows.push(member(201)), "no row past members that stand");
+    }
+
+    /// The tombs of a join that ended are taken over by the join that replaces it, and a listener
+    /// forgotten lets go of a tomb owed only to it.
+    ///
+    /// # Control
+    ///
+    /// `keep_tombs_of` that copies nothing reds the first `owes`.
+    #[test]
+    fn a_rejoin_keeps_the_tombs_and_a_forgotten_listener_lets_them_go() {
+        let mut ended = MemberRows::new();
+        assert!(ended.push(member(3)));
+        assert!(ended.push(member(4)));
+        let key = member_key(&member(3));
+        assert!(ended.came(ToldPlane::Links, 2, &key));
+        let mut joined = MemberRows::new();
+        joined.keep_tombs_of(&ended);
+        assert_eq!(joined.len, 1, "only the member a listener was told");
+        assert!(joined.owes(ToldPlane::Links, 2, &key));
+        assert_eq!(joined.iter().count(), 0, "kept as a tomb");
+        joined.forget(ToldPlane::Transports, 2);
+        assert!(
+            joined.owes(ToldPlane::Links, 2, &key),
+            "another plane forgets nothing here"
+        );
+        joined.forget(ToldPlane::Links, 2);
+        assert_eq!(joined.len, 0);
+    }
 }

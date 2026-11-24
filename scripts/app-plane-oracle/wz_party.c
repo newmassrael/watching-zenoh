@@ -424,7 +424,7 @@ static int make_live_cutter(void) {
 static void put_frame(const z_loaned_publisher_t *publisher, const uint8_t *frame, size_t len) {
     if (live_cut) {
         live_piece_t at = {publisher, puts_done, 0};
-        wz_ext_segment_result_t result;
+        wz_ext_segment_result_t result = {.struct_size = sizeof(wz_ext_segment_result_t)};
         z_owned_string_t reason;
         z_result_t rc = wz_ext_segment_sender_split(wz_ext_segment_sender_loan(&live_cutter), frame, len, live_chunk,
                                                     put_piece, &at, &result, &reason);
@@ -521,6 +521,7 @@ static void on_frame(z_loaned_sample_t *sample, void *arg) {
     size_t len = z_slice_len(z_slice_loan(&slice));
     wz_ext_e2e_verdict_t verdict;
     memset(&verdict, 0, sizeof verdict);
+    verdict.struct_size = sizeof verdict;
     uint64_t now_ms = (uint64_t)z_clock_elapsed_ms(&started);
     z_result_t rc = wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
     if (rc == Z_OK && verdict.payload_offset + verdict.payload_len <= len) {
@@ -660,6 +661,7 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
     if (pieces) {
         wz_ext_replay_subscriber_counts_t counts;
         memset(&counts, 0, sizeof counts);
+        counts.struct_size = sizeof counts;
         wz_ext_replay_subscriber_counts(wz_ext_replay_subscriber_loan(&joiner), &counts);
         wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&joiner));
         free(held_store);
@@ -706,7 +708,7 @@ static int print_pieces(const char *segment_profile, const char *segment_values,
     int status = 0;
     for (size_t i = 0; i < plan_count && status == 0; i++) {
         piece_place_t place = {i, 0};
-        wz_ext_segment_result_t result;
+        wz_ext_segment_result_t result = {.struct_size = sizeof(wz_ext_segment_result_t)};
         rc = wz_ext_segment_sender_split(wz_ext_segment_sender_loan(&splitter), frames[i], frame_len[i], chunk_bytes,
                                          print_piece, &place, &result, &reason);
         if (rc != Z_OK) status = refused("split", rc, &reason);
@@ -789,6 +791,7 @@ static int role_serve(const z_loaned_session_t *session, const char *key) {
         int stopped = wait_for_file("stop");
         wz_ext_replay_publisher_counts_t counts;
         memset(&counts, 0, sizeof counts);
+        counts.struct_size = sizeof counts;
         wz_ext_replay_publisher_counts(loaned, &counts);
         printf("answers %llu\n", (unsigned long long)counts.answers);
         printf(stopped ? "done\n" : "timeout stop\n");
@@ -841,6 +844,7 @@ static int role_ask(const z_loaned_session_t *session, const char *key) {
     }
     wz_ext_replay_subscriber_counts_t counts;
     memset(&counts, 0, sizeof counts);
+    counts.struct_size = sizeof counts;
     wz_ext_replay_subscriber_counts(loaned, &counts);
     wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&subscriber));
     print_seen();

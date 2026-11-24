@@ -749,7 +749,7 @@ mod forward_stamp {
     /// A Put carrying `time` paired with `zid`.
     #[cfg(feature = "time-hlc")]
     fn stamped_put(time: u64, zid: &[u8]) -> wz_session_core::wire::PushOwned {
-        let stamp = wz_session_core::sample::TimestampHint::new(time, &zid).unwrap();
+        let stamp = wz_session_core::sample::TimestampHint::new(time, zid).unwrap();
         let meta = wz_session_core::metadata::PushMetadata {
             timestamp: Some(&stamp),
             ..Default::default()

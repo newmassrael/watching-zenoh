@@ -176,6 +176,20 @@ pub trait LocalLivelinessSubscribers {
 pub trait LivelinessDelivered<X, Id>: Sized {
     /// Tell `row`, the row `id`, one sample through `cx`.
     fn tell(cx: &mut X, id: Id, row: RowAccess<'_, Self>, sample: LivelinessSample<'_>);
+
+    /// [`Self::tell`] of a sample whose keyexpr is the whole text of `held`, a key of the
+    /// session's key arena, when it is one: a context that keeps the sample past the call may hold
+    /// the key's block rather than copy the key. The provided form tells it as `tell` does.
+    fn tell_held(
+        cx: &mut X,
+        id: Id,
+        row: RowAccess<'_, Self>,
+        sample: LivelinessSample<'_>,
+        held: Option<&crate::key_arena::KeyRef>,
+    ) {
+        let _ = held;
+        Self::tell(cx, id, row, sample);
+    }
 }
 
 impl<Row: LivelinessSampleSink, Id> LivelinessDelivered<(), Id> for Row {
@@ -191,12 +205,14 @@ impl<X, Id> LivelinessDelivered<X, Id> for () {
     fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
 }
 
-/// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many.
+/// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many. `held` is the
+/// key of the session's key arena `keyexpr` is the whole text of, when it is one.
 fn tell_reached<L: LocalLivelinessSubscribers, X>(
     subs: &mut L,
     cx: &mut X,
     kind: LivelinessSampleKind,
     keyexpr: &str,
+    held: Option<&crate::key_arena::KeyRef>,
     token_id: u64,
     historical: bool,
 ) -> usize
@@ -204,7 +220,7 @@ where
     L::Sink: LivelinessDelivered<X, L::RowId>,
 {
     subs.fire_matching(keyexpr, historical, |id, row| {
-        L::Sink::tell(
+        L::Sink::tell_held(
             cx,
             id,
             row,
@@ -213,6 +229,7 @@ where
                 keyexpr,
                 token_id,
             },
+            held,
         )
     })
 }
@@ -548,14 +565,15 @@ impl<P: Storage> PeerTokens<P> {
         })
     }
 
-    /// The id the next token declared by its keyexpr is held under: past every one held.
-    fn next_sourced_id(&self) -> u64 {
+    /// The id the next token declared by its keyexpr is held under: past every one held, and
+    /// none when the greatest id there is is held.
+    fn next_sourced_id(&self) -> Option<u64> {
         self.table
             .entries()
             .map(|(id, _)| id)
             .filter(|id| *id >= SOURCED_ID_BASE)
             .max()
-            .map_or(SOURCED_ID_BASE, |held| held + 1)
+            .map_or(Some(SOURCED_ID_BASE), |held| held.checked_add(1))
     }
 }
 
@@ -916,7 +934,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         if self.slots.iter().any(|s| s.interest_id == interest_id) {
             return Ok(false);
         }
-        if !self.quota.admits(self.slots.len() + 1) {
+        if !self.quota.admits(self.slots.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         if !self.key_quota.admits(keyexpr.len()) {
@@ -1007,7 +1025,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // The BORROWED fan is the live plane by construction: it carries no
         // envelope, so there is no `interest_id` that could make it a CURRENT
         // answer. `false` is the derived value here, not a default.
-        tell_reached(self, &mut (), kind, keyexpr, token_id, false)
+        tell_reached(self, &mut (), kind, keyexpr, None, token_id, false)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -1446,7 +1464,13 @@ impl<P: Storage> PeerTokens<P> {
             if self.sourced_id(resolved).is_some() {
                 return;
             }
-            self.next_sourced_id()
+            // No id left past the ones held: refused and counted as a full table refuses, and
+            // not held under an id another token has.
+            let Some(next) = self.next_sourced_id() else {
+                self.table.count_refused();
+                return;
+            };
+            next
         } else {
             id
         };
@@ -1481,11 +1505,17 @@ impl<P: Storage> PeerTokens<P> {
         {
             return;
         }
+        // The row now holds the key, which a context that keeps the sample may hold too.
+        let held = self
+            .table
+            .find(id)
+            .and_then(crate::bounded::KeyBacking::held);
         tell_reached(
             subs,
             cx,
             LivelinessSampleKind::Put,
             resolved,
+            held,
             id,
             historical,
         );
@@ -1579,6 +1609,7 @@ impl<P: Storage> PeerTokens<P> {
             cx,
             LivelinessSampleKind::Delete,
             resolved,
+            removed.as_ref().and_then(crate::bounded::KeyBacking::held),
             id,
             historical,
         );
@@ -1615,10 +1646,11 @@ impl<P: Storage> PeerTokens<P> {
                     cx,
                     LivelinessSampleKind::Delete,
                     keyexpr.as_ref(),
+                    crate::bounded::KeyBacking::held(&keyexpr),
                     id,
                     false,
                 );
-                flushed += 1;
+                flushed = flushed.saturating_add(1);
             }
             (flushed, true)
         }
@@ -1626,6 +1658,23 @@ impl<P: Storage> PeerTokens<P> {
         {
             let _ = (subs, cx, room);
             (0, true)
+        }
+    }
+
+    /// The key of the session's key arena the token `token_id`'s row keeps, when the policy keeps
+    /// its keys there: what a context that keeps a sample of the token may hold. None on a backing
+    /// with no peer token table.
+    fn held_key(&self, token_id: u64) -> Option<&crate::key_arena::KeyRef> {
+        #[cfg(feature = "storage-profile")]
+        {
+            self.table
+                .find(token_id)
+                .and_then(crate::bounded::KeyBacking::held)
+        }
+        #[cfg(not(feature = "storage-profile"))]
+        {
+            let _ = token_id;
+            None
         }
     }
 
@@ -1688,7 +1737,9 @@ impl<P: Storage> PeerTokens<P> {
             let Some((id, row)) = subs.row_of(interest_id) else {
                 break;
             };
-            L::Sink::tell(
+            // The token's row keeps its key, which a context that keeps the sample may hold.
+            let held = self.held_key(token_id);
+            L::Sink::tell_held(
                 cx,
                 id,
                 row,
@@ -1697,8 +1748,9 @@ impl<P: Storage> PeerTokens<P> {
                     keyexpr,
                     token_id,
                 },
+                held,
             );
-            replayed += 1;
+            replayed = replayed.saturating_add(1);
             after = Some(token_id);
         }
         replayed
@@ -1976,6 +2028,27 @@ mod tests {
     use crate::transport_profile::owned::DeclareOwnedVariant;
     use hashbrown::HashMap;
     use wz_codecs::lent::{Interest, InterestBody, Wireexpr, WireexprLocal, WireexprVariant};
+
+    /// A token a peer declares by its keyexpr is held under an id past every such id held; once
+    /// the greatest id there is is held, none is left past it, and the token is refused rather
+    /// than held under an id another token has.
+    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    #[test]
+    fn a_keyexpr_token_past_the_last_sourced_id_is_refused() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        for (id, keyexpr) in [(u64::MAX, "liveliness/last"), (0, "liveliness/new")] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(keyexpr))),
+                &HashMap::new(),
+            );
+        }
+        let held: Vec<(u64, String)> = reg
+            .peer
+            .iter()
+            .map(|(id, keyexpr)| (id, keyexpr.to_string()))
+            .collect();
+        assert_eq!(held, [(u64::MAX, "liveliness/last".to_string())]);
+    }
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;

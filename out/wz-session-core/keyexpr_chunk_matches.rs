@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_chunk_matches.scxml:13 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -28,12 +28,12 @@ pub fn keyexpr_chunk_matches(p: &[u8], p_start: u32, p_end: u32, t: &[u8], t_sta
         return true;
     }
     if p_start < p_end {
-        if p[(p_start) as usize] == 64 {
+        if sce_forge_runtime::algorithm::proven::at(&p, p_start) == 64 {
             return false;
         }
     }
     if t_start < t_end {
-        if t[(t_start) as usize] == 64 {
+        if sce_forge_runtime::algorithm::proven::at(&t, t_start) == 64 {
             return false;
         }
     }

@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_chunk_kind.scxml:12 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -20,20 +20,20 @@ pub fn keyexpr_chunk_kind(k: &[u8], s: u32, e: u32) -> u8 {
     if s >= e {
         return 0;
     }
-    if k[(s) as usize] == 64 {
+    if sce_forge_runtime::algorithm::proven::at(&k, s) == 64 {
         return 3;
     }
-    if k[(s) as usize] != 42 {
+    if sce_forge_runtime::algorithm::proven::at(&k, s) != 42 {
         return 0;
     }
-    let s1: u32 = s + 1;
+    let s1: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(s, 1);
     if s1 >= e {
         return 1;
     }
-    if k[(s1) as usize] != 42 {
+    if sce_forge_runtime::algorithm::proven::at(&k, s1) != 42 {
         return 0;
     }
-    let s2: u32 = s1 + 1;
+    let s2: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(s1, 1);
     if s2 >= e {
         return 2;
     }

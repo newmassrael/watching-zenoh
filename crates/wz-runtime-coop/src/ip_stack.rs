@@ -71,9 +71,11 @@ use crate::stream_link::StreamListen;
 use crate::stream_link::STREAM_RX_CAPACITY;
 use crate::stream_link::{NoStream, StreamSocket};
 #[cfg(feature = "session-slot")]
+use crate::udp_link::ends_fit;
+#[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::udp_link::{bind_refused, dial_bind, UDP_RX_CAPACITY};
+use crate::udp_link::{bind_refused, dial_bind, EndsFit, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use crate::udp_link::{PortPeer, UdpPort};
@@ -121,8 +123,13 @@ pub(crate) fn heap_link<K>(
     driver: K,
 ) -> Result<OpenedLink<HeapLink>, LinkOpenError>
 where
-    K: BoxedLinkDriver + SessionDatagramLink + 'static,
+    K: BoxedLinkDriver + SessionDatagramLink + EndsFit + 'static,
 {
+    // A link whose ends no row of the build names is refused before it is placed, so a session
+    // never stands on a link its faces' rows would have to hold on the heap.
+    if !driver.ends_fit() {
+        return Err(LinkOpenError::Unsupported);
+    }
     // A session that lent its links cells places each in one: past them the link is refused, as
     // one past the session's buffers is, and none is placed on the heap.
     let driver =
@@ -328,6 +335,10 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups> {
     tls: L,
     groups: G,
     shape: LinkShape,
+    /// The rows every udp port of these links keeps its peers in, when the session lent some
+    /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
+    #[cfg(feature = "udp-listen")]
+    ports: Option<Rc<core::cell::RefCell<crate::udp_link::PortBook>>>,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
 
@@ -421,6 +432,8 @@ where
             tls: NoDial,
             groups: NoGroups,
             shape: LinkShape::default(),
+            #[cfg(feature = "udp-listen")]
+            ports: None,
             datagrams: core::marker::PhantomData,
         }
     }
@@ -444,6 +457,8 @@ where
             tls,
             groups: self.groups,
             shape: self.shape,
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports,
             datagrams: self.datagrams,
         }
     }
@@ -457,6 +472,8 @@ where
             tls: self.tls,
             groups,
             shape: self.shape,
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports,
             datagrams: self.datagrams,
         }
     }
@@ -608,6 +625,15 @@ where
         self.shape.cells = Some(cells);
     }
 
+    /// Every udp port these links listen on from now on keeps its peers and their datagrams in
+    /// `rows`, which the ports share.
+    #[cfg(feature = "udp-listen")]
+    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+        self.ports = Some(Rc::new(core::cell::RefCell::new(
+            crate::udp_link::PortBook::of(Some(rows)),
+        )));
+    }
+
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
     /// it, then its handshake), and each is asked for its stream later (`PendingStream`); a
     /// datagram link has no connection to wait for. A stream link's buffers are claimed as a
@@ -652,9 +678,15 @@ where
                 // A session that lent its ports a table of datagram slots has the port read into
                 // them, and a port that finds none free to read into is not opened; without the
                 // table the port reads into memory of its own.
+                let book = self.ports.clone().unwrap_or_else(|| {
+                    Rc::new(core::cell::RefCell::new(crate::udp_link::PortBook::of(
+                        None,
+                    )))
+                });
                 let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
-                    Some(table) => UdpPort::lent(socket, table).ok_or(LinkOpenError::Exhausted)?,
-                    None => UdpPort::new(socket, self.shape.datagram_rx),
+                    Some(table) => UdpPort::lent_in_book(socket, table, &book)
+                        .ok_or(LinkOpenError::Exhausted)?,
+                    None => UdpPort::in_book(socket, self.shape.datagram_rx, &book),
                 };
                 Ok(Box::new(IpUdpListener {
                     port: Rc::new(port),
@@ -1000,13 +1032,13 @@ where
             }
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
-                let socket = self.dial.dial(to.at)?;
+                let socket = named(self.dial.dial(to.at)?)?;
                 out.write(IpDriver::Tcp(link_over(socket, rx, tx)));
             }
             LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
-                let channel = self.tls.dial(to.at)?;
+                let channel = named(self.tls.dial(to.at)?)?;
                 out.write(IpDriver::Tls(link_over(channel, rx, tx)));
             }
         }
@@ -1018,6 +1050,17 @@ where
         let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
         let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
         Ok((rx, tx))
+    }
+}
+
+/// `stream`, when the rows of the build name both its ends ([`ends_fit`]); otherwise it is closed
+/// and the link refused as [`LinkOpenError::Unsupported`], before a session stands on it.
+#[cfg(feature = "session-slot")]
+fn named<S: StreamSocket>(stream: S) -> Result<S, LinkOpenError> {
+    if ends_fit(S::PROTO, stream.local(), stream.peer()) {
+        Ok(stream)
+    } else {
+        Err(LinkOpenError::Unsupported)
     }
 }
 
@@ -1089,6 +1132,7 @@ where
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
+        let stream = named(stream)?;
         let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
@@ -1142,6 +1186,7 @@ where
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
+        let stream = named(stream)?;
         let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);

@@ -719,8 +719,9 @@ pub struct PlainPutParams {
 /// tokio engine's `Session::publish` / `Session::publish_aliased` and its `Publisher` handles).
 /// These paths do not resolve the outbound mapping table (so they cannot produce
 /// `UnknownMapping`), and their remote leg is `codec-push`-gated (a build without the Push codec
-/// elides the leg and runs loopback only — never an error), so the single failure mode is a
-/// caller-data overflow of the declared bounded-codec capacity. Distinct from that engine's
+/// elides the leg and runs loopback only), so the failure an engine's publish meets is a
+/// caller-data overflow of the declared bounded-codec capacity. The type answers every refusal of
+/// a send ([`SendWireError`]), the Push codec's absence included. Distinct from that engine's
 /// `PublishAliasError` (ISP): its auto-resolving `Session::publish_aliased_auto` keeps the richer
 /// `UnknownMapping` surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -772,6 +773,17 @@ pub enum PublishError {
     /// reports to the caller, as zenoh-pico's put does. No wire bytes were emitted. Under zenoh's
     /// profile a congestion drop is the publication's success, and this is never answered.
     HeldConduit,
+    /// An advanced publisher's sample was refused because its cache keeps samples as records of
+    /// its session's ring (`ADVANCED_CACHE_BYTES`) and the sample's record is longer than the
+    /// whole ring: a sample sent and not kept would leave a recovering subscriber's query empty.
+    /// No wire bytes were emitted, and the sample took no time and no sequence number. Upstream
+    /// keeps a cached sample of any size on the heap.
+    ExceedsCacheRoom,
+    /// The build has no Push codec (`codec-push` off), so a Push has no wire leg to go out on: what
+    /// a send through the session's link actions answers in such a build
+    /// ([`SendWireError::FeatureDisabled`]). No wire bytes were emitted. An engine's own publish
+    /// runs its loopback leg alone in such a build and does not answer it.
+    FeatureDisabled,
 }
 
 impl core::fmt::Display for PublishError {
@@ -817,6 +829,16 @@ impl core::fmt::Display for PublishError {
                 "PublishError: another sender held this droppable Push's conduit \
                  and the queue profile drops it at once; the Push was not emitted"
             ),
+            PublishError::ExceedsCacheRoom => write!(
+                f,
+                "PublishError: the sample's record is longer than its session's \
+                 cache ring; the Push was not emitted"
+            ),
+            PublishError::FeatureDisabled => write!(
+                f,
+                "PublishError: this build has no Push codec (codec-push is off); \
+                 the Push was not emitted"
+            ),
         }
     }
 }
@@ -827,13 +849,7 @@ impl From<SendWireError> for PublishError {
     fn from(e: SendWireError) -> Self {
         match e {
             SendWireError::Codec(_) => PublishError::ExceedsCapacity,
-            // An engine invokes its send_push_* path only inside a `codec-push`-gated block,
-            // where the Push codec is present; the send therefore never reports
-            // `FeatureDisabled` to this conversion. The guard documents that compile-time
-            // invariant (and trips a future regression that ungates the leg).
-            SendWireError::FeatureDisabled => {
-                unreachable!("publish remote leg is codec-push-gated")
-            }
+            SendWireError::FeatureDisabled => PublishError::FeatureDisabled,
             SendWireError::TransportUnavailable => PublishError::TransportUnavailable,
             SendWireError::UnsupportedVariant => PublishError::RequiresUnicast,
             // Both mean "too large to send; no wire bytes emitted" — one bound is the codec's,
@@ -1087,6 +1103,23 @@ mod plain_put_tests {
                 .is_plain_apart_from_qos(),
             "an instrumented Put is not a plain one"
         );
+    }
+
+    /// A send refused because the build has no Push codec is a publish refused for the same
+    /// reason, not a panic and not another refusal. Turned red by an arm that maps it elsewhere.
+    #[test]
+    fn a_send_without_the_push_codec_is_a_publish_refused_for_it() {
+        assert_eq!(
+            PublishError::from(SendWireError::FeatureDisabled),
+            PublishError::FeatureDisabled
+        );
+        assert_eq!(
+            PublishError::from(SendWireError::TransportUnavailable),
+            PublishError::TransportUnavailable,
+            "CONTROL: another refusal keeps its own answer"
+        );
+        let text = alloc::format!("{}", PublishError::FeatureDisabled);
+        assert!(text.contains("codec-push"), "{text}");
     }
 
     #[test]

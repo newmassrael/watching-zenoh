@@ -8,7 +8,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::lodge::Kept;
+use wz_capi_port::sync::SessionHeld;
+use wz_capi_port::{KeyHolds, LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
 
@@ -53,10 +55,7 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
         .declare_liveliness_token_on_wire(
             "demo/alive/a",
             WireKey::literal(),
-            Some(RetractionKey {
-                mapping_id: 0,
-                suffix: "demo/alive/a".to_owned(),
-            }),
+            Some(RetractionKey::literal()),
         )
         .expect("the engine has liveliness");
     let bare = engine
@@ -86,6 +85,49 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
     engine.undeclare_liveliness_token(bare);
 }
 
+/// A token's row keeps its key's form in the session's tables (the declaration it is named by,
+/// counted there), not the ABI's key: what the key keeps for its name (a name lodged in a place of
+/// the session's, as an advanced subscriber's detection token's is) is let go of by the
+/// declaration, after it lets go of the session's lock, and nothing of it is left for the close
+/// to let go of under the lock.
+///
+/// # Control
+///
+/// A token row that kept the ABI's key would hold the name past the declaration, which reds the
+/// first assertion, and let it go under the close's lock, which the probe reads as a lock held.
+#[test]
+fn a_tokens_kept_name_is_let_go_of_by_its_declaration_with_no_lock_held() {
+    struct Probe(Arc<Mutex<Option<bool>>>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = Some(SessionHeld::any_here());
+        }
+    }
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let dropped = Arc::new(Mutex::new(None));
+    let wire = WireKey::literal().keeping(Kept::shared(Arc::new(Probe(dropped.clone()))));
+    let token = engine
+        .declare_liveliness_token_on_wire("demo/alive/kept", wire, None)
+        .expect("the engine has liveliness");
+    assert_eq!(
+        *dropped.lock().unwrap(),
+        Some(false),
+        "the declaration let the name go, with no session lock held"
+    );
+    let on_wire = u64::from(token);
+    until(&engine, "the router to hold the token", || {
+        router.seen(|s| s.tokens == [(on_wire, "demo/alive/kept".to_owned())])
+    });
+
+    SessionDrive::close(&*engine);
+    assert_eq!(
+        *dropped.lock().unwrap(),
+        Some(false),
+        "the close found nothing of the name to let go of"
+    );
+}
+
 /// A token named by a key expression the program declared holds that declaration while it stands:
 /// the program letting go of the key leaves it declared, and the token's retraction takes it with
 /// it, after the token. The CONTROL is the declaration held by the program alone, which goes as
@@ -110,10 +152,7 @@ fn a_token_holds_the_declaration_its_key_is_named_by() {
         .declare_liveliness_token_on_wire(
             "demo/alive/x",
             WireKey::aliased(prefix, Some("/x".to_owned())),
-            Some(RetractionKey {
-                mapping_id: prefix,
-                suffix: "/x".to_owned(),
-            }),
+            Some(RetractionKey::declared(prefix, "/x")),
         )
         .expect("the engine has liveliness");
     let on_wire = u64::from(token);

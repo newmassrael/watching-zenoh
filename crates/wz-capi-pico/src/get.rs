@@ -10,29 +10,31 @@
 //! session's whole peer set") and threads every face's replies back into the one
 //! C reply closure.
 //!
-//! ## Completion is the `Arc` refcount, and nothing else
+//! ## Completion is the count of the get's legs, and nothing else
 //!
 //! pico signals a get's completion by running the reply closure's
 //! `drop(context)` once, when no further reply can arrive
 //! (`_z_query`/`_z_trigger_query_reply_final`, and `_z_drop_handler_execute`
 //! directly when `remaining_finals == 0`, `src/net/primitives.c:560-562`). Here
-//! that signal is carried by the refcount of the shared
-//! `Arc<CReplyClosure>`: each face's pending query holds a
-//! clone through its `on_reply` closure, and the last release runs
-//! `crate::ffi::CClosure`'s `Drop` → the C `drop(context)`.
+//! a get lies in a place of its session's ([`GetPlace`]), the C closure in it, and
+//! each face's pending query holds one count of the place through the leg's reply
+//! callback: the leg's end, whatever ends it, lets its count go, and the last
+//! count let go of gives the place back, which drops the closure → the C
+//! `drop(context)`.
 //!
 //! An N-finals COUNTER — the obvious alternative — is not merely inelegant, it
 //! is WRONG here, and the difference is a hang. A face that dies mid-flight
 //! takes its whole `ReplyRegistry` down with it: its pending entry is DROPPED,
 //! never swept, so it fires no final and a counter waiting for it never reaches
-//! zero. The refcount handles that case (the dropped entry drops the closure,
-//! releasing the clone) with the same code path as a real final, a timeout
-//! sweep, a per-face issue error, and the zero-faces get. It is also PROMPT: no
-//! path has to wait for a deadline to conclude the get is over.
+//! zero. Counting the legs' callbacks handles that case (the dropped entry drops
+//! the callback, letting its count go) with the same code path as a real final,
+//! a timeout sweep, a per-face issue error, and the zero-faces get. It is also
+//! PROMPT: no path has to wait for a deadline to conclude the get is over.
 //!
-//! The C thread therefore holds its OWN clone across the whole fan loop. Without
-//! it, face 1 answering (and its entry dropping) before face 2's `query` is
-//! issued would take the refcount to zero and complete the get early.
+//! The C thread therefore holds the place as its owner across the whole fan
+//! loop and lets go of it after. Without that, face 1 answering (and its entry
+//! dropping) before face 2's `query` is issued would take the count to zero and
+//! complete the get early.
 //!
 //! ## CONSOLIDATION — the gap is CLOSED, and one divergence remains (R311y321)
 //!
@@ -129,7 +131,7 @@
 use alloc::sync::Arc;
 use core::ffi::c_void;
 
-use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{Refusal, ReplyCallback};
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
@@ -143,8 +145,9 @@ use crate::prelude::*;
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
-use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
-use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_OK};
+use crate::refusal::{refusal_code, Door};
+use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t};
+use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
 
@@ -456,8 +459,8 @@ pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
 // different from the sample / query planes' and must not be paraphrased from
 // them — in particular the "drive-task-only" phrasing they use is FALSE here.
 //
-// Sharing one get's `CReplyClosure` across per-face callbacks needs `Sync` (so
-// `Arc<CReplyClosure>`, and each `on_reply`, is `Send`).
+// Sharing one get's `CReplyClosure` across per-face callbacks needs `Sync`: each leg's
+// callback reads it, where the get's place keeps it, from whichever thread delivers.
 //
 // `call` — WHO invokes it is pico's contract, which this ABI keeps in each arm.
 // Without `local-queryable`, only the drive thread: every face of a session is
@@ -477,14 +480,14 @@ pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
 //
 // `drop` — CANNOT be attributed to the drive thread, and this is where the
 // querier plane genuinely diverges from its siblings. It runs wherever the LAST
-// `Arc` clone is released, which is the drive thread for a real final / timeout
-// sweep / face death, but the C thread for a get that issued no live query at
-// all (zero faces, or every face's `query` erroring at issue). That is sound,
-// and pico-faithful: pico likewise runs the drop handler on the CALLING thread
-// when `remaining_finals == 0` (`src/net/primitives.c:560-562`). The
-// serialization is the refcount itself — a live `call` holds a clone through its
-// `on_reply`, so the refcount cannot reach zero while one is running, on either
-// thread.
+// count of the get's place is let go of, which is the drive thread for a real
+// final / timeout sweep / face death, but the C thread for a get that issued no
+// live query at all (zero faces, or every face's `query` erroring at issue).
+// That is sound, and pico-faithful: pico likewise runs the drop handler on the
+// CALLING thread when `remaining_finals == 0` (`src/net/primitives.c:560-562`).
+// The serialization is the count itself — a live `call` is made through a leg's
+// callback, which holds its count until it is dropped, so the count cannot reach
+// zero while one is running, on either thread.
 unsafe impl Sync for CReplyClosure {}
 
 /// The querier-side `accept_replies` gate — pico's
@@ -494,7 +497,7 @@ unsafe impl Sync for CReplyClosure {}
 /// This is the RECEIVE half of `accept_replies`, and it is on by default:
 /// `_anyke` is false unless the caller asked for `Z_REPLY_KEYEXPR_ANY`
 /// (`primitives.c:575-578`), and the default is `Z_REPLY_KEYEXPR_MATCHING_QUERY`
-/// (`api/constants.h:291`). [`transmit_parameters`] is the SEND half; a getter
+/// (`api/constants.h:291`). [`appends_anyke`] is the SEND half; a getter
 /// with only the send half would still surface a reply on a key disjoint from
 /// its query, which pico silently drops.
 ///
@@ -508,8 +511,9 @@ unsafe impl Sync for CReplyClosure {}
 /// ([`crate::reply_keyexpr::reply_keyexpr_is_covered`]) rather than re-derived, so the
 /// two halves cannot drift apart.
 pub(crate) struct ReplyGate {
-    /// The keyexpr the get asked under — pico's `pen_qry->_key`.
-    pub(crate) query_keyexpr: String,
+    /// The keyexpr the get asked under — pico's `pen_qry->_key`: a block of the session's key
+    /// arena, which a key of the same text shares, so the get keeps no copy of its own.
+    pub(crate) query_keyexpr: crate::keyexpr::KeyText,
     /// pico's `pen_qry->_anyke`: set when the caller passed
     /// `Z_REPLY_KEYEXPR_ANY` OR wrote `_anyke` into the selector itself
     /// (`primitives.c:575-578` ORs the two).
@@ -529,7 +533,7 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     // pico drops a reply the query does not accept BEFORE building it
     // (`query.c:121-127`) — the callback never sees it.
     if !crate::reply_keyexpr::reply_keyexpr_is_covered(
-        &gate.query_keyexpr,
+        gate.query_keyexpr.as_str(),
         view.keyexpr(),
         gate.anyke,
     ) {
@@ -967,19 +971,21 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// `unsafe impl Sync for CReplyClosure` above for what each arm means for the
 /// reply callback.
 ///
-/// The parameters, the value, its encoding and the attachment are lent for the call, read where
-/// the caller and the moved objects hold them, so a get copies none of them.
-#[allow(clippy::too_many_arguments)]
-fn get_options<'a>(
-    target: z_query_target_t,
-    consolidation: z_consolidation_mode_t,
-    parameters: &'a [u8],
-    timeout_ms: u64,
-    payload: Option<&'a crate::bytes::ByteBuf>,
-    attachment: Option<&'a crate::bytes::ByteBuf>,
-    qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta<'a>,
-) -> QueryOptionsOf<'a> {
+/// The parameters are `ask`'s, followed by pico's implicit `_anyke` when `anyke`
+/// ([`appends_anyke`]). They, the value, its encoding and the attachment are lent for the call,
+/// read where the caller and the moved objects hold them, so a get copies none of them.
+fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
+    let parameters = ask.parameters;
+    let GetAsk {
+        target,
+        consolidation,
+        timeout_ms,
+        payload,
+        attachment,
+        qos,
+        ref value_meta,
+        ..
+    } = *ask;
     let mut opts = QueryOptionsOf::get()
         .with_allowed_destination(qos.destination)
         .with_timeout_ms(get_timeout_ms(timeout_ms))
@@ -1007,8 +1013,8 @@ fn get_options<'a>(
     if let Some(encoding) = value_meta.encoding {
         opts = opts.with_encoding_ref(encoding);
     }
-    if let Some(si) = value_meta.source_info {
-        opts = opts.with_source_info(si);
+    if let Some(si) = &value_meta.source_info {
+        opts = opts.with_source_info(si.clone());
     }
 
     // `Z_QUERY_TARGET_BEST_MATCHING` is deliberately NOT representable in wz's
@@ -1064,8 +1070,8 @@ fn get_options<'a>(
         ));
     }
 
-    if !parameters.is_empty() {
-        opts = opts.with_parameters_lent(parameters);
+    if !parameters.is_empty() || anyke {
+        opts = opts.with_parameters_lent_anyke(parameters, anyke);
     }
     if let Some(payload) = payload {
         opts = opts.with_payload_lent(payload.as_slice());
@@ -1094,35 +1100,22 @@ fn parameters_has_time_selector(parameters: &[u8]) -> bool {
         .any(|window| window == SELECTOR_TIME)
 }
 
-/// The selector parameters to transmit, applying pico's implicit-`_anyke`
-/// append (`src/net/primitives.c:575-578` + `codec/message.c:413-425`).
+/// Whether a get sends pico's implicit `_anyke` after its parameters
+/// (`src/net/primitives.c:575-578` + `codec/message.c:413-425`).
 ///
 /// `accept_replies == Z_REPLY_KEYEXPR_ANY` is not a wire field: pico transmits
 /// it by APPENDING `_anyke` to the parameter list (with a `;` separator when the
 /// list is non-empty), and the responder recovers it by parsing the list — which
 /// is exactly what R3a's [`crate::query::parameters_has_anyke`] does on the
-/// receive side. Reproducing the append here therefore makes wz's plain
-/// `parameters` bytes byte-identical to pico's encoded ones, with no
-/// `implicit_anyke` concept needed in the wz encoder.
+/// receive side. The flag is written after the caller's parameters where the get
+/// is written (`QueryOptionsOf::with_parameters_lent_anyke`), so the bytes are
+/// pico's and the caller's parameters are not copied to append it.
 ///
 /// The `!_anyke_in_parameters` guard is pico's own ("extra _anyke parameter only
 /// if it's not already in the parameters list"), so a caller that wrote `_anyke`
 /// by hand AND asked for ANY does not get it twice.
-fn transmit_parameters(
-    parameters: &[u8],
-    accept_replies: z_reply_keyexpr_t,
-) -> alloc::borrow::Cow<'_, [u8]> {
-    let anyke_option = accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
-    if !anyke_option || parameters_has_anyke(parameters) {
-        // What the caller wrote goes out as it is, read where the caller holds it.
-        return alloc::borrow::Cow::Borrowed(parameters);
-    }
-    let mut out = parameters.to_vec();
-    if !out.is_empty() {
-        out.push(PARAM_SEPARATOR);
-    }
-    out.extend_from_slice(ANYKE_PARAM);
-    alloc::borrow::Cow::Owned(out)
+fn appends_anyke(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> bool {
+    accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY && !parameters_has_anyke(parameters)
 }
 
 // --- z_get -----------------------------------------------------------------
@@ -1187,7 +1180,7 @@ pub(crate) unsafe fn get_inner(
     // `CReplyClosure` owns the C `drop(context)`, so every early return below
     // frees it — and, because the drop IS the completion signal, an early error
     // also correctly reports "this get is over".
-    let cclosure = adopt_reply_closure(callback);
+    let mut cclosure = adopt_reply_closure(callback);
     // A payload or an attachment the program moved out of a callback's sample is copied, and with
     // no room for the copy the get is refused; the closure adopted above reports it over.
     let (payload, attachment) = match (payload, attachment) {
@@ -1207,13 +1200,14 @@ pub(crate) unsafe fn get_inner(
         Ok(handle) => handle,
         Err(code) => return code,
     };
-    // The session's close waits for this get's closure to finish and be dropped.
-    handle.keep_background(cclosure.release_latch());
+    // The session's close waits for this get's closure to finish and be dropped, and the place of
+    // its handle stands until then.
+    crate::session::count_in_session(zs, &mut cclosure);
     // A non-canonical / pico-unsafe keyexpr is refused up front, as the declare
     // paths refuse it: the fan is best-effort per face, so a per-face reject
     // would be swallowed and the call would report Z_OK.
     let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
-        Ok(k) => k.to_owned(),
+        Ok(k) => k,
         Err(code) => return code,
     };
 
@@ -1249,28 +1243,31 @@ pub(crate) unsafe fn get_inner(
     };
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
-    let engine = crate::session::engine_ref(handle);
-    let wire = wire_key_of(keyexpr, engine);
+    let engine = crate::session::engine_of(handle);
+    let wire = wire_key_of(keyexpr, Arc::as_ref(&engine));
 
     let value_meta = PicoQueryValueMeta {
         encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),
         source_info,
     };
-    issue_get(
-        engine,
-        ke,
-        wire,
-        params_in,
+    let ask = GetAsk {
+        parameters: params_in,
         target,
         consolidation,
         timeout_ms,
         accept_replies,
-        payload,
-        attachment,
+        payload: payload.as_ref(),
+        attachment: attachment.as_ref(),
         qos,
         value_meta,
+    };
+    issue_get(
+        &engine,
+        ke,
+        wire,
+        &ask,
         cclosure,
-        token,
+        token.map(TokenRef::shared),
         target_peer,
     )
 }
@@ -1279,18 +1276,18 @@ pub(crate) unsafe fn get_inner(
 /// (`_z_closure_reply_t closure = callback->_this._val;
 /// z_internal_closure_reply_null(&callback->_this);`).
 ///
-/// From here the returned `Arc` owns the C `drop(context)`, and because that
+/// From here the returned closure owns the C `drop(context)`, and because that
 /// drop IS the get's completion signal, releasing it on an error path correctly
-/// reports "this get is over". Shared with `z_querier_get`
-/// (`crate::querier`), which has the same contract.
+/// reports "this get is over". It is counted in no owner yet: the caller counts it
+/// in the one that waits for it ([`CReplyClosure::count_in`]) once it has one.
+/// Shared with `z_querier_get` and `z_liveliness_get`, which have the same
+/// contract.
 ///
 /// # Safety
 /// `callback` must be a non-null, valid moved reply closure.
-pub(crate) unsafe fn adopt_reply_closure(
-    callback: *mut z_moved_closure_reply_t,
-) -> Arc<CReplyClosure> {
+pub(crate) unsafe fn adopt_reply_closure(callback: *mut z_moved_closure_reply_t) -> CReplyClosure {
     let owned = &mut (*callback)._this;
-    let adopted = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
+    let adopted = CReplyClosure::uncounted(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_reply_t::null_value();
     adopted
 }
@@ -1312,6 +1309,22 @@ pub(crate) struct PicoQueryValueMeta<'a> {
     /// The query's `(zid, eid, sn)` — the Query body's source_info ext 0x01.
     /// Borrowed from the caller's `z_source_info_t*`, projected to an owned hint.
     pub(crate) source_info: Option<wz_session_core::sample::SourceInfo>,
+}
+
+/// What a C get asks besides its key, its callback, its cancellation and its addressee: its
+/// parameters as the caller wrote them, the reply keys it accepts, and the rest of its options,
+/// each read where the caller or the querier holds it. Lent to [`issue_get`] and [`get_options`]
+/// by reference, so neither call copies it.
+pub(crate) struct GetAsk<'a> {
+    pub(crate) parameters: &'a [u8],
+    pub(crate) target: z_query_target_t,
+    pub(crate) consolidation: z_consolidation_mode_t,
+    pub(crate) timeout_ms: u64,
+    pub(crate) accept_replies: crate::reply_keyexpr::z_reply_keyexpr_t,
+    pub(crate) payload: Option<&'a crate::bytes::ByteBuf>,
+    pub(crate) attachment: Option<&'a crate::bytes::ByteBuf>,
+    pub(crate) qos: PicoQueryQos,
+    pub(crate) value_meta: PicoQueryValueMeta<'a>,
 }
 
 /// R311y551 — the three request-QoS option fields, bundled so the shared
@@ -1369,48 +1382,33 @@ impl PicoQueryQos {
 /// every `z_*` entry point asks. An engine that cannot address a get to one node
 /// asks no link and the get answers `WZ_EXT_ERR_UNSUPPORTED`, completed with no
 /// reply.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn issue_get(
-    engine: &Engine,
-    keyexpr: String,
+    engine: &Arc<Engine>,
+    keyexpr: &str,
     wire: WireKey,
-    params_in: &[u8],
-    target: z_query_target_t,
-    consolidation: z_consolidation_mode_t,
-    timeout_ms: u64,
-    accept_replies: crate::reply_keyexpr::z_reply_keyexpr_t,
-    payload: Option<crate::bytes::ByteBuf>,
-    attachment: Option<crate::bytes::ByteBuf>,
-    qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta<'_>,
-    closure: Arc<CReplyClosure>,
-    token: Option<Arc<CancellationToken>>,
+    ask: &GetAsk<'_>,
+    closure: CReplyClosure,
+    token: Option<TokenRef>,
     target_peer: Option<Vec<u8>>,
 ) -> ZResult {
-    let params = transmit_parameters(params_in, accept_replies);
+    let anyke = appends_anyke(ask.parameters, ask.accept_replies);
 
     // pico's `pen_qry->_anyke` is the OR of the option and the selector the
     // caller wrote by hand: `_anyke_in_parameters || _anyke_option`
-    // (`~/zenoh-pico/src/net/primitives.c:575-582`). Read off `params` -- which
-    // `transmit_parameters` has already normalised -- so the receive gate and
-    // the transmitted bytes cannot disagree.
-    // The gate holds the key the get asked under, and the get is sent naming the gate's: one text.
-    let gate = Arc::new(ReplyGate {
-        query_keyexpr: keyexpr,
-        anyke: parameters_has_anyke(&params),
-    });
-    let asked = Arc::clone(&gate);
+    // (`~/zenoh-pico/src/net/primitives.c:575-582`). The flag the get appends is
+    // one of the two, so the receive gate and the transmitted bytes agree.
+    // The gate holds the key the get asked under, kept where the session keeps its keys, and the
+    // get is sent naming the gate's: one text. A key the session has no room for refuses the get,
+    // the closure dropped, so it is reported over.
+    let gate = match crate::keyexpr::KeyText::of_session(engine, keyexpr) {
+        Ok(query_keyexpr) => ReplyGate {
+            query_keyexpr,
+            anyke: anyke || parameters_has_anyke(ask.parameters),
+        },
+        Err(code) => return code,
+    };
 
-    let opts = get_options(
-        target,
-        consolidation,
-        &params,
-        timeout_ms,
-        payload.as_ref(),
-        attachment.as_ref(),
-        qos,
-        value_meta,
-    );
+    let opts = get_options(ask, anyke);
 
     // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
@@ -1427,9 +1425,14 @@ pub(crate) fn issue_get(
         Some(target_peer) => opts.with_target_peer(target_peer),
         None => opts,
     };
-    fan_get(closure, gate, token, |fan, leg| {
-        engine.get_on_wire(&asked.query_keyexpr, &wire, &opts, fan, leg)
-    })
+    fan_get(
+        engine,
+        crate::object_slot::Kind::Get,
+        closure,
+        gate,
+        token,
+        |asked, fan, leg| engine.get_on_wire(asked, &wire, &opts, fan, leg),
+    )
 }
 
 /// Fan one C get across every connected face and, where its destination admits
@@ -1438,36 +1441,47 @@ pub(crate) fn issue_get(
 /// tokio engine's registry fan, shared with the zenoh-c ABI, or the cooperative
 /// engine's one link.
 ///
-/// The C thread holds its own `Arc` clone (`guard`) for the whole fan. That is
-/// load-bearing: without it, a leg answering and dropping its pending entry
-/// before the NEXT leg's `query` is issued would take the refcount to zero and
-/// run the C `drop(context)` — completing the get while it was still being
-/// issued.
+/// The get lies in a place of its session's ([`GetPlace`], of `kind`): its C
+/// closure, its reply gate and its cancellation registration, so it takes no memory
+/// of its own. A session with no place left refuses it, as pico refuses a pending
+/// query its heap cannot hold (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`), the closure dropped,
+/// so the get is reported over with nothing sent. Each leg's callback holds one
+/// count of the place ([`leg_callback`]), and the C thread holds the place as its
+/// owner for the whole fan. That is load-bearing: without it, a leg answering and
+/// dropping its pending entry before the NEXT leg's `query` is issued would take
+/// the count to zero and run the C `drop(context)` — completing the get while it
+/// was still being issued.
 ///
 /// An engine issues its legs with none of its locks held across a leg: a leg can
 /// stage work whose drain fires a C callback, and a pico callback is explicitly
 /// allowed to re-enter the session (`z_put` from inside one is supported).
 ///
-/// Zero legs is `Z_OK` with no query issued: `guard` is then the last clone, so
-/// the C `drop(context)` runs here on the C thread and the get completes
+/// Zero legs is `Z_OK` with no query issued: the C thread's hold is then the last,
+/// so the C `drop(context)` runs here on the C thread and the get completes
 /// immediately with no reply. That is pico's own behaviour for an empty peer set
 /// — `_z_query` runs `_z_drop_handler_execute(dropper, arg)` on the caller
 /// thread when `remaining_finals == 0` (`src/net/primitives.c:560-562`).
 ///
-/// `issue` is the engine's call, handed the fan to record each leg against and the factory
-/// that mints a leg's callback: `get_on_wire` for a query, `liveliness_get_on_wire` for a
-/// liveliness snapshot. Both are asked in the one way, so the cancellation, the leg's
-/// ownership and the order they are dropped in are stated once.
+/// `issue` is the engine's call, handed the key the get asks under, the fan to record each leg
+/// against and the factory that mints a leg's callback: `get_on_wire` for a query,
+/// `liveliness_get_on_wire` for a liveliness snapshot. Both are asked in the one way, so the
+/// place, the cancellation, the leg's ownership and the order they are dropped in are stated
+/// once.
 pub(crate) fn fan_get(
-    closure: Arc<CReplyClosure>,
-    gate: Arc<ReplyGate>,
-    token: Option<Arc<CancellationToken>>,
+    engine: &Arc<Engine>,
+    kind: crate::object_slot::Kind,
+    closure: CReplyClosure,
+    gate: ReplyGate,
+    token: Option<TokenRef>,
     issue: impl FnOnce(
+        &str,
         Option<&CancellableFan>,
         &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal>,
 ) -> ZResult {
-    let guard = closure.clone();
+    let Some(slot) = crate::object_slot::Slot::<GetPlace>::take_entity(engine, kind) else {
+        return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    };
     // R311y575 — the cancellation is registered BEFORE the first face is
     // issued, which is upstream's ordering
     // (`vendor/zenoh-pico/src/net/primitives.c:606-609`: register the
@@ -1475,52 +1489,55 @@ pub(crate) fn fan_get(
     // afterwards would leave a window in which a token cancelled mid-fan left
     // live pending queries behind.
     //
-    // R2949 — the registration is shared by every leg's callback (see
-    // [`LegReply`]), so it drops only when the LAST of them does, and the
-    // token's `cancel` waits for that, as pico's `_z_sync_group_wait` does.
-    let fan = match &token {
-        None => None,
-        Some(token) => {
-            let Some((fan, registration)) = register_fan(token) else {
-                // ALREADY CANCELLED. Upstream's
-                // `_z_cancellation_token_add_on_cancel_handler` answers
-                // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
-                // query it had just created and returns that error, and NO
-                // Query reaches the wire
-                // (`src/session/cancellation.c:171-181`,
-                // `src/net/primitives.c:606-629`). `closure` and `guard` drop on
-                // this return, so the C `drop(context)` still runs — the get is
-                // correctly reported over, exactly as upstream's
-                // `_z_unregister_pending_query` rollback reports it.
-                return crate::result::Z_ERR_CANCELLED;
-            };
-            Some((fan, Arc::new(registration)))
+    // R2949 — the registration lies in the get's place, so it drops only when the
+    // LAST leg lets the place go, after the C closure, and the token's `cancel`
+    // waits for that, as pico's `_z_sync_group_wait` does.
+    //
+    // The fan is the registration: it lies in the place, and is linked into the token's list
+    // where it lies, so registering takes no memory.
+    let cancellable = token.is_some();
+    let place = slot.fill(GetPlace {
+        get: PendingGet {
+            closure,
+            gate,
+            fan: CancellableFan::new(),
+        },
+        legs: crate::ffi::OpenClosures::default(),
+    });
+    if let Some(token) = token {
+        // SAFETY: the place was filled just above and does not move until it is given back,
+        // which drops the fan; no engine has the fan yet.
+        if !unsafe { (*place).get.fan.register(token) } {
+            // ALREADY CANCELLED. Upstream's
+            // `_z_cancellation_token_add_on_cancel_handler` answers
+            // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
+            // query it had just created and returns that error, and NO
+            // Query reaches the wire
+            // (`src/session/cancellation.c:171-181`,
+            // `src/net/primitives.c:606-629`). The place goes back with no leg,
+            // so the C `drop(context)` still runs: the get is reported over,
+            // as upstream's `_z_unregister_pending_query` rollback reports it.
+            // SAFETY: the owner lets go of the place once, here, having minted no leg.
+            unsafe { release_get(place) };
+            return crate::result::Z_ERR_CANCELLED;
         }
-    };
-    let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
-    let fan = fan.map(|(f, _)| f);
+    }
     // R2959 — a declared key goes out as its alias where the leg can name one, and the
     // reply gate still matches the literal. A leg whose issue fails is not one: its
-    // callback was dropped with its rolled-back pending entry, so it cannot hold the get
-    // open, and if EVERY leg fails, `guard` below completes it.
-    let issued = issue(fan.as_deref(), &mut || {
-        let leg = LegReply {
-            closure: closure.clone(),
-            gate: gate.clone(),
-            _registration: registration.clone(),
-        };
-        // Only the reply callback carries the `Arc`. Completion is signalled by the
-        // callback being DROPPED (which releases the clone), and that happens on a
-        // real final, a timeout sweep, and a face death alike — whereas a counter
-        // incremented on a final would never be reached by the face-death path. See
-        // the module doc.
-        ReplyCallback::shared(move |view: &dyn ReplyView| leg.fire(view))
+    // callback was dropped with its rolled-back pending entry, letting its count go, so
+    // it cannot hold the get open, and if EVERY leg fails, the release below completes it.
+    // SAFETY: the place was filled just above and this thread holds it as its owner until
+    // the release below, so the key read here stands for the call.
+    let asked = unsafe { (*place).get.gate.query_keyexpr.as_str() };
+    // SAFETY: as the key's: the fan stands in the place while its owner holds it.
+    let fan = cancellable.then(|| unsafe { &(*place).get.fan });
+    let issued = issue(asked, fan, &mut || {
+        // SAFETY: the place stands while its owner holds it, which it does until every leg
+        // is minted.
+        unsafe { leg_callback(place) }
     });
-    drop(guard);
-    // After `guard`, explicitly: locals drop in REVERSE declaration order, so
-    // left implicit the registration would go first and a concurrent `cancel`
-    // could return before the zero-face path's C `drop(context)` had run.
-    drop(registration);
+    // SAFETY: the owner lets go of the place once, here, after the last leg was minted.
+    unsafe { release_get(place) };
     match issued {
         // Zero legs included: a get that reached nobody is over, as pico's is.
         Ok(_) => Z_OK,
@@ -1528,32 +1545,73 @@ pub(crate) fn fan_get(
     }
 }
 
-/// R2949 — what each leg's reply callback owns: a face's, the local plane's, or a
-/// liveliness get's.
+/// One get the program issued, as its place keeps it ([`GetPlace`]).
 ///
-/// A struct rather than three captured locals because the DROP ORDER is the
-/// contract: fields drop in declaration order, so the C closure clone goes
-/// before the token registration, and a `cancel` waiting on the registration
-/// cannot return while this leg's share of the C `drop(context)` is still
-/// pending. Captured locals of a closure promise no such order.
-///
-/// ⚠ The callback must name the WHOLE struct — hence [`Self::fire`] taking
-/// `&self`. A closure that wrote `leg.closure` and `leg.gate`
-/// captures only those two fields (Rust 2021 disjoint capture), so the
-/// registration was dropped at the end of the loop iteration, removing its
-/// handler before any cancel could run it. The pico cancellation differential
-/// test's legC measured exactly that.
-pub(crate) struct LegReply {
-    pub(crate) closure: Arc<CReplyClosure>,
-    pub(crate) gate: Arc<ReplyGate>,
-    pub(crate) _registration: Option<Arc<Registration>>,
+/// R2949 — the DROP ORDER is the contract: fields drop in declaration order, so
+/// the C closure goes before the fan, which is the get's registration on its token, and a
+/// `cancel` waiting on the fan cannot return while the C `drop(context)` is still pending.
+pub(crate) struct PendingGet {
+    closure: CReplyClosure,
+    gate: ReplyGate,
+    fan: CancellableFan,
 }
 
-impl LegReply {
-    /// Deliver one reply. Taking `&self` is what makes a callback that calls it
-    /// capture the whole struct, registration included.
-    pub(crate) fn fire(&self, view: &dyn ReplyView) {
-        fire_reply(&self.closure, &self.gate, view);
+/// The place of one get the program issued: the get, and the count of what holds it, its legs'
+/// callbacks and, while the fan runs, the C thread that issues it. The last count let go of
+/// gives the place back, which drops the get: its C `drop(context)` runs, and the get is over.
+pub(crate) struct GetPlace {
+    get: PendingGet,
+    legs: crate::ffi::OpenClosures,
+}
+
+/// One leg's reply callback over the get at `place`, holding one count of it until it is
+/// dropped: it hands each reply the gate admits to the C closure, and its drop, the leg's end,
+/// lets the count go ([`end_leg`]).
+///
+/// # Safety
+/// `place` is a filled [`GetPlace`] whose owner still holds it.
+unsafe fn leg_callback(place: *mut GetPlace) -> ReplyCallback {
+    /// # Safety
+    /// `context` is a place whose count this leg holds.
+    unsafe fn call(context: *mut c_void, view: &dyn ReplyView) {
+        // SAFETY: the caller's: the place stands while this leg holds a count of it.
+        let get = unsafe { &(*context.cast::<GetPlace>()).get };
+        fire_reply(&get.closure, &get.gate, view);
+    }
+    /// # Safety
+    /// As `call`'s, called once, after the leg's last call.
+    unsafe fn end_leg(context: *mut c_void) {
+        let place = context.cast::<GetPlace>();
+        // SAFETY: the caller's: this leg's count is let go of once, here; the place is given
+        // back by the one that lets the last count go after its owner let go of it.
+        unsafe {
+            if (*place).legs.close_one() {
+                crate::object_slot::release_entity(place);
+            }
+        }
+    }
+    // SAFETY: the caller's: the place stands, and the count opened here keeps it standing
+    // until `end_leg` lets it go.
+    unsafe {
+        (*place).legs.open_one();
+        // `call` reads the closure and the gate through a shared borrow, which the plane's
+        // `Sync` argument admits from any thread (`CReplyClosure`), and `end_leg` runs once,
+        // after the last call.
+        ReplyCallback::raw(call, place.cast::<c_void>(), Some(end_leg))
+    }
+}
+
+/// The owner of the get at `place` lets go of it: given back now when no leg holds it (zero
+/// legs, or every leg ended already), or by the last leg's end.
+///
+/// # Safety
+/// `place` is a filled [`GetPlace`], let go of by its owner once, here.
+unsafe fn release_get(place: *mut GetPlace) {
+    // SAFETY: the caller's.
+    unsafe {
+        if (*place).legs.retire() {
+            crate::object_slot::release_entity(place);
+        }
     }
 }
 
@@ -2110,16 +2168,7 @@ mod tests {
             is_express: true,
             destination: Locality::Remote,
         };
-        let opts = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &[],
-            0,
-            None,
-            None,
-            qos,
-            PicoQueryValueMeta::default(),
-        );
+        let opts = get_options(&GetAsk { qos, ..asking(&[]) }, false);
         let packed = opts.qos.expect("the QoS trio reaches QueryOptions");
         assert_eq!(packed.priority(), Priority::RealTime, "priority");
         assert_eq!(packed.congestion(), CongestionControl::Drop, "congestion");
@@ -2129,16 +2178,7 @@ mod tests {
         // request-side default is BLOCK, which is NOT the wire DEFAULT byte, so
         // a default `z_get` legitimately carries a QoS ext. Leaving it unset
         // would downgrade every default query to Drop.
-        let defaulted = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &[],
-            0,
-            None,
-            None,
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta::default(),
-        );
+        let defaulted = get_options(&asking(&[]), false);
         let packed = defaulted
             .qos
             .expect("the options-default QoS reaches QueryOptions too");
@@ -2160,27 +2200,16 @@ mod tests {
             schema: Some(&schema),
         };
         let params_in = b"a=1".as_slice();
-        let params = transmit_parameters(
-            params_in,
-            crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
-        );
-        assert!(
-            matches!(params, alloc::borrow::Cow::Borrowed(_)),
-            "parameters that need no _anyke are not copied"
-        );
-        let opts = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &params,
-            0,
-            Some(&value),
-            Some(&attachment),
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta {
+        let ask = GetAsk {
+            payload: Some(&value),
+            attachment: Some(&attachment),
+            value_meta: PicoQueryValueMeta {
                 encoding: Some(encoding),
                 source_info: None,
             },
-        );
+            ..asking(params_in)
+        };
+        let opts = get_options(&ask, false);
         let lent = |slot: Option<&alloc::borrow::Cow<'_, [u8]>>| {
             slot.is_some_and(|bytes| matches!(bytes, alloc::borrow::Cow::Borrowed(_)))
         };
@@ -2198,6 +2227,31 @@ mod tests {
                 .map(wz_session_core::sample::CarriedEncoding::view),
             Some(encoding)
         );
+        // A get that accepts any key lends the same bytes: the flag is written after them where the
+        // get is written, and only a reader that asks for them in one piece copies them.
+        let any = GetAsk {
+            accept_replies: crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY,
+            ..asking(params_in)
+        };
+        let opts = get_options(&any, appends_anyke(params_in, any.accept_replies));
+        assert!(lent(opts.parameters.as_ref()), "the parameters are lent");
+        assert_eq!(
+            opts.parameters.as_deref().map(<[u8]>::as_ptr),
+            Some(params_in.as_ptr())
+        );
+        assert_eq!(opts.sent_parameters().as_deref(), Some(&b"a=1;_anyke"[..]));
+    }
+
+    /// The parameters a get with `parameters` and `accept_replies` sends, in one piece.
+    fn sent(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> Vec<u8> {
+        let ask = GetAsk {
+            accept_replies,
+            ..asking(parameters)
+        };
+        get_options(&ask, appends_anyke(parameters, accept_replies))
+            .sent_parameters()
+            .map(alloc::borrow::Cow::into_owned)
+            .unwrap_or_default()
     }
 
     /// `accept_replies = ANY` is transmitted by APPENDING `_anyke` to the
@@ -2209,43 +2263,37 @@ mod tests {
         let matching = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 
         // Empty selector → the bare key (pico's no-params encoder arm).
-        assert_eq!(transmit_parameters(b"", any), b"_anyke".to_vec());
+        assert_eq!(sent(b"", any), b"_anyke".to_vec());
         // Non-empty → `;`-separated (pico's has_params arm).
-        assert_eq!(transmit_parameters(b"a=1", any), b"a=1;_anyke".to_vec());
+        assert_eq!(sent(b"a=1", any), b"a=1;_anyke".to_vec());
         // MATCHING_QUERY (the DEFAULT) appends nothing.
-        assert_eq!(transmit_parameters(b"a=1", matching), b"a=1".to_vec());
-        assert_eq!(transmit_parameters(b"", matching), b"".to_vec());
+        assert_eq!(sent(b"a=1", matching), b"a=1".to_vec());
+        assert_eq!(sent(b"", matching), b"".to_vec());
         // pico's own guard: don't append when the caller already wrote it.
-        assert_eq!(transmit_parameters(b"_anyke", any), b"_anyke".to_vec());
-        assert_eq!(
-            transmit_parameters(b"a=1;_anyke", any),
-            b"a=1;_anyke".to_vec()
-        );
+        assert_eq!(sent(b"_anyke", any), b"_anyke".to_vec());
+        assert_eq!(sent(b"a=1;_anyke", any), b"a=1;_anyke".to_vec());
         // ...but a DECOY is not the flag, so the append still happens (the
         // boundary rules R3a ported are what make this the right answer).
-        assert_eq!(
-            transmit_parameters(b"no_anyke", any),
-            b"no_anyke;_anyke".to_vec()
-        );
+        assert_eq!(sent(b"no_anyke", any), b"no_anyke;_anyke".to_vec());
     }
 
     /// The querier-side round-trip that pins R3a against R3b: what
-    /// `transmit_parameters` emits is what `parameters_has_anyke` reads back.
+    /// a get sends is what `parameters_has_anyke` reads back.
     #[test]
     fn transmitted_anyke_is_recovered_by_the_responder_parse() {
         for selector in [&b""[..], b"a=1", b"a=1;b=2", b"no_anyke", b"_anykey=1"] {
-            let sent = transmit_parameters(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
+            let any = sent(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
             assert!(
-                parameters_has_anyke(&sent),
-                "an ANY get's selector {sent:?} must parse as _anyke on the responder"
+                parameters_has_anyke(&any),
+                "an ANY get's selector {any:?} must parse as _anyke on the responder"
             );
-            let sent = transmit_parameters(
+            let matching = sent(
                 selector,
                 crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
             );
             assert!(
-                !parameters_has_anyke(&sent),
-                "a MATCHING_QUERY get's selector {sent:?} must NOT parse as _anyke"
+                !parameters_has_anyke(&matching),
+                "a MATCHING_QUERY get's selector {matching:?} must NOT parse as _anyke"
             );
         }
     }
@@ -2264,8 +2312,8 @@ mod tests {
 
         // The default is MATCHING_QUERY, so the gate is ON by default.
         let gate = |ke: &str, accept| ReplyGate {
-            query_keyexpr: ke.to_owned(),
-            anyke: parameters_has_anyke(&transmit_parameters(b"", accept)),
+            query_keyexpr: crate::keyexpr::KeyText::owned(ke),
+            anyke: parameters_has_anyke(&sent(b"", accept)),
         };
 
         let g = gate("a/**", matching);
@@ -2274,12 +2322,16 @@ mod tests {
             "MATCHING_QUERY is the default and leaves anyke off"
         );
         assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
-            &g.query_keyexpr,
+            g.query_keyexpr.as_str(),
             "a/b",
             g.anyke
         ));
         assert!(
-            !crate::reply_keyexpr::reply_keyexpr_is_covered(&g.query_keyexpr, "z/b", g.anyke),
+            !crate::reply_keyexpr::reply_keyexpr_is_covered(
+                g.query_keyexpr.as_str(),
+                "z/b",
+                g.anyke
+            ),
             "a reply on a disjoint key must be dropped — pico's query.c:121"
         );
 
@@ -2290,7 +2342,7 @@ mod tests {
             "Z_REPLY_KEYEXPR_ANY must reach the receive gate too"
         );
         assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
-            &g.query_keyexpr,
+            g.query_keyexpr.as_str(),
             "z/b",
             g.anyke
         ));
@@ -2299,8 +2351,8 @@ mod tests {
         // (`primitives.c:575-582`), so `_anyke` in the caller's own parameters
         // opens the gate even under MATCHING_QUERY.
         let g = ReplyGate {
-            query_keyexpr: "a/**".to_owned(),
-            anyke: parameters_has_anyke(&transmit_parameters(b"_anyke", matching)),
+            query_keyexpr: crate::keyexpr::KeyText::owned("a/**"),
+            anyke: parameters_has_anyke(&sent(b"_anyke", matching)),
         };
         assert!(g.anyke, "a hand-written _anyke selector must open the gate");
     }
@@ -2321,19 +2373,24 @@ mod tests {
         assert!(!parameters_has_time_selector(b"_time"));
     }
 
+    /// A get that asks with `parameters` and every other option at pico's default.
+    fn asking(parameters: &[u8]) -> GetAsk<'_> {
+        GetAsk {
+            parameters,
+            target: Z_QUERY_TARGET_BEST_MATCHING,
+            consolidation: Z_CONSOLIDATION_MODE_AUTO,
+            timeout_ms: 0,
+            accept_replies: crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            payload: None,
+            attachment: None,
+            qos: PicoQueryQos::defaults(),
+            value_meta: PicoQueryValueMeta::default(),
+        }
+    }
+
     /// The consolidation an AUTO `z_get` is given, for `parameters`.
     fn auto_get_consolidation(parameters: &str) -> Option<ConsolidationMode> {
-        get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            parameters.as_bytes(),
-            0,
-            None,
-            None,
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta::default(),
-        )
-        .consolidation
+        get_options(&asking(parameters.as_bytes()), false).consolidation
     }
 
     /// The C ABI and the Rust API resolve AUTO by ONE rule: on every selector
@@ -2383,17 +2440,11 @@ mod tests {
     #[test]
     fn a_named_consolidation_is_kept_and_a_raw_one_names_none() {
         let named = |mode, parameters: &str| {
-            get_options(
-                Z_QUERY_TARGET_BEST_MATCHING,
-                mode,
-                parameters.as_bytes(),
-                0,
-                None,
-                None,
-                PicoQueryQos::defaults(),
-                PicoQueryValueMeta::default(),
-            )
-            .consolidation
+            let ask = GetAsk {
+                consolidation: mode,
+                ..asking(parameters.as_bytes())
+            };
+            get_options(&ask, false).consolidation
         };
         assert_eq!(
             named(Z_CONSOLIDATION_MODE_MONOTONIC, "_time=[..]"),
@@ -2408,5 +2459,134 @@ mod tests {
             Some(ConsolidationMode::None)
         );
         assert_eq!(named(7, ""), None);
+    }
+    /// A get lies in a place of its session's from its fan to its last leg's end: two legs held past
+    /// the fan keep it, the second one's end runs the C drop once and gives the place back; a get
+    /// with no leg is over at once; a session with no place left refuses the get, its C drop
+    /// run; a get with a token registers the fan lying in its place, and one whose token is
+    /// cancelled already is refused with its place given back. Turned red by a get whose place goes back under a leg still held, or never, or by one
+    /// that takes memory of its own instead of a place.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_gets_place_goes_back_with_its_last_leg() {
+        use crate::object_slot::{Kind, Slot};
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn counted_drop(_context: *mut c_void) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+        let closure = || CReplyClosure::uncounted(core::ptr::null_mut(), None, Some(counted_drop));
+        let gate = || ReplyGate {
+            query_keyexpr: crate::keyexpr::KeyText::owned("demo/get"),
+            anyke: false,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many get places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Get)).collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+        assert!(places > 0, "the session's limit admits pending gets");
+
+        let mut legs = Vec::new();
+        let code = fan_get(
+            &engine,
+            Kind::Get,
+            closure(),
+            gate(),
+            None,
+            |asked, fan, leg| {
+                assert_eq!(asked, "demo/get", "the get asks under the gate's key");
+                assert!(fan.is_none(), "a get with no token records no leg");
+                legs.push(leg());
+                legs.push(leg());
+                Ok(2)
+            },
+        );
+        assert_eq!(code, Z_OK);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0, "two legs hold the get");
+        assert_eq!(free(&engine), places - 1, "the get holds one place");
+        drop(legs.pop());
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0, "one leg still holds it");
+        assert_eq!(free(&engine), places - 1);
+        drop(legs.pop());
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the last leg's end is the get's"
+        );
+        assert_eq!(free(&engine), places, "and gives the place back");
+
+        let code = fan_get(&engine, Kind::Get, closure(), gate(), None, |_, _, _| Ok(0));
+        assert_eq!(code, Z_OK, "a get that reached nobody is over");
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+        assert_eq!(free(&engine), places);
+
+        let held: Vec<Slot<u64>> =
+            core::iter::from_fn(|| Slot::<u64>::take_entity(&engine, Kind::Get)).collect();
+        let code = fan_get(&engine, Kind::Get, closure(), gate(), None, |_, _, _| Ok(0));
+        assert_eq!(code, crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            3,
+            "the refused get is reported over"
+        );
+        drop(held);
+
+        // A get with a token: its fan, registered on the token where it lies in the place, is
+        // the one the engine is handed, and goes with the last leg.
+        let token = CancellationToken::new();
+        let mut legs = Vec::new();
+        let code = fan_get(
+            &engine,
+            Kind::Get,
+            closure(),
+            gate(),
+            Some(TokenRef::shared(Arc::clone(&token))),
+            |_, fan, leg| {
+                assert!(fan.is_some(), "a get with a token hands its fan");
+                legs.push(leg());
+                Ok(1)
+            },
+        );
+        assert_eq!(code, Z_OK);
+        assert_eq!(token.active(), 1, "the fan in the place is registered");
+        drop(legs);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 4);
+        assert_eq!(token.active(), 0, "the fan went with the place");
+        assert_eq!(free(&engine), places);
+
+        // A token already cancelled refuses the get before any leg, its place given back.
+        token.cancel();
+        let code = fan_get(
+            &engine,
+            Kind::Get,
+            closure(),
+            gate(),
+            Some(TokenRef::shared(Arc::clone(&token))),
+            |_, _, _| panic!("a cancelled get issues no leg"),
+        );
+        assert_eq!(code, crate::result::Z_ERR_CANCELLED);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            5,
+            "the cancelled get is reported over"
+        );
+        assert_eq!(free(&engine), places, "and its place is back");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 }

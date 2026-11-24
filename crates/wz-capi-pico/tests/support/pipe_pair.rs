@@ -573,11 +573,27 @@ pub(crate) unsafe fn config_over(
     cfg
 }
 
+/// What a pair's sessions' configs are given besides the pipe, before they open.
+pub(crate) type Shape = unsafe fn(&mut z_owned_config_t);
+
+/// A config given nothing besides the pipe.
+pub(crate) unsafe fn unshaped(_config: &mut z_owned_config_t) {}
+
 pub(crate) unsafe fn open_over(
     key: u8,
     transport: *mut wz_ext_owned_transport_t,
 ) -> z_owned_session_t {
+    open_over_shaped(key, transport, unshaped)
+}
+
+/// A session over the pipe whose config `shape` was handed first.
+pub(crate) unsafe fn open_over_shaped(
+    key: u8,
+    transport: *mut wz_ext_owned_transport_t,
+    shape: Shape,
+) -> z_owned_session_t {
     let mut cfg = config_over(key, transport);
+    shape(&mut cfg);
     let mut session: z_owned_session_t = std::mem::zeroed();
     assert_eq!(
         z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
@@ -740,11 +756,16 @@ impl Pair {
     /// route to the listener made (a put heard) and a get answered, so what a later call does is
     /// the call's own work and not the first exchange of a route.
     pub(crate) unsafe fn open(dial: bool) -> Self {
+        Self::open_shaped(dial, unshaped)
+    }
+
+    /// As `open`, each session's config handed `shape` before it opens.
+    pub(crate) unsafe fn open_shaped(dial: bool, shape: Shape) -> Self {
         let (pipe, teller) = Pipe::start();
         let counts = Arc::new(Counts::default());
         let listening_transport = make_transport(&pipe, Side::Listening);
         let dialling_transport = make_transport(&pipe, Side::Dialling);
-        let listener = open_over(Z_CONFIG_LISTEN_KEY, listening_transport);
+        let listener = open_over_shaped(Z_CONFIG_LISTEN_KEY, listening_transport, shape);
         let mut closure = sample_closure(&counts);
         let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
         assert_eq!(
@@ -768,7 +789,7 @@ impl Pair {
             dialler: None,
         };
         if dial {
-            let dialler = open_over(Z_CONFIG_CONNECT_KEY, dialling_transport);
+            let dialler = open_over_shaped(Z_CONFIG_CONNECT_KEY, dialling_transport, shape);
             pair.dialler = Some(dialler);
             pair.converge();
         }

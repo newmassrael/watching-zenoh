@@ -156,6 +156,32 @@ impl SessionState {
     }
 }
 
+impl wz_capi_port::KeyHolds for SharedSession {
+    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::release_keyexpr(self, mapping_id)
+    }
+
+    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::retain_keyexpr(self, mapping_id)
+    }
+}
+
+impl wz_capi_port::Tickers for SharedSession {
+    #[cfg(feature = "advanced")]
+    fn start_ticker(
+        &self,
+        period_ms: u64,
+        tick: wz_capi_port::Tick,
+    ) -> Result<wz_capi_port::TickerId, Refusal> {
+        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
+    }
+
+    #[cfg(feature = "advanced")]
+    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
+        SharedSession::stop_ticker(self, id);
+    }
+}
+
 impl SessionEngine for SharedSession {
     fn is_closed(&self) -> bool {
         SharedSession::is_closed(self)
@@ -241,6 +267,10 @@ impl SessionEngine for SharedSession {
         all
     }
 
+    fn told_ledger(&self) -> Option<&wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>> {
+        Some(&self.told)
+    }
+
     fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> Result<u64, Refusal> {
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);
@@ -312,7 +342,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -332,13 +362,6 @@ impl SessionEngine for SharedSession {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
 
-    fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::release_keyexpr(self, mapping_id)
-    }
-
-    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
-        SharedSession::retain_keyexpr(self, mapping_id)
-    }
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -486,7 +509,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Result<wz_capi_port::QblId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
                 wire,
@@ -504,6 +527,28 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_queryable(self, id);
     }
 
+    // A reply holds the keep's value while it runs, so a release from another thread meanwhile
+    // sends the Final once the reply has gone out. The runtime's hold answers under the key it
+    // keeps itself, so the caller's is not read.
+    #[cfg(feature = "queryable")]
+    fn reply_held(
+        &self,
+        id: wz_capi_port::HeldQueryId,
+        _key: &str,
+        answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut),
+    ) {
+        if SharedSession::is_closed(self) {
+            return;
+        }
+        if let Some(kept) = self.kept_queries.get(id) {
+            kept.held.reply(|out| answer(out));
+        }
+    }
+
+    #[cfg(feature = "queryable")]
+    fn release_held(&self, id: wz_capi_port::HeldQueryId) {
+        self.kept_queries.release(id);
+    }
     // One leg per connected face, as the snapshot get always fanned; it asks by the literal key,
     // which the runtime's liveliness get has no other form of, so `wire` is not read.
     #[cfg(feature = "liveliness-get")]
@@ -527,7 +572,7 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Result<wz_capi_port::TokenId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_token_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -536,20 +581,6 @@ impl SessionEngine for SharedSession {
                     .with_retraction_naming_the_key(retraction.is_some()),
             )
         })
-    }
-
-    #[cfg(feature = "advanced")]
-    fn start_ticker(
-        &self,
-        period_ms: u64,
-        tick: wz_capi_port::Tick,
-    ) -> Result<wz_capi_port::TickerId, Refusal> {
-        self.declared(|| Some(SharedSession::start_ticker(self, period_ms, tick)))
-    }
-
-    #[cfg(feature = "advanced")]
-    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
-        SharedSession::stop_ticker(self, id);
     }
 
     #[cfg(feature = "liveliness")]
@@ -568,7 +599,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -668,7 +699,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -695,7 +726,7 @@ impl SessionEngine for SharedSession {
             allowed_origin,
             links,
         } = reach;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
                 wire,
@@ -716,7 +747,7 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
     ) -> Result<wz_capi_port::TokenId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_token_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -740,7 +771,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -778,6 +809,21 @@ impl SharedSession {
         made().ok_or(Refusal::NoEntityId)
     }
 
+    /// [`Self::declared`] for a declaration on `wire`, which `made` is handed: a closed session,
+    /// which runs nothing, gives back what the key held of its declarations
+    /// ([`WireKey::into_holds`]); the registry gives it back when it refuses or lets the entry go.
+    fn declared_on_wire<T>(
+        &self,
+        wire: WireKey,
+        made: impl FnOnce(WireKey) -> Option<T>,
+    ) -> Result<T, Refusal> {
+        if self.is_closed() {
+            wire.let_go(self);
+            return Err(Refusal::Closed);
+        }
+        made(wire).ok_or(Refusal::NoEntityId)
+    }
+
     /// The registry's walk of a liveliness get, as the port answers it: refused on a closed session,
     /// which asks nothing, and the number of legs issued on an open one.
     #[cfg(feature = "liveliness-get")]
@@ -798,23 +844,41 @@ impl SharedSession {
 }
 
 /// One face's session as the port's [`QueryHolder`](wz_capi_port::QueryHolder): a query held
-/// through it answers on that face, and the node's latch says whether its session is closed.
+/// through it answers on that face, and the node's latch says whether its session is closed. A
+/// query kept is kept in the registry's slab ([`SharedSession`]'s `kept_queries`), held weakly:
+/// the slab is the session's, and a face's queryable outlives no session.
 #[cfg(feature = "queryable")]
 struct FaceHolder {
     face: wz_runtime_tokio::session::TokioQueryHolder,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    kept: std::sync::Weak<wz_capi_port::HeldSlab<FaceKept>>,
+}
+
+/// What the registry keeps of a query a program keeps past its handler: the runtime's hold of it,
+/// which answers on the face the query came in on and owes its Final until dropped. The program's
+/// copy keeps the query's key and parameters itself.
+#[cfg(feature = "queryable")]
+pub(crate) struct FaceKept {
+    held: wz_runtime_tokio::session::TokioHeldQuery,
 }
 
 #[cfg(feature = "queryable")]
 impl wz_capi_port::QueryHolder for FaceHolder {
-    fn hold_query(
+    fn keep_query(
         &self,
         view: &dyn wz_session_core::query_sink::QueryView,
-    ) -> Box<dyn wz_capi_port::HeldQuery> {
-        Box::new(FaceHeld {
-            held: self.face.hold_query(view),
-            closed: self.closed.clone(),
-        })
+    ) -> Result<Option<wz_capi_port::HeldQueryId>, Refusal> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Refusal::Closed);
+        }
+        let kept = self.kept.upgrade().ok_or(Refusal::Closed)?;
+        kept.keep(
+            view.rid(),
+            FaceKept {
+                held: self.face.hold_query(view),
+            },
+        )
+        .map(Some)
     }
 
     fn session_closed(&self) -> bool {
@@ -839,10 +903,12 @@ impl SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
-        // The registry mints a callback per face with the face's own session; the port's
-        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
+        // The registry mints a callback per face with the face's own session; each calls the one
+        // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
+        let kept = Arc::downgrade(&self.kept_queries);
+        let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
             wire,
@@ -851,30 +917,19 @@ impl SharedSession {
             links,
             retraction,
             Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
-                sink(Arc::new(FaceHolder {
+                let holder = FaceHolder {
                     face: face.clone(),
                     closed: closed.clone(),
-                }))
+                    kept: kept.clone(),
+                };
+                let sink = Arc::clone(&sink);
+                Box::new(
+                    move |query: &dyn wz_session_core::query_sink::QueryView,
+                          out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                        sink.call(query, out, &holder);
+                    },
+                ) as Box<_>
             }),
         )
-    }
-}
-
-/// The runtime's held query as the port's [`HeldQuery`](wz_capi_port::HeldQuery), beside the
-/// node's closed latch its face's holder reads; dropping it releases the runtime's hold.
-#[cfg(feature = "queryable")]
-struct FaceHeld {
-    held: wz_runtime_tokio::session::TokioHeldQuery,
-    closed: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(feature = "queryable")]
-impl wz_capi_port::HeldQuery for FaceHeld {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
-        self.held.reply(|out| answer(out));
-    }
-
-    fn session_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

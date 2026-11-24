@@ -31,14 +31,14 @@
 //! so the verdicts that one face's dispatch reaches count the other faces' declarations beside
 //! its own ([`Others`], `slot_observer::OtherPeers`).
 
-#[cfg(feature = "queryable")]
-use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
-use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
+use super::decl_watch::WatchObserver;
+#[cfg(feature = "queryable")]
+use wz_session_core::bounded::Static;
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
@@ -57,22 +57,23 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
+#[cfg(any(feature = "listen", feature = "group", test))]
+use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, OtherPeers, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf};
 
-use super::queued::{MatchFlips, Queued};
 #[cfg(feature = "query")]
-use super::LegSink;
+use super::{LegHold, LegSink};
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
-use wz_capi_port::{FilterPlane, MatchId};
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
-#[cfg(any(feature = "query", feature = "queryable"))]
-use wz_session_core::declare::queryable::QuerierCriterion;
-use wz_session_core::declare::subscriber::PublisherCriterion;
+#[cfg(feature = "query")]
+use wz_session_core::pending_get::LegTables;
+use wz_session_core::pending_get::{GetKind, SessionFaces};
+use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -101,7 +102,7 @@ type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Le
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
 #[cfg(feature = "query")]
-pub(super) type Gets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 /// A session that asks no query has no pending get on any face: its requester side is none, and
 /// the observer's fan and drains keep no path for gets.
 #[cfg(not(feature = "query"))]
@@ -139,10 +140,21 @@ impl FaceTables {
     #[inline(never)]
     fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
         let at = place.as_mut_ptr();
+        // A field added to the set and not written below would be read uninitialised. This names
+        // every field with no `..`, so adding one without naming it here (and so without writing
+        // it below) does not compile.
+        let _every_field_is_written = |set: &Self| {
+            let Self {
+                peer: _,
+                gets: _,
+                #[cfg(feature = "liveliness")]
+                    retracting: _,
+            } = set;
+        };
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
         // pointer to it, the peer's tables by `init_in`, which writes them whole (a
-        // `MaybeUninit<T>` has the layout of `T`). `every_field_is_written` names every field, so
-        // the set is whole when it is lent.
+        // `MaybeUninit<T>` has the layout of `T`). The list above names every field, so the set is
+        // whole when it is lent.
         let set = unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
             #[cfg(feature = "liveliness")]
@@ -152,19 +164,6 @@ impl FaceTables {
         };
         set.peer.limit_to(limits);
         set
-    }
-
-    /// A field added to [`FaceTables`] and not written by [`Self::rowless_in`] would be read
-    /// uninitialised. This destructures the set with no `..`, so adding a field without naming it
-    /// here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(set: Self) {
-        let Self {
-            peer: _,
-            gets: _,
-            #[cfg(feature = "liveliness")]
-                retracting: _,
-        } = set;
     }
 
     /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its
@@ -254,11 +253,13 @@ impl<'a> Iterator for HeldMut<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let held = self.held.next()?;
+        // `held` names the sets in their order, so each lies at or past `base`.
+        let skip = held.at.checked_sub(self.base)?;
         let rest = core::mem::take(&mut self.rest);
-        let (_, from) = rest.split_at_mut(held.at - self.base);
-        let (set, after) = from.split_first_mut()?;
+        let (set, after) = rest.get_mut(skip..)?.split_first_mut()?;
         self.rest = after;
-        self.base = held.at + 1;
+        // The set taken lies at `held.at`, so one past it is at most the sets' length.
+        self.base = held.at.saturating_add(1);
         Some(set)
     }
 
@@ -286,11 +287,11 @@ impl Others<'_> {
         let (before, after, after_at) = (self.before, self.after, self.after_at);
         self.held_before
             .iter()
-            .map(move |held| &before[held.at])
+            .filter_map(move |held| before.get(held.at))
             .chain(
                 self.held_after
                     .iter()
-                    .map(move |held| &after[held.at - after_at]),
+                    .filter_map(move |held| after.get(held.at.checked_sub(after_at)?)),
             )
     }
 }
@@ -308,7 +309,7 @@ impl OtherPeers for Others<'_> {
     // Without a querier or a queryable the faces hold no queryable a peer declared, and the
     // trait's own answer (none) is this engine's.
     #[cfg(any(feature = "query", feature = "queryable"))]
-    fn answers(&self, criterion: &QuerierCriterion) -> bool {
+    fn answers(&self, criterion: &wz_session_core::declare::queryable::QuerierCriterion) -> bool {
         self.faces()
             .any(|face| face.peer.remote_queryables.has_matching_for(criterion))
     }
@@ -337,18 +338,18 @@ impl ObserverSinks for CoopSinks {
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::Queryable;
     // The program's watches of what the peers declare are the only observers this engine installs
-    // (`decl_watch`), boxed closures; a build without them holds none, so its observer lists are
-    // of a sink that cannot be made and hold nothing to drop or free.
+    // (`decl_watch`), each held in its row of an observer list; a build without them holds none,
+    // so its observer lists are of a sink that cannot be made and hold nothing to drop or free.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    type Declared = BoxedDeclSink;
+    type Declared = WatchObserver;
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    type Undeclared = BoxedUndeclSink;
+    type Undeclared = WatchObserver;
     #[cfg(not(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -361,23 +362,57 @@ impl ObserverSinks for CoopSinks {
     type Undeclared = NoSink;
 }
 
-/// Where a matching listener's flips go on this engine: the session's queue of them, by the
-/// listener's id, handed to its callback after the lock (`MatchFlips`). A value of its own, so
-/// the tables keep no box and no closure per listener.
-pub(super) struct FlipReport {
-    pub(super) queue: alloc::sync::Arc<Queued<MatchFlips>>,
-    pub(super) id: MatchId,
-}
+/// The sink of the application layer's own matching watches, which this engine registers none
+/// in: its matching listeners are rows of the session's tables, read after the lock's turns
+/// (`SessionTables::next_matching_change`), so no value of it is ever made and its watch lists
+/// stay empty.
+pub(super) enum NoWatch {}
 
-impl MatchingSink for FlipReport {
-    fn on_matching_changed(&mut self, matching: bool) {
-        self.queue.lock().flip(self.id, matching);
+impl MatchingSink for NoWatch {
+    fn on_matching_changed(&mut self, _matching: bool) {
+        match *self {}
     }
+
+    const WATCHES: bool = false;
 }
 
 /// What the application registered on the session: its tables' rows lent from the session's
 /// arena at its open, each as many as the limit the open resolved.
-pub(super) type App = SlotObserverOf<CoopSinks, Lent, FlipReport>;
+pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoWatch>;
+
+/// What a write filter's verdict and a matching listener's are read off: every face's peer's
+/// declarations, each search of them counted for the tests ([`Registry::peers_declare`]).
+impl PeerDeclarations for Registry {
+    fn declares(&self, plane: Plane, key: &str) -> bool {
+        self.peers_declare(plane, key)
+    }
+
+    fn written(&self) -> u64 {
+        self.faces_written
+    }
+}
+
+/// Whether any of `faces`' peers declared what `plane` counts on `keyexpr`: a subscriber, or a
+/// queryable (a complete one where the plane requires it). Asked from the borrowed key: a poll
+/// builds no criterion.
+fn faces_declare<'a>(
+    mut faces: impl Iterator<Item = &'a FaceTables>,
+    plane: Plane,
+    keyexpr: &str,
+) -> bool {
+    match plane {
+        Plane::Subscribers => faces.any(|face| face.peer.remote_subscribers.has_matching(keyexpr)),
+        #[cfg(any(feature = "query", feature = "queryable"))]
+        Plane::Queryables { complete_required } => faces.any(|face| {
+            face.peer
+                .remote_queryables
+                .answers_query(keyexpr, complete_required)
+        }),
+        // A build without a querier or a queryable holds no queryable a peer declared.
+        #[cfg(not(any(feature = "query", feature = "queryable")))]
+        Plane::Queryables { .. } => false,
+    }
+}
 
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
@@ -418,7 +453,7 @@ pub(super) struct Registry {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    pub(super) decl_watches: alloc::sync::Arc<DeclWatches>,
+    pub(super) decl_watches: DeclWatches,
     /// Moves each time a face's peer tables are handed out to be written and each time a face
     /// comes or goes: an answer read off what the peers declared ([`Self::peers_declare`]) holds
     /// for as long as this reads what it read when the answer was taken.
@@ -436,6 +471,45 @@ pub(super) struct Registry {
     /// cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+}
+
+/// The faces as the session's state reaches them (`SessionState`): a
+/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
+/// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
+impl SessionFaces for Registry {
+    fn end_leg(&mut self, face: FaceId, kind: GetKind) {
+        #[cfg(feature = "query")]
+        if let Some(gets) = self.gets_mut(face) {
+            gets.end_leg(kind);
+        }
+        #[cfg(not(feature = "query"))]
+        let _ = (face, kind);
+    }
+
+    fn lose_face(&mut self, face: FaceId) {
+        self.flush_declarations_on_link_loss(face);
+        // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
+        #[cfg(feature = "liveliness")]
+        self.lose_tokens(face);
+    }
+
+    fn next_get_deadline_ms(&self) -> Option<u64> {
+        #[cfg(feature = "query")]
+        {
+            self.all_gets()
+                .filter_map(LegTables::next_deadline_ms)
+                .min()
+        }
+        #[cfg(not(feature = "query"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
+        Registry::retract_owed(self, room)
+    }
 }
 
 /// The faces other than the one a call acts on, as the build holds them. A build that adds no face
@@ -527,7 +601,7 @@ impl Registry {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            decl_watches: alloc::sync::Arc::default(),
+            decl_watches: DeclWatches::under(limits)?,
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
@@ -551,24 +625,10 @@ impl Registry {
 
     /// Whether any face's peer declared what `plane` counts on `keyexpr`: a subscriber, or a
     /// queryable (a complete one where the plane requires it).
-    pub(super) fn peers_declare(&self, plane: FilterPlane, keyexpr: &str) -> bool {
+    pub(super) fn peers_declare(&self, plane: Plane, keyexpr: &str) -> bool {
         #[cfg(test)]
         self.peer_looks.set(self.peer_looks.get() + 1);
-        // Asked from the borrowed key: a poll builds no criterion.
-        match plane {
-            FilterPlane::Subscribers => self
-                .faces()
-                .any(|face| face.peer.remote_subscribers.has_matching(keyexpr)),
-            #[cfg(any(feature = "query", feature = "queryable"))]
-            FilterPlane::Queryables { complete_required } => self.faces().any(|face| {
-                face.peer
-                    .remote_queryables
-                    .answers_query(keyexpr, complete_required)
-            }),
-            // A build without a querier or a queryable holds no queryable a peer declared.
-            #[cfg(not(any(feature = "query", feature = "queryable")))]
-            FilterPlane::Queryables { .. } => false,
-        }
+        faces_declare(self.faces(), plane, keyexpr)
     }
 
     /// How often [`Self::peers_declare`] searched what the peers declared.
@@ -595,15 +655,15 @@ impl Registry {
     }
 
     /// The set that lies at `at`, for a walk over the faces.
-    fn set(&self, at: usize) -> &FaceTables {
+    fn set(&self, at: usize) -> Option<&FaceTables> {
         #[cfg(test)]
         self.set_reads.set(self.set_reads.get() + 1);
-        &self.sets[at]
+        self.sets.get(at)
     }
 
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.held.iter().map(move |held| self.set(held.at))
+        self.held.iter().filter_map(move |held| self.set(held.at))
     }
 
     /// Where the set face `id` holds lies among the sets, while the session holds the face.
@@ -620,13 +680,13 @@ impl Registry {
         feature = "declarations-synced-event"
     ))]
     pub(super) fn tables_of(&self, id: FaceId) -> Option<&FaceTables> {
-        self.held_at(id).map(|at| self.set(at))
+        self.held_at(id).and_then(|at| self.set(at))
     }
 
     /// The tables of face `id`, while the session holds it, to write.
     fn held_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
         let at = self.held_at(id)?;
-        Some(&mut self.sets[at])
+        self.sets.get_mut(at)
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
@@ -670,7 +730,9 @@ impl Registry {
             // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             self.owe_tokens_of(gone.at);
-            self.sets[gone.at].give_back();
+            if let Some(set) = self.sets.get_mut(gone.at) {
+                set.give_back();
+            }
         }
     }
 
@@ -681,8 +743,8 @@ impl Registry {
         let Self { sets, held, .. } = self;
         held.retain(|face| {
             let accepted = face.id != DIAL_FACE;
-            if accepted {
-                sets[face.at].give_back();
+            if let Some(set) = sets.get_mut(face.at).filter(|_| accepted) {
+                set.give_back();
             }
             !accepted
         });
@@ -737,23 +799,28 @@ impl Registry {
             ..
         } = self;
         let held: &[HeldSet] = &held[..];
-        let place = held.iter().position(|face| face.id == id)?;
-        let at = held[place].at;
         #[cfg(any(feature = "listen", feature = "group", test))]
         let (face, others) = {
-            let (before, rest) = sets.split_at_mut(at);
+            let place = held.iter().position(|face| face.id == id)?;
+            let (held_before, from) = held.split_at_checked(place)?;
+            let (this, held_after) = from.split_first()?;
+            let (before, rest) = sets.split_at_mut_checked(this.at)?;
             let (face, after) = rest.split_first_mut()?;
             let others = Others {
                 before: &*before,
                 after: &*after,
-                held_before: &held[..place],
-                held_after: &held[place + 1..],
-                after_at: at + 1,
+                held_before,
+                held_after,
+                // `face` lies at `this.at`, so one past it is at most the sets' length.
+                after_at: this.at.saturating_add(1),
             };
             (face, others)
         };
         #[cfg(not(any(feature = "listen", feature = "group", test)))]
-        let (face, others) = (sets.get_mut(at)?, NoOtherPeers);
+        let (face, others) = (
+            sets.get_mut(held.iter().find(|face| face.id == id)?.at)?,
+            NoOtherPeers,
+        );
         Some(Split {
             app,
             delivery,
@@ -844,7 +911,10 @@ impl Registry {
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    pub(super) fn settle_decl_events(&self, peer: impl FnOnce() -> Option<Vec<u8>>) {
+    pub(super) fn settle_decl_events(
+        &self,
+        peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
+    ) {
         self.decl_watches.settle(peer);
     }
 
@@ -859,8 +929,8 @@ impl Registry {
     fn reconcile_subscribers(&mut self, id: FaceId) {
         // Handed out to be written, as `Self::split` hands a face's tables out.
         self.writing();
-        if let Some(at) = self.held_at(id) {
-            reconcile_face(&self.app, &mut self.sets[at]);
+        if let Some(set) = self.held_at(id).and_then(|at| self.sets.get_mut(at)) {
+            reconcile_face(&self.app, set);
         }
     }
 
@@ -1061,93 +1131,6 @@ impl Registry {
         }
     }
 
-    /// Declare a matching listener on the publishers' plane: it fires when any face's peer comes
-    /// to hold a subscriber `criterion` reaches or the last of them lets go. `local` is the
-    /// session's own half of the verdict it starts from.
-    pub(super) fn watch_publishers(
-        &mut self,
-        criterion: PublisherCriterion,
-        local: bool,
-        sink: FlipReport,
-    ) -> u64 {
-        let Split {
-            app, face, others, ..
-        } = self
-            .split(DIAL_FACE)
-            .expect("the registry holds the dial face");
-        let local = local || others.subscribes(&criterion);
-        app.remote_subscribers.declare_matching_listener_seeded(
-            &face.peer.remote_subscribers,
-            criterion,
-            local,
-            sink,
-        )
-    }
-
-    /// Declare a matching listener on the queriers' plane; see [`Self::watch_publishers`].
-    #[cfg(any(feature = "query", feature = "queryable"))]
-    pub(super) fn watch_queriers(
-        &mut self,
-        criterion: QuerierCriterion,
-        local: bool,
-        sink: FlipReport,
-    ) -> u64 {
-        let Split {
-            app, face, others, ..
-        } = self
-            .split(DIAL_FACE)
-            .expect("the registry holds the dial face");
-        let local = local || others.answers(&criterion);
-        app.remote_queryables.declare_matching_listener_seeded(
-            &face.peer.remote_queryables,
-            criterion,
-            local,
-            sink,
-        )
-    }
-
-    /// Tell every matching listener on the publishers' plane that counts the session's own
-    /// subscribers whether it now matches, after one was declared or retracted here.
-    #[cfg(feature = "local-subscriber")]
-    pub(super) fn reevaluate_publisher_watches(&mut self) {
-        let Split {
-            app, face, others, ..
-        } = self
-            .split(DIAL_FACE)
-            .expect("the registry holds the dial face");
-        let subscribers = &app.tables;
-        app.remote_subscribers
-            .reevaluate_matching(&face.peer.remote_subscribers, &|criterion| {
-                (criterion.locality.allows_local()
-                    && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
-                        subscribers,
-                        &criterion.keyexpr,
-                    ))
-                    || others.subscribes(criterion)
-            });
-    }
-
-    /// The queriers' plane's counterpart of [`Self::reevaluate_publisher_watches`].
-    #[cfg(feature = "local-queryable")]
-    pub(super) fn reevaluate_querier_watches(&mut self) {
-        let Split {
-            app, face, others, ..
-        } = self
-            .split(DIAL_FACE)
-            .expect("the registry holds the dial face");
-        let queryables = app.tables.queryables();
-        app.remote_queryables
-            .reevaluate_matching(&face.peer.remote_queryables, &|criterion| {
-                (criterion.locality.allows_local()
-                    && wz_session_core::query::LocalQueryables::has_local_queryable(
-                        queryables,
-                        &criterion.keyexpr,
-                        criterion.complete_required,
-                    ))
-                    || others.answers(criterion)
-            });
-    }
-
     /// The token liveliness subscriber `id` is owed next by its history, from where `cursor`
     /// stands: the faces in ascending id, and on each the token of the lowest id above the last one
     /// handed that its peer holds and the subscriber's pattern matches. With it, the cursor to ask
@@ -1294,22 +1277,6 @@ mod tests {
         assert!(!core::mem::needs_drop::<Gets>());
     }
 
-    /// A flip reported for a listener waits in the session's queue under the listener's id, to be
-    /// handed after the lock; a change back before it is handed takes it away.
-    #[test]
-    fn a_reported_flip_waits_in_the_sessions_queue_by_the_listeners_id() {
-        let queue = alloc::sync::Arc::new(Queued::new(MatchFlips::new()));
-        let mut report = FlipReport {
-            queue: queue.clone(),
-            id: 7,
-        };
-        report.on_matching_changed(true);
-        assert_eq!(queue.lock().next(), Some((7, true)));
-        report.on_matching_changed(false);
-        report.on_matching_changed(true);
-        assert_eq!(queue.lock().next(), None);
-    }
-
     /// A registry and the arena its tables were lent from, the registry first so its tables go
     /// before the memory they lie in, and how many sets the open lent rows to.
     struct Held {
@@ -1367,12 +1334,13 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
+        let round = crate::round::leaked(4);
         #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(crate::round::Round::leaked(1024, 4));
+        let delivery = RoundDelivery::new(round);
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
-            crate::round::Round::leaked(1024, 4),
-            alloc::sync::Arc::new(super::super::query::QueryPlane::holding(1)),
+            round,
+            alloc::sync::Arc::new(super::super::query::QueryPlane::leaked(1)),
         );
         let registry = Registry::new(
             &SessionLimits::defaults(),
@@ -2140,12 +2108,8 @@ mod tests {
                 "face {id} is untouched"
             );
         }
-        assert!(held
-            .registry
-            .peers_declare(FilterPlane::Subscribers, "demo/5/1"));
-        assert!(!held
-            .registry
-            .peers_declare(FilterPlane::Subscribers, "demo/past"));
+        assert!(held.registry.peers_declare(Plane::Subscribers, "demo/5/1"));
+        assert!(!held.registry.peers_declare(Plane::Subscribers, "demo/past"));
     }
 
     /// A face that goes gives back to the session's pools exactly the rows its peer held, and the
@@ -2275,7 +2239,7 @@ mod tests {
         assert_eq!(subscribers_of(&held.registry, DIAL_FACE), (2, 1));
         assert!(held
             .registry
-            .peers_declare(FilterPlane::Subscribers, "demo/dial/2"));
+            .peers_declare(Plane::Subscribers, "demo/dial/2"));
     }
 
     /// A MEASUREMENT of the bytes one set of face tables takes, by table, and of the header of a lent

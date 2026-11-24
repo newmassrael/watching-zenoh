@@ -33,6 +33,7 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::face::FaceEventKind;
+use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
@@ -40,7 +41,7 @@ use super::*;
 use crate::drive::{FaceDrive, NodeRole};
 use crate::faces::no_shm_clients;
 use crate::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
-use wz_capi_port::PeerLists;
+use wz_capi_port::{PeerLists, QueryHolder};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -230,14 +231,13 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
             false,
             Locality::Any,
             None,
-            Arc::new(move |_holder| {
-                let counted = Arc::clone(&counted);
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     counted.fetch_add(1, Ordering::SeqCst);
                     out.reply_keyed(query.keyexpr(), b"from the router")
                         .expect("a reply on the query's own key");
-                })
-            }),
+                },
+            ),
         )
         .expect("a node has queryables");
 
@@ -312,7 +312,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         .next_entity_id
         .store(u64::from(u32::MAX), Ordering::Relaxed);
     let answer = || -> QueryableSink {
-        Arc::new(|_holder| Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}))
+        QueryableSink::shared(|_: &dyn QueryView, _: &mut dyn ReplyOut, _: &dyn QueryHolder| {})
     };
     let queryables = |key: &str| {
         engine.matching_status(
@@ -571,7 +571,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
         .declare_matching_listener(
             FilterPlane::Subscribers,
             "wz/port/match/a",
-            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
+            wz_capi_port::MatchingSink::shared(move |matching| sink.lock().unwrap().push(matching)),
             false,
         )
         .expect("a node holds every matching listener it is asked for");
@@ -889,6 +889,215 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     router.close();
 }
 
+/// One ask's legs: the Put replies they are handed, and how many of them have ended.
+#[derive(Default)]
+struct Legs {
+    replies: Mutex<Vec<Vec<u8>>>,
+    ended: AtomicUsize,
+}
+
+/// A leg's end, counted on its ask when the leg's callback is let go of.
+struct LegEnd(Arc<Legs>);
+
+impl Drop for LegEnd {
+    fn drop(&mut self) {
+        self.0.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Ask `key` once through `asker`'s port: how many legs were issued, and what they are handed.
+fn ask_counting_legs(asker: &Arc<dyn SessionEngine>, key: &str) -> (usize, Arc<Legs>) {
+    let legs = Arc::new(Legs::default());
+    let issued = asker
+        .get_on_wire(
+            key,
+            &WireKey::literal(),
+            &QueryOptions::default(),
+            None,
+            &mut || {
+                let end = LegEnd(Arc::clone(&legs));
+                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
+                    if reply.kind() == ReplyKind::Put {
+                        end.0.replies.lock().unwrap().push(reply.payload().to_vec());
+                    }
+                })
+            },
+        )
+        .expect("the engine asks queries");
+    (issued, legs)
+}
+
+/// Declare on `keeper` a queryable under `key` whose handler keeps each query and answers none,
+/// and ask it through `asker` until a query is kept. The kept query is answered through the
+/// keeper's port (`reply_held`): the reply arrives while the asker's leg stays open, the leg ends
+/// once the keep is released (`release_held`), `holds` (what the keeper keeps) is none after,
+/// and a keep released answers nothing more.
+fn a_kept_query_answers_and_ends_through_the_port(
+    keeper: &Arc<dyn SessionEngine>,
+    asker: &Arc<dyn SessionEngine>,
+    key: &str,
+    holds: impl Fn() -> usize,
+) {
+    let kept: Arc<Mutex<Vec<(String, HeldQueryId)>>> = Arc::default();
+    let into = Arc::clone(&kept);
+    let queryable = keeper
+        .declare_queryable_on_wire(
+            &format!("{key}/*"),
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            QueryableSink::shared(
+                move |query: &dyn QueryView, _out: &mut dyn ReplyOut, holder: &dyn QueryHolder| {
+                    let held = holder
+                        .keep_query(query)
+                        .expect("room to keep the query")
+                        .expect("the query this handler answers");
+                    into.lock()
+                        .unwrap()
+                        .push((query.keyexpr().to_owned(), held));
+                },
+            ),
+        )
+        .expect("a session has queryables");
+
+    // Each ask names a key of its own, so the keep of the last one is told from a keep of an
+    // earlier ask that arrived late.
+    let deadline = Instant::now() + WAIT;
+    let mut attempt = 0_u32;
+    let (asked, issued, legs, held) = loop {
+        attempt += 1;
+        let asked = format!("{key}/{attempt}");
+        let (issued, legs) = ask_counting_legs(asker, &asked);
+        let kept_of = || {
+            kept.lock()
+                .unwrap()
+                .iter()
+                .find(|(of, _)| *of == asked)
+                .map(|(_, held)| *held)
+        };
+        let waited = Instant::now() + Duration::from_millis(500);
+        while kept_of().is_none() && Instant::now() < waited {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(held) = kept_of() {
+            break (asked, issued, legs, held);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no query reached the keeping queryable"
+        );
+    };
+    assert!(holds() >= 1, "the keeper keeps the query");
+
+    keeper.reply_held(held, &asked, &mut |out| {
+        out.reply_keyed(&asked, b"kept")
+            .expect("a reply on the query's own key");
+    });
+    assert!(
+        eventually(|| !legs.replies.lock().unwrap().is_empty()),
+        "the reply made through the port did not arrive"
+    );
+    assert_eq!(legs.replies.lock().unwrap()[0], b"kept".to_vec());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        legs.ended.load(Ordering::SeqCst) < issued,
+        "a leg ended while its query was kept"
+    );
+
+    let all: Vec<HeldQueryId> = kept
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|(_, held)| held)
+        .collect();
+    for each in all {
+        keeper.release_held(each);
+    }
+    assert!(
+        eventually(|| legs.ended.load(Ordering::SeqCst) == issued),
+        "the leg did not end once its keep was released"
+    );
+    assert_eq!(holds(), 0, "a keep released is kept no more");
+
+    let mut answered = false;
+    keeper.reply_held(held, &asked, &mut |_out| answered = true);
+    assert!(!answered, "a keep released was answered");
+    keeper.undeclare_queryable(queryable);
+}
+
+/// A query a node's own queryable keeps past its handler is answered and ended through the node's
+/// port, the registry's client asking.
+#[test]
+fn a_query_the_node_keeps_is_answered_and_ended_through_its_port() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &router.as_engine(),
+        &peer.as_engine(),
+        "wz/port/kept/node",
+        || router.engine.kept.kept(),
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query a queryable of the registry keeps past its handler is answered on the face it came in
+/// on and ended through the registry's port, the node asking.
+#[cfg(feature = "queryable")]
+#[test]
+fn a_query_the_registry_keeps_is_answered_and_ended_through_its_port() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &peer.as_engine(),
+        &router.as_engine(),
+        "wz/port/kept/registry",
+        || peer.0.shared.kept_queries.kept(),
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query as a holder is handed one outside any handler.
+struct Unasked;
+
+impl QueryView for Unasked {
+    fn keyexpr(&self) -> &str {
+        "wz/port/kept/none"
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        None
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        None
+    }
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        1
+    }
+    fn qos(&self) -> wz_session_core::sample::QosLevel {
+        wz_session_core::sample::QosLevel::DEFAULT
+    }
+}
+
+/// A node's holder keeps nothing outside a handler of its queryables, and refuses a keep once the
+/// node is closed.
+#[test]
+fn a_nodes_holder_keeps_nothing_outside_a_handler_and_refuses_once_closed() {
+    let router = open_node();
+    let holder = router.node_query_holder();
+    assert_eq!(
+        holder.keep_query(&Unasked),
+        Ok(None),
+        "outside a handler there is no query to keep"
+    );
+    router.close();
+    assert_eq!(
+        holder.keep_query(&Unasked),
+        Err(Refusal::Closed),
+        "a closed node keeps nothing"
+    );
+    assert_eq!(router.engine.kept.kept(), 0);
+}
+
 /// The port's shared-memory publication, over links that negotiated shared memory.
 #[cfg(feature = "session-extshm")]
 mod shared_memory {
@@ -1044,9 +1253,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let sink = Arc::clone(&sink);
-                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          _out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let shared = query
                             .payload_shared()
                             .and_then(|bytes| bytes.shm_chunk())
@@ -1054,8 +1264,8 @@ mod shared_memory {
                         sink.lock()
                             .unwrap()
                             .push((query.payload().unwrap_or_default().to_vec(), shared));
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
         (got, id)
@@ -1214,9 +1424,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1224,8 +1435,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
 
@@ -1315,9 +1526,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1325,8 +1537,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a node has queryables");
 

@@ -14,7 +14,9 @@
 //! A watch of subscribers or queryables is told first what each peer holds when the watch is
 //! declared, as [`DeclWatchEvent::Declared`] events ahead of every live event of that link, then
 //! what the peers declare from then on, on every link the session holds and every link that comes
-//! up later; each declaration is told once. A watch of tokens hears only what comes after it: the
+//! up later. Each declaration is told once, or, when the engine had no room to hold the events a
+//! watch is owed, the watch is told how many it lost ([`DeclWatchEvent::Lost`]) ahead of its next
+//! event. A watch of tokens hears only what comes after it: the
 //! tokio engine keeps no table of the tokens a peer holds. A watch declared after a peer finished
 //! its initial declarations is not told [`DeclWatchEvent::Synced`] for that link. A link that is
 //! lost tells no undeclaration for what its peer
@@ -70,6 +72,13 @@ pub enum DeclWatchEvent<'a> {
         /// As [`DeclWatchEvent::Declared`]'s.
         peer: Option<&'a [u8]>,
     },
+    /// The engine had no room to hold events the watch was owed, and dropped them: told ahead of
+    /// the watch's next event, so a program that keeps a picture of what the peers hold knows it
+    /// is no longer whole. Names no peer, as the events lost may be of more than one.
+    Lost {
+        /// How many events the watch lost since it was last told.
+        count: u64,
+    },
 }
 
 impl<'a> DeclWatchEvent<'a> {
@@ -79,6 +88,7 @@ impl<'a> DeclWatchEvent<'a> {
             Self::Declared { peer, .. } | Self::Undeclared { peer, .. } | Self::Synced { peer } => {
                 peer
             }
+            Self::Lost { .. } => None,
         }
     }
 
@@ -89,20 +99,28 @@ impl<'a> DeclWatchEvent<'a> {
         self.peer().and_then(|bytes| SessionZid::new(bytes).ok())
     }
 
-    /// The id of the declaration the event is about; `None` for [`DeclWatchEvent::Synced`],
-    /// which is about none.
+    /// The id of the declaration the event is about; `None` for [`DeclWatchEvent::Synced`] and
+    /// [`DeclWatchEvent::Lost`], which are about none.
     pub fn declaration_id(&self) -> Option<u64> {
         match *self {
             Self::Declared { id, .. } | Self::Undeclared { id, .. } => Some(id),
-            Self::Synced { .. } => None,
+            Self::Synced { .. } | Self::Lost { .. } => None,
         }
     }
 
-    /// The key expression of a [`DeclWatchEvent::Declared`]; `None` for the other two.
+    /// How many events a [`DeclWatchEvent::Lost`] counts; `None` for the others.
+    pub fn lost(&self) -> Option<u64> {
+        match *self {
+            Self::Lost { count } => Some(count),
+            Self::Declared { .. } | Self::Undeclared { .. } | Self::Synced { .. } => None,
+        }
+    }
+
+    /// The key expression of a [`DeclWatchEvent::Declared`]; `None` for the others.
     pub fn keyexpr(&self) -> Option<&'a str> {
         match *self {
             Self::Declared { keyexpr, .. } => Some(keyexpr),
-            Self::Undeclared { .. } | Self::Synced { .. } => None,
+            Self::Undeclared { .. } | Self::Synced { .. } | Self::Lost { .. } => None,
         }
     }
 }
@@ -113,9 +131,81 @@ impl<'a> DeclWatchEvent<'a> {
 /// An engine calls it where it hands out the session's callbacks and never under a lock of its
 /// own, so the sink may call back into the session. With more than one link the calls may come
 /// from more than one thread; an ABI that hands the events to a program serialises them itself.
-/// The engine drops its last reference when the watch is undeclared or the session is closed,
-/// after any call in flight has returned.
-pub type DeclWatchSink = Arc<dyn Fn(DeclWatchEvent<'_>) + Send + Sync>;
+/// The engine lets go of it when the watch is undeclared or the session is closed, after any call
+/// in flight has returned: its drop is the program's, and runs once.
+pub enum DeclWatchSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawDeclWatchCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<dyn Fn(DeclWatchEvent<'_>) + Send + Sync>),
+}
+
+/// The parts of a C program's closure an engine calls ([`DeclWatchSink::Raw`]): plain values;
+/// the drop runs once, when the [`DeclWatchSink`] holding them is dropped. The event is lent to
+/// the call, so the function takes it by reference.
+#[derive(Clone, Copy)]
+pub struct RawDeclWatchCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, event: &DeclWatchEvent<'_>),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: a raw callback is made only by `DeclWatchSink::raw`, whose caller promises what the
+// marker traits ask of it; the shared one is `Send + Sync` itself.
+unsafe impl Send for DeclWatchSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for DeclWatchSink {}
+
+impl DeclWatchSink {
+    /// A C program's closure: `call` with `context` for each event, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// `call` is safe to make with `context` from any thread the engine hands events on, through
+    /// a shared borrow, for as long as the sink is held, and `drop` with `context` once, after
+    /// the last call.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, event: &DeclWatchEvent<'_>),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawDeclWatchCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl Fn(DeclWatchEvent<'_>) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `event` to the callback.
+    pub fn call(&self, event: DeclWatchEvent<'_>) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, &event) },
+            Self::Shared(call) => call(event),
+        }
+    }
+}
+
+impl Drop for DeclWatchSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawDeclWatchCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call, since a
+            // call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// The id of one declaration watch on one session, which undeclares it.
 pub type DeclWatchId = u64;
@@ -123,6 +213,50 @@ pub type DeclWatchId = u64;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts a call in the first counter of the context, which the test's event names.
+    unsafe fn count_call(context: *mut core::ffi::c_void, event: &DeclWatchEvent<'_>) {
+        // SAFETY: the test hands two counters as the context.
+        let counts = unsafe { &*context.cast::<[AtomicUsize; 2]>() };
+        if event.declaration_id() == Some(5) {
+            counts[0].fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Counts a drop in the second counter of the context.
+    unsafe fn count_drop(context: *mut core::ffi::c_void) {
+        // SAFETY: as `count_call`.
+        let counts = unsafe { &*context.cast::<[AtomicUsize; 2]>() };
+        counts[1].fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_raw_sink_calls_its_function_and_drops_its_context_once() {
+        let counts = [AtomicUsize::new(0), AtomicUsize::new(0)];
+        let context = (&counts as *const [AtomicUsize; 2]).cast_mut().cast();
+        // SAFETY: the counters outlive the sink, and both functions only count.
+        let sink = unsafe { DeclWatchSink::raw(count_call, context, Some(count_drop)) };
+        sink.call(DeclWatchEvent::Undeclared { id: 5, peer: None });
+        sink.call(DeclWatchEvent::Undeclared { id: 5, peer: None });
+        assert_eq!(counts[1].load(Ordering::SeqCst), 0, "held, not let go of");
+        drop(sink);
+        assert_eq!(counts[0].load(Ordering::SeqCst), 2, "each call reached it");
+        assert_eq!(counts[1].load(Ordering::SeqCst), 1, "let go of once");
+    }
+
+    #[test]
+    fn a_shared_sink_is_let_go_of_with_its_last_reference() {
+        let token = Arc::new(());
+        let held = Arc::clone(&token);
+        let sink = DeclWatchSink::shared(move |_event: DeclWatchEvent<'_>| {
+            let _ = &held;
+        });
+        sink.call(DeclWatchEvent::Synced { peer: None });
+        assert_eq!(Arc::strong_count(&token), 2);
+        drop(sink);
+        assert_eq!(Arc::strong_count(&token), 1);
+    }
 
     const PEER: [u8; 3] = [0xa1, 0x00, 0x7f];
 
@@ -150,6 +284,18 @@ mod tests {
         );
         assert_eq!(synced.keyexpr(), None);
         assert_eq!(synced.peer(), Some(&PEER[..]));
+        assert_eq!(synced.lost(), None);
+
+        let lost = DeclWatchEvent::Lost { count: 3 };
+        assert_eq!(lost.lost(), Some(3));
+        assert_eq!(
+            lost.declaration_id(),
+            None,
+            "a loss is about no one declaration"
+        );
+        assert_eq!(lost.keyexpr(), None);
+        assert_eq!(lost.peer(), None, "a loss names no peer");
+        assert_eq!(declared.lost(), None);
     }
 
     #[test]

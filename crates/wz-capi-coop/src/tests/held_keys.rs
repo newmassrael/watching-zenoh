@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    HeldKey, KeyAsk, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys, SubscriberSink, WireKey,
+    HeldKey, KeyAsk, KeyHold, KeyHolds, KeyNotHeld, SessionDrive, SessionEngine, SessionKeys,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::key_arena::block_bytes;
 use wz_session_core::limit_binding::Quota;
@@ -256,4 +257,93 @@ fn holds_of_one_text_share_its_block_whoever_holds_it() {
     release(&engine, second);
     release(&engine, other);
     assert_eq!(engine.key_counts().used, before, "every block went back");
+}
+
+/// The holds of a declaration the session handed out and was not given back, counted whether the
+/// session is open or closed (`Takes::holds`): a hold given back to a closed session is still one
+/// given back.
+fn live_holds(engine: &Engine) -> isize {
+    engine.takes.holds.load(Ordering::SeqCst)
+}
+
+/// Every hold a row's key keeps of a declaration comes back to the session: an undeclared
+/// subscriber's, a token's, those of the rows the close lets go of, and a key a closed session
+/// refuses. After the close only the program's own hold is live, and none once it is given back.
+/// The count is kept the same whether the session is open or closed. Turned red by a path that
+/// drops a row or a key with its holds: the close's walk dropping its rows
+/// (`CoopEngine::let_go_of_rows`) leaves three live after the close, and a refusal on the closed
+/// session that drops the key leaves three after it.
+#[test]
+fn every_hold_comes_back_and_none_is_live_after_the_close_counted_open_or_closed() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let id = engine
+        .acquire_keyexpr("demo/holds")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    // A key naming the declaration and holding it twice over, as a key the ABI announces an entity
+    // on holds the declaration it names and the one its entity retracts by.
+    let held = |rest: &str| {
+        WireKey::aliased(id, Some(rest.into()))
+            .holding(program.share(&*engine))
+            .holding_also(program.share(&*engine))
+    };
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let first = engine
+        .declare_subscriber_on_wire(
+            "demo/holds/a",
+            held("/a"),
+            Locality::Any,
+            None,
+            sink(&dropped),
+        )
+        .expect("declared");
+    engine
+        .declare_subscriber_on_wire(
+            "demo/holds/b",
+            held("/b"),
+            Locality::Any,
+            None,
+            sink(&dropped),
+        )
+        .expect("declared");
+    #[cfg(feature = "liveliness")]
+    engine
+        .declare_liveliness_token_on_wire("demo/holds/t", held("/t"), None)
+        .expect("declared");
+    engine.undeclare_subscriber(first);
+    // The program's hold and the standing subscriber's two.
+    assert_eq!(
+        live_holds(&engine),
+        3,
+        "the undeclared row and the token gave theirs back"
+    );
+
+    SessionDrive::close(&*engine);
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the close gave back every row's holds"
+    );
+    let refused = engine.declare_subscriber_on_wire(
+        "demo/holds/c",
+        held("/c"),
+        Locality::Any,
+        None,
+        sink(&dropped),
+    );
+    assert!(refused.is_err(), "a closed session declares nothing");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "and gives the refused key's holds back"
+    );
+
+    program.release(&*engine);
+    assert_eq!(live_holds(&engine), 0, "no hold is live after the close");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        3,
+        "each callback let go of with its row"
+    );
 }

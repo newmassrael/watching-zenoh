@@ -22,23 +22,26 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
-use wz_session_core::face::{FaceEventSink, FaceSnapshot};
+use wz_session_core::face::{FaceEventSink, FaceLinkRow, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptionsOf;
+use wz_session_core::query_sink::ReplyOut;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
-use crate::entity_place::PlaceLender;
+use crate::entity_place::{CacheBytes, PlaceLender};
 use crate::held_key::SessionKeys;
+use crate::os::Mutex;
 use crate::peers::PeerIdentity;
+use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink,
-    MatchId, MatchingSink, QblId, QueryRowSink, QueryableSink, Refusal, ReplyCallback, SubId,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, LinksNotHonoured,
+    LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId,
     SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
@@ -49,6 +52,48 @@ pub enum RedeclareRefusal {
     Unsupported,
     /// The session is closed.
     Closed,
+}
+
+/// What a hold on a key expression declaration asks of its session ([`crate::KeyHold`]): the
+/// engine's own count of the declaration's holders. Apart from [`SessionEngine`], so a hold names
+/// its session by these two operations alone, and a build whose doors reach the engine as its own
+/// type makes no table of every operation of the session for it.
+pub trait KeyHolds: Send + Sync {
+    /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
+    fn release_keyexpr(&self, mapping_id: ExprId);
+
+    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
+    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
+    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
+    /// longer held takes none. Every engine states it: one that held a declaration and did not
+    /// count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, mapping_id: ExprId);
+}
+
+/// The periodic jobs a session runs ([`crate::Ticker`]). Apart from [`SessionEngine`] for the
+/// reason [`KeyHolds`] is.
+pub trait Tickers: Send + Sync {
+    /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
+    /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
+    /// period is raised to it, so a job cannot make the engine spin.
+    ///
+    /// The first run is one period after the call, and each next one a period after the previous
+    /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
+    /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
+    /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
+    /// session, so a tick is as late as the program is slow to step. Refused when the session's
+    /// table of jobs is full or the session is closed, and with [`Refusal::NotBuilt`] by an
+    /// engine with no periodic jobs in this build, which is the provided answer.
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        let _ = (period_ms, tick);
+        Err(Refusal::NotBuilt)
+    }
+
+    /// End the periodic job `id`. A tick already running is not interrupted, and none starts
+    /// after this returns. Ending one already ended, or one never started, does nothing.
+    fn stop_ticker(&self, id: TickerId) {
+        let _ = id;
+    }
 }
 
 /// Who a declaration is reachable by: the localities its origin may be (`allowed_origin`) and the
@@ -67,7 +112,7 @@ pub struct DeclarationReach {
 /// declared on it (a publisher, a subscriber, a declared key expression each hold it), and the
 /// C program may call in from any thread. Releases run outside the engine's locks, so a C
 /// `drop(context)` reached from one may re-enter the session.
-pub trait SessionEngine: Send + Sync + 'static {
+pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Whether the session has been closed. Every operation after that answers as a closed
     /// session does: nothing is sent and nothing is declared.
     fn is_closed(&self) -> bool;
@@ -82,7 +127,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// The engine's own clock, in whole milliseconds since an epoch of its choosing: monotonic,
-    /// and the one its periodic jobs ([`Self::start_ticker`]) and its deadlines run on. A caller
+    /// and the one its periodic jobs ([`Tickers::start_ticker`]) and its deadlines run on. A caller
     /// that measures how long ago it last heard of something (a source's retention, say) reads it
     /// here and compares two readings of this one engine, never with another clock.
     fn now_ms(&self) -> u64;
@@ -132,6 +177,78 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// built without the connectivity plane lists none, which is the provided answer.
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         Vec::new()
+    }
+
+    /// The row at cursor `at` of the established faces' links: each face's links in order, the
+    /// faces in the order [`Self::face_snapshots`] lists them; `None` past the last. A caller
+    /// walks the faces by asking `0`, `1`, ... until `None`. The session's lock is held only
+    /// while the one row is read, and the row holds everything in itself, so a caller may hand
+    /// each to a program's callback between two calls. A face that comes up or goes down between
+    /// two calls may be skipped or met twice: a reader that must miss none watches the faces
+    /// ([`Self::watch_faces`]) before it walks them, and the watch's events cover the difference.
+    /// The provided answer reads [`Self::face_snapshots`] for each row; an engine that reserves
+    /// its memory answers from its faces in place.
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        for face in self.face_snapshots() {
+            // Past this face's links the cursor moves on by them; within them it is the row.
+            match at.checked_sub(face.links.len()) {
+                Some(rest) => at = rest,
+                None => return FaceLinkRow::of_snapshot(&face, at),
+            }
+        }
+        None
+    }
+
+    /// The told bits of the faces of an engine that reads its faces from snapshots, kept on the
+    /// heap ([`ToldLedger`]), which the provided told answers below read. `None`, the provided
+    /// answer, for an engine that keeps them on its own face rows, and answers those itself, or
+    /// keeps none.
+    fn told_ledger(&self) -> Option<&Mutex<ToldLedger>> {
+        None
+    }
+
+    /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
+    /// came ([`crate::told`]): whether it is to be told. `false` when the row does not stand,
+    /// having come and gone before the listener was told it, or when the listener was told it
+    /// already. An engine that keeps no told bits answers `true`, every event told as it comes.
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        let Some(ledger) = self.told_ledger() else {
+            return true;
+        };
+        // Read before the ledger is held: the rows are the engine's, under its own lock.
+        let stands = crate::told::standing_row(self, key);
+        ledger.lock().tell_came(plane, listener, key, stands)
+    }
+
+    /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
+    /// left: whether it is to be told, which it is only when it was told the row came. The
+    /// tombstone of a row that went is let go of once no listener is left to tell. An engine that
+    /// keeps no told bits answers `true`.
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        match self.told_ledger() {
+            Some(ledger) => ledger.lock().tell_went(plane, listener, key),
+            None => true,
+        }
+    }
+
+    /// The first row `listener` of `plane` was told came that no longer stands: a tombstone it is
+    /// still to be told left. `None` when there is none, and from an engine that keeps no told
+    /// bits.
+    fn first_told_gone(&self, plane: ToldPlane, listener: usize) -> Option<FaceLinkRow> {
+        let ledger = self.told_ledger()?;
+        let ledger = ledger.lock();
+        ledger.first_gone(plane, listener, |key| {
+            crate::told::standing_row(self, key).is_some()
+        })
+    }
+
+    /// Note nothing more for `listener` of `plane`, whose replay ended or which went: every
+    /// event reaches it as it comes from here, and a tombstone only it was owed is let go of.
+    fn forget_told(&self, plane: ToldPlane, listener: usize) {
+        if let Some(ledger) = self.told_ledger() {
+            ledger.lock().forget(plane, listener);
+        }
     }
 
     /// Tell `sink` each time a face comes up or goes down, from now on, and answer the id that
@@ -288,16 +405,6 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// room left, or is closed; and with [`Refusal::NotBuilt`] by an engine that names every key
     /// whole and holds no declaration.
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Refusal>;
-
-    /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
-    fn release_keyexpr(&self, mapping_id: ExprId);
-
-    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
-    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
-    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
-    /// longer held takes none. Every engine states it: one that held a declaration and did not
-    /// count this would retract it before its last holder let go.
-    fn retain_keyexpr(&self, mapping_id: ExprId);
     /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
     /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
@@ -311,6 +418,13 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// entities spend no other's. `None`, the provided answer, from an engine whose sessions keep
     /// no such places, whose ABI places its objects itself.
     fn place_lender(&self) -> Option<&dyn PlaceLender> {
+        None
+    }
+
+    /// The ring the session's advanced publishers' caches keep their samples in, when the session
+    /// reserves one at its open. `None`, the provided answer, from an engine whose sessions keep
+    /// none, whose caches keep their samples on the heap.
+    fn cache_bytes(&self) -> Option<&dyn CacheBytes> {
         None
     }
 
@@ -443,7 +557,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     fn batch_all(&self, step: BatchStep) -> usize;
 
     /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
-    /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`
+    /// answering the queries `allowed_origin` admits through `sink`, which the queryable's row keeps
+    /// and calls with the holder of the face each query came in on. `retraction`
     /// is the key its undeclaration names beside its id, when the declaring ABI's reference
     /// library names one. Refused as [`Self::declare_subscriber_on_wire`] is, and with
     /// [`Refusal::NotBuilt`] by an engine with no queryable in this build, which is the provided
@@ -461,34 +576,28 @@ pub trait SessionEngine: Send + Sync + 'static {
         Err(Refusal::NotBuilt)
     }
 
-    /// [`Self::declare_queryable_on_wire`] with the one callback the queryable's row keeps,
-    /// called with the holder of the face each query came in on. Provided as the minting form
-    /// ([`QueryRowSink::into_minted`]) for an engine that does not keep it in its row yet.
-    fn declare_queryable_row_on_wire(
-        &self,
-        keyexpr: &str,
-        wire: WireKey,
-        complete: bool,
-        allowed_origin: Locality,
-        retraction: Option<RetractionKey>,
-        sink: QueryRowSink,
-    ) -> Result<QblId, Refusal> {
-        self.declare_queryable_on_wire(
-            keyexpr,
-            wire,
-            complete,
-            allowed_origin,
-            retraction,
-            sink.into_minted(),
-        )
-    }
-
     /// Retract queryable `id`. Retracting one already retracted, or one never declared, does
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
     }
 
+    /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
+    /// writes into a responder built as its handler's was (the replies its parameters accept and
+    /// its QoS, which the engine keeps, and `key`, the query's key, which the caller keeps), on
+    /// the route it came in on. A query no longer kept, one of a closed session and one whose link
+    /// has since been lost send nothing; an engine that keeps no query answers nothing, which is
+    /// the provided answer.
+    fn reply_held(&self, id: HeldQueryId, key: &str, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        let _ = (id, key, answer);
+    }
+
+    /// Let go of one keep of query `id`: its last hold sends the query's `ResponseFinal` when
+    /// its dispatch owes one, and gives back what the keep held of it. Each keep is released once;
+    /// what a closed session keeps goes with its memory. The provided answer does nothing.
+    fn release_held(&self, id: HeldQueryId) {
+        let _ = id;
+    }
     /// Ask which liveliness tokens are alive on `keyexpr` (named on the wire as `wire`): one leg
     /// per peer the engine reaches, each ended by its peer's DeclFinal, `timeout_ms` (`0` is the
     /// platform default, never none) or the loss of its link. Its replies are token
@@ -551,9 +660,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
     /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
     /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
-    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
-    /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
-    /// legs are issued stops the issuing.
+    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
+    /// attached as what ends the legs it tags with the fan's key ([`CancellableFan::attach`]), and
+    /// a fan cancelled while the legs are issued stops the issuing.
     ///
     /// The number of legs issued, `0` for a get that reached nobody (its destination admits
     /// nobody, or no link is up), which is over at once. A refused get issued no leg (`leg` was
@@ -637,27 +746,6 @@ pub trait SessionEngine: Send + Sync + 'static {
         self.declare_queryable_on_wire(keyexpr, wire, complete, allowed_origin, retraction, sink)
     }
 
-    /// [`Self::declare_queryable_row_on_wire`] limited to the links of `links`, as
-    /// [`Self::declare_queryable_on_link_set`] limits the minting form. Provided as that form.
-    fn declare_queryable_row_on_link_set(
-        &self,
-        keyexpr: &str,
-        wire: WireKey,
-        complete: bool,
-        reach: DeclarationReach,
-        retraction: Option<RetractionKey>,
-        sink: QueryRowSink,
-    ) -> Result<QblId, Refusal> {
-        self.declare_queryable_on_link_set(
-            keyexpr,
-            wire,
-            complete,
-            reach,
-            retraction,
-            sink.into_minted(),
-        )
-    }
-
     /// [`Self::declare_liveliness_token_on_wire`] limited to the links of `links`: announced to
     /// the nodes behind those links only.
     fn declare_liveliness_token_on_link_set(
@@ -699,27 +787,5 @@ pub trait SessionEngine: Send + Sync + 'static {
     ) -> Result<usize, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg)
-    }
-
-    /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
-    /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
-    /// period is raised to it, so a job cannot make the engine spin.
-    ///
-    /// The first run is one period after the call, and each next one a period after the previous
-    /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
-    /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
-    /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
-    /// session, so a tick is as late as the program is slow to step. Refused when the session's
-    /// table of jobs is full or the session is closed, and with [`Refusal::NotBuilt`] by an
-    /// engine with no periodic jobs in this build, which is the provided answer.
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        let _ = (period_ms, tick);
-        Err(Refusal::NotBuilt)
-    }
-
-    /// End the periodic job `id`. A tick already running is not interrupted, and none starts
-    /// after this returns. Ending one already ended, or one never started, does nothing.
-    fn stop_ticker(&self, id: TickerId) {
-        let _ = id;
     }
 }

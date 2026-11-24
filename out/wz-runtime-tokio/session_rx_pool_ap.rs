@@ -28,6 +28,14 @@
 //
 // Generated from document `session_rx_pool_ap` with section `heap`,
 // alignment `64`, cache-policy `none`.
+//
+// Total outside `#[cfg(test)]`: no indexing, no unchecked arithmetic,
+// no unwrap, expect or panic. A consumer denies `clippy::indexing_slicing`,
+// `clippy::arithmetic_side_effects` and the rest of the panic-free lint
+// set on the crate that holds this file, and a pool sits on the DMA path,
+// where a panic is a stopped device. Slot tables are reached through
+// `SlotIndex`, a type with no value out of range, rather than through a
+// `usize` and a bounds check.
 
 
 use core::marker::PhantomData;
@@ -142,7 +150,7 @@ pub struct CpuRef;
 /// when this happens at the lexical level.
 #[must_use = "Slot must be returned via pool_return or handed off via link_arm_tx; dropping silently leaks the slot per §synth-5-E lines 1162-1164"]
 pub struct Slot<S> {
-    idx: usize,
+    idx: SlotIndex,
     _state: PhantomData<fn() -> S>,
 }
 
@@ -151,7 +159,447 @@ impl<S> Slot<S> {
     /// for writing a peripheral's DMA descriptor (e.g., for
     /// `Slot<DmaArmedRx>`).
     pub fn idx(&self) -> usize {
-        self.idx
+        self.idx.index()
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slot index — the key of both per-slot tables, in range by its type
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// One slot of the table (§synth-5-E slot table), as a value that
+/// cannot name a slot the table does not have.
+///
+/// A consumer compiles this file under `clippy::indexing_slicing` and
+/// the rest of the panic-free lint set, denied. Indexing
+/// `[_; SLOT_COUNT]` with a `usize` is a bounds check whose failing
+/// arm is a panic, and `get` with an arm for "no such slot" would be a
+/// branch that no handle can take. This type has one variant per slot
+/// and nothing else, so [`Self::of`] and [`Self::of_mut`] reach an
+/// entry by taking the table apart, with neither an index nor a dead
+/// branch. A `usize` that arrives from outside (a completion signal,
+/// a debug probe) is converted once, by [`Self::from_index`], where
+/// "names no slot" is an answer rather than a panic.
+///
+/// Private: a handle's index is minted only by the pool.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+enum SlotIndex {
+    S0 = 0,
+    S1 = 1,
+    S2 = 2,
+    S3 = 3,
+    S4 = 4,
+    S5 = 5,
+    S6 = 6,
+    S7 = 7,
+    S8 = 8,
+    S9 = 9,
+    S10 = 10,
+    S11 = 11,
+    S12 = 12,
+    S13 = 13,
+    S14 = 14,
+    S15 = 15,
+    S16 = 16,
+    S17 = 17,
+    S18 = 18,
+    S19 = 19,
+    S20 = 20,
+    S21 = 21,
+    S22 = 22,
+    S23 = 23,
+    S24 = 24,
+    S25 = 25,
+    S26 = 26,
+    S27 = 27,
+    S28 = 28,
+    S29 = 29,
+    S30 = 30,
+    S31 = 31,
+    S32 = 32,
+    S33 = 33,
+    S34 = 34,
+    S35 = 35,
+    S36 = 36,
+    S37 = 37,
+    S38 = 38,
+    S39 = 39,
+    S40 = 40,
+    S41 = 41,
+    S42 = 42,
+    S43 = 43,
+    S44 = 44,
+    S45 = 45,
+    S46 = 46,
+    S47 = 47,
+    S48 = 48,
+    S49 = 49,
+    S50 = 50,
+    S51 = 51,
+    S52 = 52,
+    S53 = 53,
+    S54 = 54,
+    S55 = 55,
+    S56 = 56,
+    S57 = 57,
+    S58 = 58,
+    S59 = 59,
+    S60 = 60,
+    S61 = 61,
+    S62 = 62,
+    S63 = 63,
+}
+
+impl SlotIndex {
+    /// Every slot, in table order: the order the freelist scans.
+    const ALL: [SlotIndex; SLOT_COUNT] = [
+        SlotIndex::S0,
+        SlotIndex::S1,
+        SlotIndex::S2,
+        SlotIndex::S3,
+        SlotIndex::S4,
+        SlotIndex::S5,
+        SlotIndex::S6,
+        SlotIndex::S7,
+        SlotIndex::S8,
+        SlotIndex::S9,
+        SlotIndex::S10,
+        SlotIndex::S11,
+        SlotIndex::S12,
+        SlotIndex::S13,
+        SlotIndex::S14,
+        SlotIndex::S15,
+        SlotIndex::S16,
+        SlotIndex::S17,
+        SlotIndex::S18,
+        SlotIndex::S19,
+        SlotIndex::S20,
+        SlotIndex::S21,
+        SlotIndex::S22,
+        SlotIndex::S23,
+        SlotIndex::S24,
+        SlotIndex::S25,
+        SlotIndex::S26,
+        SlotIndex::S27,
+        SlotIndex::S28,
+        SlotIndex::S29,
+        SlotIndex::S30,
+        SlotIndex::S31,
+        SlotIndex::S32,
+        SlotIndex::S33,
+        SlotIndex::S34,
+        SlotIndex::S35,
+        SlotIndex::S36,
+        SlotIndex::S37,
+        SlotIndex::S38,
+        SlotIndex::S39,
+        SlotIndex::S40,
+        SlotIndex::S41,
+        SlotIndex::S42,
+        SlotIndex::S43,
+        SlotIndex::S44,
+        SlotIndex::S45,
+        SlotIndex::S46,
+        SlotIndex::S47,
+        SlotIndex::S48,
+        SlotIndex::S49,
+        SlotIndex::S50,
+        SlotIndex::S51,
+        SlotIndex::S52,
+        SlotIndex::S53,
+        SlotIndex::S54,
+        SlotIndex::S55,
+        SlotIndex::S56,
+        SlotIndex::S57,
+        SlotIndex::S58,
+        SlotIndex::S59,
+        SlotIndex::S60,
+        SlotIndex::S61,
+        SlotIndex::S62,
+        SlotIndex::S63,
+    ];
+
+    /// The slot `i` names, or `None` past the end of the table.
+    fn from_index(i: usize) -> Option<Self> {
+        Self::ALL.get(i).copied()
+    }
+
+    /// This slot's position in the table, `0..SLOT_COUNT`.
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// This slot's entry in a per-slot table.
+    fn of<T>(self, table: &[T; SLOT_COUNT]) -> &T {
+        let [
+            t0,
+            t1,
+            t2,
+            t3,
+            t4,
+            t5,
+            t6,
+            t7,
+            t8,
+            t9,
+            t10,
+            t11,
+            t12,
+            t13,
+            t14,
+            t15,
+            t16,
+            t17,
+            t18,
+            t19,
+            t20,
+            t21,
+            t22,
+            t23,
+            t24,
+            t25,
+            t26,
+            t27,
+            t28,
+            t29,
+            t30,
+            t31,
+            t32,
+            t33,
+            t34,
+            t35,
+            t36,
+            t37,
+            t38,
+            t39,
+            t40,
+            t41,
+            t42,
+            t43,
+            t44,
+            t45,
+            t46,
+            t47,
+            t48,
+            t49,
+            t50,
+            t51,
+            t52,
+            t53,
+            t54,
+            t55,
+            t56,
+            t57,
+            t58,
+            t59,
+            t60,
+            t61,
+            t62,
+            t63,
+        ] = table;
+        match self {
+            Self::S0 => t0,
+            Self::S1 => t1,
+            Self::S2 => t2,
+            Self::S3 => t3,
+            Self::S4 => t4,
+            Self::S5 => t5,
+            Self::S6 => t6,
+            Self::S7 => t7,
+            Self::S8 => t8,
+            Self::S9 => t9,
+            Self::S10 => t10,
+            Self::S11 => t11,
+            Self::S12 => t12,
+            Self::S13 => t13,
+            Self::S14 => t14,
+            Self::S15 => t15,
+            Self::S16 => t16,
+            Self::S17 => t17,
+            Self::S18 => t18,
+            Self::S19 => t19,
+            Self::S20 => t20,
+            Self::S21 => t21,
+            Self::S22 => t22,
+            Self::S23 => t23,
+            Self::S24 => t24,
+            Self::S25 => t25,
+            Self::S26 => t26,
+            Self::S27 => t27,
+            Self::S28 => t28,
+            Self::S29 => t29,
+            Self::S30 => t30,
+            Self::S31 => t31,
+            Self::S32 => t32,
+            Self::S33 => t33,
+            Self::S34 => t34,
+            Self::S35 => t35,
+            Self::S36 => t36,
+            Self::S37 => t37,
+            Self::S38 => t38,
+            Self::S39 => t39,
+            Self::S40 => t40,
+            Self::S41 => t41,
+            Self::S42 => t42,
+            Self::S43 => t43,
+            Self::S44 => t44,
+            Self::S45 => t45,
+            Self::S46 => t46,
+            Self::S47 => t47,
+            Self::S48 => t48,
+            Self::S49 => t49,
+            Self::S50 => t50,
+            Self::S51 => t51,
+            Self::S52 => t52,
+            Self::S53 => t53,
+            Self::S54 => t54,
+            Self::S55 => t55,
+            Self::S56 => t56,
+            Self::S57 => t57,
+            Self::S58 => t58,
+            Self::S59 => t59,
+            Self::S60 => t60,
+            Self::S61 => t61,
+            Self::S62 => t62,
+            Self::S63 => t63,
+        }
+    }
+
+    /// This slot's entry in a per-slot table, for writing.
+    fn of_mut<T>(self, table: &mut [T; SLOT_COUNT]) -> &mut T {
+        let [
+            t0,
+            t1,
+            t2,
+            t3,
+            t4,
+            t5,
+            t6,
+            t7,
+            t8,
+            t9,
+            t10,
+            t11,
+            t12,
+            t13,
+            t14,
+            t15,
+            t16,
+            t17,
+            t18,
+            t19,
+            t20,
+            t21,
+            t22,
+            t23,
+            t24,
+            t25,
+            t26,
+            t27,
+            t28,
+            t29,
+            t30,
+            t31,
+            t32,
+            t33,
+            t34,
+            t35,
+            t36,
+            t37,
+            t38,
+            t39,
+            t40,
+            t41,
+            t42,
+            t43,
+            t44,
+            t45,
+            t46,
+            t47,
+            t48,
+            t49,
+            t50,
+            t51,
+            t52,
+            t53,
+            t54,
+            t55,
+            t56,
+            t57,
+            t58,
+            t59,
+            t60,
+            t61,
+            t62,
+            t63,
+        ] = table;
+        match self {
+            Self::S0 => t0,
+            Self::S1 => t1,
+            Self::S2 => t2,
+            Self::S3 => t3,
+            Self::S4 => t4,
+            Self::S5 => t5,
+            Self::S6 => t6,
+            Self::S7 => t7,
+            Self::S8 => t8,
+            Self::S9 => t9,
+            Self::S10 => t10,
+            Self::S11 => t11,
+            Self::S12 => t12,
+            Self::S13 => t13,
+            Self::S14 => t14,
+            Self::S15 => t15,
+            Self::S16 => t16,
+            Self::S17 => t17,
+            Self::S18 => t18,
+            Self::S19 => t19,
+            Self::S20 => t20,
+            Self::S21 => t21,
+            Self::S22 => t22,
+            Self::S23 => t23,
+            Self::S24 => t24,
+            Self::S25 => t25,
+            Self::S26 => t26,
+            Self::S27 => t27,
+            Self::S28 => t28,
+            Self::S29 => t29,
+            Self::S30 => t30,
+            Self::S31 => t31,
+            Self::S32 => t32,
+            Self::S33 => t33,
+            Self::S34 => t34,
+            Self::S35 => t35,
+            Self::S36 => t36,
+            Self::S37 => t37,
+            Self::S38 => t38,
+            Self::S39 => t39,
+            Self::S40 => t40,
+            Self::S41 => t41,
+            Self::S42 => t42,
+            Self::S43 => t43,
+            Self::S44 => t44,
+            Self::S45 => t45,
+            Self::S46 => t46,
+            Self::S47 => t47,
+            Self::S48 => t48,
+            Self::S49 => t49,
+            Self::S50 => t50,
+            Self::S51 => t51,
+            Self::S52 => t52,
+            Self::S53 => t53,
+            Self::S54 => t54,
+            Self::S55 => t55,
+            Self::S56 => t56,
+            Self::S57 => t57,
+            Self::S58 => t58,
+            Self::S59 => t59,
+            Self::S60 => t60,
+            Self::S61 => t61,
+            Self::S62 => t62,
+            Self::S63 => t63,
+        }
     }
 }
 
@@ -225,10 +673,10 @@ impl SessionRxPoolAp {
     /// 1141: `free → cpu-mut`. Returns `None` when every slot is in
     /// use, preserving the α-era full-pool semantics.
     pub fn pool_acquire_for_encode(&mut self) -> Option<Slot<CpuMut>> {
-        for (i, st) in self.slot_states.iter_mut().enumerate() {
+        for (idx, st) in SlotIndex::ALL.iter().copied().zip(self.slot_states.iter_mut()) {
             if *st == SlotState::Free {
                 *st = SlotState::CpuMut;
-                return Some(Slot { idx: i, _state: PhantomData });
+                return Some(Slot { idx, _state: PhantomData });
             }
         }
         None
@@ -245,10 +693,10 @@ impl SessionRxPoolAp {
     /// writes even after the post-RX invalidate (RFC §synth-5-E lines
     /// 1199-1212).
     pub fn link_arm_rx(&mut self) -> Option<Slot<DmaArmedRx>> {
-        for (i, st) in self.slot_states.iter_mut().enumerate() {
+        for (idx, st) in SlotIndex::ALL.iter().copied().zip(self.slot_states.iter_mut()) {
             if *st == SlotState::Free {
                 *st = SlotState::DmaArmedRx;
-                return Some(Slot { idx: i, _state: PhantomData });
+                return Some(Slot { idx, _state: PhantomData });
             }
         }
         None
@@ -257,7 +705,15 @@ impl SessionRxPoolAp {
     /// Inspect a slot's current lifecycle state. Out-of-range index
     /// is `None` so debug introspection cannot panic.
     pub fn slot_state(&self, idx: usize) -> Option<SlotState> {
-        self.slot_states.get(idx).copied()
+        SlotIndex::from_index(idx).map(|slot| *slot.of(&self.slot_states))
+    }
+
+    /// The slot `idx` names, when it names one and that slot is in
+    /// `state`. The one place an index-keyed edge or accessor turns the
+    /// `usize` it was handed into a slot, so each reads the state once
+    /// and every later table access is by `SlotIndex`.
+    fn slot_in(&self, idx: usize, state: SlotState) -> Option<SlotIndex> {
+        SlotIndex::from_index(idx).filter(|slot| *slot.of(&self.slot_states) == state)
     }
 
     /// Which slot a buffer address names, if any.
@@ -274,19 +730,23 @@ impl SessionRxPoolAp {
     /// containing it: a completion naming an address the pool never
     /// published is a driver bug, and rounding would turn it into a
     /// plausible-looking index.
+    ///
+    /// Checked arithmetic throughout, because the consumer denies
+    /// `clippy::arithmetic_side_effects`: an address below the table is
+    /// the subtraction's `None`, and the remainder and quotient divide
+    /// by the stride, `size_of::<SlotBytes>()`, which is `slot-size`
+    /// and positive by the parser. `is_multiple_of` would say the
+    /// remainder test in one call, but the generated Rust compiles on
+    /// Rust 1.81, which does not have it.
     pub fn slot_index_of_ptr(&self, ptr: *const u8) -> Option<usize> {
         let base = self.storage.as_ptr() as usize;
-        let addr = ptr as usize;
-        if addr < base {
-            return None;
-        }
         let stride = core::mem::size_of::<SlotBytes>();
-        let offset = addr - base;
-        if offset % stride != 0 {
+        let offset = (ptr as usize).checked_sub(base)?;
+        if offset.checked_rem(stride)? != 0 {
             return None;
         }
-        let idx = offset / stride;
-        (idx < SLOT_COUNT).then_some(idx)
+        let idx = offset.checked_div(stride)?;
+        SlotIndex::from_index(idx).map(SlotIndex::index)
     }
 
     /// Address of a slot in `dma-armed-tx`, for the descriptor
@@ -309,10 +769,8 @@ impl SessionRxPoolAp {
     /// `dma-armed-tx`, and the CPU must not write through it while
     /// the transfer runs.
     pub fn dma_armed_tx_ptr(&self, idx: usize) -> Option<*const u8> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
-            return None;
-        }
-        Some(self.storage[idx].0.as_ptr())
+        let slot = self.slot_in(idx, SlotState::DmaArmedTx)?;
+        Some(slot.of(&self.storage).0.as_ptr())
     }
 
     /// Number of slots currently on the freelist.
@@ -337,7 +795,7 @@ impl Slot<CpuMut> {
     /// (spec lines 1186-1188) so the DMA controller reads the
     /// latest CPU writes from main memory.
     pub fn link_arm_tx(self, pool: &mut SessionRxPoolAp) {
-        pool.slot_states[self.idx] = SlotState::DmaArmedTx;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::DmaArmedTx;
     }
 
     /// Return the slot to the freelist. Spec §synth-5-E line 1155:
@@ -345,17 +803,17 @@ impl Slot<CpuMut> {
     /// `cpu-mut|cpu-ref → free` author-visible API on lines
     /// 1232-1237. Consumes the handle.
     pub fn pool_return(self, pool: &mut SessionRxPoolAp) {
-        pool.slot_states[self.idx] = SlotState::Free;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes.
     pub fn read<'a>(&'a self, pool: &'a SessionRxPoolAp) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx].0
+        &self.idx.of(&pool.storage).0
     }
 
     /// Mutable borrow of the slot's bytes.
     pub fn write<'a>(&'a mut self, pool: &'a mut SessionRxPoolAp) -> &'a mut [u8; SLOT_SIZE] {
-        &mut pool.storage[self.idx].0
+        &mut self.idx.of_mut(&mut pool.storage).0
     }
 }
 
@@ -372,13 +830,13 @@ impl Slot<CpuRef> {
     /// `cpu-ref → free` ("handler complete; pool_return(slot)").
     /// Consumes the handle.
     pub fn pool_return(self, pool: &mut SessionRxPoolAp) {
-        pool.slot_states[self.idx] = SlotState::Free;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes — `cpu-ref` is a shared
     /// CPU-read state per spec line 1135.
     pub fn read<'a>(&'a self, pool: &'a SessionRxPoolAp) -> &'a [u8; SLOT_SIZE] {
-        &pool.storage[self.idx].0
+        &self.idx.of(&pool.storage).0
     }
 }
 
@@ -417,8 +875,7 @@ impl Slot<DmaArmedRx> {
     /// Takes `&mut SessionRxPoolAp` because a pointer valid for writes
     /// has to be derived from a mutable borrow.
     pub fn dma_armed_rx_ptr(&self, pool: &mut SessionRxPoolAp) -> *mut u8 {
-        pool.storage[self.idx].0.as_mut_ptr()
-    }
+        self.idx.of_mut(&mut pool.storage).0.as_mut_ptr()    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -465,10 +922,10 @@ impl SessionRxPoolAp {
     /// The caller must have observed DMA controller signal for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn dma_start_tx(&mut self, idx: usize) -> bool {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
+        let Some(slot) = self.slot_in(idx, SlotState::DmaArmedTx) else {
             return false;
-        }
-        self.slot_states[idx] = SlotState::DmaBusyTx;
+        };
+        *slot.of_mut(&mut self.slot_states) = SlotState::DmaBusyTx;
         true
     }
 
@@ -486,10 +943,10 @@ impl SessionRxPoolAp {
     /// The caller must have observed TX-complete IRQ; pool_return(slot) for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn tx_complete(&mut self, idx: usize) -> bool {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyTx) {
+        let Some(slot) = self.slot_in(idx, SlotState::DmaBusyTx) else {
             return false;
-        }
-        self.slot_states[idx] = SlotState::Free;
+        };
+        *slot.of_mut(&mut self.slot_states) = SlotState::Free;
         true
     }
 
@@ -507,11 +964,9 @@ impl SessionRxPoolAp {
     /// The caller must have observed RX-complete IRQ for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn rx_complete(&mut self, idx: usize) -> Option<Slot<CpuRef>> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaBusyRx) {
-            return None;
-        }
-        self.slot_states[idx] = SlotState::CpuRef;
-        Some(Slot { idx, _state: PhantomData })
+        let slot = self.slot_in(idx, SlotState::DmaBusyRx)?;
+        *slot.of_mut(&mut self.slot_states) = SlotState::CpuRef;
+        Some(Slot { idx: slot, _state: PhantomData })
     }
 
     /// `dma-armed-tx → cpu-mut` — un-arm before DMA start (error path).
@@ -528,11 +983,9 @@ impl SessionRxPoolAp {
     /// The caller must have observed un-arm before DMA start (error path) for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn un_arm_tx(&mut self, idx: usize) -> Option<Slot<CpuMut>> {
-        if self.slot_states.get(idx) != Some(&SlotState::DmaArmedTx) {
-            return None;
-        }
-        self.slot_states[idx] = SlotState::CpuMut;
-        Some(Slot { idx, _state: PhantomData })
+        let slot = self.slot_in(idx, SlotState::DmaArmedTx)?;
+        *slot.of_mut(&mut self.slot_states) = SlotState::CpuMut;
+        Some(Slot { idx: slot, _state: PhantomData })
     }
 
 }
@@ -548,7 +1001,7 @@ impl Slot<DmaArmedRx> {
     /// The caller must have observed peripheral start for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn dma_start_rx(self, pool: &mut SessionRxPoolAp) {
-        pool.slot_states[self.idx] = SlotState::DmaBusyRx;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::DmaBusyRx;
     }
 }
 
@@ -563,7 +1016,7 @@ impl Slot<CpuRef> {
     /// The caller must have observed in-place mutate for this slot.
     /// Calling it early publishes memory the peripheral still owns.
     pub unsafe fn mutate_in_place(self, pool: &mut SessionRxPoolAp) -> Slot<CpuMut> {
-        pool.slot_states[self.idx] = SlotState::CpuMut;
+        *self.idx.of_mut(&mut pool.slot_states) = SlotState::CpuMut;
         Slot { idx: self.idx, _state: PhantomData }
     }
 }

@@ -11,7 +11,7 @@
 use super::limit;
 
 pub(super) const MAX_KEYEXPR_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_KEYEXPR_BYTES"), 256);
-pub(super) const KEY_ARENA_BYTES: usize = limit(option_env!("WZ_LIMIT_KEY_ARENA_BYTES"), 97152);
+pub(super) const KEY_ARENA_BYTES: usize = limit(option_env!("WZ_LIMIT_KEY_ARENA_BYTES"), 11984);
 pub(super) const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 100);
 pub(super) const MATCH_MEMO_SLOTS: usize = limit(option_env!("WZ_LIMIT_MATCH_MEMO_SLOTS"), 8);
 pub(super) const MATCH_MEMO_FIXED_SLOTS: usize =
@@ -37,6 +37,13 @@ pub(super) const MAX_PUBLISHERS: usize = limit(option_env!("WZ_LIMIT_MAX_PUBLISH
 pub(super) const MAX_QUERIERS: usize = limit(option_env!("WZ_LIMIT_MAX_QUERIERS"), 16);
 pub(super) const MAX_MATCHING_LISTENERS: usize =
     limit(option_env!("WZ_LIMIT_MAX_MATCHING_LISTENERS"), 16);
+pub(super) const MAX_DECL_WATCHES: usize = limit(option_env!("WZ_LIMIT_MAX_DECL_WATCHES"), 4);
+pub(super) const MAX_TRANSPORT_EVENTS_LISTENERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS"), 4);
+pub(super) const MAX_LINK_EVENTS_LISTENERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS"), 4);
+pub(super) const MAX_DECL_WATCH_EVENTS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_DECL_WATCH_EVENTS"), 32);
 pub(super) const MAX_DECLARED_KEYEXPRS: usize =
     limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 332);
 pub(super) const HELD_SESSIONS: usize = limit(option_env!("WZ_LIMIT_HELD_SESSIONS"), 4);
@@ -82,7 +89,26 @@ pub(super) const MAX_MULTICAST_REPLIES: usize =
 pub(super) const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 16);
 pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 16);
 pub(super) const MAX_TICKERS: usize = limit(option_env!("WZ_LIMIT_MAX_TICKERS"), 16);
+pub(super) const ADVANCED_CACHE_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_ADVANCED_CACHE_BYTES"), 1712);
+pub(super) const MAX_ADVANCED_PUBLISHERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_PUBLISHERS"), 8);
+pub(super) const MAX_ADVANCED_SUBSCRIBERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS"), 8);
+pub(super) const MAX_SAMPLE_MISS_LISTENERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS"), 4);
+pub(super) const MAX_ADVANCED_SOURCES: usize =
+    limit(option_env!("WZ_LIMIT_MAX_ADVANCED_SOURCES"), 16);
+pub(super) const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = limit(
+    option_env!("WZ_LIMIT_ADVANCED_SUBSCRIBER_PENDING_BYTES"),
+    1712,
+);
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
+pub(super) const MAX_GROUP_ENDPOINT_LEN: usize =
+    limit(option_env!("WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"), 96);
+pub(super) const MAX_GROUP_MEMBERS: usize = limit(option_env!("WZ_LIMIT_MAX_GROUP_MEMBERS"), 32);
+pub(super) const MAX_CONNECTIVITY_REPLAY_EVENTS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"), 8);
 pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
 pub(super) const MAX_PEER_NODES: usize = limit(option_env!("WZ_LIMIT_MAX_PEER_NODES"), 0);
 pub(super) const MAX_FACES: usize = limit(option_env!("WZ_LIMIT_MAX_FACES"), 1000);

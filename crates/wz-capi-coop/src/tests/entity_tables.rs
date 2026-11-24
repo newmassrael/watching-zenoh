@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    FilterId, FilterPlane, KeyHolds, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -230,9 +230,24 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
-    assert_eq!(count("write filters"), Some(7));
-    assert_eq!(count("matching listeners"), Some(5));
-    assert_eq!(count("interests"), Some(12));
+    assert_eq!(
+        plan.tables().write_filters,
+        7,
+        "a write filter is a row of the session's one table set, a publisher's or a querier's"
+    );
+    assert_eq!(plan.tables().matching_listeners, 5);
+    assert_eq!(
+        plan.tables().interests(),
+        12,
+        "an Interest is a row of the session's one table set, one for each filter and listener"
+    );
+    assert_eq!(
+        count("write filters"),
+        None,
+        "the engine keeps no table of write filters beside the session's"
+    );
+    assert_eq!(count("matching listeners"), None);
+    assert_eq!(count("interests"), None);
 }
 
 /// The subscribers' table at its limit refuses one more: no id, its callback let go of with the
@@ -383,6 +398,38 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     );
 }
 
+/// A write filter that asks the peers nothing spends an entity id of its own: one that finds none
+/// left is refused for it and gives its row back, so with ids again the next filter takes that row
+/// in a table of one. Turned red by a refusal that keeps the row, which refuses the next one as a
+/// full table.
+#[test]
+fn a_filter_that_finds_no_id_left_gives_its_row_back() {
+    let limits = lowered(|l| l.select_max_publishers(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    fn quiet(engine: &Engine) -> Result<FilterId, Refusal> {
+        engine.declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/quiet/1",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+    }
+    engine.entity_ids_from(None);
+    assert_eq!(quiet(&engine), Err(Refusal::NoEntityId));
+    engine.entity_ids_from(Some(7));
+    assert!(
+        quiet(&engine).is_ok(),
+        "the refused filter gave its row back"
+    );
+    assert_eq!(
+        quiet(&engine),
+        Err(Refusal::TableFull),
+        "CONTROL: the table holds one filter"
+    );
+}
+
 /// The matching listeners' table at its limit refuses one more as a full table, before its Interest
 /// is asked; its sink goes with the refusal.
 #[test]
@@ -390,7 +437,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
+    let first_sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     let first = engine
         .declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false)
         .expect("a row is free");
@@ -399,8 +446,12 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     });
     let asked = router.seen(|s| s.interests);
 
-    let refused_sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let held = Arc::downgrade(&refused_sink);
+    // The sink holds the one strong count of the token the weak one reads.
+    let token = Arc::new(());
+    let held = Arc::downgrade(&token);
+    let refused_sink: MatchingSink = MatchingSink::shared(move |_matching: bool| {
+        let _ = &token;
+    });
     let refused =
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
     assert_eq!(refused, Err(Refusal::TableFull));
@@ -412,7 +463,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 
     engine.undeclare_matching_listener(first);
-    let again: MatchingSink = Arc::new(|_matching: bool| {});
+    let again: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert!(
         engine
             .declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false)
@@ -421,23 +472,32 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     );
 }
 
-/// The queryables' table at its limit refuses one more: no callback minted, nothing sent.
+/// The queryables' table at its limit refuses one more: its callback let go at once, nothing sent.
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
-    use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+    use wz_capi_port::{QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    /// Counts its own drop: a callback the engine let go of.
+    struct LetGo(Arc<AtomicUsize>);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
-    let sink = |minted: &Arc<AtomicUsize>| -> QueryableSink {
-        let minted = minted.clone();
-        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            minted.fetch_add(1, Ordering::SeqCst);
-            Box::new(|_query: &dyn QueryView, _out: &mut dyn ReplyOut| {}) as QueryCallback
-        })
+    let let_go = Arc::new(AtomicUsize::new(0));
+    let sink = |let_go: &Arc<AtomicUsize>| -> QueryableSink {
+        let guard = LetGo(let_go.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                let _held = &guard;
+            },
+        )
     };
     let declare = |key: &str| {
         engine.declare_queryable_on_wire(
@@ -446,7 +506,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
             false,
             Locality::Remote,
             None,
-            sink(&minted),
+            sink(&let_go),
         )
     };
     let before = router.seen(|s| s.declares);
@@ -456,12 +516,17 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     });
     let seen = router.seen(|s| s.declares);
 
+    assert_eq!(
+        let_go.load(Ordering::SeqCst),
+        0,
+        "the declared one's callback is held"
+    );
     assert_eq!(declare("demo/qbl/2"), Err(Refusal::TableFull));
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
+        let_go.load(Ordering::SeqCst),
         1,
-        "no callback for a refusal"
+        "a refusal lets its callback go at once"
     );
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 
@@ -596,7 +661,7 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         filter(&engine, FilterPlane::Subscribers, past),
         Err(Refusal::KeyTooLong)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
         Err(Refusal::KeyTooLong),
@@ -614,6 +679,31 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         declare_subscriber(&engine, "demo/k/9", &dropped).is_ok(),
         "a key of the session's bound is taken"
     );
+}
+
+/// A matching listener's criterion holds its key in place, so a key longer than that is refused
+/// for its length before anything is taken or sent, and its sink is let go of.
+#[test]
+fn a_listener_on_a_key_past_the_criterion_is_refused_for_its_length() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let before = router.seen(|s| s.declares);
+    let past = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let token = Arc::new(());
+    let held = Arc::clone(&token);
+    let listener = MatchingSink::shared(move |_matching: bool| {
+        let _ = &held;
+    });
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, &past, listener, false),
+        Err(Refusal::KeyTooLong)
+    );
+    settle(&engine);
+    assert_eq!(Arc::strong_count(&token), 1, "the refused sink is let go");
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
 }
 
 /// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
@@ -645,7 +735,7 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
         declare_subscriber(&engine, "demo/k/3", &dropped),
         Err(Refusal::TableFull)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
         Err(Refusal::TableFull),
@@ -713,5 +803,74 @@ fn a_key_expression_the_link_refuses_is_not_declared() {
         .expect("CONTROL: a key the link takes");
     until(&engine, "the router to see the declaration", || {
         router.seen(|s| s.declares) > seen
+    });
+}
+
+/// A write filter's id names its row and no row that takes the slot after it: once undeclared,
+/// the id holds nothing back and undeclares nothing, while the filter declared after it holds its
+/// writes back until a peer declares. Turned red by an id that names a slot without its generation.
+#[test]
+fn an_undeclared_write_filters_id_names_no_later_filter() {
+    let limits = lowered(|l| l.select_max_publishers(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let first = filter(&engine, FilterPlane::Subscribers, "demo/g/1").expect("a row is free");
+    assert!(
+        engine.write_filter_active(first),
+        "CONTROL: a filter no peer answers holds its writes back"
+    );
+    engine.undeclare_write_filter(first);
+    let second =
+        filter(&engine, FilterPlane::Subscribers, "demo/g/2").expect("the row was given back");
+    assert_ne!(first, second, "the later filter is named apart");
+    assert!(engine.write_filter_active(second));
+    assert!(
+        !engine.write_filter_active(first),
+        "the undeclared filter's id holds nothing back"
+    );
+    engine.undeclare_write_filter(first);
+    assert!(
+        engine.write_filter_active(second),
+        "the undeclared filter's id left the later filter standing"
+    );
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, "demo/g/3"),
+        Err(Refusal::TableFull),
+        "the later filter still holds the publishers' one row"
+    );
+}
+
+/// A write filter and a matching listener on one key of one plane hold one Interest: the second
+/// asks nothing, and the Interest's Final goes once the last of them goes, not before.
+#[test]
+fn a_filter_and_a_listener_on_one_key_hold_one_interest_until_both_go() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/one/key").expect("a row is free");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    let asked = router.seen(|s| s.interests);
+    let sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
+    let listener = engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/one/key", sink, false)
+        .expect("a row is free");
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked,
+        "the listener holds the filter's Interest and asks nothing"
+    );
+    engine.undeclare_write_filter(publisher);
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked,
+        "the listener still holds the Interest: no Final"
+    );
+    engine.undeclare_matching_listener(listener);
+    until(&engine, "the Final of the Interest's last holder", || {
+        router.seen(|s| s.interests) == asked + 1
     });
 }

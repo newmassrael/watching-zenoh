@@ -107,7 +107,7 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # The queues of the delivery lane (`lane::SharedLane`), generated from their SCE document into
 # `out/wz-capi-coop/`, name the runtime's queue and codec types.
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
-# The dialler's endpoint reader and the application layer's dispatch.
+# The session shell's action bundle, its group session and the application layer's dispatch.
 wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
     "alloc",
     "dial",
@@ -141,6 +141,15 @@ host-sys = ["wz-capi-port/os-sys", "wz-runtime-coop/host-lock-sys"]
 # starts none leaves it out, so the job table, the cut to a read's wait and the run after a step
 # are not in its text (the capability-cost gate measures it).
 ticker = []
+# The ring the advanced publishers' caches keep their samples in (`ADVANCED_CACHE_BYTES`): one
+# span of the session's arena, reserved and zeroed at its open, lent under a lock of its own
+# (`wz_capi_port::CacheBytes`), so a cache's put copies its sample into the session's memory. A
+# build with no advanced publisher leaves it out, and its plan has no row for it.
+advanced-cache = []
+# The advanced publishers and subscribers an ABI holds (`MAX_ADVANCED_PUBLISHERS`,
+# `MAX_ADVANCED_SUBSCRIBERS`): a place of the session's arena for each, laid out at its open, and
+# the ring their caches keep their samples in. A build with no advanced plane has no row for them.
+advanced = ["advanced-cache"]
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the
@@ -162,6 +171,7 @@ scout-datagram = [
 # attachment, and the error reply) and a query a C program keeps past its callback. What
 # `wz-capi-core`'s `queryable` names on its runtime, named on session-core.
 queryable = [
+    "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-queryable",
     "wz-session-core/reply-source-info",
@@ -194,8 +204,7 @@ local-subscriber = []
 # pools (`peer-row-pools`), so a face that goes gives its set back at once.
 listen = [
     "interest-answer",
-    "wz-runtime-coop/session-unicast-accept",
-    "wz-runtime-coop/udp-listen",
+    "wz-runtime-coop/listen",
     "wz-session-core/peer-row-pools",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
@@ -214,6 +223,7 @@ app-transport = ["wz-runtime-coop/app-link"]
 # (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
 group = [
     "interest-answer",
+    "wz-runtime-coop/group",
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
     "wz-session-core/peer-row-pools",
@@ -245,7 +255,7 @@ local-queryable = ["query", "queryable"]
 # transport and its links, and the events a watcher is told when one comes up or goes down. What
 # `wz-capi-core`'s `connectivity` names on its runtime. It needs nothing of session-core that the
 # engine does not already have.
-connectivity = []
+connectivity = ["wz-runtime-coop/connectivity"]
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
@@ -262,6 +272,7 @@ liveliness-get = ["liveliness", "query", "wz-session-core/liveliness-get"]
 # consolidation, attachment, parameters, source info, value) and everything a reply carries back
 # to it. What `wz-capi-core`'s `query` names on its runtime, named on session-core.
 query = [
+    "wz-runtime-coop/query",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-get",
     "wz-session-core/query-reply",
@@ -282,7 +293,11 @@ query = [
 # the dictionary it is opened with, every link of it reads an id only the dictionary names, and a
 # key goes on the wire as the session's key-wire form says. Without it a session opened with a
 # form other than `declared` is refused.
-shared-key-ids = ["wz-session-core/shared-key-ids", "wz-capi-port/shared-key-ids"]
+shared-key-ids = [
+    "wz-runtime-coop/shared-key-ids",
+    "wz-session-core/shared-key-ids",
+    "wz-capi-port/shared-key-ids",
+]
 # The session's transport counters (`CoopEngine::transport_stats`): each link's session counts
 # what it sends, receives and drops, as the tokio engine's sessions do under the same session-core
 # feature, and the engine counts the publishes it drops before they reach a link. Off, which is
@@ -305,14 +320,6 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
-# The lent-only receive (`wz-session-core`'s `rx-lent-only`): a record read in place that the lent
-# form cannot carry (a list of shared-memory slices, a key past the bounded buffer, a message with
-# a timestamp stack, none of which this engine's links carry) is a counted refusal, so the build
-# links no owned projection of a lent Push or Response. A SELECTOR, off by default and named by the
-# C library's final build beside `tx-lend-only`, for the reason that one is: unified into a build
-# that holds the tokio engine it would drop what that engine's sessions deliver through the
-# projection, which `wz-runtime-tokio` refuses to build.
-rx-lent-only = ["wz-session-core/rx-lent-only"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

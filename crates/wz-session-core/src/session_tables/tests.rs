@@ -26,6 +26,9 @@ macro_rules! called_while_held {
             fn retire(&self) -> bool {
                 true
             }
+            fn drained(&self) -> bool {
+                true
+            }
         }
     )*};
 }
@@ -249,6 +252,84 @@ fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() 
     assert!(tables.subscribers().is_empty());
 }
 
+/// A walk of the tables takes out each row undeclared while a call of it ran once its last call
+/// ended, each once, of every kind a call of which may outlive the tables' hold; a live row is
+/// never taken. The CONTROL is the walk while the calls still run, which takes nothing.
+#[test]
+fn a_walk_lets_go_of_the_rows_whose_last_call_ended() {
+    let mut tables = latched_tables();
+    let kept = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let gone = tables
+        .declare_subscriber("g", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    let qbl = tables
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), latched(3))
+        .unwrap();
+    let live = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), latched(4))
+        .unwrap();
+    let calls = (
+        tables.begin_subscriber(kept.handle).unwrap(),
+        tables.begin_subscriber(gone.handle).unwrap(),
+        tables.begin_queryable(qbl.handle).unwrap(),
+        tables.begin_liveliness_subscriber(live.handle).unwrap(),
+    );
+    assert!(tables
+        .undeclare_subscriber(gone.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(tables
+        .undeclare_queryable(qbl.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(tables
+        .undeclare_liveliness_subscriber(live.handle)
+        .unwrap()
+        .row
+        .is_none());
+    assert!(
+        tables.release_drained_subscriber(&mut 0).is_none(),
+        "CONTROL: its call still runs"
+    );
+    assert!(tables.release_drained_queryable(&mut 0).is_none());
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_none());
+    assert!(
+        !ended::<CClosure<u32>>(calls.0),
+        "a live row's call marks nothing"
+    );
+    assert!(ended::<CClosure<u32>>(calls.1));
+    assert!(ended::<CClosure<u32>>(calls.2));
+    assert!(ended::<CClosure<u32>>(calls.3));
+    let mut cursor = 0;
+    assert!(tables.release_drained_subscriber(&mut cursor).is_some());
+    assert!(
+        tables.release_drained_subscriber(&mut cursor).is_none(),
+        "each once"
+    );
+    assert!(!tables.subscribers().holds_slot(gone.handle));
+    assert!(
+        tables.subscribers().contains(kept.handle),
+        "the live row is not taken"
+    );
+    assert!(tables.release_drained_subscriber(&mut 0).is_none());
+    assert!(tables.release_drained_queryable(&mut 0).is_some());
+    assert!(!tables.queryables().holds_slot(qbl.handle));
+    assert!(tables.release_drained_queryable(&mut 0).is_none());
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_some());
+    assert!(!tables.liveliness_subscribers().holds_slot(live.handle));
+    assert!(tables
+        .release_drained_liveliness_subscriber(&mut 0)
+        .is_none());
+}
+
 #[test]
 fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
     let mut tables = latched_tables();
@@ -307,10 +388,11 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .unwrap()
         .row
         .is_none());
-    assert!(matches!(
-        tables.undeclare_matching_listener(listener),
-        Some(Removal::AfterCalls)
-    ));
+    assert!(tables
+        .undeclare_matching_listener(listener)
+        .unwrap()
+        .row
+        .is_none());
     assert!(matches!(
         tables.end_get(get.handle),
         Some(Removal::AfterCalls)
@@ -479,7 +561,8 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let first = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap();
-    let asked = first.interest.unwrap();
+    let opened = first.interest.unwrap();
+    let asked = opened.id;
     let second = tables
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
@@ -495,9 +578,19 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             false,
         )
         .unwrap();
-    assert!(querier.interest.is_some_and(|id| id != asked));
+    assert!(querier.interest.is_some_and(|new| new.id != asked));
     assert_eq!(tables.interests().len(), 2);
-    let interest = tables.write_filters().get(first.handle).unwrap().interest();
+    let interest = tables
+        .write_filters()
+        .get(first.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
+    assert_eq!(
+        interest, opened.handle,
+        "the filter holds the Interest it opened"
+    );
+    assert_eq!(tables.interests().get(interest).unwrap().id(), asked);
     assert_eq!(tables.interest_key(interest), Some("k"));
     assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
@@ -506,7 +599,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
             .get(listener)
             .unwrap()
             .interest(),
-        interest,
+        Some(interest),
         "a listener reads its filter's Interest"
     );
     // The Interest's Final goes with its last holder; the listener goes with its filter.
@@ -676,6 +769,34 @@ fn a_matching_listener_is_told_each_change_once() {
     assert_eq!(
         tables.next_matching_change(&mut cursor, &peers),
         Some((listener, true))
+    );
+}
+
+/// A listener's verdict is read and recorded through a shared borrow of the tables, so an engine
+/// reads it beside what its peers declared, both borrowed from one owner. Turned red by a read that
+/// needs the tables to write, or that records no verdict.
+#[test]
+fn a_matching_verdict_is_recorded_through_shared_tables() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let listener = tables.declare_matching_listener(filter, 3).unwrap();
+    let peers = Peers::default();
+    peers.declares.set(true);
+    let shared: &Tables = &tables;
+    let mut cursor = 0;
+    assert_eq!(
+        shared.next_matching_change(&mut cursor, &peers),
+        Some((listener, true))
+    );
+    assert!(shared.matching_listeners().get(listener).unwrap().last());
+    let mut cursor = 0;
+    assert_eq!(
+        shared.next_matching_change(&mut cursor, &peers),
+        None,
+        "told once"
     );
 }
 
@@ -1126,6 +1247,38 @@ fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     );
 }
 
+/// An entity's key form names the declaration its wire names while that declaration stands, and
+/// none for a wire that names none or one that went.
+#[test]
+fn a_key_form_names_the_declaration_the_wire_names_while_it_stands() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert_eq!(
+        tables.key_form(declared.id, true),
+        KeyForm {
+            prefix: Some(declared.handle),
+            names_key: true
+        }
+    );
+    assert_eq!(
+        tables.key_form(0, false),
+        KeyForm {
+            prefix: None,
+            names_key: false
+        },
+        "a wire that names no declaration"
+    );
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(
+        tables.key_form(declared.id, true),
+        KeyForm {
+            prefix: None,
+            names_key: true
+        },
+        "a declaration that went is not named"
+    );
+}
+
 #[test]
 fn a_retracted_declaration_goes_whatever_holds_it() {
     let mut tables = Tables::new();
@@ -1219,6 +1372,9 @@ impl RowCallback for Counted {
     }
     fn retire(&self) -> bool {
         self.1.retire()
+    }
+    fn drained(&self) -> bool {
+        self.1.drained()
     }
 }
 
@@ -2049,4 +2205,256 @@ fn a_token_reaches_the_table_sets_liveliness_subscribers_by_the_registrys_rule()
     assert!(!complete(&tables));
     tables.liveliness_subscribers.mark_history_complete(id);
     assert!(complete(&tables));
+}
+
+/// A filter that asks the peers nothing holds no Interest and spends no id, and is judged on its
+/// own key; a listener on it reads that key, and goes with it. Turned red by a filter that still
+/// holds an Interest, or a listener that finds no key without one.
+#[test]
+fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
+    let mut tables = Tables::new();
+    let before = tables.next_entity_id();
+    let quiet = tables
+        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
+        .unwrap();
+    assert_eq!(quiet.interest, None);
+    assert_eq!(tables.interests().len(), 0, "no Interest held");
+    assert_eq!(tables.next_entity_id(), before, "no id spent");
+    let row = tables.write_filters().get(quiet.handle).unwrap();
+    assert_eq!((row.interest(), row.key()), (None, "q"));
+    let peers = Peers::default();
+    peers.declares.set(true);
+    assert_eq!(tables.write_filter_open(quiet.handle, &peers), Some(true));
+    let listener = tables.declare_matching_listener(quiet.handle, 4).unwrap();
+    let mut cursor = 0;
+    assert_eq!(
+        tables.next_matching_change(&mut cursor, &peers),
+        Some((listener, true)),
+        "the listener reads the filter's key"
+    );
+    let mut gone = Vec::new();
+    let unwatched = tables
+        .undeclare_write_filter(quiet.handle, |handle, _| gone.push(handle))
+        .unwrap();
+    assert_eq!(unwatched.interest_final, None);
+    assert_eq!(gone, [listener]);
+}
+
+/// A listener declared on a key holds an Interest of its own on the key whole, shared with one open
+/// on the same key and kind, and its undeclaration hands back that Interest's Final when it held it
+/// last; it is told its changes as one on a filter is. Turned red by a listener that holds no hold
+/// of its own, sends a second Interest for a key asked already, or keeps the Interest open.
+#[test]
+fn a_listener_on_a_key_holds_an_interest_of_its_own() {
+    let mut tables = Tables::new();
+    let alone = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", true, 6)
+        .unwrap();
+    let opened = alone.interest.expect("a new Interest");
+    let asked = opened.id;
+    let interest = tables
+        .matching_listeners()
+        .get(alone.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
+    assert_eq!(
+        interest, opened.handle,
+        "the listener holds the Interest it opened"
+    );
+    let row = tables.interests().get(interest).unwrap();
+    assert_eq!(
+        (row.mapping_id(), row.suffix(), row.aggregate()),
+        (0, Some("m"), false)
+    );
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "m", false)
+        .unwrap();
+    assert_eq!(
+        filter.interest, None,
+        "the filter shares the listener's Interest"
+    );
+    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
+    let sub = subscribe(&mut tables, "m", Locality::Any, 1);
+    let mut cursor = 0;
+    assert_eq!(
+        tables.next_matching_change(&mut cursor, &NoPeers),
+        Some((alone.handle, true))
+    );
+    let _ = tables.undeclare_subscriber(sub.handle);
+    let first = tables.undeclare_matching_listener(alone.handle).unwrap();
+    assert_eq!(first.interest_final, None, "the filter still holds it");
+    assert!(first.row.is_some());
+    let again = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", false, 7)
+        .unwrap();
+    let _ = tables.undeclare_write_filter(filter.handle, |_, _| {});
+    assert_eq!(
+        tables
+            .undeclare_matching_listener(again.handle)
+            .unwrap()
+            .interest_final,
+        Some(asked),
+        "the last holder ends it"
+    );
+    assert_eq!(tables.interests().len(), 0);
+}
+
+/// An Interest keeps the rest of the key it names as a range of its own key: the tail where the
+/// rest ends the key, the place inside the key where it lies elsewhere, and the key whole by no
+/// declaration where it lies nowhere in the key, which names the same key. Turned red by a rest
+/// read from the wrong range, or one refused.
+#[test]
+fn an_interest_names_its_rest_by_a_range_of_its_key() {
+    let rest = |text: &str| Some(std::string::String::from(text));
+    let mut tables = Tables::new();
+    let named = |tables: &mut Tables, key: &str, suffix: &str| {
+        let filter = tables
+            .declare_write_filter_as(
+                Plane::Subscribers,
+                key,
+                false,
+                Some(InterestName {
+                    mapping_id: 5,
+                    suffix: Some(suffix),
+                    aggregate: true,
+                }),
+            )
+            .unwrap();
+        let interest = tables
+            .write_filters()
+            .get(filter.handle)
+            .unwrap()
+            .interest()
+            .unwrap();
+        let row = tables.interests().get(interest).unwrap();
+        (
+            row.mapping_id(),
+            row.suffix().map(std::string::String::from),
+            row.aggregate(),
+        )
+    };
+    assert_eq!(
+        named(&mut tables, "a/b/c", "/c"),
+        (5, rest("/c"), true),
+        "the tail"
+    );
+    assert_eq!(
+        named(&mut tables, "x/y/x/y", "x/y"),
+        (5, rest("x/y"), true),
+        "the tail, where the rest lies twice"
+    );
+    assert_eq!(
+        named(&mut tables, "p/q/r", "q"),
+        (5, rest("q"), true),
+        "inside the key"
+    );
+    assert_eq!(
+        named(&mut tables, "s/t", "u"),
+        (0, rest("s/t"), true),
+        "nowhere in the key: the key whole"
+    );
+    assert_eq!(
+        named(&mut Tables::new(), "ä/ö/ü", "ö"),
+        (5, rest("ö"), true),
+        "inside the key, after characters of two bytes"
+    );
+    assert_eq!(
+        named(&mut Tables::new(), "s", "s/t"),
+        (0, rest("s"), true),
+        "a rest longer than the key: the key whole"
+    );
+    let plain = tables
+        .declare_write_filter_as(
+            Plane::Subscribers,
+            "n",
+            false,
+            Some(InterestName {
+                mapping_id: 9,
+                suffix: None,
+                aggregate: false,
+            }),
+        )
+        .unwrap();
+    let interest = tables
+        .write_filters()
+        .get(plain.handle)
+        .unwrap()
+        .interest()
+        .unwrap();
+    let row = tables.interests().get(interest).unwrap();
+    assert_eq!((row.mapping_id(), row.suffix()), (9, None), "no rest");
+}
+
+/// A matching listener's callback is reached to change through its handle while the listener
+/// stands, and not through that handle once the listener is undeclared, even after another took its
+/// slot. Turned red by an accessor that reads a retired row or ignores the handle's generation.
+#[test]
+fn a_listeners_callback_is_reached_by_its_handle_until_it_goes() {
+    let mut tables = Tables::new();
+    let first = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", false, 1)
+        .unwrap();
+    if let Some(callback) = tables.matching_listener_callback_mut(first.handle) {
+        *callback = 2;
+    }
+    assert_eq!(
+        tables
+            .matching_listeners()
+            .get(first.handle)
+            .map(|row| *row.callback()),
+        Some(2),
+        "changed in its row"
+    );
+    let _ = tables.undeclare_matching_listener(first.handle);
+    assert_eq!(tables.matching_listener_callback_mut(first.handle), None);
+    let second = tables
+        .declare_matching_listener_on(Plane::Subscribers, "n", false, 3)
+        .unwrap();
+    assert_eq!(
+        tables.matching_listener_callback_mut(first.handle),
+        None,
+        "the undeclared listener's handle reaches no row that came since"
+    );
+    assert_eq!(
+        tables
+            .matching_listener_callback_mut(second.handle)
+            .copied(),
+        Some(3)
+    );
+}
+
+/// A value of a kept kind is held as itself; one of a kind not kept is refused.
+#[test]
+fn a_record_of_a_kept_kind_holds_its_value_and_one_not_kept_is_refused() {
+    let kept = <Present as Presence>::record(7_u64).expect("kept");
+    assert_eq!(*<Present as Presence>::read(&kept), 7);
+    assert_eq!(<Present as Presence>::take(kept), 7);
+    assert!(<Absent as Presence>::record(7_u64).is_none());
+    assert!(<Present as Presence>::KEPT && !<Absent as Presence>::KEPT);
+}
+
+/// A variant that holds a record of a kind not kept takes no room: the enum is as small as its
+/// other variant alone, which a kept kind's record outgrows.
+#[test]
+fn a_variant_of_a_kind_not_kept_takes_no_room() {
+    enum Owes<K: Presence> {
+        Call(&'static u8),
+        Other(K::Record<[u64; 2]>),
+    }
+    impl<K: Presence> Owes<K> {
+        fn first(&self) -> u64 {
+            match self {
+                Self::Call(byte) => u64::from(**byte),
+                Self::Other(other) => K::read(other)[0],
+            }
+        }
+    }
+    let both = [Owes::<Present>::Call(&3), Owes::<Present>::Other([5, 6])];
+    assert_eq!(both.iter().map(Owes::first).collect::<Vec<_>>(), [3, 5]);
+    assert_eq!(
+        core::mem::size_of::<Owes<Absent>>(),
+        core::mem::size_of::<&u8>()
+    );
+    assert!(core::mem::size_of::<Owes<Present>>() > core::mem::size_of::<&u8>());
 }

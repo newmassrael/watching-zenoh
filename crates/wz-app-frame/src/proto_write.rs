@@ -63,7 +63,8 @@ use crate::proto_schema::{FieldKind, FileOptions, Fld, Msg};
 
 const WIRE_VARINT: u64 = 0;
 const WIRE_I64: u64 = 1;
-const WIRE_LEN: u64 = 2;
+/// The wire type of a length-delimited value: a string, bytes, a message or a packed run.
+pub const WIRE_LEN: u64 = 2;
 const WIRE_I32: u64 = 5;
 
 /// One value as the wire carries it, before its tag.
@@ -106,14 +107,14 @@ impl<'b> Wire<'b> {
     }
 
     /// Append the value without its tag.
-    pub fn put(&self, out: &mut Vec<u8>) {
+    pub fn put<O: Out + ?Sized>(&self, out: &mut O) {
         match self {
             Self::Varint(v) => put_varint(out, *v),
-            Self::Fixed32(v) => out.extend_from_slice(&v.to_le_bytes()),
-            Self::Fixed64(v) => out.extend_from_slice(&v.to_le_bytes()),
+            Self::Fixed32(v) => out.put_slice(&v.to_le_bytes()),
+            Self::Fixed64(v) => out.put_slice(&v.to_le_bytes()),
             Self::Len(bytes) => {
                 put_varint(out, bytes.len() as u64);
-                out.extend_from_slice(bytes);
+                out.put_slice(bytes);
             }
         }
     }
@@ -155,30 +156,105 @@ impl Wire<'static> {
     }
 }
 
+/// Where the writer puts its bytes: a buffer that grows, one of a fixed size, or a count of them
+/// alone, so a size is known before a byte is written.
+pub trait Out {
+    /// Append one byte.
+    fn put_byte(&mut self, byte: u8);
+    /// Append `bytes`.
+    fn put_slice(&mut self, bytes: &[u8]);
+}
+
+impl Out for Vec<u8> {
+    fn put_byte(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    fn put_slice(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// The bytes a write puts, counted and not kept.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Count(pub usize);
+
+impl Out for Count {
+    fn put_byte(&mut self, _byte: u8) {
+        self.0 = self.0.saturating_add(1);
+    }
+
+    fn put_slice(&mut self, bytes: &[u8]) {
+        self.0 = self.0.saturating_add(bytes.len());
+    }
+}
+
+/// A buffer of a fixed size written from its start. Every byte is counted, and one past the end
+/// is not written, so a writer that measured first ([`Count`]) writes the whole of it.
+#[derive(Debug)]
+pub struct Fixed<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> Fixed<'a> {
+    /// A writer at the start of `buf`.
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, len: 0 }
+    }
+
+    /// How many bytes were put, those past the end included.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether nothing was put.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Out for Fixed<'_> {
+    fn put_byte(&mut self, byte: u8) {
+        if let Some(at) = self.buf.get_mut(self.len) {
+            *at = byte;
+        }
+        self.len = self.len.saturating_add(1);
+    }
+
+    fn put_slice(&mut self, bytes: &[u8]) {
+        let end = self.len.saturating_add(bytes.len());
+        if let Some(at) = self.buf.get_mut(self.len..end) {
+            at.copy_from_slice(bytes);
+        }
+        self.len = end;
+    }
+}
+
 /// Append `v` as a varint: seven bits a byte, the low bits first.
-pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+pub fn put_varint<O: Out + ?Sized>(out: &mut O, mut v: u64) {
     while v >= 0x80 {
-        out.push((v & 0x7f) as u8 | 0x80);
+        out.put_byte((v & 0x7f) as u8 | 0x80);
         v >>= 7;
     }
-    out.push(v as u8);
+    out.put_byte(v as u8);
 }
 
 /// Append the tag of field `number` for a value of `wire_type`.
-pub fn put_tag(out: &mut Vec<u8>, number: u64, wire_type: u64) {
+pub fn put_tag<O: Out + ?Sized>(out: &mut O, number: u64, wire_type: u64) {
     put_varint(out, (number << 3) | wire_type);
 }
 
 /// Append field `number` holding `value`: its tag and the value, whatever the
 /// value is.
-pub fn put_field(out: &mut Vec<u8>, number: u64, value: &Wire<'_>) {
+pub fn put_field<O: Out + ?Sized>(out: &mut O, number: u64, value: &Wire<'_>) {
     put_tag(out, number, value.wire_type());
     value.put(out);
 }
 
 /// Append a singular field: written when it has presence ([`has_presence`]),
 /// and otherwise only when its value is not its type's default.
-pub fn put_singular(out: &mut Vec<u8>, number: u64, presence: bool, value: &Wire<'_>) {
+pub fn put_singular<O: Out + ?Sized>(out: &mut O, number: u64, presence: bool, value: &Wire<'_>) {
     if presence || !value.is_default() {
         put_field(out, number, value);
     }
@@ -186,17 +262,27 @@ pub fn put_singular(out: &mut Vec<u8>, number: u64, presence: bool, value: &Wire
 
 /// Append the elements of a repeated field: one length-delimited run of them
 /// when `packed` ([`packed`] decides it), else each under its own tag. No
-/// element writes nothing.
-pub fn put_repeated(out: &mut Vec<u8>, number: u64, packed: bool, elements: &[Wire<'_>]) {
+/// element writes nothing. A run's length is counted before it is written, so nothing is
+/// gathered apart.
+pub fn put_repeated<O: Out + ?Sized>(
+    out: &mut O,
+    number: u64,
+    packed: bool,
+    elements: &[Wire<'_>],
+) {
     if elements.is_empty() {
         return;
     }
     if packed {
-        let mut run = Vec::new();
+        let mut run = Count::default();
         for element in elements {
             element.put(&mut run);
         }
-        put_field(out, number, &Wire::delimited(run));
+        put_tag(out, number, WIRE_LEN);
+        put_varint(out, run.0 as u64);
+        for element in elements {
+            element.put(out);
+        }
     } else {
         for element in elements {
             put_field(out, number, element);

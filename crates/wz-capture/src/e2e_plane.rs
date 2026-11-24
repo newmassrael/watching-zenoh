@@ -64,7 +64,7 @@ use wz_session_core::sorted_chunks::SortedChunks;
 
 use crate::e2e_profile::Profile;
 use crate::e2e_slots::{
-    read_unjudged, Outcome, Reception, SlotLedger, SlotSender, Unjudged, UNREADABLE_PAYLOAD,
+    read_unjudged, Outcome, Reception, SlotLedger, Unjudged, UNREADABLE_PAYLOAD,
 };
 use crate::e2e_words::E2eWords;
 use crate::payload::formats::{first_covering, first_segment_covering, SegmentKey};
@@ -185,6 +185,7 @@ impl Judged {
     /// the profile's and are not counted, so this is a lower bound.
     #[cfg(feature = "dissect")]
     fn heap_bytes(&self) -> usize {
+        use crate::e2e_slots::SlotSender;
         use wz_session_core::heap_account::vec_bytes;
         let Some(Outcome::Opened(opened)) = &self.outcome else {
             return 0;

@@ -485,7 +485,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let mut table = self.broker.future.guard();
             let keys: Vec<(FaceId, u64)> = table
                 .keys()
-                .filter(|(face, id)| *face == client && client_id.map_or(true, |c| c == *id))
+                .filter(|(face, id)| *face == client && client_id.is_none_or(|c| c == *id))
                 .copied()
                 .collect();
             keys.into_iter()

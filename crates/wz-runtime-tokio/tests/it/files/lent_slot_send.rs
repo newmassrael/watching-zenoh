@@ -348,9 +348,11 @@ fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
         wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
         b"v",
         None,
-        true,
-        false,
-        Priority::DEFAULT,
+        wz_session_core::session_actions::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        },
     );
     assert!(
         matches!(
@@ -1029,9 +1031,11 @@ fn a_message_its_encoder_refuses_mid_window_is_refused_and_spends_no_sn() {
         wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
         b"v",
         None,
-        true,
-        false,
-        Priority::DEFAULT,
+        wz_session_core::session_actions::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        },
     );
     assert!(
         matches!(

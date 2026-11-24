@@ -21,9 +21,10 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
-    MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
-    StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HeldSlab,
+    LivelinessSink, MatchId, MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal,
+    ReplyCallback, SessionEngine, StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId,
+    TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
@@ -34,7 +35,7 @@ use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
-use super::RouterState;
+use super::{RouterKept, RouterState};
 use crate::caller_span::CallerSpan;
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
@@ -111,6 +112,12 @@ pub(super) struct EngineState {
     /// The program's liveliness tokens, as `queryables` holds its queryables.
     tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
+    /// What each connectivity listener whose history is being replayed was told of the node's
+    /// faces ([`SessionEngine::told_ledger`]).
+    told: wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>,
+    /// The queries the program keeps past the handlers of the node's queryables, each under the
+    /// id its keep answers ([`wz_capi_port::QueryHolder::keep_query`]).
+    kept: Arc<HeldSlab<RouterKept>>,
 }
 
 impl EngineState {
@@ -123,7 +130,15 @@ impl EngineState {
             queryables: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
+            told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
+            kept: Arc::new(HeldSlab::new()),
         }
+    }
+
+    /// The node's kept queries, as a holder of its queryables keeps them: weakly, the slab being
+    /// the node's.
+    pub(super) fn kept_queries(&self) -> std::sync::Weak<HeldSlab<RouterKept>> {
+        Arc::downgrade(&self.kept)
     }
 
     /// The next entity id, or `None` once every `u32` one has been handed out.
@@ -157,6 +172,41 @@ fn plane_of(plane: FilterPlane) -> MatchPlane {
         FilterPlane::Queryables { complete_required } => {
             MatchPlane::Queryables { complete_required }
         }
+    }
+}
+
+impl wz_capi_port::KeyHolds for RouterState {
+    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
+    /// here and there is nothing to count.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+}
+
+impl wz_capi_port::Tickers for RouterState {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
+        // of its own, so a host with no thread left to give holds no more of them.
+        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
+            .ok_or(Refusal::TableFull)?;
+        let id = self.engine.local_id();
+        self.engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, job);
+        Ok(id)
+    }
+
+    fn stop_ticker(&self, id: TickerId) {
+        // Dropped outside the lock: the job's tick may be what called in.
+        let job = self
+            .engine
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        drop(job);
     }
 }
 
@@ -197,6 +247,10 @@ impl SessionEngine for RouterState {
 
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         self.forwarder.face_snapshots()
+    }
+
+    fn told_ledger(&self) -> Option<&wz_capi_port::os::Mutex<wz_capi_port::told::ToldLedger>> {
+        Some(&self.engine.told)
     }
 
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
@@ -304,11 +358,6 @@ impl SessionEngine for RouterState {
         Err(Refusal::NotBuilt)
     }
 
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-
-    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
-    /// here and there is nothing to count.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
@@ -325,7 +374,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -340,7 +389,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -436,11 +485,18 @@ impl SessionEngine for RouterState {
     ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        // The node's queries are held through the node itself, which the one sink is called with.
+        let holder = self.query_holder();
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
             allowed_origin,
-            Box::new(sink(self.query_holder())),
+            Box::new(
+                move |query: &dyn wz_session_core::query_sink::QueryView,
+                      out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                    sink.call(query, out, &*holder);
+                },
+            ),
         );
         self.engine
             .queryables
@@ -462,6 +518,26 @@ impl SessionEngine for RouterState {
         }
     }
 
+    // A reply holds the keep's value while it runs, so a release from another thread meanwhile
+    // sends the final once the reply has gone out. The forwarder's hold answers under the key it
+    // keeps itself, so the caller's is not read.
+    fn reply_held(
+        &self,
+        id: HeldQueryId,
+        _key: &str,
+        answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut),
+    ) {
+        if RouterState::is_closed(self) {
+            return;
+        }
+        if let Some(kept) = self.engine.kept.get(id) {
+            kept.held.reply(answer);
+        }
+    }
+
+    fn release_held(&self, id: HeldQueryId) {
+        self.engine.kept.release(id);
+    }
     fn declare_liveliness_token_on_wire(
         &self,
         keyexpr: &str,
@@ -546,7 +622,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -582,7 +658,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -634,37 +710,14 @@ impl SessionEngine for RouterState {
         let id = face.tokens_get_id();
         let cancel_face = Arc::clone(&face);
         // A fan already cancelled issues no leg: the get is over, having asked nobody.
-        if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
+        if fan.is_some_and(|fan| {
+            !crate::fan_undo::record(fan, Box::new(move || cancel_face.end_tokens_get(id)))
+        }) {
             return Ok(0);
         }
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
         face.get_tokens(id, keyexpr, on_key, on_final);
         Ok(1)
-    }
-
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
-        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
-        // of its own, so a host with no thread left to give holds no more of them.
-        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
-            .ok_or(Refusal::TableFull)?;
-        let id = self.engine.local_id();
-        self.engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, job);
-        Ok(id)
-    }
-
-    fn stop_ticker(&self, id: TickerId) {
-        // Dropped outside the lock: the job's tick may be what called in.
-        let job = self
-            .engine
-            .jobs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-        drop(job);
     }
 }
 

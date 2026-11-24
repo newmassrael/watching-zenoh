@@ -63,6 +63,16 @@ impl Tickers {
         self.entries.retain(|entry| entry.id != id);
     }
 
+    /// Every job, handed out for its taker to let go of where it chooses: what a job holds may
+    /// take the session's lock as it goes, so a close lets go of them after letting go of the
+    /// lock. The table holds none after.
+    pub(super) fn take_all(&mut self) -> Self {
+        Self {
+            entries: core::mem::take(&mut self.entries),
+            rows: 0,
+        }
+    }
+
     /// When the earliest job is next due, if any is waiting. A job that is running has no time.
     pub(super) fn next_due_ms(&self) -> Option<u64> {
         self.entries
@@ -104,6 +114,39 @@ mod tests {
     /// A job that goes on.
     fn job() -> Tick {
         alloc::sync::Arc::new(|| true)
+    }
+
+    /// Every job is handed out at once and the table holds none after; what a job holds goes
+    /// with the jobs handed out, when their taker lets go of them. Turned red by a close that
+    /// leaves a job, and what it holds, in the table of a session that runs none again.
+    #[test]
+    fn every_job_is_handed_out_and_goes_with_its_taker() {
+        let mut tickers = Tickers::reserved(2);
+        let held = alloc::sync::Arc::new(());
+        let kept = alloc::sync::Arc::clone(&held);
+        assert!(tickers.start(
+            1,
+            10,
+            alloc::sync::Arc::new(move || {
+                let _ = &kept;
+                true
+            }),
+            0
+        ));
+        assert!(tickers.start(2, 20, job(), 0));
+        let taken = tickers.take_all();
+        assert_eq!(tickers.next_due_ms(), None, "the table holds no job");
+        assert_eq!(
+            alloc::sync::Arc::strong_count(&held),
+            2,
+            "a job handed out still holds what it holds"
+        );
+        drop(taken);
+        assert_eq!(
+            alloc::sync::Arc::strong_count(&held),
+            1,
+            "letting the jobs go lets it go"
+        );
     }
 
     /// A start past the rows is refused and holds nothing; a row let go of takes a job again.

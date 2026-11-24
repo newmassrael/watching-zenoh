@@ -34,7 +34,7 @@ fn subscribe(
     let declares_before = router.seen(|s| s.declares);
     let port: Arc<dyn SessionEngine> = engine.clone();
     let subscriber = EngineSubscriber::declare(&port, "demo/data", options, move |sample| {
-        into.lock().unwrap().push(sample.payload[0]);
+        into.lock().unwrap().push(sample.view().payload()[0]);
     })
     .expect("the subscriber declares on the cooperative engine");
     until(engine, "the router to see the subscription", || {

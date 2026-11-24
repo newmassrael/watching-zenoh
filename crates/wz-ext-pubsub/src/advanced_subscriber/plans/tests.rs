@@ -150,6 +150,32 @@ fn history_selector_emits_max_and_time() {
     );
 }
 
+/// The parameters a history or recovery get lends are the selector's text without the flag,
+/// which the get writes after them; the longest a `usize` and an `f64` print fit the bound, so
+/// no part is ever left out. Turned red by a bound under the longest `f64` text.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn get_parameters_write_the_selector_and_the_longest_values_fit() {
+    assert_eq!(GetParameters::history(None, None).as_bytes(), b"");
+    assert_eq!(
+        GetParameters::history(Some(2), Some(30.0)).as_str(),
+        "_max=2;_time=[now(-30s)..]"
+    );
+    assert_eq!(
+        GetParameters::history(None, Some(0.0)).as_str(),
+        "_time=[now()..]"
+    );
+    assert_eq!(GetParameters::recovery(7, None).as_str(), "_sn=7..");
+    assert_eq!(GetParameters::recovery(7, Some(9)).as_str(), "_sn=7..9");
+    for age in [-f64::from_bits(1), f64::MIN, f64::MAX] {
+        assert_eq!(
+            GetParameters::history(Some(usize::MAX), Some(age)).as_str(),
+            format!("_max={};_time=[now(-{age}s)..]", usize::MAX),
+            "the longest values are written whole"
+        );
+    }
+}
+
 /// A sample recovered from a reply is built from the reply's bytes as they
 /// are held: a reply off the wire holds ranges of the frame it arrived in, so
 /// the recovered sample holds the very same bytes (payload and attachment),
@@ -193,5 +219,52 @@ fn a_recovered_sample_holds_the_storage_its_reply_holds() {
         kept.as_ptr(),
         attachment.as_ptr(),
         "and so is the attachment"
+    );
+}
+
+/// A recovered reply read as a view hands on the reply's own bytes and its encoding, and a sample
+/// copied out of that view keeps the encoding, which the view gives only as its parts.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_recovered_view_reads_the_reply_where_it_lies() {
+    use wz_session_core::link::RxBytes;
+    use wz_session_core::reply::{InboundReply, InboundReplyBody};
+    use wz_session_core::sample::EncodingHint;
+    use wz_session_core::sample_kind::SampleKind;
+    use wz_session_core::sink::SampleView;
+
+    let reply = InboundReply {
+        rid: 1,
+        keyexpr_literal: "demo/recovered".into(),
+        body: InboundReplyBody::Put {
+            payload: RxBytes::from(b"PAYLOAD".to_vec()),
+            attachment: None,
+            encoding: Some((0x0B, Some(b"text".to_vec()))),
+            source_info: None,
+            timestamp: None,
+        },
+        responder: None,
+        qos: None,
+        stamp: Default::default(),
+    };
+
+    let view = RecoveredView::of(&reply).expect("a Put reply recovers");
+    assert_eq!(view.kind(), SampleKind::Put);
+    assert_eq!(view.keyexpr(), "demo/recovered");
+    assert_eq!(
+        view.payload().as_ptr(),
+        ReplyView::payload(&reply).as_ptr(),
+        "the view reads the reply's bytes where they lie"
+    );
+    assert_eq!(view.encoding_parts(), Some((0x0B, Some(&b"text"[..]))));
+
+    let sample = recovered_sample_from_reply(&reply).expect("a Put reply recovers");
+    assert_eq!(
+        sample.encoding,
+        Some(EncodingHint {
+            packed_id: 0x0B,
+            schema: Some(b"text".to_vec()),
+        }),
+        "a sample copied out of the view keeps the encoding the view gives as parts"
     );
 }

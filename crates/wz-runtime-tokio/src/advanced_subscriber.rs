@@ -119,8 +119,8 @@ use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_ext_pubsub::advanced_subscriber::RecoveryRequest;
+use wz_ext_pubsub::advanced_subscriber::{owned_samples, MissHandlers, State};
 pub use wz_ext_pubsub::advanced_subscriber::{Miss, SampleMissListener};
-use wz_ext_pubsub::advanced_subscriber::{MissHandlers, State};
 
 /// R311y90 (review C5) — why declaring an advanced subscriber failed.
 /// Distinct from the base [`SubscribeError`] (which stays the plain
@@ -209,6 +209,7 @@ impl From<crate::session::LivelinessAliasError> for AdvancedSubscribeError {
 
 #[cfg(feature = "ext-pubsub-advanced-history")]
 pub use wz_ext_pubsub::advanced_subscriber::options::HistoryConfig;
+use wz_ext_pubsub::advanced_subscriber::options::Kept;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 pub use wz_ext_pubsub::advanced_subscriber::options::RecoveryConfig;
 pub use wz_ext_pubsub::advanced_subscriber::options::{
@@ -227,7 +228,7 @@ use wz_ext_pubsub::advanced_subscriber::plans::{
 /// order a host that declares keys shows a peer.
 struct Held<E> {
     entity: E,
-    _keeps: Option<Arc<dyn Send + Sync>>,
+    _keeps: Option<Kept>,
 }
 
 impl<E> Held<E> {
@@ -1157,7 +1158,10 @@ where
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    let options = options.with_retraction_naming(form.retraction().cloned());
+    let options = options.with_retraction_naming(
+        form.retraction()
+            .map(|key| crate::session::RetractionName::of(*key, keyexpr)),
+    );
     let subscriber = if form.is_literal() {
         session.declare_subscriber(keyexpr.to_owned(), options, callback)?
     } else {
@@ -1243,7 +1247,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // What names an entity is handed to the host that made it, since nothing
         // is left to let it go after the entity: the entity stays declared for
         // the session's life, and so must its name.
-        let retain = |keeps: Option<Arc<dyn Send + Sync>>| {
+        let retain = |keeps: Option<Kept>| {
             if let (Some(forms), Some(keeps)) = (forms.as_ref(), keeps) {
                 forms.forms().retain(keeps);
             }
@@ -1526,7 +1530,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State::new(
-            Box::new(on_sample),
+            owned_samples(on_sample),
             MissHandlers::default(),
         )));
         let cb_state = Arc::clone(&state);
@@ -1583,7 +1587,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State::new(
-            Box::new(on_sample),
+            owned_samples(on_sample),
             MissHandlers::default(),
         )));
         let cb_state = Arc::clone(&state);
@@ -1772,7 +1776,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let base_keyexpr: String = keyexpr.into();
 
         let state =
-            State::new(Box::new(on_sample), miss_handlers).with_retransmission(retransmission);
+            State::new(owned_samples(on_sample), miss_handlers).with_retransmission(retransmission);
         // The startup history get is one in flight from the start; the buffer's ceiling is
         // upstream's own derivation, field for field — see the machine's field doc.
         #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -2455,7 +2459,7 @@ mod tests {
                 PublishOptions::put()
                     .with_locality(Locality::SessionLocal)
                     .with_timestamp(
-                        wz_session_core::sample::TimestampHint::new(time, &zid).unwrap(),
+                        wz_session_core::sample::TimestampHint::new(time, zid).unwrap(),
                     ),
             )
             .expect("loopback timestamped publish")
@@ -4939,7 +4943,7 @@ mod tests {
         asked: Mutex<Vec<String>>,
         released: Arc<Mutex<Vec<(&'static str, usize)>>>,
         driver: Arc<crate::test_fixtures::RecordingLinkDriver>,
-        retained: Mutex<Vec<Arc<dyn Send + Sync>>>,
+        retained: Mutex<Vec<Kept>>,
     }
 
     #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -4962,11 +4966,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{label} {keyexpr}"));
-            EntityForm::literal().keeping(Arc::new(Witness {
+            EntityForm::literal().keeping(Kept::shared(Arc::new(Witness {
                 label,
                 log: Arc::clone(&self.released),
                 driver: Arc::clone(&self.driver),
-            }))
+            })))
         }
     }
 
@@ -4987,7 +4991,7 @@ mod tests {
         fn token(&self, keyexpr: &str) -> EntityForm {
             self.answer("token", keyexpr)
         }
-        fn retain(&self, anchor: Arc<dyn Send + Sync>) {
+        fn retain(&self, anchor: Kept) {
             self.retained.lock().unwrap().push(anchor);
         }
     }
@@ -5018,7 +5022,7 @@ mod tests {
                 .with_history(HistoryConfig::new().detect_late_publishers())
                 .with_subscriber_detection(SubscriberDetection::new())
                 .with_get_locality(Locality::SessionLocal)
-                .with_declaration_forms(forms.clone()),
+                .with_declaration_forms(FormsHandle::new(forms.clone())),
             |_s: Sample| {},
         )
         .expect("a fully configured advanced subscriber declares");

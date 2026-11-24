@@ -450,11 +450,11 @@
               "x-wz-wire": "none"
             },
             "KEY_ARENA_BYTES": {
-              "description": "How many bytes of key text the rows of a session's tables hold at once, in one arena each row keeps its key in: the session's own declarations, the application's tables, its pending gets and what each peer declares to it.",
+              "description": "How many bytes of key text a session holds at once, in one arena every keyed row keeps its key in: its declared key expressions, its entities with their write filters, Interests and matching listeners, its pending gets and what each peer declares to it.",
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967291,
-              "default": 97152,
+              "default": 11984,
               "x-wz-kind": "parameter",
               "x-wz-storage": "both",
               "x-wz-scope": "session",
@@ -546,7 +546,7 @@
               "x-wz-wire": "none"
             },
             "MAX_QUERYABLES": {
-              "description": "The queryables a session holds at once.",
+              "description": "The queryables a session holds at once, a background one included until the session closes.",
               "oneOf": [
                 {
                   "type": "integer",
@@ -704,6 +704,82 @@
               ],
               "x-wz-kind": "bound",
               "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECL_WATCHES": {
+              "description": "The declaration watches a session holds at once (what its peers declare and retract, told to the program), over every kind of entity watched.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_TRANSPORT_EVENTS_LISTENERS": {
+              "description": "The transport events listeners a session holds at once, each told when a transport to a peer opens or closes.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_LINK_EVENTS_LISTENERS": {
+              "description": "The link events listeners a session holds at once, each told when a link to a peer comes up or goes.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECL_WATCH_EVENTS": {
+              "description": "The events of what the peers declare and retract that a session holds for its declaration watches until each watch is told, one row for each event however many watches it reaches.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
@@ -917,6 +993,44 @@
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_ADVANCED_PUBLISHERS": {
+              "description": "The advanced publishers a session holds at once, each the C object over the publisher, its cache and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_ADVANCED_SUBSCRIBERS": {
+              "description": "The advanced subscribers a session holds at once, owned or background, each the C object over the subscriber, its history and recovery and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_LOCATOR_LEN": {

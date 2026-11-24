@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_capi_port::{HeldQuery, QueryCallback, QueryHolder, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{HeldQueryId, QueryHolder, QueryableSink, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
@@ -19,9 +19,8 @@ use super::{open, until, CatchAll, Command, Engine, Router};
 fn declare(
     engine: &Engine,
     keyexpr: &str,
-    answer: impl Fn(&Arc<dyn QueryHolder>, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
+    answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
 ) {
-    let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -29,12 +28,7 @@ fn declare(
             false,
             Locality::Remote,
             None,
-            Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                let answer = answer.clone();
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    answer(&holder, query, out)
-                }) as QueryCallback
-            }),
+            QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build");
 }
@@ -71,10 +65,10 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
 fn a_kept_query_holds_its_final_until_it_is_dropped() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::default();
     let slot = kept.clone();
     declare(&engine, "demo/k/**", move |holder, query, _out| {
-        *slot.lock().unwrap() = Some(holder.hold_query(query));
+        *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
     });
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) >= 1
@@ -93,14 +87,14 @@ fn a_kept_query_holds_its_final_until_it_is_dropped() {
     );
 
     let held = kept.lock().unwrap().take().expect("the kept query");
-    held.reply(&mut |out| {
+    engine.reply_held(held, "demo/k/a", &mut |out| {
         out.reply_keyed("demo/k/a", b"later")
             .expect("a reply on the query's own key");
     });
     until(&engine, "the late reply", || {
         router.seen(|s| s.answers.len()) >= 1
     });
-    drop(held);
+    engine.release_held(held);
     until(&engine, "the final", || {
         router.seen(|s| s.answers.len()) >= 2
     });
@@ -117,10 +111,13 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
     let limits = super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(2)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
-    let kept: Arc<Mutex<Vec<Box<dyn HeldQuery>>>> = Arc::default();
+    let kept: Arc<Mutex<Vec<HeldQueryId>>> = Arc::default();
     let slot = kept.clone();
     declare(&engine, "demo/f/**", move |holder, query, _out| {
-        slot.lock().unwrap().push(holder.hold_query(query));
+        let held = holder.keep_query(query).expect("room to keep the query");
+        slot.lock()
+            .unwrap()
+            .push(held.expect("the query this callback answers"));
     });
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) >= 1
@@ -148,7 +145,8 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
         "nothing answers a refused query, and the kept ones wait"
     );
 
-    drop(kept.lock().unwrap().remove(0));
+    let first = kept.lock().unwrap().remove(0);
+    engine.release_held(first);
     until(&engine, "the first kept query's final", || {
         router.seen(|s| s.answers.len()) >= 1
     });
@@ -157,7 +155,10 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
         held() == 2
     });
 
-    kept.lock().unwrap().clear();
+    let rest: Vec<HeldQueryId> = kept.lock().unwrap().drain(..).collect();
+    for held in rest {
+        engine.release_held(held);
+    }
     until(&engine, "the kept queries' finals", || {
         router.seen(|s| s.answers.len()) >= 3
     });
@@ -187,7 +188,7 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
     let engine = super::entity_tables::open_under(&router, limits);
     let many = wz_session_core::caps::MAX_PENDING_REPLIES + 2;
     let refused: Arc<Mutex<Option<Result<(), ReplyError>>>> = Arc::default();
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::default();
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::default();
     let (refusal, slot) = (refused.clone(), kept.clone());
     declare(&engine, "demo/r/**", move |holder, query, out| {
         for _ in 0..many {
@@ -195,7 +196,7 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
                 .expect("a reply under the bound");
         }
         *refusal.lock().unwrap() = Some(out.reply_keyed(query.keyexpr(), &[0u8; 17]));
-        *slot.lock().unwrap() = Some(holder.hold_query(query));
+        *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
     });
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) >= 1
@@ -210,11 +211,11 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
         "a payload past the bound is refused to the callback"
     );
     let held = kept.lock().unwrap().take().expect("the kept query");
-    held.reply(&mut |out| {
+    engine.reply_held(held, "demo/r/a", &mut |out| {
         out.reply_keyed("demo/r/a", b"later")
             .expect("a reply on the query's own key");
     });
-    drop(held);
+    engine.release_held(held);
     until(&engine, "the late reply and the final", || {
         router.seen(|s| s.answers.len()) >= many + 2
     });
@@ -224,5 +225,97 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
         router.seen(|s| s.answers.clone()),
         expected,
         "every reply under the bound, none past it, then the final"
+    );
+}
+
+/// A kept query holds nothing of its session but its id: the session's last handle lets the
+/// engine go with a query still kept, the rows of its held Finals before its arena, and a reply to
+/// it once the session is closed answers nothing. The CONTROL is the session standing while its
+/// handle is held. Turned red by a closed session that still answers a kept query, or by a keep
+/// that keeps the engine, and so its arena, alive.
+#[test]
+fn a_query_kept_past_its_session_holds_none_of_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let kept: Arc<Mutex<Option<HeldQueryId>>> = Arc::default();
+    let slot = kept.clone();
+    declare(&engine, "demo/p/**", move |holder, query, _out| {
+        *slot.lock().unwrap() = holder.keep_query(query).expect("room to keep the query");
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    router.send(Command::Query(5, "demo/p/a"));
+    until(&engine, "the callback to keep the query", || {
+        kept.lock().unwrap().is_some()
+    });
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    assert!(
+        !SessionEngine::is_closed(&*engine),
+        "CONTROL: the session stands while its handle is held"
+    );
+
+    let gone = Arc::downgrade(&engine);
+    SessionDrive::close(&*engine);
+    let mut answered = false;
+    engine.reply_held(held, "demo/p/a", &mut |_out| answered = true);
+    assert!(!answered, "a query of a closed session answers nothing");
+    engine.release_held(held);
+    drop(engine);
+    assert!(
+        gone.upgrade().is_none(),
+        "the kept query keeps nothing of the engine alive"
+    );
+}
+
+/// Keeping a query, answering it later and letting it go take no memory of the heap: the hold is a
+/// row the session lent at its open, which keeps what the replies are built from beside the key,
+/// the caller hands the key to the reply, and the program holds plain values. The allocations
+/// counted are the calling thread's, which keeps the query from inside its callback and answers
+/// and lets it go after. The CONTROL is the reply and the Final reaching the router: the counted
+/// calls did their work. Turned red by a keep that copies the query's key or parameters onto the
+/// heap, or boxes what it holds.
+#[test]
+fn keeping_answering_and_letting_go_of_a_query_allocate_nothing() {
+    use super::redial_heap::counted;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let kept: Arc<Mutex<Option<(HeldQueryId, u64)>>> = Arc::default();
+    let slot = kept.clone();
+    declare(&engine, "demo/z/**", move |holder, query, _out| {
+        let mut held = None;
+        let allocations = counted(|| {
+            held = holder.keep_query(query).expect("room to keep the query");
+        });
+        *slot.lock().unwrap() = held.map(|held| (held, allocations));
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    router.send(Command::Query(11, "demo/z/a"));
+    until(&engine, "the callback to keep the query", || {
+        kept.lock().unwrap().is_some()
+    });
+    let (held, keeping) = kept.lock().unwrap().take().expect("the kept query");
+    let answering = counted(|| {
+        engine.reply_held(held, "demo/z/a", &mut |out| {
+            out.reply_keyed("demo/z/a", b"late")
+                .expect("a reply on the query's own key");
+        });
+    });
+    let letting_go = counted(|| engine.release_held(held));
+    until(&engine, "the reply and the final", || {
+        router.seen(|s| s.answers.len()) >= 2
+    });
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["reply", "final"],
+        "CONTROL: the kept query was answered and let go"
+    );
+    assert_eq!(
+        (keeping, answering, letting_go),
+        (0, 0, 0),
+        "a kept query takes no memory of the heap"
     );
 }

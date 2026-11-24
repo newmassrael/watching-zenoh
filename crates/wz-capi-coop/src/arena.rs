@@ -50,9 +50,6 @@
 //! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
 //!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
 //!   build's), each a link's batch long, which the ports share, lent with the links' tables;
-//! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
-//!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
-//!   state's tables (`SessionRows::lane_bytes`);
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
 //!   each reliability a peer has a chain open in, and one for the rejoined message the round
@@ -65,8 +62,8 @@
 //!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
 //!   each a link's batch long, with their flags and a row beside each for the rest of the
 //!   publish (`wz_runtime_coop::handed`), lent with the links' tables;
-//! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): the key expressions it declares
+//! - the session's one table set, each declaration it announces and announces again over a new
+//!   link a row of it ([`EntityRows`]): the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
 //!   Interests those filters and listeners hold open, at most one for each of them;
@@ -120,6 +117,8 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
+#[cfg(feature = "listen")]
+use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -138,12 +137,14 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
+use crate::engine::{CoopTables, FACE_SET_BYTES, HELD_SET_BYTES};
 #[cfg(feature = "query")]
-use crate::engine::LegSink;
-use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
+use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
+#[cfg(feature = "query")]
+use wz_session_core::reply_hold::HeldReply;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,25 +183,25 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The delivery lane's flag and its area, and the round's records, the callbacks they owe and
-/// its keys.
-const LANE_ROWS: usize = 5;
+/// The round's records, the callbacks they owe and its keys: the round keeps no area, since every
+/// record is read where it lies.
+const LANE_ROWS: usize = 3;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
-/// The slots of the datagrams the udp ports of a session that listens hold, and their flags
-/// (`listen`).
-const PORT_RX_ROWS: usize = 2 * cfg!(feature = "listen") as usize;
+/// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
+/// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
+const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
-/// The application's tables apart from the session's one table set: liveliness tokens
-/// (`liveliness`), and the declaration watchers.
-const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
-/// nothing holds no table of gets.
-const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
+/// The application's tables apart from the session's one table set: the declaration watchers.
+const OBSERVER_ROWS: usize = 1;
+/// The pending gets, the ends of their legs, the legs' callbacks, the session's note of each leg
+/// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
+/// that asks nothing holds no table of gets.
+const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -211,9 +212,9 @@ const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): the session's
-/// one table set, write filters, matching listeners, interests and the key arena.
-const ENTITY_ROWS: usize = 5;
+/// The session's declarations ([`ArenaPlan::put_entities`]): the session's one table set and the
+/// key arena.
+const ENTITY_ROWS: usize = 2;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
@@ -221,10 +222,22 @@ const CELL_ROWS: usize = 6;
 const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
-/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), as many as the ABI
-/// asks places of, at most these.
-const ENTITY_PLACE_ROWS: usize =
-    2 * (3 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize);
+/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
+/// (`query`), pending liveliness gets (`liveliness-get`), matching listeners, declaration watches
+/// (`remote-declaration-watch` or `declarations-synced-event`), transport and link events
+/// listeners (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the
+/// ABI asks places of, at most these.
+const ENTITY_PLACE_ROWS: usize = 2
+    * (4 + cfg!(feature = "queryable") as usize
+        + 2 * cfg!(feature = "liveliness") as usize
+        + cfg!(feature = "query") as usize
+        + cfg!(feature = "liveliness-get") as usize
+        + cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) as usize
+        + 2 * cfg!(feature = "connectivity") as usize
+        + 2 * cfg!(feature = "advanced") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -243,7 +256,15 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + ENTITY_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
-    + ENTITY_PLACE_ROWS;
+    + ENTITY_PLACE_ROWS
+    + CACHE_RING_ROWS
+    + FINAL_ROWS;
+
+/// The flag and the span of the ring the advanced publishers' caches keep their samples in
+/// (`advanced-cache`).
+const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
+const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -273,6 +294,46 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "MAX_LIVELINESS_SUBSCRIPTIONS",
         ),
         EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
+        EntityKind::PendingGet => (
+            "pending get place flags",
+            "pending get places",
+            "MAX_PENDING_QUERIES",
+        ),
+        EntityKind::PendingLivelinessGet => (
+            "pending liveliness get place flags",
+            "pending liveliness get places",
+            "MAX_PENDING_LIVELINESS_GETS",
+        ),
+        EntityKind::MatchingListener => (
+            "matching listener place flags",
+            "matching listener places",
+            "MAX_MATCHING_LISTENERS",
+        ),
+        EntityKind::DeclWatch => (
+            "declaration watch place flags",
+            "declaration watch places",
+            "MAX_DECL_WATCHES",
+        ),
+        EntityKind::TransportEventsListener => (
+            "transport events listener place flags",
+            "transport events listener places",
+            "MAX_TRANSPORT_EVENTS_LISTENERS",
+        ),
+        EntityKind::AdvancedPublisher => (
+            "advanced publisher place flags",
+            "advanced publisher places",
+            "MAX_ADVANCED_PUBLISHERS",
+        ),
+        EntityKind::AdvancedSubscriber => (
+            "advanced subscriber place flags",
+            "advanced subscriber places",
+            "MAX_ADVANCED_SUBSCRIBERS",
+        ),
+        EntityKind::LinkEventsListener => (
+            "link events listener place flags",
+            "link events listener places",
+            "MAX_LINK_EVENTS_LISTENERS",
+        ),
     }
 }
 
@@ -399,6 +460,27 @@ pub struct EntityRows {
     pub queriers: usize,
     /// The matching listeners (`MAX_MATCHING_LISTENERS`).
     pub matching_listeners: usize,
+    /// The gets pending at once (`MAX_PENDING_QUERIES`), each a row of every table of pending
+    /// gets; none in a build without `query`.
+    pub pending_gets: usize,
+    /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
+    /// without `liveliness-get`.
+    pub pending_liveliness_gets: usize,
+    /// The declaration watches (`MAX_DECL_WATCHES`); none in a build with neither
+    /// `remote-declaration-watch` nor `declarations-synced-event`.
+    pub decl_watches: usize,
+    /// The transport events listeners (`MAX_TRANSPORT_EVENTS_LISTENERS`); none in a build
+    /// without `connectivity`.
+    pub transport_events_listeners: usize,
+    /// The advanced publishers (`MAX_ADVANCED_PUBLISHERS`), which the engine keeps no row of: the
+    /// ABI's places of them only; none in a build without `advanced`.
+    pub advanced_publishers: usize,
+    /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
+    /// advanced publishers; none in a build without `advanced`.
+    pub advanced_subscribers: usize,
+    /// The link events listeners (`MAX_LINK_EVENTS_LISTENERS`); none in a build without
+    /// `connectivity`.
+    pub link_events_listeners: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -413,8 +495,10 @@ pub struct GetTables {
 }
 
 impl GetTables {
-    /// How many gets every table together holds pending at once: the rows of the table of the ends
-    /// of the legs (`crate::engine`'s `EndedLegs`). `None` past the address space.
+    /// How many gets every table together holds pending at once: the rows of the tables of the
+    /// ends of the legs, of their callbacks and of the session's note of each leg pending
+    /// (`crate::engine`'s `EndedLegs`, `LegRows` and `PendingGet`). `None` past the address
+    /// space.
     pub const fn legs(&self) -> Option<usize> {
         match self.rows.queries.checked_add(self.rows.liveliness_gets) {
             Some(each) => each.checked_mul(self.tables),
@@ -426,7 +510,7 @@ impl GetTables {
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
 #[cfg(feature = "query")]
-type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -485,6 +569,14 @@ impl EntityRows {
             EntityKind::Token => self.tokens,
             EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
             EntityKind::Querier => self.queriers,
+            EntityKind::PendingGet => self.pending_gets,
+            EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
+            EntityKind::MatchingListener => self.matching_listeners,
+            EntityKind::DeclWatch => self.decl_watches,
+            EntityKind::TransportEventsListener => self.transport_events_listeners,
+            EntityKind::AdvancedPublisher => self.advanced_publishers,
+            EntityKind::AdvancedSubscriber => self.advanced_subscribers,
+            EntityKind::LinkEventsListener => self.link_events_listeners,
         }
     }
 
@@ -578,6 +670,9 @@ pub struct TransportRows {
     /// The slots of the datagrams the session's udp ports hold: how many, and the bytes of each.
     #[cfg(feature = "listen")]
     port_rx: (usize, usize),
+    /// The rows of the peers the session's udp ports take, one for each link it may hold.
+    #[cfg(feature = "listen")]
+    port_peers: usize,
 }
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
@@ -594,6 +689,9 @@ pub(crate) struct TransportTables {
     /// The places of the publishes the session keeps for its other faces.
     #[cfg(any(feature = "listen", feature = "group"))]
     pub(crate) handed: HandedTable,
+    /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
+    #[cfg(feature = "listen")]
+    pub(crate) port_rows: PortRows,
 }
 
 impl TransportRows {
@@ -621,6 +719,8 @@ impl TransportRows {
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
+            #[cfg(feature = "listen")]
+            port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
     }
 
@@ -662,6 +762,10 @@ impl TransportRows {
     #[cfg(feature = "group")]
     fn group_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
         let (buffers, bytes) = self.group_rx;
+        // A plan that counts no group laid no table of them out.
+        if buffers == 0 {
+            return tables;
+        }
         tables.with_group_rx(lend.byte_cells(bytes, buffers))
     }
 
@@ -677,8 +781,6 @@ impl TransportRows {
 /// its faces' peers write and are owed, and the key arena every keyed row keeps its key in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRows {
-    /// The bytes of the session's round of deliveries (`crate::round`).
-    lane_bytes: usize,
     /// The rows of the round's tables.
     round: RoundRowCounts,
     /// The rows of the engine's record of the session's declarations.
@@ -691,15 +793,17 @@ pub struct SessionRows {
     held_queries: usize,
     /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
     key_bytes: usize,
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`), none for no ring.
+    #[cfg(feature = "advanced-cache")]
+    cache_bytes: usize,
+    /// The replies the gets that consolidate hold to their Finals, a row each, shared by every get
+    /// of the session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    held_replies: usize,
 }
 
 impl SessionRows {
-    /// The bytes of the delivery lane's area (`DELIVERY_LANE_BYTES`): one table of one buffer,
-    /// claimed for the session's life (`ArenaPlan::claim_lane_and_handle`).
-    pub fn lane_bytes(&self) -> usize {
-        self.lane_bytes
-    }
-
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities
@@ -714,6 +818,27 @@ impl SessionRows {
     /// (`KEY_ARENA_BYTES`).
     pub fn key_bytes(&self) -> usize {
         self.key_bytes
+    }
+
+    /// How many queries the session holds for its queryables' callbacks at once
+    /// (`MAX_PENDING_FINALS`): the rows of the Finals held and of the requests refused.
+    pub fn held_queries(&self) -> usize {
+        self.held_queries
+    }
+
+    /// The bytes of the ring the session's advanced publishers' caches keep their samples in
+    /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
+    /// ([`CacheSpan::claimed`]).
+    #[cfg(feature = "advanced-cache")]
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
+    }
+
+    /// How many replies the gets that consolidate hold to their Finals at once, of every get of the
+    /// session (`MAX_PENDING_REPLIES`).
+    #[cfg(feature = "query")]
+    pub fn held_replies(&self) -> usize {
+        self.held_replies
     }
 }
 
@@ -825,6 +950,8 @@ impl ArenaPlan {
                 group_rx: (0, 0),
                 #[cfg(feature = "listen")]
                 port_rx: (0, 0),
+                #[cfg(feature = "listen")]
+                port_peers: 0,
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -860,11 +987,6 @@ impl ArenaPlan {
                 )
                 .min(links);
         }
-        plan.session.lane_bytes = plan.lent(
-            "DELIVERY_LANE_BYTES",
-            Quota::at_most(limits.delivery_lane_bytes()),
-            caps::DELIVERY_LANE_BYTES,
-        );
         plan.session.round = RoundRowCounts {
             records: plan.lent(
                 "DELIVERY_LANE_EVENTS",
@@ -929,9 +1051,10 @@ impl ArenaPlan {
         // A receive buffer for each group the session may join, lent with the links' tables
         // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
-        // datagram longer than it is dropped and counted by its transport.
+        // datagram longer than it is dropped and counted by its transport. A config that names no
+        // group has no table of them in its plan.
         #[cfg(feature = "group")]
-        {
+        if !config.groups.is_empty() {
             let buffers = config.groups.len().min(caps::MAX_TASKS);
             let bytes = config
                 .groups
@@ -959,7 +1082,8 @@ impl ArenaPlan {
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
-            let slots = if config.listen.count() > 0 { slots } else { 0 };
+            let listens = config.listen.count() > 0;
+            let slots = if listens { slots } else { 0 };
             plan.transport.port_rx = (slots, link_bytes);
             plan.put_table(
                 ["link port datagram flags", "link port datagram slots"],
@@ -967,15 +1091,22 @@ impl ArenaPlan {
                 slots,
                 link_bytes,
             );
+            // The ports' book of their peers, a row for each link the session may hold, and of
+            // the datagrams sorted for them, a row for each slot a datagram holds while it waits
+            // (`TransportRows::lent_from`).
+            let peers = if listens { links } else { 0 };
+            plan.transport.port_peers = peers;
+            let peer_rows = plan.sized(Arena::table_bytes::<PortPeerRow>(peers));
+            plan.put(
+                "udp port peers",
+                "MAX_FACES + MAX_ACCEPT_PENDING",
+                1,
+                peer_rows,
+            );
+            let queue_rows = plan.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+            plan.put("udp port queue", "UDP_PORT_SLOTS", 1, queue_rows);
         }
-        // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
-        plan.put_table(
-            ["delivery lane flag", "delivery lane"],
-            "DELIVERY_LANE_BYTES",
-            1,
-            plan.session.lane_bytes,
-        );
-        // The round's tables, lent after its area (`crate::round::RoundRows::lent`).
+        // The round's tables (`crate::round::RoundRows::lent`).
         plan.put(
             "delivery records",
             "DELIVERY_LANE_EVENTS",
@@ -1035,13 +1166,6 @@ impl ArenaPlan {
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
         plan.session.entities = plan.kept(entity_rows(limits));
-        #[cfg(feature = "liveliness")]
-        plan.put(
-            "liveliness tokens",
-            "MAX_LOCAL_TOKENS",
-            plan.session.entities.tokens,
-            wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-        );
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
         let watchers = plan.lent(
@@ -1097,15 +1221,45 @@ impl ArenaPlan {
                 get_bytes,
             );
         }
-        // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
+        // The ends of the legs, the rows of their callbacks and the session's note of each leg
+        // pending, a row of each for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
+            const BASIS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
             let legs = plan.sized(plan.session.gets.legs());
             plan.put(
                 "ended legs",
-                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                BASIS,
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
+            );
+            plan.put(
+                "leg callbacks",
+                BASIS,
+                legs,
+                core::mem::size_of::<Option<crate::engine::LegRow>>(),
+            );
+            plan.put(
+                "pending legs",
+                BASIS,
+                legs,
+                core::mem::size_of::<crate::engine::PendingGet>(),
+            );
+        }
+        // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
+        // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
+        #[cfg(feature = "query")]
+        {
+            plan.session.held_replies = plan.lent(
+                "MAX_PENDING_REPLIES",
+                limits.max_pending_replies(),
+                caps::MAX_PENDING_REPLIES,
+            );
+            plan.put(
+                "held replies",
+                "MAX_PENDING_REPLIES",
+                plan.session.held_replies,
+                core::mem::size_of::<HeldReply<u64, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
@@ -1177,6 +1331,40 @@ impl ArenaPlan {
         } else {
             0
         };
+        // The Finals held for those queries and the requests a dispatch refused for want of a
+        // row, a row of each for each query held (`engine::query::FinalHolds`).
+        #[cfg(feature = "queryable")]
+        {
+            let held = plan.session.held_queries;
+            plan.put(
+                "held finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::FinalHold>(),
+            );
+            plan.put(
+                "refused finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::RefusedFinal>(),
+            );
+        }
+        #[cfg(feature = "advanced-cache")]
+        {
+            plan.session.cache_bytes = plan.lent(
+                "ADVANCED_CACHE_BYTES",
+                Quota::at_most(caps::ADVANCED_CACHE_BYTES),
+                caps::ADVANCED_CACHE_BYTES,
+            );
+            if plan.session.cache_bytes != 0 {
+                plan.put_table(
+                    ["cache ring flag", "cache ring"],
+                    "ADVANCED_CACHE_BYTES",
+                    1,
+                    plan.session.cache_bytes,
+                );
+            }
+        }
         plan.put_entities();
         plan.settled()
     }
@@ -1196,63 +1384,33 @@ impl ArenaPlan {
         &self.places
     }
 
-    /// The one buffer of each of `lane` and `handle`, tables of one buffer the plan's lender
-    /// lent whole ([`SessionRows::lane_bytes`], [`PlaceTables::handle`]), claimed for the
-    /// session's life: the lane's place and length, and the handle's place when the plan holds
-    /// one. The claims are never given back: what holds a buffer holds it until the session is
-    /// let go, and a buffer dropped then would write its cell's flag into an arena given back
+    /// The one buffer of `handle`, a table of one buffer the plan's lender lent whole
+    /// ([`PlaceTables::handle`]), claimed for the session's life: the handle's place when the plan
+    /// holds one. The claim is never given back: what holds the buffer holds it until the session
+    /// is let go, and a buffer dropped then would write its cell's flag into an arena given back
     /// before it. Refused as an arena with no room for a table lent no buffer.
-    pub(crate) fn claim_lane_and_handle(
+    pub(crate) fn claim_handle(
         &self,
-        lane: LentByteCells,
         handle: Option<LentByteCells>,
     ) -> Result<ClaimedPlaces, ArenaRefused> {
-        let lane = claimed(lane);
-        let handle = handle.map(claimed);
-        match (lane, handle) {
-            (Some((lane_area, lane_bytes)), None) => Ok(ClaimedPlaces {
-                lane_area,
-                lane_bytes,
-                handle: None,
-            }),
-            (Some((lane_area, lane_bytes)), Some(Some((base, bytes)))) => Ok(ClaimedPlaces {
-                lane_area,
-                lane_bytes,
+        match handle.map(claimed) {
+            None => Ok(ClaimedPlaces { handle: None }),
+            Some(Some((base, bytes))) => Ok(ClaimedPlaces {
                 handle: Some(HandlePlace { base, bytes }),
             }),
-            (None, _) | (_, Some(None)) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
-                asked: Some(self.session.lane_bytes.max(self.places.handle_bytes)),
+            Some(None) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
+                asked: Some(self.places.handle_bytes),
                 left: 0,
             })),
         }
     }
 
-    /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
+    /// The rows of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) {
-        let rows = self.session.entities;
-        // The session's one table set, holding the kinds moved onto it so far.
+        // The session's one table set, holding the kinds moved onto it so far: the write filters,
+        // the matching listeners and the Interests they hold among them.
         let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
         self.put("session tables", "MAX_DECLARED_KEYEXPRS", 1, tables);
-        let filters = self.sized(rows.filters());
-        self.put(
-            "write filters",
-            "MAX_PUBLISHERS + MAX_QUERIERS",
-            filters,
-            EntryBytes::FILTER,
-        );
-        self.put(
-            "matching listeners",
-            "MAX_MATCHING_LISTENERS",
-            rows.matching_listeners,
-            EntryBytes::MATCH,
-        );
-        let interests = self.sized(rows.interests());
-        self.put(
-            "interests",
-            "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
-            interests,
-            EntryBytes::INTEREST,
-        );
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`TableLender::keys`), not a row of
         // each.
@@ -1286,6 +1444,8 @@ impl ArenaPlan {
             queryables: self.session.entities.queryables,
             tokens: self.session.entities.tokens,
             liveliness_subscribers: self.session.entities.liveliness_subscribers,
+            write_filters: self.session.entities.filters().unwrap_or(usize::MAX),
+            matching_listeners: self.session.entities.matching_listeners,
             ..TableRows::default()
         }
     }
@@ -1318,8 +1478,8 @@ impl ArenaPlan {
 
     /// How many queries the session holds for its queryables' callbacks at once
     /// (`MAX_PENDING_FINALS`), resolved as the arena's rows are and none in a build without
-    /// `queryable`. They are no row of the arena: the query plane holds them in a fixed table of
-    /// its own, as it is shared with what answers outside the session's lock.
+    /// `queryable`. Their Finals lie in rows of the arena, a row each, as do the requests a
+    /// dispatch refused for want of one.
     pub fn held_queries(&self) -> usize {
         self.session.held_queries
     }
@@ -1579,6 +1739,64 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             "MAX_MATCHING_LISTENERS",
             limits.max_matching_listeners(),
         )?,
+        // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
+        // holds pending takes one row of every face's table, so no more are pending at once.
+        pending_gets: if cfg!(feature = "query") {
+            lent::<{ caps::MAX_PENDING_QUERIES }>(
+                "MAX_PENDING_QUERIES",
+                limits.max_pending_queries(),
+            )?
+        } else {
+            0
+        },
+        pending_liveliness_gets: if cfg!(feature = "liveliness-get") {
+            lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+                "MAX_PENDING_LIVELINESS_GETS",
+                limits.max_pending_liveliness_gets(),
+            )?
+        } else {
+            0
+        },
+        decl_watches: if cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) {
+            lent::<{ caps::MAX_DECL_WATCHES }>("MAX_DECL_WATCHES", limits.max_decl_watches())?
+        } else {
+            0
+        },
+        transport_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+                "MAX_TRANSPORT_EVENTS_LISTENERS",
+                limits.max_transport_events_listeners(),
+            )?
+        } else {
+            0
+        },
+        advanced_publishers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+                "MAX_ADVANCED_PUBLISHERS",
+                limits.max_advanced_publishers(),
+            )?
+        } else {
+            0
+        },
+        advanced_subscribers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+                "MAX_ADVANCED_SUBSCRIBERS",
+                limits.max_advanced_subscribers(),
+            )?
+        } else {
+            0
+        },
+        link_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+                "MAX_LINK_EVENTS_LISTENERS",
+                limits.max_link_events_listeners(),
+            )?
+        } else {
+            0
+        },
     })
 }
 
@@ -1960,13 +2178,8 @@ impl EntityPlaces {
     }
 }
 
-/// The places an open claims from its arena for the session's life
-/// (`ArenaPlan::claim_lane_and_handle`).
+/// The places an open claims from its arena for the session's life (`ArenaPlan::claim_handle`).
 pub(crate) struct ClaimedPlaces {
-    /// Where the delivery lane's area starts.
-    pub(crate) lane_area: NonNull<u8>,
-    /// The bytes of the lane's area.
-    pub(crate) lane_bytes: usize,
     /// The place of the ABI's handle, `None` for a plan with no place.
     pub(crate) handle: Option<HandlePlace>,
 }
@@ -1978,6 +2191,47 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
     let (base, len) = buffer.raw();
     core::mem::forget(buffer);
     Some((NonNull::new(base)?, len))
+}
+
+/// The span of a session's arena its advanced publishers' caches keep their ring in
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
+/// it holds an empty ring, and lent under the engine's lock of its own
+/// (`wz_capi_port::CacheBytes`).
+#[cfg(feature = "advanced-cache")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CacheSpan {
+    base: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a span is an address in a session's arena and its length; its bytes are reached only
+// through the engine's lock of the span, so handing the span to another thread shares nothing.
+#[cfg(feature = "advanced-cache")]
+unsafe impl Send for CacheSpan {}
+
+#[cfg(feature = "advanced-cache")]
+impl CacheSpan {
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
+    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
+        let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(bytes),
+            left: 0,
+        }))?;
+        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
+        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
+        Ok(Self { base, len })
+    }
+
+    /// The span's bytes.
+    ///
+    /// # Safety
+    /// The caller holds the span alone for as long as the bytes are borrowed, and the arena the
+    /// span lies in stands that long.
+    pub(crate) unsafe fn bytes<'a>(self) -> &'a mut [u8] {
+        // SAFETY: the caller's; the span is `len` bytes of the arena.
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    }
 }
 
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let

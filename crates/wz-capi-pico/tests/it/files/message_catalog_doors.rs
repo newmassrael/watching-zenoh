@@ -81,7 +81,7 @@ fn release(this: &mut wz_ext_owned_message_catalog_t) {
 
 fn entry(this: &wz_ext_owned_message_catalog_t, index: usize) -> (ZResult, wz_ext_message_entry_t) {
     unsafe {
-        let mut out: wz_ext_message_entry_t = std::mem::zeroed();
+        let mut out = wz_ext_message_entry_t::default();
         let rc = wz_ext_message_catalog_entry(wz_ext_message_catalog_loan(this), index, &mut out);
         (rc, out)
     }
@@ -254,7 +254,7 @@ mod e2e {
         frame: &[u8],
         now: u64,
     ) -> wz_ext_e2e_verdict_t {
-        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        let mut verdict = wz_ext_e2e_verdict_t::default();
         let rc = wz_ext_e2e_receiver_judge(
             wz_ext_e2e_receiver_loan(rx),
             0,

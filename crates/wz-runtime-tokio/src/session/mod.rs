@@ -151,10 +151,9 @@ use crate::sync::Mutex;
 ///
 /// The `rid = 0` / literal-id 0 envelope `build_request_query_with_meta` wraps
 /// the body in is discarded: the loopback rid + resolved keyexpr ride the
-/// `local_query()` call arguments, not the Query body. The `.expect` names the
-/// real invariant — the `CodecError` arm is unreachable on this `alloc` runtime
-/// profile (the owned `SceBytes<N>` copies are unbounded heap copies, `N`
-/// advisory).
+/// `local_query()` call arguments, not the Query body. A part the codec refuses
+/// (a source info that names no zid) is answered as the value, and the query is
+/// refused whole before anything is sent, as a refused wire emit is.
 ///
 /// ## Panic contract (R311y252 — a deliberate wire/loopback unification)
 ///
@@ -175,7 +174,9 @@ use crate::sync::Mutex;
 /// because the trimmed meta pins `timeout_ms` to its `0` default, and
 /// `query_value` asserts nothing.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
-fn build_loopback_query(opts: &QueryOptions) -> wz_session_core::wire::parts::QueryOwned {
+fn build_loopback_query(
+    opts: &QueryOptions,
+) -> Result<wz_session_core::wire::parts::QueryOwned, sce_forge_runtime::codec::CodecError> {
     // The assembly is session-core's (`QueryOptions::loopback_query`), shared with the other
     // engines' loopback legs; this engine's own part is the leg that delivers it.
     opts.loopback_query()
@@ -4411,12 +4412,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             obs.face_ref()
                 .remote_subscribers
                 .initial_declarations_final()
-                && !obs.face_ref().remote_subscribers.has_matching_for(
-                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        keyexpr,
-                        Locality::Remote,
-                    ),
-                )
+                && !obs
+                    .face_ref()
+                    .remote_subscribers
+                    .has_matching_at(keyexpr, Locality::Remote)
         })
     }
 
@@ -5211,9 +5210,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                             key,
                             payload,
                             meta.qos,
-                            reliable,
-                            express,
-                            opts.priority_band(),
+                            wz_session_core::session_actions::SendAs {
+                                reliable,
+                                express,
+                                priority: opts.priority_band(),
+                            },
                         )
                     }) {
                     Some(sent) => {
@@ -5767,9 +5768,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     key,
                     payload,
                     params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
+                    wz_session_core::session_actions::SendAs {
+                        reliable: params.reliable,
+                        express: params.express,
+                        priority: params.priority,
+                    },
                 )
             }) {
                 Some(sent) => Ok(sent?),
@@ -6203,6 +6206,24 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             #[cfg(not(feature = "transport-shm"))]
             let descriptor_value = shm_value;
 
+            // The body the session's own queryables are handed, made before anything is sent: a
+            // part the codec refuses refuses the query whole, as a refused wire emit does. It
+            // carries the GET's selector params (`_sn` / `_max`), so a SessionLocal queryable
+            // filters as the wire path does.
+            #[cfg(feature = "query-queryable")]
+            let loopback = match allows_local
+                .then(|| build_loopback_query(&opts))
+                .transpose()
+            {
+                Ok(query) => query,
+                Err(e) => {
+                    R::with_mutex_mut(&self.observer, |observer| {
+                        observer.face().replies.unregister(rid);
+                    });
+                    return Err(SendWireError::Codec(e).into());
+                }
+            };
+
             if allows_remote {
                 // R240 — thread QueryOptions metadata (target /
                 // consolidation / attachment / timeout_ms) through the
@@ -6276,102 +6297,95 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             // plane. A pure getter (query-queryable OFF) has no local
             // queryable to answer, so the loopback yields zero replies
             // and only the synthetic Final (below) fires.
-            if allows_local {
-                #[cfg(feature = "query-queryable")]
-                {
-                    // R3061 -- a value that is a chunk is handed to a local queryable AS the
-                    // chunk, the way a local subscriber is handed a published one. Looked up
-                    // only when some local queryable listens, because the view takes a
-                    // reference to the segment that nobody would release. `false` for
-                    // completeness is the wider test: a complete-only query that dispatch
-                    // then refuses just drops the view.
-                    #[cfg(feature = "transport-shm")]
-                    let local_value = shm_value
-                        .filter(|_| {
-                            R::with_mutex_mut(&self.observer, |observer| {
-                                observer.read_app(|app| {
-                                    app.queryables
-                                        .has_local_matching(selector.loopback_keyexpr, false)
-                                })
+            #[cfg(feature = "query-queryable")]
+            if let Some(query) = loopback {
+                // R3061 -- a value that is a chunk is handed to a local queryable AS the
+                // chunk, the way a local subscriber is handed a published one. Looked up
+                // only when some local queryable listens, because the view takes a
+                // reference to the segment that nobody would release. `false` for
+                // completeness is the wider test: a complete-only query that dispatch
+                // then refuses just drops the view.
+                #[cfg(feature = "transport-shm")]
+                let local_value = shm_value
+                    .filter(|_| {
+                        R::with_mutex_mut(&self.observer, |observer| {
+                            observer.read_app(|app| {
+                                app.queryables
+                                    .has_local_matching(selector.loopback_keyexpr, false)
                             })
                         })
-                        .and_then(|chunk| chunk.receiver_view())
-                        .map(|view| {
-                            (
-                                opts.encoding
-                                    .clone()
-                                    .map(wz_session_core::sample::CarriedEncoding::into_hint)
-                                    .unwrap_or_default(),
-                                view,
-                            )
-                        });
-                    #[cfg(not(feature = "transport-shm"))]
-                    let local_value: Option<(
-                        wz_session_core::sample::EncodingHint,
-                        wz_session_core::link::RxBytes,
-                    )> = None;
-                    R::with_mutex_mut(&self.observer, |observer| {
-                        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(
-                            observer.reply_bounds(),
-                        );
-                        // R311y94 (review V2) — carry the GET's selector params
-                        // (`_sn` / `_max`) into the loopback Query so a SessionLocal
-                        // queryable filters identically to the wire path.
-                        let query = build_loopback_query(&opts);
-                        // R311y321 residual closed: the GET's `target` is a
-                        // Request-level slot the loopback body does not carry, so
-                        // it rides the call. Use the GATED `effective_target()` —
-                        // the SAME accessor the wire path (`query_metadata`) uses
-                        // — NEVER the raw `opts.target` pub field: with
-                        // `query-target` OFF that field is a bypassable pub write
-                        // (R311y317), and reading it here would re-arm the
-                        // completeness filter on the loopback leg in a build that
-                        // cannot emit a target — the last-hop-that-knows trap the
-                        // accessor exists to close. Gated, an `AllComplete` GET
-                        // fires only complete SessionLocal queryables, as the wire
-                        // path does; `query-target` OFF leaves the leg inert.
-                        // R2594 — the GET's QoS rides the call beside its
-                        // target, and it is the value a remote queryable reads
-                        // off this GET's Request: an absent `opts.qos` emits no
-                        // ext, which the receiver decodes as DEFAULT.
-                        let envelope = wz_session_core::query::QueryEnvelope {
-                            rid,
-                            target: opts.effective_target(),
-                            qos: opts
-                                .qos
-                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
-                        };
-                        // The stack of the loopback leg is the query's own, not the wire's:
-                        // the session's own queryables are not reached through a route.
-                        #[cfg(feature = "pubsub-ts-stack")]
-                        observer.with_app(|app| {
-                            app.queryables.local_query_with_stack(
-                                envelope,
-                                selector.loopback_keyexpr,
-                                &query,
-                                local_value,
-                                opts.ts_stack.as_ref(),
-                                &mut replies,
-                            )
-                        });
-                        #[cfg(not(feature = "pubsub-ts-stack"))]
-                        observer.with_app(|app| {
-                            app.queryables.local_query_with_value(
-                                envelope,
-                                selector.loopback_keyexpr,
-                                &query,
-                                local_value,
-                                &mut replies,
-                            )
-                        });
-                        for reply in
-                            wz_session_core::reply_stage::ReplyStaging::drain_staged(&mut replies)
-                        {
-                            let inbound: InboundReply = reply.into();
-                            observer.face().replies.deliver_local_reply(&inbound);
-                        }
+                    })
+                    .and_then(|chunk| chunk.receiver_view())
+                    .map(|view| {
+                        (
+                            opts.encoding
+                                .clone()
+                                .map(wz_session_core::sample::CarriedEncoding::into_hint)
+                                .unwrap_or_default(),
+                            view,
+                        )
                     });
-                }
+                #[cfg(not(feature = "transport-shm"))]
+                let local_value: Option<(
+                    wz_session_core::sample::EncodingHint,
+                    wz_session_core::link::RxBytes,
+                )> = None;
+                R::with_mutex_mut(&self.observer, |observer| {
+                    let mut replies =
+                        wz_session_core::reply_stage::ReplyStage::held_to(observer.reply_bounds());
+                    // R311y321 residual closed: the GET's `target` is a
+                    // Request-level slot the loopback body does not carry, so
+                    // it rides the call. Use the GATED `effective_target()` —
+                    // the SAME accessor the wire path (`query_metadata`) uses
+                    // — NEVER the raw `opts.target` pub field: with
+                    // `query-target` OFF that field is a bypassable pub write
+                    // (R311y317), and reading it here would re-arm the
+                    // completeness filter on the loopback leg in a build that
+                    // cannot emit a target — the last-hop-that-knows trap the
+                    // accessor exists to close. Gated, an `AllComplete` GET
+                    // fires only complete SessionLocal queryables, as the wire
+                    // path does; `query-target` OFF leaves the leg inert.
+                    // R2594 — the GET's QoS rides the call beside its
+                    // target, and it is the value a remote queryable reads
+                    // off this GET's Request: an absent `opts.qos` emits no
+                    // ext, which the receiver decodes as DEFAULT.
+                    let envelope = wz_session_core::query::QueryEnvelope {
+                        rid,
+                        target: opts.effective_target(),
+                        qos: opts
+                            .qos
+                            .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
+                    };
+                    // The stack of the loopback leg is the query's own, not the wire's:
+                    // the session's own queryables are not reached through a route.
+                    #[cfg(feature = "pubsub-ts-stack")]
+                    observer.with_app(|app| {
+                        app.queryables.local_query_with_stack(
+                            envelope,
+                            selector.loopback_keyexpr,
+                            &query,
+                            local_value,
+                            opts.ts_stack.as_ref(),
+                            &mut replies,
+                        )
+                    });
+                    #[cfg(not(feature = "pubsub-ts-stack"))]
+                    observer.with_app(|app| {
+                        app.queryables.local_query_with_value(
+                            envelope,
+                            selector.loopback_keyexpr,
+                            &query,
+                            local_value,
+                            &mut replies,
+                        )
+                    });
+                    for reply in
+                        wz_session_core::reply_stage::ReplyStaging::drain_staged(&mut replies)
+                    {
+                        let inbound: InboundReply = reply.into();
+                        observer.face().replies.deliver_local_reply(&inbound);
+                    }
+                });
             }
 
             // R311y290 — BOTH drains are gated on `allows_local`, mirroring
@@ -6492,11 +6506,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-subscriber")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.face_ref().remote_subscribers.has_matching_for(
-                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        keyexpr, locality,
-                    ),
-                )
+                obs.face_ref()
+                    .remote_subscribers
+                    .has_matching_at(keyexpr, locality)
             })
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -6531,13 +6543,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-queryable")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.face_ref().remote_queryables.has_matching_for(
-                    &wz_session_core::declare::queryable::QuerierCriterion::new(
-                        keyexpr,
-                        locality,
-                        complete_required,
-                    )
-                    .with_remote_inclusion(by_inclusion),
+                obs.face_ref().remote_queryables.has_matching_at(
+                    keyexpr,
+                    locality,
+                    complete_required,
+                    by_inclusion,
                 )
             })
         }
@@ -6972,10 +6982,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         };
         let _ = self.actions().send_interest_kinds(
             interest_id,
-            plane.kinds(),
-            /*current=*/ true,
-            /*future=*/ true,
-            aggregate,
+            wz_session_core::session_actions::InterestAsk {
+                kinds: plane.kinds(),
+                current: true,
+                future: true,
+                aggregate,
+            },
             mapping_id,
             suffix,
         );

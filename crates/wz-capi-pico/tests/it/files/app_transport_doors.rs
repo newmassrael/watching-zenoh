@@ -1195,3 +1195,142 @@ fn a_two_member_group_carries_a_put_and_a_get() {
         pipe.drops.load(Ordering::SeqCst) == 2
     });
 }
+
+/// The answer a session gives a peer's liveliness Interest, over the program's transport: the
+/// listening session holds a token, the dialling one asks which tokens are alive on its key and is
+/// answered with it, and with none on a key no token is on; once the token is dropped, the same
+/// question is answered with none. The listener reads the answer from the tokens its tables hold,
+/// with no second record of them, so a session that answered from an empty record turns the first
+/// assertion red.
+#[cfg(feature = "liveliness-get")]
+mod living {
+    use super::*;
+    use wz_capi_pico::liveliness::{
+        z_liveliness_declare_token, z_liveliness_get, z_liveliness_get_options_default,
+        z_liveliness_get_options_t, z_liveliness_token_drop, z_liveliness_token_move,
+        z_owned_liveliness_token_t,
+    };
+    use wz_capi_pico::{
+        z_keyexpr_as_view_string, z_owned_closure_reply_t, z_sample_keyexpr, z_string_data,
+        z_string_len, z_view_string_loan, z_view_string_t,
+    };
+
+    /// What a snapshot's closure saw: the key of each token (`err` for an error reply), and
+    /// whether the closure has been dropped.
+    #[derive(Default)]
+    struct Alive {
+        keys: Vec<String>,
+        done: bool,
+    }
+
+    unsafe extern "C" fn on_token(reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
+        let alive = &*(ctx as *const Mutex<Alive>);
+        if !z_reply_is_ok(reply) {
+            alive.lock().unwrap().keys.push("err".to_owned());
+            return;
+        }
+        let mut view: z_view_string_t = std::mem::zeroed();
+        assert_eq!(
+            z_keyexpr_as_view_string(z_sample_keyexpr(z_reply_ok(reply)), &mut view),
+            Z_OK
+        );
+        let string = z_view_string_loan(&view);
+        let bytes =
+            std::slice::from_raw_parts(z_string_data(string) as *const u8, z_string_len(string));
+        alive
+            .lock()
+            .unwrap()
+            .keys
+            .push(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    unsafe extern "C" fn on_done(ctx: *mut c_void) {
+        let alive = Arc::from_raw(ctx as *const Mutex<Alive>);
+        alive.lock().unwrap().done = true;
+    }
+
+    /// Ask `session` which tokens are alive on `key` and wait until the snapshot has ended: their
+    /// keys, sorted.
+    unsafe fn alive_on(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+        let alive = Arc::new(Mutex::new(Alive::default()));
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_reply(
+                &mut closure,
+                Some(on_token),
+                Some(on_done),
+                Arc::into_raw(alive.clone()) as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options: z_liveliness_get_options_t = std::mem::zeroed();
+        assert_eq!(z_liveliness_get_options_default(&mut options), Z_OK);
+        assert_eq!(
+            z_liveliness_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                z_closure_reply_move(&mut closure),
+                &mut options,
+            ),
+            Z_OK
+        );
+        wait_until("the snapshot to end", Duration::from_secs(10), || {
+            alive.lock().unwrap().done
+        });
+        let mut keys = std::mem::take(&mut alive.lock().unwrap().keys);
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn a_peers_liveliness_interest_is_answered_with_the_listeners_token() {
+        let pipe = Arc::new(Pipe::default());
+        let listening = make_transport(&pipe, Side::Listening);
+        let dialling = make_transport(&pipe, Side::Dialling);
+        unsafe {
+            let listener = open_over(Z_CONFIG_LISTEN_KEY, LISTEN, listening);
+            let dialler = open_over(Z_CONFIG_CONNECT_KEY, LISTEN, dialling);
+            wait_for_peer(&dialler);
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"demo/alive/one".as_ptr()),
+                Z_OK
+            );
+            let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+            assert_eq!(
+                z_liveliness_declare_token(
+                    z_session_loan(&listener),
+                    &mut token,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null(),
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                alive_on(&dialler, c"demo/alive/**"),
+                ["demo/alive/one"],
+                "the listener's token answers the Interest"
+            );
+            assert_eq!(
+                alive_on(&dialler, c"demo/nobody/**"),
+                Vec::<String>::new(),
+                "CONTROL: a key no token is on is answered with the DeclFinal alone"
+            );
+            z_liveliness_token_drop(z_liveliness_token_move(&mut token));
+            assert_eq!(
+                alive_on(&dialler, c"demo/alive/**"),
+                Vec::<String>::new(),
+                "a token dropped answers no more"
+            );
+            close(dialler);
+            close(listener);
+        }
+        drop_transport(dialling);
+        drop_transport(listening);
+        wait_until("both transports to drop", Duration::from_secs(10), || {
+            pipe.drops.load(Ordering::SeqCst) == 2
+        });
+    }
+}

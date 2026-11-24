@@ -5,7 +5,7 @@
 //! reaches the subscriber, and a Response the get that asked for it, from the frame's own bytes,
 //! each record lent for its dispatch, as the copying receive delivers them.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limit_binding::Quota;
@@ -13,7 +13,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
 use super::entity_tables::{lowered, open_under};
-use super::{open, until, CatchAll, Command, Router};
+use super::{open, until, CatchAll, Command, Engine, Router};
 use crate::round::RoundCounts;
 
 /// A Push the router sends is read in place and reaches the subscriber with its key and payload.
@@ -41,6 +41,60 @@ fn a_push_read_in_place_reaches_the_subscriber() {
     assert_eq!(
         *got.lock().unwrap(),
         [("demo/in-place".to_owned(), b"lent".to_vec())]
+    );
+}
+
+/// A Push naming the router's alias of a key with no suffix is handed its key where the session's
+/// key arena keeps the alias. The router undeclares the alias in the same frame, after the Push,
+/// so the alias is gone before the callback runs: the callback still reads the key, and the arena
+/// holds as much as it did with the alias declared, the round holding the alias's block. The
+/// round lets go of the block at the session's next step, and the arena is back to what it held
+/// before the alias. The CONTROL is the Push after the undeclaration, which the session can no
+/// longer resolve and drops: one sample reaches the callback. Turned red by a round that copies
+/// the key (the arena smaller while the callback runs) or never lets go of the block.
+#[test]
+fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let watched: Arc<OnceLock<Weak<Engine>>> = Arc::default();
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let (watched, got) = (watched.clone(), got.clone());
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            // Called with no lock of the session held (decision D8), so the arena can be read.
+            let used = watched
+                .get()
+                .and_then(Weak::upgrade)
+                .map(|engine| engine.key_counts().used);
+            got.lock().unwrap().push((
+                sample.keyexpr().to_owned(),
+                sample.payload().to_vec(),
+                used,
+            ));
+        })
+    };
+    let _ = watched.set(Arc::downgrade(&engine));
+    engine
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, sink)
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares >= 1)
+    });
+    let before = engine.key_counts().used;
+    router.send(Command::DeclareKeyexpr(9, "demo/alias"));
+    until(&engine, "the alias in the session's key arena", || {
+        engine.key_counts().used > before
+    });
+    let declared = engine.key_counts().used;
+    router.send(Command::PushAliasThenUndeclare(9, b"v"));
+    until(&engine, "the sample", || !got.lock().unwrap().is_empty());
+    until(&engine, "the alias's block back", || {
+        engine.key_counts().used == before
+    });
+    assert_eq!(
+        *got.lock().unwrap(),
+        [("demo/alias".to_owned(), b"v".to_vec(), Some(declared))],
+        "the key read where the alias kept it, after the alias was undeclared"
     );
 }
 
@@ -116,13 +170,13 @@ fn a_reply_read_in_place_answers_its_get() {
 }
 
 /// The engine's tables are handed an owned record only where its receive projects one: the build
-/// that lends only (`rx-lent-only`), with no counter that reads owned messages, hands them none,
-/// so their readers of owned messages are left out of its text; any other build hands them the
-/// batch it was given.
+/// whose session core lends only (`RX_LENT_ONLY`), with no counter that reads owned messages, hands
+/// them none, so their readers of owned messages are left out of its text; any other build hands
+/// them the batch it was given.
 #[test]
 fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
-    use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS};
-    let lends_only = cfg!(feature = "rx-lent-only") && !cfg!(feature = "transport-stats");
+    use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS, RX_LENT_ONLY};
+    let lends_only = RX_LENT_ONLY && !cfg!(feature = "transport-stats");
     assert_eq!(OWNED_RECORDS, !lends_only);
     assert_eq!(
         owned_records(&[]).is_some(),
@@ -134,7 +188,8 @@ fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
 /// The walk of a frame this engine reads in place lends every record (`rx-lent-control`): in the
 /// build whose tables take no owned record (the C library's, `rx-lent-only` with no counters), the
 /// walk's one-record buffer is a marker of no size too, so the build links no drop of an owned
-/// message for a list that is always empty. Run with `--features rx-lent-only` to build that form.
+/// message for a list that is always empty. Run with `--features wz-session-core/rx-lent-only` to
+/// build that form.
 #[test]
 fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_record() {
     use wz_session_core::driver_loop::OWNED_RECORDS;
@@ -152,7 +207,7 @@ fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_reco
 /// The records an outcome carries are a list of no size in the build whose tables take no owned
 /// record, so an outcome dropped there links no drop of an owned message; in either form a frame
 /// with no record reads as an empty batch, and the tables are handed it only where they read owned
-/// records. Run with `--features rx-lent-only` to build the form of no size.
+/// records. Run with `--features wz-session-core/rx-lent-only` to build the form of no size.
 #[test]
 fn an_outcome_holds_a_batch_of_no_size_where_the_tables_take_no_owned_record() {
     use wz_session_core::driver_loop::{

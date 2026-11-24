@@ -244,6 +244,27 @@ pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
 /// declaration past it is refused, having sent nothing.
 pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 
+/// The declaration watches a session holds at once, over every kind of entity watched. A watch
+/// past it is refused, having installed nothing.
+pub const MAX_DECL_WATCHES: usize = generated::MAX_DECL_WATCHES;
+
+/// The events of what the peers declare and retract a session holds for its declaration watches
+/// until each watch is told, one row for each event however many watches it reaches. An event
+/// that finds every row taken is not held, and each watch it would reach is told how many it lost.
+/// A row holds the event's key inline (`MAX_KEYEXPR_BYTES`) and a flag for each watch
+/// (`MAX_DECL_WATCHES`): about 304 bytes at the defaults of 256 and 4 on a 64-bit target, so
+/// the default 32 rows take about 9.7 KB of each session that watches declarations, and none of a
+/// build without the declaration watch.
+pub const MAX_DECL_WATCH_EVENTS: usize = generated::MAX_DECL_WATCH_EVENTS;
+
+/// The transport events listeners a session holds at once. A listener past it is refused, having
+/// been told nothing.
+pub const MAX_TRANSPORT_EVENTS_LISTENERS: usize = generated::MAX_TRANSPORT_EVENTS_LISTENERS;
+
+/// The link events listeners a session holds at once, apart from the transport events
+/// listeners' bound. A listener past it is refused, having been told nothing.
+pub const MAX_LINK_EVENTS_LISTENERS: usize = generated::MAX_LINK_EVENTS_LISTENERS;
+
 /// The distinct key expressions a session declares to its peers at once (each held by every
 /// entity that names it). A declaration of one more distinct key is refused, having sent nothing.
 pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
@@ -277,8 +298,9 @@ pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
 pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 
 /// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
-/// once: the payloads' area of the process's pools, blocks of power-of-two sizes each the smallest
-/// that holds its bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
+/// once, and the keys and parameters of the queries it keeps past their callbacks: the payloads'
+/// area of the process's pools, blocks of power-of-two sizes each the smallest that holds its
+/// bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
 pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
 
 /// The encodings a program holds through the C ABI at once: the slots of the process's pool of
@@ -290,6 +312,34 @@ pub const HELD_ENCODINGS: usize = generated::HELD_ENCODINGS;
 /// an encoding to send it later holds for one. A longer one is refused where it is made, never cut
 /// short; one a peer sends is read where it lies.
 pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTES;
+
+/// The bytes of a session's ring of cached samples, which the caches of its advanced publishers
+/// keep their records in together, each as long as its sample. A put whose record is longer than
+/// the ring is refused; one that finds no room lets the oldest records go.
+pub const ADVANCED_CACHE_BYTES: usize = generated::ADVANCED_CACHE_BYTES;
+
+/// The advanced publishers a session holds at once, each in a place of the session's own. A
+/// declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_PUBLISHERS: usize = generated::MAX_ADVANCED_PUBLISHERS;
+
+/// The advanced subscribers a session holds at once, owned and background, each in a place of the
+/// session's own. A declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_SUBSCRIBERS: usize = generated::MAX_ADVANCED_SUBSCRIBERS;
+
+/// The sample-miss listeners one advanced subscriber of the zenoh-pico interface holds at once,
+/// owned and background, each in a room of the subscriber's place. A declaration past them is
+/// refused, its closure let go of.
+pub const MAX_SAMPLE_MISS_LISTENERS: usize = generated::MAX_SAMPLE_MISS_LISTENERS;
+
+/// The sources one advanced subscriber orders at once, of each of its two kinds (sequenced and
+/// timestamped): the rows of the tables kept with the subscriber. A source met while every row is
+/// taken takes the row of the idle one met longest ago; while none is idle it is not ordered.
+pub const MAX_ADVANCED_SOURCES: usize = generated::MAX_ADVANCED_SOURCES;
+
+/// The bytes one advanced subscriber holds samples back in, kept with the subscriber: one ring of
+/// records, each a sample as long as it is, until what comes before it is in. A sample that finds
+/// no room is not held: what its source holds goes on first, in order, and then it.
+pub const ADVANCED_SUBSCRIBER_PENDING_BYTES: usize = generated::ADVANCED_SUBSCRIBER_PENDING_BYTES;
 
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
@@ -551,6 +601,22 @@ pub const MAX_ADMIN_KEY_BYTES: usize = 2 * MAX_KEYEXPR_BYTES;
 /// "per-locator length of 64 bytes") — long enough for an `ipv6` locator
 /// with a `proto/` prefix and port, with margin.
 pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
+
+/// The longest endpoint, socket keys included, a session joins a multicast group by: the text a
+/// connectivity row holds a group member's link by. A group whose endpoint is longer is refused
+/// when it is joined. Apart from [`MAX_LOCATOR_LEN`], so the keys do not lengthen every locator
+/// row.
+pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
+
+/// The members a session holds of each multicast group it joined: the rows a connectivity reader
+/// reads a member's transport from, with nothing allocated, and the group session's member table.
+/// A JOIN from one more is not admitted while every row is held.
+pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
+
+/// The transport or link events a connectivity listener declared with history holds while its
+/// history is replayed. Past them, the rest of the replay's window is told by comparing the
+/// transports that stand with those the listener was told.
+pub const MAX_CONNECTIVITY_REPLAY_EVENTS: usize = generated::MAX_CONNECTIVITY_REPLAY_EVENTS;
 
 /// Maximum number of static-scouting peer locators
 /// ([`crate::scout_static::synth_static_locators`] output capacity =

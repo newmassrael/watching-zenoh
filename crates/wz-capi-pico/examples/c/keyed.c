@@ -123,7 +123,7 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
     }
     /* Which instance the payload is, read through the schema; an indexed payload becomes its
      * instance's last value. The keyer has a lock of its own, so any thread may call it. */
-    wz_ext_instance_key_t key;
+    wz_ext_instance_key_t key = {.struct_size = sizeof(wz_ext_instance_key_t)};
     z_result_t rc = wz_ext_instance_keyer_index(wz_ext_instance_keyer_loan(&keyer), data, len,
                                                 (uint64_t)z_clock_elapsed_ms(&started), &key);
     z_mutex_lock(z_mutex_loan_mut(&keyed.lock));

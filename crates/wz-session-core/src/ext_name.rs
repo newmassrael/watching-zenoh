@@ -480,10 +480,14 @@ const AUTH_SUB: &[Row] = &[
 const fn identities_of<const N: usize>(table: &[Row]) -> [u8; N] {
     assert!(table.len() == N, "an identity table is as long as its rows");
     let mut out = [0u8; N];
-    let mut i = 0;
-    while i < N {
-        out[i] = row_eid(&table[i]);
-        i += 1;
+    // The identities and the rows are walked together, each by its first element, so no write
+    // names an index.
+    let mut slots: &mut [u8] = &mut out;
+    let mut rest = table;
+    while let ([slot, more @ ..], [row, tail @ ..]) = (slots, rest) {
+        *slot = row_eid(row);
+        slots = more;
+        rest = tail;
     }
     out
 }

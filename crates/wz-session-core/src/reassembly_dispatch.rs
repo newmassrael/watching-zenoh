@@ -626,20 +626,30 @@ struct ChainKey {
 
 impl ChainKey {
     fn new(peer_key: &[u8], reliable: bool, priority: Priority) -> Self {
+        let kept = Self::kept(peer_key);
+        // The rest of the array stays zero, so the derived equality compares the bytes kept.
         let mut buf = [0u8; PEER_KEY_MAX];
-        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
-        buf[..n].copy_from_slice(&peer_key[..n]);
+        if let Some(to) = buf.get_mut(..kept.len()) {
+            to.copy_from_slice(kept);
+        }
         Self {
             peer_key: buf,
-            peer_key_len: n as u8,
+            // At most `PEER_KEY_MAX`, which a `u8` holds.
+            peer_key_len: kept.len() as u8,
             reliable,
             priority,
         }
     }
 
+    /// The bytes of `peer_key` a key holds: its first `PEER_KEY_MAX`.
+    fn kept(peer_key: &[u8]) -> &[u8] {
+        peer_key.get(..PEER_KEY_MAX).unwrap_or(peer_key)
+    }
+
+    /// Compared as slices, by length and bytes: a held prefix built to compare whole would cost
+    /// an array copy at every lookup.
     fn same_peer(&self, peer_key: &[u8]) -> bool {
-        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
-        self.peer_key_len as usize == n && self.peer_key[..n] == peer_key[..n]
+        self.peer_key.get(..usize::from(self.peer_key_len)) == Some(Self::kept(peer_key))
     }
 
     fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {
@@ -687,15 +697,57 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     open: Option<OpenChain<S::Chain>>,
 }
 
-impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
-    fn new() -> Self {
-        let mut engine = Engine::new(ReassemblySlotPolicy::new_with_checked_session_id(
+/// A slot's machine.
+type SlotEngine = Engine<ReassemblySlotPolicy<SlotBinding>>;
+
+/// Build a slot machine in `cell` and enter its initial `Empty` leaf (W3C SCXML 3.3).
+///
+/// Not generic over the Router and out of line, so every Router type and every place a slot is
+/// built or put back in service share one copy of the machine's start, and the machine is written
+/// where the slot keeps it rather than built on a stack and moved there.
+#[inline(never)]
+fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
+    Engine::new_in_place(
+        cell,
+        ReassemblySlotPolicy::new_with_checked_session_id(
             REASSEMBLY_SLOT_SESSION_ID,
             SlotBinding::default(),
-        ));
-        // W3C SCXML 3.3: enter the initial `Empty` leaf.
-        engine.initialize().unwrap_or_else(|never| match never {});
-        Self { engine, open: None }
+        ),
+    )
+    .initialize()
+    .unwrap_or_else(|never| match never {});
+}
+
+impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
+    /// A free slot, built in `cell` where the Router keeps it. Whatever `cell` held is not
+    /// dropped.
+    fn init_in(cell: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
+        use core::ptr::addr_of_mut;
+        let at = cell.as_mut_ptr();
+        // Names every field of the slot with no `..`, so a field added to the struct stops this from
+        // compiling until it is written below too.
+        let _every_field_is_written = |slot: &Self| {
+            let Self { engine: _, open: _ } = slot;
+        };
+        // SAFETY: `at` points at storage for one slot that holds no value. The machine is written
+        // in its field by `start_slot_engine` and the chain state beside it, every field the list
+        // above names. With both written the slot is whole.
+        unsafe {
+            start_slot_engine(
+                &mut *addr_of_mut!((*at).engine).cast::<core::mem::MaybeUninit<SlotEngine>>(),
+            );
+            addr_of_mut!((*at).open).write(None);
+            &mut *at
+        }
+    }
+
+    /// A free slot as a value, for the tests that drive one slot without its Router.
+    #[cfg(test)]
+    fn new() -> Self {
+        let mut cell = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut cell);
+        // SAFETY: `init_in` wrote the whole slot.
+        unsafe { cell.assume_init() }
     }
 
     fn is_free(&self) -> bool {
@@ -749,7 +801,16 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         if let Some(open) = self.open.take() {
             staging.release(open.chain);
         }
-        *self = Self::new();
+        let cell =
+            core::ptr::addr_of_mut!(self.engine).cast::<core::mem::MaybeUninit<SlotEngine>>();
+        // SAFETY: the machine is whole, so dropping it is sound, and its field is then storage
+        // that holds no value, which `start_slot_engine` fills with a whole machine before it
+        // returns. Nothing between the drop and the write can unwind: the machine's start cannot
+        // fail. The chain state was emptied above, as a fresh slot's is.
+        unsafe {
+            core::ptr::drop_in_place(cell.cast::<SlotEngine>());
+            start_slot_engine(&mut *cell);
+        }
     }
 
     /// [`Self::release`] from a state the chart makes terminal, and
@@ -806,14 +867,10 @@ where
     /// The arena must be EMPTY, with no chain of its own outstanding; the
     /// Router's accounting starts from all of `SLOTS` free.
     pub fn with_staging(config: ReassemblyConfig, staging: S) -> Self {
-        Self {
-            slots: core::array::from_fn(|_| Slot::new()),
-            config,
-            staging,
-            capacity_refusals: 0,
-            opened: 0,
-            displaced: None,
-        }
+        let mut place = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut place, config, staging);
+        // SAFETY: `init_in` wrote every field of the Router.
+        unsafe { place.assume_init() }
     }
 
     /// [`Self::with_staging`] built where `place` lies, and lent back: each slot is made in its
@@ -834,14 +891,31 @@ where
     ) -> &mut Self {
         use core::ptr::addr_of_mut;
         let at = place.as_mut_ptr();
+        // A field added to the Router and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |router: &Self| {
+            let Self {
+                slots: _,
+                config: _,
+                staging: _,
+                capacity_refusals: _,
+                opened: _,
+                displaced: _,
+            } = router;
+        };
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`). An array of `SLOTS`
         // slots has the layout of `SLOTS` consecutive slots, so each is written once through its
-        // own address, as is every other field; `every_field_is_written` holds the list of fields
-        // to the struct's, so `place` is fully written before it is lent back.
+        // own address, as is every other field the list above names, so `place` is fully written
+        // before it is lent back.
         unsafe {
             let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
             for index in 0..SLOTS {
-                slots.add(index).write(Slot::new());
+                Slot::<SLOTS, CAP, S>::init_in(
+                    &mut *slots
+                        .add(index)
+                        .cast::<core::mem::MaybeUninit<Slot<SLOTS, CAP, S>>>(),
+                );
             }
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).staging).write(staging);
@@ -850,21 +924,6 @@ where
             addr_of_mut!((*at).displaced).write(None);
             place.assume_init_mut()
         }
-    }
-
-    /// A field added to the Router and not written by [`Self::init_in`] would be read
-    /// uninitialised. This destructures the struct with no `..`, so adding a field without naming
-    /// it here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(router: Self) {
-        let Self {
-            slots: _,
-            config: _,
-            staging: _,
-            capacity_refusals: _,
-            opened: _,
-            displaced: _,
-        } = router;
     }
 
     /// The open chain the last ingest ended for a fragment that was not of
@@ -1093,42 +1152,52 @@ where
     ) -> IngestOutcome {
         let staged = self.stage(idx, sn, payload);
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        let Some(slot) = slots.get_mut(idx) else {
+            // No slot holds the chain, so none is delivered and none released.
+            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
+        };
         if !staged {
             slot.release_or_replace(staging);
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
-        if hand != Hand::Borrow {
-            if let Some(OpenChain {
-                key,
-                last_sn,
-                deadline_ms,
-                opened,
-                chain,
-            }) = slot.open.take()
-            {
-                match Self::hand_up(staging, chain, hand) {
-                    Ok(bytes) => {
-                        slot.release_or_replace(staging);
-                        deliver(bytes);
-                        return IngestOutcome::Reassembled;
-                    }
-                    Err(chain) => {
-                        slot.open = Some(OpenChain {
-                            key,
-                            last_sn,
-                            deadline_ms,
-                            opened,
-                            chain,
-                        })
-                    }
+        let taken = if hand == Hand::Borrow {
+            None
+        } else {
+            slot.open.take()
+        };
+        // A chain the arena cannot hand up is held here, out of its slot, and delivered borrowed
+        // and released after, as a chain asked borrowed is: put back into the slot, its whole open
+        // state was moved out and in again.
+        let mut held = None;
+        let handed_up = match taken {
+            Some(open) => match Self::hand_up(staging, open.chain, hand) {
+                Ok(bytes) => Some(bytes),
+                Err(chain) => {
+                    held = Some(chain);
+                    None
                 }
+            },
+            None => None,
+        };
+        let released_first = handed_up.is_some();
+        if released_first {
+            slot.release_or_replace(staging);
+        }
+        // One call of `deliver` for both hands, so the delivery is compiled in here once.
+        let bytes = handed_up.or_else(|| {
+            held.as_ref()
+                .or(slot.open.as_ref().map(|open| &open.chain))
+                .map(|chain| ChainBytes::Borrowed(staging.bytes(chain)))
+        });
+        if let Some(bytes) = bytes {
+            deliver(bytes);
+        }
+        if !released_first {
+            slot.release_or_replace(staging);
+            if let Some(chain) = held {
+                staging.release(chain);
             }
         }
-        if let Some(open) = slot.open.as_ref() {
-            deliver(ChainBytes::Borrowed(staging.bytes(&open.chain)));
-        }
-        slot.release_or_replace(staging);
         IngestOutcome::Reassembled
     }
 
@@ -1319,8 +1388,8 @@ where
             slot.drive(ReassemblySlotEvent::ReassemblyTimeout);
             slot.release_or_replace(staging);
             released(reliable, priority);
-            loss.bytes += staged;
-            loss.chains += 1;
+            loss.bytes = loss.bytes.saturating_add(staged);
+            loss.chains = loss.chains.saturating_add(1);
         }
         loss
     }
@@ -1377,7 +1446,9 @@ where
         let max_message_bytes = self.config.max_message_bytes;
         let opened = self.opened;
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        let Some(slot) = slots.get_mut(idx) else {
+            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+        };
         let Some(chain) = staging.acquire() else {
             return IngestOutcome::Refused(RefuseReason::PoolExhausted);
         };
@@ -1473,7 +1544,7 @@ where
     /// disagree. The caller ends the chain.
     fn stage(&mut self, idx: usize, sn: u64, payload: &[u8]) -> bool {
         let Self { slots, staging, .. } = self;
-        let Some(open) = slots[idx].open.as_mut() else {
+        let Some(open) = slots.get_mut(idx).and_then(|slot| slot.open.as_mut()) else {
             return false;
         };
         if staging.append(&mut open.chain, payload).is_err() {
@@ -1494,7 +1565,7 @@ where
     ) -> IngestOutcome {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
-        let Some(open) = self.slots[idx].open.as_ref() else {
+        let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
             return self.ingest_chain_start(frag, now_ms, hand, deliver);
         };
         let last_sn = open.last_sn;
@@ -1531,7 +1602,12 @@ where
         }
 
         // The slot FSM's `more` guard decides Continue vs Final.
-        let duties = self.slots[idx].drive_chunk(frag.more);
+        // No slot in `idx` is no machine to drive, and the chain is given up below as one whose
+        // machine answered neither duty.
+        let duties = self
+            .slots
+            .get_mut(idx)
+            .map_or(0, |slot| slot.drive_chunk(frag.more));
         if duties & duty::APPEND != 0 {
             if !self.stage(idx, frag.sn, frag.payload) {
                 return self.abort(
@@ -1549,7 +1625,9 @@ where
         // was not in `Receiving` while the Router held its chain open: the
         // chain is given up and the slot gets a fresh machine.
         let Self { slots, staging, .. } = self;
-        slots[idx].replace(staging);
+        if let Some(slot) = slots.get_mut(idx) {
+            slot.replace(staging);
+        }
         IngestOutcome::Aborted(AbortReason::CapacityOverflow)
     }
 
@@ -1571,7 +1649,10 @@ where
     /// it, is replaced, so the chain the Router ended is ended either way.
     fn end_chain(&mut self, idx: usize, event: ReassemblySlotEvent) {
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        // No slot in `idx` holds no chain to end.
+        let Some(slot) = slots.get_mut(idx) else {
+            return;
+        };
         if slot.drive(event) & duty::ABORT != 0 {
             slot.release_or_replace(staging);
         } else {
@@ -1609,11 +1690,12 @@ where
     /// splice a later link's fragments of the same peer onto them. Each is driven through the
     /// abort arm [`Self::abort_channel`] drives. Answers how many were ended.
     pub fn abort_peer(&mut self, peer_key: &[u8]) -> usize {
-        let mut ended = 0;
+        let mut ended = 0usize;
         for idx in 0..SLOTS {
-            let of_peer = self.slots[idx]
-                .open
-                .as_ref()
+            let of_peer = self
+                .slots
+                .get(idx)
+                .and_then(|slot| slot.open.as_ref())
                 .is_some_and(|open| open.key.same_peer(peer_key));
             if of_peer {
                 self.abort(
@@ -1621,7 +1703,8 @@ where
                     ReassemblySlotEvent::FragmentOoo,
                     AbortReason::OutOfOrder,
                 );
-                ended += 1;
+                // At most `SLOTS`.
+                ended = ended.saturating_add(1);
             }
         }
         ended
@@ -1680,6 +1763,26 @@ mod tests {
 
     const PEER_A: &[u8] = &[0xAA; 16];
     const PEER_B: &[u8] = &[0xBB; 16];
+
+    /// A chain's key holds a peer key by its first `PEER_KEY_MAX` bytes: a longer key is the
+    /// same peer as that prefix, and a key that differs in its length or in a kept byte is not,
+    /// a trailing zero included.
+    #[test]
+    fn a_chain_key_holds_a_peer_key_by_its_bounded_prefix() {
+        let long = [0x11u8; PEER_KEY_MAX + 4];
+        let key = ChainKey::new(&long, true, Priority::DEFAULT);
+        assert!(key.same_peer(&long));
+        assert!(key.same_peer(&long[..PEER_KEY_MAX]));
+        assert!(!key.same_peer(&long[..PEER_KEY_MAX - 1]));
+        let short = ChainKey::new(&[1, 2, 3], false, Priority::DEFAULT);
+        assert!(short.same_peer(&[1, 2, 3]));
+        assert!(
+            !short.same_peer(&[1, 2, 3, 0]),
+            "a zero past the kept bytes is a byte"
+        );
+        assert!(!short.same_peer(&[1, 2]));
+        assert!(!short.same_peer(&[1, 2, 4]));
+    }
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
     const MASK: u64 = crate::sn::mask_from_res(0x02);
@@ -2189,6 +2292,31 @@ mod tests {
         assert_eq!(LentStaging::<4, 64>::none().available(), 0);
     }
 
+    /// A chain that starts after an earlier one ended takes the place that chain left, and the
+    /// count of open chains is over every place: a place held after the free one still counts.
+    #[test]
+    fn a_lent_staging_counts_every_held_place_when_a_chain_starts() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let cells = lent_cells(8, 4);
+        let mut staging = LentStaging::<4, 64>::over(&cells, 2);
+        let first = staging.acquire().expect("a buffer");
+        let _second = staging.acquire().expect("another buffer");
+        staging.release(first);
+        assert_eq!((staging.available(), cells.in_use()), (1, 1));
+        let _third = staging.acquire().expect("the place the first left");
+        assert_eq!(cells.in_use(), 2);
+        assert!(
+            staging.acquire().is_none(),
+            "two chains open: the table has two buffers free and the staging takes no third chain"
+        );
+        assert_eq!(cells.in_use(), 2, "the refused chain claimed nothing");
+        assert!(
+            LentStaging::<4, 64>::none().acquire().is_none(),
+            "a staging of no table refuses every chain"
+        );
+    }
+
     /// The stagings of two links over their session's one table share its buffers: a chain of one
     /// link that finds every buffer held by the other's is refused, and the buffer the other's
     /// chain gives back when it ends serves it.
@@ -2304,6 +2432,16 @@ mod tests {
         assert!(
             borrowed,
             "CONTROL: an arena that cannot keep lends for the call"
+        );
+        assert_eq!(
+            heap.active_chains(),
+            0,
+            "the slot is free once the delivery returns"
+        );
+        assert_eq!(
+            heap.staging_available(),
+            4,
+            "the chain the arena could not keep is released to it after the delivery"
         );
     }
 
@@ -2641,6 +2779,26 @@ mod duty_tests {
 
     fn state(slot: &TestSlot) -> State {
         slot.engine.get_current_state()
+    }
+
+    /// A slot put back in service in the middle of a chain is a fresh one where it stands: its
+    /// machine is at `Empty` with nothing posted, it holds no chain, and the next first fragment
+    /// begins a chain as on a slot never used.
+    #[test]
+    fn a_replaced_slot_is_fresh_in_its_own_place() {
+        let mut staging = <HeapStaging<1, 64> as BuildsOwnStorage<1, 64>>::new();
+        let mut slot = TestSlot::new();
+        assert_eq!(state(&slot), State::Empty);
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
+
+        slot.replace(&mut staging);
+        assert_eq!(state(&slot), State::Empty, "the machine was started again");
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
+        assert!(slot.is_free());
+        assert_eq!(staging.available(), 1, "the arena lent nothing");
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
     }
 
     /// Every transition of `reassembly_slot.scxml` posts exactly the duties of

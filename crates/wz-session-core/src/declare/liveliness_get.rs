@@ -309,7 +309,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// nothing.
     pub fn has_room(&self) -> bool {
         self.pending.len() < self.finalized.free_slots()
-            && self.quota.admits(self.pending.len() + 1)
+            && self.quota.admits(self.pending.len().saturating_add(1))
     }
 
     /// Drop every pending get and every staged marker without firing anything: what the loss of
@@ -455,13 +455,13 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         // ReplyRegistry::sweep_timed_out): take one expired entry out, then
         // fire it after the borrow releases so a panicking `on_final` cannot
         // leave a half-swept entry behind.
-        let mut swept = 0;
+        let mut swept = 0usize;
         let mut at = 0;
         while let Some(mut entry) = self.pending.take_next_where(
             &mut at,
             |entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms),
         ) {
-            swept += 1;
+            swept = swept.saturating_add(1);
             let id = entry.interest_id;
             // F3/R311ka — a timed-out get is as terminated as a
             // DeclFinal'd one: stage it for the reconnect-cache prune

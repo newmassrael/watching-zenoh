@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_chunk_includes.scxml:16 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -30,16 +30,16 @@ pub fn keyexpr_chunk_includes(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_st
     if a_start >= a_end || b_start >= b_end {
         return false;
     }
-    if a[(a_start) as usize] == 64 || b[(b_start) as usize] == 64 {
+    if sce_forge_runtime::algorithm::proven::at(&a, a_start) == 64 || sce_forge_runtime::algorithm::proven::at(&b, b_start) == 64 {
         return false;
     }
     if wild_single {
-        let a_next: u32 = a_start + 1;
-        let b_next: u32 = b_start + 1;
-        if a[(a_start) as usize] == 42 && a_next == a_end {
+        let a_next: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(a_start, 1);
+        let b_next: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(b_start, 1);
+        if sce_forge_runtime::algorithm::proven::at(&a, a_start) == 42 && a_next == a_end {
             return true;
         }
-        if b[(b_start) as usize] == 42 && b_next == b_end {
+        if sce_forge_runtime::algorithm::proven::at(&b, b_start) == 42 && b_next == b_end {
             return false;
         }
     }
