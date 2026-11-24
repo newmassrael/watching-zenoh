@@ -456,10 +456,13 @@ inherits = "ship"
 panic = "abort"
 lto = "fat"
 
-# The code that interprets a document once, when a node is handed it, built for size: the schema's
-# tokenizer, parser and linker (`wz-app-schema`). What reads and writes every sample keeps the
-# profile's `opt-level = 3`; the crate boundary is the line between the two. Stated for each profile
-# a release library is built with, so no profile builds the crate otherwise.
+# The code that runs once, when a node is handed a document or a session is opened, built for size:
+# the schema's tokenizer, parser and linker (`wz-app-schema`), the handshake's auth methods
+# (`wz-auth`, called only while a session's handshake runs, never on a frame after it) and the
+# reader of a TLS key's PEM material (`wz-tls-pem`). What reads and writes every sample keeps the
+# profile's `opt-level = 3`; the crate boundary is the line between the two. The level is a crate's
+# own code: a generic it defines is built at the level of the crate that instantiates it. Stated for
+# each profile a release library is built with, so no profile builds the crate otherwise.
 [profile.release.package.wz-app-schema]
 opt-level = "s"
 
@@ -470,6 +473,30 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.capi-nostd.package.wz-app-schema]
+opt-level = "s"
+
+[profile.release.package.wz-auth]
+opt-level = "s"
+
+[profile.ship.package.wz-auth]
+opt-level = "s"
+
+[profile.capi-small.package.wz-auth]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-auth]
+opt-level = "s"
+
+[profile.release.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.ship.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.capi-small.package.wz-tls-pem]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-tls-pem]
 opt-level = "s"
 
 # socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has

@@ -38,6 +38,7 @@ use wz_session_core::declare::MatchingReport;
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
+use wz_session_core::placed::PlacedRef;
 use wz_session_core::round::{DeclEvent, DeclEventKind};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
@@ -292,7 +293,7 @@ impl Table {
 /// What the observers and the engine reach: the table, and the round the events are held in.
 struct Shared {
     table: Mutex<Table>,
-    round: Arc<Round>,
+    round: PlacedRef<Round>,
 }
 
 /// The session's declaration watches. The registry holds it, so a link's dispatch reaches it, and
@@ -422,17 +423,20 @@ unsafe fn heard(
 impl DeclWatches {
     /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
     /// build's, their events held in `round`, the session's round of deliveries.
-    pub(super) fn under(limits: &SessionLimits, round: &Arc<Round>) -> Result<Self, LendRefused> {
+    pub(super) fn under(
+        limits: &SessionLimits,
+        round: &PlacedRef<Round>,
+    ) -> Result<Self, LendRefused> {
         let watches = rows_under(limits.max_decl_watches(), caps::MAX_DECL_WATCHES)?;
         Ok(Self::holding(watches, round))
     }
 
     /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
-    fn holding(watches: usize, round: &Arc<Round>) -> Self {
+    fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
         Self {
             shared: Arc::new(Shared {
                 table: Mutex::new(Table::holding(watches)),
-                round: Arc::clone(round),
+                round: *round,
             }),
         }
     }
@@ -842,7 +846,7 @@ mod tests {
     }
 
     /// As many watches as the build holds, their events held in a round of `events` records.
-    fn over(events: usize) -> (DeclWatches, Arc<Round>) {
+    fn over(events: usize) -> (DeclWatches, PlacedRef<Round>) {
         let round = crate::round::leaked(events);
         (DeclWatches::holding(caps::MAX_DECL_WATCHES, &round), round)
     }

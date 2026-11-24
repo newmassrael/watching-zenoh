@@ -1000,6 +1000,26 @@ impl MulticastReplyEnqueue for GroupTxStage {
             '_,
         >| writer.encode_tx(sink));
     }
+
+    // Written from the borrowed reply into the lane or the staged storage, as the session with no
+    // allocator writes it to its link: no owned `Declare` of it is built. A reply its encoder
+    // refuses holds no slot, as the owned one is never built.
+    #[cfg(feature = "liveliness-token")]
+    fn enqueue_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        let params = &self.inner.params;
+        let _ = wz_session_core::multicast_tx::multicast_tx_token_reply(
+            token_id,
+            keyexpr,
+            interest_id,
+            |message| {
+                self.admit_reply_body(
+                    MulticastTxMeta::of_encoded(message, params),
+                    message.size,
+                    message.body,
+                );
+            },
+        );
+    }
 }
 
 /// Which lane the group's pump takes its next datagram from: the most urgent lane that holds one,
@@ -1975,6 +1995,65 @@ mod tests {
         assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
     }
 
+    /// The answer to a member's interest in tokens is framed as the owned reply the trait's default
+    /// queues is, at once and when it is kept while the conduits are held, and holds a reply slot
+    /// until its datagram is taken; one past the protocol's bound is no datagram and holds no slot.
+    /// Turned red by a reply written with another band, channel or body than the owned one
+    /// (`enqueue_token_reply`), or by a refused reply that takes a slot.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_is_framed_as_its_owned_reply() {
+        /// The owned items the trait's default `enqueue_token_reply` queues.
+        struct Owned(RefCell<Vec<MulticastTxItem>>);
+        impl MulticastReplyEnqueue for Owned {
+            fn enqueue(&self, item: MulticastTxItem) {
+                self.0.borrow_mut().push(item);
+            }
+        }
+        let recorded = Owned(RefCell::new(Vec::new()));
+        recorded.enqueue_token_reply(9, "demo/token", 42);
+        let item = recorded.0.borrow_mut().pop().expect("the owned reply");
+        let owned = GroupTxStage::new(&params());
+        owned.enqueue(item);
+        let lent = GroupTxStage::new(&params());
+        lent.enqueue_token_reply(9, "demo/token", 42);
+        let staged = GroupTxStage::new(&params());
+        {
+            let _held = staged.inner.conduits.borrow_mut();
+            staged.enqueue_token_reply(9, "demo/token", 42);
+            assert!(staged.take().is_none(), "kept while the conduits are held");
+            assert_eq!(
+                staged.inner.replies.get(),
+                1,
+                "the kept reply holds its slot"
+            );
+        }
+        staged.push_deferred();
+        let expected = owned.take().expect("the owned reply");
+        for stage in [&lent, &staged] {
+            let datagram = stage.take().expect("the reply");
+            assert_eq!(datagram.bytes, expected.bytes);
+            assert_eq!(
+                (datagram.priority, datagram.reliable),
+                (expected.priority, expected.reliable)
+            );
+        }
+        assert_eq!(staged.inner.replies.get(), 0, "its slot is free once taken");
+        assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
+
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        recorded.enqueue_token_reply(9, &past, 42);
+        assert!(
+            recorded.0.borrow().is_empty(),
+            "the owned form refuses it too"
+        );
+        let refused = GroupTxStage::new(&params());
+        refused.enqueue_token_reply(9, &past, 42);
+        assert!(refused.take().is_none(), "a refused reply is no datagram");
+        assert_eq!(refused.inner.replies.get(), 0, "and holds no slot");
+        assert_eq!(refused.dropped(), 0, "nor is it counted as a drop");
+    }
+
     /// A staged reply handed as its parts is framed as its owned record is, at once and when it is
     /// kept while the conduits are held, on the band its QoS names; one the writer refuses holds no
     /// slot and is no datagram. Turned red by parts framed with another band, channel or body than
@@ -1987,20 +2066,20 @@ mod tests {
         use wz_session_core::query::QueryReply;
         use wz_session_core::reply_stage::{PartsBody, PartsKind, ReplyParts};
         use wz_session_core::sample::QosLevel;
-        let staged = |keyexpr| ReplyParts {
-            rid: 9,
-            keyexpr,
-            responder: Some((&[1, 2, 3, 4], 5)),
-            qos: QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: None,
-            kind: PartsKind::Reply {
-                body: PartsBody::Put(b"answer"),
-                encoding: None,
-                timestamp: None,
-                attachment: None,
-                source_info: None,
-            },
+        let staged = |keyexpr| {
+            ReplyParts::new(
+                9,
+                keyexpr,
+                Some((&[1, 2, 3, 4], 5)),
+                QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+                PartsKind::Reply {
+                    body: PartsBody::Put(b"answer"),
+                    encoding: None,
+                    timestamp: None,
+                    attachment: None,
+                    source_info: None,
+                },
+            )
         };
         let mut params = params();
         params.is_qos = true;

@@ -15,6 +15,7 @@
 
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 
 use core::net::SocketAddr;
@@ -29,7 +30,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::session_drive::{LinkProto, Locator, OpenedLink, SessionLinks};
 
-use crate::driver::{share_socket, DriverHandle, LwipUdpDriver};
+use crate::driver::{share_socket, DriverHandle, LwipUdpDriver, SharedSessionSocket};
 use crate::session_drive::LwipSessionLink;
 
 /// The handle a [`LwipLinks`] holds the lwIP stack by, unless it is given another:
@@ -89,26 +90,44 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     /// profiles `SessionLinks` wraps it in an `Rc`.
     ///
     /// `peer` is the link's peer, which the initiator dialled; an acceptor's link
-    /// has none until its first `InitSyn` ([`Self::bind_accepting_driver`]). The
-    /// port's lwIP has no IPv6, so an IPv6 peer is
-    /// [`LinkOpenError::Unsupported`], before a socket is bound.
+    /// has none until its first `InitSyn`. The port's lwIP has no IPv6, so an IPv6
+    /// peer is [`LinkOpenError::Unsupported`], before a socket is bound.
+    ///
+    /// By value: a node makes the driver where it keeps it ([`Self::bind_driver_in`]).
     pub fn bind_driver(&self, port: u16, peer: SocketAddr) -> Result<LwipUdpDriver, LinkOpenError> {
+        let (socket, addr, port) = self.bind_dialled(port, peer)?;
+        Ok(LwipUdpDriver::new(socket, addr, port))
+    }
+
+    /// [`Self::bind_driver`], made in `out`, the place the driver is kept (a session's
+    /// slot): `out` is written exactly when `Ok` is answered.
+    pub fn bind_driver_in(
+        &self,
+        out: &mut MaybeUninit<LwipUdpDriver>,
+        port: u16,
+        peer: SocketAddr,
+    ) -> Result<(), LinkOpenError> {
+        let (socket, addr, port) = self.bind_dialled(port, peer)?;
+        LwipUdpDriver::new_in(out, socket, addr, port);
+        Ok(())
+    }
+
+    /// The socket of a link that dials `peer`, bound on `port`, and the peer as lwIP
+    /// names it.
+    fn bind_dialled(
+        &self,
+        port: u16,
+        peer: SocketAddr,
+    ) -> Result<(SharedSessionSocket, u32, u16), LinkOpenError> {
         let SocketAddr::V4(peer) = peer else {
             return Err(LinkOpenError::Unsupported);
         };
         let socket = self.bind_socket(port)?;
-        Ok(LwipUdpDriver::new(
+        Ok((
             share_socket(socket),
             ipv4_addr_from_octets(peer.ip().octets()),
             peer.port(),
         ))
-    }
-
-    /// [`Self::bind_driver`] for an acceptor that owns its socket: the link is
-    /// bound to the source of the first `InitSyn` it takes.
-    pub fn bind_accepting_driver(&self, port: u16) -> Result<LwipUdpDriver, LinkOpenError> {
-        let socket = self.bind_socket(port)?;
-        Ok(LwipUdpDriver::accepting(share_socket(socket)))
     }
 
     /// Bind a session socket on `port` (0 asks lwIP for a free one) and hand it over
@@ -131,16 +150,20 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
         LwipSessionLink::new(self.link.clone(), driver)
     }
 
-    /// The two halves of a link over `driver`.
+    /// The two halves of a link over the driver `make` writes in the cell it is kept in:
+    /// the driver carries its outbound slot, which made in a frame and moved into the
+    /// cell would first be a value on the stack that opens the link.
     #[cfg(not(feature = "session-slot"))]
     fn opened(
         &self,
-        driver: LwipUdpDriver,
+        make: impl FnOnce(&mut MaybeUninit<LwipUdpDriver>) -> &mut LwipUdpDriver,
     ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError>
     where
         L: 'static,
     {
-        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver);
+        let driver = wz_runtime_coop::link_cells::CellRc::<LwipUdpDriver>::claim(None)
+            .and_then(|cell| cell.made(make))
+            .ok_or(LinkOpenError::Exhausted)?;
         Ok(OpenedLink {
             sink: driver.clone().into_sink(),
             pump: self.pump_over(driver),
@@ -187,7 +210,8 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its
         // InitSyn.
-        self.opened(self.bind_accepting_driver(port)?)
+        let socket = share_socket(self.bind_socket(port)?);
+        self.opened(|place| LwipUdpDriver::accepting_in(place, socket))
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
@@ -200,7 +224,8 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
             return Err(LinkOpenError::Unsupported);
         }
         // Port 0 asks lwIP for a free one, one per initiator session.
-        self.opened(self.bind_driver(0, ip.at)?)
+        let (socket, addr, port) = self.bind_dialled(0, ip.at)?;
+        self.opened(|place| LwipUdpDriver::new_in(place, socket, addr, port))
     }
 }
 

@@ -2930,37 +2930,138 @@ value = 1
 reason = "zenoh-pico bounds its kept hellos by no count; none of its examples or API tests clones a hello, its scout reading each where the callback lends it (`vendor/zenoh-pico/examples/unix/c11/z_scout.c` @ `void callback(z_loaned_hello_t *hello, void *context) {`). One keeps z_hello_clone answering for a program that keeps the hello it found."
 
 [[limit]]
-id = "HELD_PAYLOAD_BYTES"
-kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
-kind = "bound"
-driven = "local"
-default = 131072
+id = "PAYLOAD_SMALL_BLOCK_BYTES"
+kconfig = "WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES"
+kind = "parameter"
+range = [32, 1073741824]
+default = 64
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The bytes the owned payloads, strings and slices a program of the pico C ABI
-holds carry at once, and the keys and parameters of the queries it keeps
-past their callbacks: the payloads' area the library reserves at its first
-object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
-smallest that holds its bytes and a 16-byte head. A payload no free block
-holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+The bytes of each block of the smallest of the three pools of payload blocks a
+program of the pico C ABI holds the bytes of its owned payloads, strings and
+slices in, and the keys and parameters of the queries it keeps, a 16-byte head
+of each block included and rounded up to 16. A payload takes a block of the
+smallest of the three pools whose blocks hold it and its head and that has one
+free. At least 32.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. Sixty-four bytes hold a 16-byte head and 48 bytes: the default payloads of zenoh-pico's latency and throughput examples (`vendor/zenoh-pico/examples/unix/c11/z_ping.c` @ `#define DEFAULT_PKT_SIZE 8`), and the key texts and parameters of the queries its examples keep, each a few tens of bytes."
+
+[[limit]]
+id = "PAYLOAD_MEDIUM_BLOCK_BYTES"
+kconfig = "WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES"
+kind = "parameter"
+range = [32, 1073741824]
+default = 1040
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes of each block of the middle one of the three pools of payload blocks
+a program of the pico C ABI holds the bytes of its owned payloads, strings and
+slices in, a 16-byte head of each block included and rounded up to 16. The
+largest pool's blocks are not stated: each holds the largest message a session
+of the build delivers (the larger of PICO_FRAG_MAX_BYTES,
+PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES) and its head, so a
+payload a session hands a program always has a block that holds it. At least
+32.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. 1,040 bytes hold a 16-byte head and a payload of 1,024 bytes, MAX_REPLY_PAYLOAD_BYTES's default, so a reply's payload a program keeps takes one of these blocks and no block of the largest."
+
+[[limit]]
+id = "HELD_SMALL_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 256
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
+holds payload bytes in at once: the smallest of the three pools of payload
+blocks the library reserves at its first object. A payload whose bytes no free
+block of a pool that holds them takes is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. 256 blocks of 64 bytes are 16 KiB, an eighth of the 128 KiB the three pools of the default hold together: eight short payloads, strings or kept query texts for each of HELD_PAYLOADS's thirty-two payloads."
 
 [limit.pico_preset]
-value = 32768
-reason = "zenoh-pico bounds its payloads' bytes by no count. The largest payload a program or test of the preset builds is twice its FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the one the fragmentation test puts past the receiving ceiling (`crates/wz-capi-pico/tests/it/files/fragmentation_roundtrip.rs` @ `const TOO_BIG: usize = 2 * CEILING;`): 8,192 bytes and a 16-byte head take a block of 16,384. The other half holds what the held samples, replies, queries and strings of its examples carry, each a few tens of bytes. A program that builds a payload larger than a block of the area is refused where zenoh-pico would allocate it, as zenoh-pico is on a heap that small."
+value = 128
+reason = "zenoh-pico bounds its payloads by no count. 128 blocks of 64 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the held samples, replies and queries of its examples (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES) and their key texts carry a few tens of bytes each."
 
-# The pico preset is counted from zenoh-pico's own tests and examples: at most one encoding with a
-# schema is alive at once in any of them (z_api_encoding_test.c, z_api_alignment_test.c,
-# z_pub_attachment.c, z_get_attachment.c, z_queryable_attachment.c); the clones z_api_admin_space_test.c
-# keeps carry no schema. A declared publisher's is the second.
+[[limit]]
+id = "HELD_MEDIUM_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 32
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
+holds payload bytes in at once: the middle one of the three pools of payload
+blocks the library reserves at its first object. A payload whose bytes no free
+block of a pool that holds them takes is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Thirty-two blocks are one for each of HELD_PAYLOADS's thirty-two payloads, about a quarter of the 128 KiB the three pools of the default hold together."
+
+[limit.pico_preset]
+value = 8
+reason = "zenoh-pico bounds its payloads by no count. Eight blocks of 1,040 bytes are 8 KiB, a quarter of the 32 KiB the three pools of the preset hold together: the three payloads its examples hold at once (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), the encodings they keep and the samples they take out of a channel."
+
+[[limit]]
+id = "HELD_LARGE_PAYLOAD_BLOCKS"
+kconfig = "WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS"
+kind = "bound"
+driven = "local"
+default = 20
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The blocks a program of the pico C ABI holds its largest payloads in at once:
+the largest of the three pools of payload blocks the library reserves at its
+first object, each block holding the largest message a session of the build
+delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
+PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
+block, or one no free block of a pool that holds it takes, is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. Twenty blocks of the default's 4,112 bytes (PICO_FRAG_MAX_BYTES's 4,096 and the head) are about 80 KiB, which with the two smaller pools makes the 128 KiB the default held for its payloads before the pools of blocks, a whole message for each of HELD_SAMPLES's eighteen samples and two more."
+
+[limit.pico_preset]
+value = 4
+reason = "zenoh-pico bounds its payloads by no count; the largest it holds is a whole message of FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`). Four blocks of 4,112 bytes are 16 KiB, half of the 32 KiB the three pools of the preset hold together, as the half the preset held for one such payload before the pools of blocks."
+
 [[limit]]
 id = "HELD_ENCODINGS"
 kconfig = "WZ_LIMIT_HELD_ENCODINGS"
@@ -3510,8 +3611,10 @@ help = '''
 The most timers a runtime holds: a ceiling on the timer table a
 fixed-memory image declares, checked as the task ceiling is, and the entries
 of the timer table a session of the C ABI's cooperative engine reserves when
-it opens. A sleep past them is refused an entry and counted, and ends by
-polling.
+it opens in a build with a feature whose task sleeps on the session's runtime.
+A session keeps its own deadlines, and no feature of that engine spawns a task
+that sleeps, so its sessions reserve no entry. A sleep past them is refused an
+entry and counted, and ends by polling.
 '''
 
 [limit.upstream]

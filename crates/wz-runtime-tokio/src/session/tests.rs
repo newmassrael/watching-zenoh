@@ -14,25 +14,15 @@ use crate::reply_sink::ReplyKind;
 use crate::runtime_impl::TokioTime;
 use crate::test_fixtures::{recording_actions, recording_actions_with_params, RecordingLinkDriver};
 use portable_atomic::{AtomicUsize, Ordering};
-use wz_runtime_core::TimeSource;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
-/// R283 test helper — force the session-FSM `Established` stamp
-/// without driving the full handshake. The production path
-/// populates `established_at` via the `record_established_at` Lua
-/// action wired to `Established.onentry` in
-/// `session_fsm_unicast.scxml`; pure-Rust unit tests skip the
-/// SCXML driver and stamp the field directly. Mirror of any
-/// other test fixture that needs to bypass FSM driving (e.g. the
-/// keyexpr mapping is populated via `send_declare_keyexpr` rather
-/// than driving the peer's `DeclKexpr` inbound).
+/// R283 test helper — enter the session-FSM `Established` state without
+/// driving the full handshake, through the door the `record_established_at`
+/// action wired to `Established.onentry` takes
+/// ([`SessionLinkActions::enter_established`]).
 fn mark_session_established(session: &TokioSession) {
     // R311nf — `actions()` is now infallible on `TokioSession` (= `Session<_,_,Unicast>`).
-    let now = session.actions().clock.now_monotonic_ms();
-    session
-        .actions()
-        .link
-        .fact_established_at(|slot| *slot = Some(now));
+    session.actions().enter_established();
 }
 
 /// Convenience constructor that returns a (Session,
@@ -43,7 +33,23 @@ fn mark_session_established(session: &TokioSession) {
 /// SSOT (`recording_actions()`); the former local `RecordingDriver`
 /// + `fixture_params` duplicate was folded into it.
 fn build_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
-    let (actions, driver) = recording_actions();
+    session_over(recording_actions())
+}
+
+/// [`build_session`] before establishment, for a test whose subject is what a session
+/// mid-handshake answers.
+fn build_handshaking_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
+    session_over(crate::test_fixtures::handshaking_actions_with_params(
+        fixture_session_init_params(),
+    ))
+}
+
+fn session_over(
+    (actions, driver): (
+        Arc<crate::session_glue::SessionLinkActions>,
+        Arc<RecordingLinkDriver>,
+    ),
+) -> (TokioSession, Arc<RecordingLinkDriver>) {
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     // R311cw — Session::new takes `Arc<T>` clock; R311nf — `TokioSession` alias.
     let clock = Arc::new(TokioTime::new());
@@ -12686,8 +12692,11 @@ fn declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wir
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     let baseline_frames = driver.frame_count();
-    // NOTE: NO mark_session_established(&session) — that's the
-    // condition under test.
+    // The condition under test: the stamp of a session mid-handshake, none.
+    session
+        .actions()
+        .link
+        .fact_established_at(|slot| *slot = None);
     let err = session.declare_liveliness_subscriber_aliased(
         7,
         None,
@@ -12723,7 +12732,7 @@ fn declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_n
     // state). Retrying post-Established with the same bad mapping
     // would still fail; surfacing UnknownMapping first short-
     // circuits the futile retry loop.
-    let (session, driver) = build_session();
+    let (session, driver) = build_handshaking_session();
     // No send_declare_keyexpr — mapping 99 is genuinely unknown.
     // No mark_session_established — Established is also false.
     let err = session.declare_liveliness_subscriber_aliased(
@@ -12746,7 +12755,7 @@ fn is_established_predicate_flips_after_record_established_at() {
     // A freshly-built session is mid-handshake (established_at =
     // None); the test fixture flips the field to verify the
     // predicate tracks it.
-    let (session, _driver) = build_session();
+    let (session, _driver) = build_handshaking_session();
     assert!(
         !session.is_established(),
         "freshly-built session is pre-Established (no record_established_at fired)",

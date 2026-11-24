@@ -91,6 +91,22 @@ where
             LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
     }
+
+    // Made in the session's slot: the driver carries its outbound slot, which returned by
+    // value would be a copy in each frame of the dial it passed through.
+    fn bind_in(
+        &mut self,
+        to: Locator,
+        out: &mut core::mem::MaybeUninit<LwipUdpDriver>,
+    ) -> Result<(), LinkOpenError> {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        match ip.proto {
+            LinkProto::Udp => self.links.bind_driver_in(out, 0, ip.at),
+            LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
+        }
+    }
 }
 
 /// The [`Dialer`](wz_session_mcu::connect_manager::Dialer) of the slot profile over lwIP: the

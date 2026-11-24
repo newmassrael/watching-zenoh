@@ -264,7 +264,9 @@ fn a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told() {
 /// # Control
 ///
 /// Dropping the tomb `FaceTold::went` hands back (no departed place) reds listener 1's
-/// `first_told_gone`; writing it over the first reds listener 0's.
+/// `first_told_gone`; writing it over the first reds listener 0's. Only a build that takes faces
+/// beside its dial role's has a free place for it.
+#[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
     let router = Router::start(CatchAll::None);
@@ -313,6 +315,59 @@ fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
         engine.first_told_gone(plane, 0).is_none() && engine.first_told_gone(plane, 1).is_none(),
         "both told, nothing kept"
     );
+}
+
+/// A session that only dials holds its dial role's face alone, so a second departure of that face
+/// under another key finds no place to be kept in: the listener told the second row is owed
+/// nothing, and the one told the first is still owed its departure, which the face's own tomb
+/// keeps.
+///
+/// # Control
+///
+/// A table that kept the second tomb at another place reds listener 1's `first_told_gone`; one
+/// that wrote it over the first reds listener 0's.
+#[cfg(not(any(feature = "listen", feature = "group")))]
+#[test]
+fn a_second_departure_of_the_dial_face_of_a_dial_only_session_is_not_kept() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    let plane = ToldPlane::Transports;
+    let first = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
+    assert!(engine.tell_came(plane, 0, &first));
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+
+    let router = Router::start_on_as(port, 0x5a, CatchAll::None);
+    until(&engine, "the link to another node", || {
+        engine.face_link_at(0).is_some()
+    });
+    let second = ToldKey::of_row(&engine.face_link_at(0).expect("the face again"));
+    assert!(engine.tell_came(plane, 1, &second));
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the second face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+
+    assert_eq!(
+        engine.first_told_gone(plane, 0).map(|row| row.zid[0]),
+        Some(0xc3),
+        "the first departure is still owed"
+    );
+    assert!(
+        engine.first_told_gone(plane, 1).is_none(),
+        "the second has no place to be kept in"
+    );
+    assert!(!engine.tell_went(plane, 1, &second));
+    assert!(engine.tell_went(plane, 0, &first));
 }
 
 /// A listener whose replay queue ran out of rows converges to the faces as they stand: told the

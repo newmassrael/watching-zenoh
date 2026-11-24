@@ -190,7 +190,12 @@ pub trait LinkCalls<C: ClockSource + 'static> {
     /// The link of face `face`, sending through `actions`, made: the session's tables are told of
     /// it before it carries anything. `key_form` is the key-wire form stated for the endpoint the
     /// link was dialled to or taken on, `None` in a build whose nodes share no key ids.
-    fn link_made(&self, face: FaceId, actions: &SessionHandle<C>, key_form: Option<KeyWireForm>);
+    fn link_made(
+        &mut self,
+        face: FaceId,
+        actions: &SessionHandle<C>,
+        key_form: Option<KeyWireForm>,
+    );
 
     /// The gates over `pump`, the link's one shared handle, whose session sends through
     /// `actions`.

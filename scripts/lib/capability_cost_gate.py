@@ -111,10 +111,12 @@ the reference's, by its row in `deploy/pico_host_ceiling.json`:
   join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
   with the row this run reads, and `--measure` prints the rows of every case it builds.
 - ONE TABLE, TWO LANES. The release DLL of each width of Windows has its row in the same table
-  (`pico_windows_package.CEILING_CASES`), read and graded by the Windows package job, since only
-  a Windows host builds it. The rule of a row is `pico_host_ceiling.py`'s, which both lanes
-  import; this gate holds the table to the population of both (`ceiling_cases`), so a Windows
-  row is checked for its shape on every tree, wherever it is graded.
+  (`pico_windows_package.CEILING_CASES`), and so do the like-for-like library of each width and
+  each of wz's doors over it (`pico_windows_package.FEATURE_CASES`), read and graded by the
+  Windows package job, since only a Windows host builds them. The rule of a row is
+  `pico_host_ceiling.py`'s, which both lanes import; this gate holds the table to the population
+  of both (`ceiling_cases`), so a Windows row is checked for its shape on every tree, wherever it
+  is graded.
 
 ## The hosted shards
 
@@ -2349,11 +2351,13 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
 
 def ceiling_cases() -> list[str]:
     """The cases the ceiling holds: every pico case of this gate, the ones `report_reference`
-    builds a reference for, and the release DLL of each width of Windows, which the Windows package
-    lane builds and grades (`pico_windows_package.CEILING_CASES`). This gate holds the table to
-    all of them, so a row of either lane is checked on every tree whichever host builds it."""
+    builds a reference for, and the release DLL of each width of Windows with the like-for-like
+    library and each door over it, which the Windows package lane builds and grades
+    (`pico_windows_package.CEILING_CASES`, `pico_windows_package.FEATURE_CASES`). This gate holds
+    the table to all of them, so a row of either lane is checked on every tree whichever host
+    builds it."""
     return ([c.id for c in CASES if c.package == "wz-capi-pico"]
-            + list(pico_windows_package.CEILING_CASES))
+            + list(pico_windows_package.CEILING_CASES) + list(pico_windows_package.FEATURE_CASES))
 
 
 def measure_command(case_id: str) -> str:
@@ -2970,6 +2974,7 @@ def cmd_selftest() -> int:
            and set(ceiling_rows(committed)) == set(ceiling_cases())
            and {c.id for c in CASES if c.package == "wz-capi-pico"} <= set(ceiling_cases())
            and set(pico_windows_package.CEILING_CASES) <= set(ceiling_cases())
+           and set(pico_windows_package.FEATURE_CASES) <= set(ceiling_cases())
            and len(pico_windows_package.CEILING_CASES) == len(pico_windows_package.ARCHES))
     expect("an unfilled row names no command when its lane gives none",
            "prints the same row" not in grade_ceiling("t", unfilled, set_from)[0][0])

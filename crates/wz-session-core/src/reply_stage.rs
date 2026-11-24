@@ -189,7 +189,28 @@ pub struct ReplyParts<'a> {
     pub kind: PartsKind<'a>,
 }
 
-impl ReplyParts<'_> {
+impl<'a> ReplyParts<'a> {
+    /// A reply's parts with no timestamp stack, whatever the build carries: what a caller
+    /// outside this crate builds them by, since it cannot name a field its own features do
+    /// not decide.
+    pub const fn new(
+        rid: crate::wire_id::RequestId,
+        keyexpr: &'a str,
+        responder: Option<(&'a [u8], u32)>,
+        qos: QosLevel,
+        kind: PartsKind<'a>,
+    ) -> Self {
+        Self {
+            rid,
+            keyexpr,
+            responder,
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind,
+        }
+    }
+
     /// The lengths a reply's payload bound (`MAX_REPLY_PAYLOAD_BYTES`) is read on: its payload's,
     /// none for a Del or for a buffer of shared memory, which is not copied, and its attachment's.
     /// What a stage refuses a reply by, and what a node that sends a reply as it is made refuses it

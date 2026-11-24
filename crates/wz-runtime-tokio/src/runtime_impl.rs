@@ -209,6 +209,29 @@ impl SessionRuntime for TokioRuntime {
     #[cfg(not(feature = "transport-unicast"))]
     type IterationWork = ();
 
+    // The session is shared by worker threads, so what its holders write without a lock is
+    // atomic, and what they reach one at a time is behind the profile's lock.
+    type Flag = core::sync::atomic::AtomicBool;
+    type Word = core::sync::atomic::AtomicU64;
+    type Local<T>
+        = crate::sync::PlainMutex<T>
+    where
+        T: Send + 'static;
+
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static,
+    {
+        crate::sync::PlainMutex::new(value)
+    }
+
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        local.with(f)
+    }
+
     // R311ja — the AP action handle is `Arc`: the multi-thread runtime
     // clones it into spawned query / reply tasks that may move across
     // worker threads, so the refcount must be atomic (`Send + Sync`). The
