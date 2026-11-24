@@ -193,8 +193,6 @@ pub mod join_handle;
 #[cfg(feature = "runtime")]
 pub mod local;
 #[cfg(feature = "runtime")]
-// Totality debt TD-205 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
 mod static_tests;
