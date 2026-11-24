@@ -59,7 +59,7 @@ use crate::matching::FilterListeners;
 #[cfg(not(feature = "engine-tokio"))]
 use crate::prelude::*;
 use crate::refusal::{refusal_code, Door};
-use crate::result::ZResult;
+use crate::result::{ZResult, Z_ERR_GENERIC};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -231,6 +231,54 @@ impl WriteFilter {
     }
 }
 
+/// A publisher's or a querier's key with its declaration, its write filter and the key as the
+/// entity names it on the wire: what both are declared with, in pico's order. The filter is
+/// first, so a holder that drops it whole retracts the filter's Interest while the declaration it
+/// names still stands.
+pub(crate) struct FilteredKey {
+    pub(crate) filter: WriteFilter,
+    pub(crate) key: DeclaredKeyexpr,
+    pub(crate) wire: WireKey,
+    /// The `eid` half of the global id the unstable API reports for the entity.
+    #[cfg(feature = "unstable-api")]
+    pub(crate) eid: wz_session_core::wire_id::EntityId,
+}
+
+impl FilteredKey {
+    /// Declare the key `keyexpr` (`existing` when the caller's key is that declaration already),
+    /// take the entity's id, then declare its write filter on `plane`, `count_local` as
+    /// [`WriteFilter::declare`] reads it. That is pico's order: `_z_declare_publisher` and
+    /// `_z_declare_querier` declare the key and take the id
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @ `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`)
+    /// before the filter is made, whose Interest takes the next id and names the key's
+    /// declaration. The id is taken whether or not the build reports it, as a group the Interest
+    /// goes to reads the next. A session that has handed out every id refuses the entity with
+    /// `Z_ERR_GENERIC`, the code a refused declaration gets here; a refused key or filter answers
+    /// its own. One body for the publisher and the querier.
+    pub(crate) fn declare(
+        session: &PicoSession,
+        plane: FilterPlane,
+        keyexpr: &str,
+        existing: Option<&DeclaredKeyexpr>,
+        count_local: bool,
+    ) -> Result<Self, ZResult> {
+        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
+        let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
+        #[cfg(not(feature = "unstable-api"))]
+        let _ = eid;
+        // The entity keeps its key, which holds the declaration: its wire form holds nothing.
+        let wire = key.wire(Arc::as_ref(&session.engine));
+        let filter = WriteFilter::declare(session, plane, &key, &wire, count_local)?;
+        Ok(Self {
+            filter,
+            key,
+            wire,
+            #[cfg(feature = "unstable-api")]
+            eid,
+        })
+    }
+}
+
 /// Retracting on DROP reaches every path that releases the entity: `z_undeclare_*` and
 /// `z_*_drop` alike. A listener its handle undeclared is off the list already. The drop returns
 /// once every listener's closure has run its `drop(context)`: a callback still running on
@@ -260,4 +308,50 @@ fn interest_ask<'a>(
         suffix,
         aggregate: client,
     })
+}
+
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+mod tests {
+    use super::*;
+    use crate::session::{
+        listening_on_loopback, session_handle, z_session_drop, z_session_loan, z_session_move,
+    };
+
+    /// An entity's key is declared and named on the wire by its own declaration, its id comes off
+    /// the session's counter, and the filter it gets holds back what it sends while nothing on a
+    /// session with no peer matches.
+    #[test]
+    fn a_filtered_key_names_its_declaration_and_starts_held_back() {
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) }
+            .expect("an open session has its handle");
+        let pico = PicoSession::of(handle);
+        let filtered = FilteredKey::declare(
+            &pico,
+            FilterPlane::Subscribers,
+            "demo/filtered",
+            None,
+            false,
+        )
+        .unwrap_or_else(|code| panic!("a session with room declares the key, not {code}"));
+        assert_eq!(filtered.key.literal(), "demo/filtered");
+        let (id, rest) = filtered.wire.names_in(filtered.key.literal());
+        assert_ne!(id, 0, "the wire names the key's own declaration");
+        assert_eq!(rest, None, "the declaration names the whole key");
+        assert!(
+            filtered.filter.active(),
+            "nothing matches on a session with no peer"
+        );
+        #[cfg(feature = "unstable-api")]
+        {
+            let next = wz_capi_port::SessionEngine::next_entity_id(&*pico.engine)
+                .expect("the session has ids left");
+            assert!(next > filtered.eid, "the entity's id was taken first");
+        }
+        drop(filtered);
+        drop(pico);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
 }
