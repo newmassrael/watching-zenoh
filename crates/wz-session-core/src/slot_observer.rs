@@ -51,7 +51,7 @@ use crate::declare::liveliness_subscriber::{
     LivelinessSubscriberTable, LocalLivelinessSubscribers,
 };
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
-use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+use crate::declare::local_token::LocalTokenRegistry;
 #[cfg(feature = "declare-queryable")]
 use crate::declare::queryable::RemoteQueryableTable;
 #[cfg(feature = "declare-subscriber")]
@@ -1334,6 +1334,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // would be a datagram of its own (see `ResponseSink::begin_burst`).
         let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(peers, actions);
         self.drain_get_prunes(requesters, actions);
         self.drain_query_finals(peers, actions);
@@ -1361,6 +1365,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         }
         let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(peers, actions);
         self.drain_get_prunes(requesters, actions);
         actions.end_burst(burst);
@@ -1557,14 +1565,19 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     }
 
     /// The answers to the peer's interests: the subscriber interest chains first,
-    /// then the liveliness ones, each batch's items before its terminating `Final`.
+    /// then the liveliness ones, each batch's items before its terminating `Final`. A build that
+    /// answers no Interest stages none and has no drain of them.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     #[inline(never)]
     pub(crate) fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
     ) {
-        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+        #[cfg(feature = "declare-subscriber")]
         for item in peers.subscribers.take_staged_sub_interest_replies() {
             match &item {
                 crate::pubsub::SubInterestReply::Final { interest_id } => {
@@ -1606,7 +1619,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         while !peers.pending_declares.is_empty() {
             let item = peers.pending_declares.remove(0);
             match item {
-                DeclResponseItem::Token {
+                crate::declare::local_token::DeclResponseItem::Token {
                     token_id,
                     interest_id,
                 } => {
@@ -1616,13 +1629,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                         sink.send_declare_token_reply(token_id, keyexpr, interest_id);
                     }
                 }
-                DeclResponseItem::Final { interest_id } => {
+                crate::declare::local_token::DeclResponseItem::Final { interest_id } => {
                     sink.send_declare_final_reply(interest_id)
                 }
             }
         }
-        #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
-        let _ = (peers, sink);
     }
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
@@ -1665,7 +1676,7 @@ fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
     {
         staged |= peers.subscribers.has_staged_sub_interest_replies();
     }
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
     {
         staged |= !peers.pending_declares.is_empty();
     }

@@ -819,6 +819,10 @@ impl ApplicationLayerObserver {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         self.drain_query_replies(actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(actions);
         self.drain_get_prunes(actions);
     }
@@ -858,7 +862,11 @@ impl ApplicationLayerObserver {
     /// `Self::drain_declare_replies`. Exposed demand-driven: the per-concern
     /// drains stay private until a single-concern consumer needs one (the
     /// get-prune concern has no such consumer yet, so it stays bundled in
-    /// [`Self::flush_pending`]).
+    /// [`Self::flush_pending`]). Not in a build that answers no Interest, which stages none.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     pub fn flush_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         self.drain_declare_replies(sink);
     }
@@ -874,6 +882,10 @@ impl ApplicationLayerObserver {
     /// holds this observer meanwhile stops every thread that needs it, the drive thread first.
     pub fn take_owed_replies<P: LivelinessGetPrune>(&mut self, owed: &mut OwedReplies, prunes: &P) {
         self.take_owed_reply_bodies(owed);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.take_owed_declarations(owed);
         self.drain_get_prunes(prunes);
     }
@@ -886,7 +898,11 @@ impl ApplicationLayerObserver {
 
     /// The declarations owed to peers' interests alone, resolved now and kept in `owed`:
     /// [`Self::flush_declare_replies`] for a host that sends after it lets go of this observer
-    /// (see [`Self::take_owed_replies`]).
+    /// (see [`Self::take_owed_replies`]). Not in a build that answers no Interest.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     pub fn take_owed_declarations(&mut self, owed: &mut OwedReplies) {
         self.drain_declare_replies(&*owed);
     }
@@ -916,6 +932,10 @@ impl ApplicationLayerObserver {
     /// order, so each interest-response batch's `Token`s precede its
     /// terminating `Final`. The sink owns the encode (a `VecSink` on AP, a
     /// `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     fn drain_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         self.app.drain_declare_replies(&mut self.peers, sink);
         // The QUERYABLE interest-response chains, in stage order: each chain's
@@ -2486,9 +2506,11 @@ mod sub_interest_reply_tests {
 }
 
 /// A build that answers no peer's Interest (`interest-answer` off), asked as one that does: the
-/// subscriber Interest reaches the subscriber plane, and neither a drain after it nor one after a
-/// subscription the Interest's FUTURE half reaches sends the peer anything, no declaration and no
-/// `Final`. The build that answers is held by `a_member_interest_on_its_own_alias_is_answered`.
+/// subscriber Interest reaches the subscriber plane, and what the observer owes after it, and after
+/// a subscription the Interest's FUTURE half reaches, is nothing: no declaration and no `Final`.
+/// Such a build has no drain of answers at all (`flush_declare_replies` is not in it), so what is
+/// taken is everything owed. The build that answers is held by
+/// `a_member_interest_on_its_own_alias_is_answered`.
 #[cfg(all(
     test,
     feature = "declare-subscriber",
@@ -2497,39 +2519,13 @@ mod sub_interest_reply_tests {
 ))]
 mod unanswered_interest_tests {
     use super::*;
-    use crate::response_sink::DeclareReplySink;
-    use alloc::vec::Vec;
-    use std::sync::Mutex;
 
-    /// The interest id of every reply a drain sends, of any kind.
-    #[derive(Default)]
-    struct RecordingSink {
-        sent: Mutex<Vec<u64>>,
-    }
+    /// No liveliness get to prune: the tests here ask none.
+    struct NoPrunes;
 
-    impl DeclareReplySink for RecordingSink {
-        #[cfg(feature = "liveliness-token")]
-        fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, interest_id: u64) {
-            self.sent.lock().unwrap().push(interest_id);
-        }
-
-        fn send_declare_final_reply(&self, interest_id: u64) {
-            self.sent.lock().unwrap().push(interest_id);
-        }
-
-        fn send_declare_subscriber_reply(
-            &self,
-            _subscriber_id: u64,
-            _keyexpr: &str,
-            interest_id: u64,
-        ) {
-            self.sent.lock().unwrap().push(interest_id);
-        }
-
-        #[cfg(feature = "declare-undeclare")]
-        fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
-            self.sent.lock().unwrap().push(subscriber_id);
-        }
+    impl LivelinessGetPrune for NoPrunes {
+        #[cfg(feature = "liveliness-get")]
+        fn prune_liveliness_get_interest(&self, _interest_id: u64) {}
     }
 
     #[test]
@@ -2552,21 +2548,21 @@ mod unanswered_interest_tests {
             sn: 0,
             messages: alloc::vec![crate::network_message::NetworkMessage::Interest(interest)],
             has_ext: false,
-            extensions: Vec::new(),
+            extensions: alloc::vec::Vec::new(),
         };
         crate::driver_loop::deliver_frame(&frame, |event| observer.dispatch_event(event));
-        let sink = RecordingSink::default();
-        observer.flush_declare_replies(&sink);
+        let mut owed = OwedReplies::new();
+        observer.take_owed_replies(&mut owed, &NoPrunes);
         assert!(
-            sink.sent.lock().unwrap().is_empty(),
+            owed.is_empty(),
             "the CURRENT half is not answered, not even by a Final"
         );
         observer
             .subscribe("demo/unasked/b", |_| {})
             .expect("no quota is stated on this table");
-        observer.flush_declare_replies(&sink);
+        observer.take_owed_replies(&mut owed, &NoPrunes);
         assert!(
-            sink.sent.lock().unwrap().is_empty(),
+            owed.is_empty(),
             "and the FUTURE half is not told of a later subscription"
         );
     }
