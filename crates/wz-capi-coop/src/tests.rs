@@ -2696,6 +2696,37 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
     );
 }
 
+/// A dial refused before any link is made names its endpoint and its cause: a text that names no
+/// address the build reads is refused by the locator, a protocol the links do not carry by the
+/// links. Turned red by a refusal that names the other cause or loses the endpoint.
+#[test]
+fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
+    use crate::{EndpointRefusal, OpenError, Refusal};
+    use wz_runtime_coop::locator_text::DialRefused;
+    use wz_runtime_coop::session_drive::LinkOpenError;
+
+    for (endpoint, why) in [
+        (
+            "tcp/localhost:7447",
+            Refusal::Locator(DialRefused::BadAddress),
+        ),
+        (
+            "tls/127.0.0.1:7447",
+            Refusal::Link(LinkOpenError::Unsupported),
+        ),
+    ] {
+        let refused = open_with_result(CoopConfig {
+            endpoints: vec![endpoint.into()],
+            ..client_config()
+        });
+        assert_eq!(
+            refused,
+            Some(OpenError::Unreachable(EndpointRefusal::new(endpoint, why))),
+            "{endpoint}"
+        );
+    }
+}
+
 /// The open writes each endpoint's text into a row of the session's arena: one longer than a row
 /// is refused by name, an endpoint to dial as unreachable and one to listen on as a port not
 /// listened on, and more endpoints than the build's rows refuse the arena. A face attached after
