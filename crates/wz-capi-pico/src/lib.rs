@@ -599,8 +599,6 @@ mod link_properties;
 #[cfg(feature = "liveliness")]
 pub mod liveliness;
 pub mod locality;
-// Totality debt TD-181 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod matching;
 // A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
 // unstable surface, over the reader of `wz-app-frame`.
