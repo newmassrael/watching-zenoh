@@ -520,8 +520,16 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
     let (actions, link) = bundle();
     let long = "k".repeat(usize::from(u16::MAX) + 1);
     let key = crate::named_key::NamedKey::literal(&long).expect("a key");
-    let sent =
-        actions.send_plain_put_qos(key, b"v", None, true, false, crate::qos::Priority::DEFAULT);
+    let sent = actions.send_plain_put_qos(
+        key,
+        b"v",
+        None,
+        super::SendAs {
+            reliable: true,
+            express: false,
+            priority: crate::qos::Priority::DEFAULT,
+        },
+    );
     assert_eq!(
         sent,
         Some(Err(crate::send_wire_error::SendWireError::Codec(
