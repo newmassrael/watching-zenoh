@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
-use crate::engine::{Holder, LinkRooms, Room};
+use crate::arena::{AllocatorMemory, SessionArena};
+use crate::engine::{Holder, LinkRooms, Room, RoomPlace, RoomPlaces};
+use wz_session_core::bounded::Arena;
 
 /// One face's handle in a test stack: the room it answers, as the test set it, and how long each
 /// ask of it was for.
@@ -69,9 +71,20 @@ impl LinkWaits for Answers {
     }
 }
 
-/// The rooms of a session over a stack whose waits are `answers`.
+/// The rooms of a session over a stack whose waits are `answers`, four places lent from an arena
+/// the test leaks.
 fn rooms(answers: &Answers) -> LinkRooms<Answers> {
-    LinkRooms::new(answers.clone(), 4)
+    const PLACES: usize = 4;
+    let bytes =
+        Arena::table_bytes::<Option<RoomPlace>>(PLACES).expect("places the address space holds");
+    let arena: &'static mut SessionArena = Box::leak(Box::new(
+        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
+    ));
+    let places: RoomPlaces = arena
+        .arena_mut()
+        .lend(PLACES)
+        .expect("the arena has the places");
+    LinkRooms::new(answers.clone(), places)
 }
 
 /// The places of the faces `room` names congested, or `None` for another answer.

@@ -661,6 +661,8 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
+    /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::new`).
+    room_places: RoomPlaces,
     /// The places the session lends its registry and its Router in for a step, in the arena.
     steps: StepPlaces,
     /// The session's round of deliveries, which lies in the arena: after the registry, which
@@ -715,19 +717,19 @@ impl SessionRows {
 }
 
 /// Lay out the plan of the session opened with `config` under `policy`, its tables' rows from
-/// `from` (`lay_out_open`, each link's cells `cell_bytes` large and the ABI's places `held`),
-/// reserve its arena in `memory`
-/// and lend from it every table of the session. One lender lends each layer its plain tables
-/// from the rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
-/// state's lane, declarations, keys and legs, and the ABI's places; it gives the tables after a
-/// refusal no rows and is asked once, after them all. The round's tables and the application's,
-/// which their makers lend, ask their own. What was lent before a refusal goes back with the
-/// arena. Out of line and generic over nothing: one body for every stack and source the open is
-/// made over. The plan is made and read here, so the open's frame never holds or moves it: what
-/// the state is sized by is handed back with the tables.
+/// `from` (`lay_out_open`, each link's cells `cell_bytes` large, the faces' rooms `rooms` bytes and
+/// the ABI's places `held`), reserve its arena in `memory` and lend from it every table of the
+/// session. One lender lends each layer its plain tables from the rows the plan counts for it: the
+/// transport's links, cells, reassembly and endpoints, the state's lane, declarations, keys and
+/// legs, and the ABI's places; it gives the tables after a refusal no rows and is asked once, after
+/// them all. The round's tables and the application's, which their makers lend, ask their own. What
+/// was lent before a refusal goes back with the arena. Out of line and generic over nothing: one
+/// body for every stack and source the open is made over. The plan is made and read here, so the
+/// open's frame never holds or moves it: what the state is sized by is handed back with the tables.
 #[inline(never)]
 fn lend_session(
     cell_bytes: LinkCells<usize>,
+    rooms: usize,
     held: &HeldPlaces,
     from: PlanFrom,
     memory: &'static dyn ArenaMemory,
@@ -740,7 +742,7 @@ fn lend_session(
         #[cfg(any(feature = "runtime-plan", test))]
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
-    lay_out_open(&mut plan, cell_bytes, held)?;
+    lay_out_open(&mut plan, cell_bytes, rooms, held)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
@@ -768,6 +770,7 @@ fn lend_session(
         handle,
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
+    let room_places: RoomPlaces = lend.table(plan.peers().sets());
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
@@ -840,6 +843,7 @@ fn lend_session(
     .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
         transport,
+        room_places,
         steps,
         samples,
         router,
@@ -957,8 +961,8 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
     /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
-    /// all (`TxQueueConf::held_drop`).
-    rooms: Arc<LinkRooms<L::Waits>>,
+    /// all (`TxQueueConf::held_drop`). A handle of the rooms `core` owns, dropped after it.
+    rooms: PlacedRef<LinkRooms<L::Waits>>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
     /// The place of the face a publish holding the session sends on now, [`NOT_SENDING`] while
@@ -1241,13 +1245,27 @@ pub(crate) struct LinkRooms<W> {
 /// mark of the last face that took a place: a set of places read at one mark names no face that
 /// took its place after it.
 struct RoomTable {
-    places: Vec<Option<RoomPlace>>,
+    places: RoomPlaces,
     mark: u64,
+}
+
+/// The places of the table of rooms, one for each set of face tables the open lent
+/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena with them.
+pub(crate) type RoomPlaces =
+    wz_session_core::bounded::BoundedVec<Option<RoomPlace>, { crate::arena::MAX_FACE_SETS }, Lent>;
+
+/// The bytes of one place of the table of rooms, as the plan lays the places out.
+pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
+
+/// The bytes of the rooms of a session over `links`, which the open places in the session's
+/// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'.
+pub(crate) const fn link_rooms_bytes<L: SessionLinks>(_links: &L) -> usize {
+    core::mem::size_of::<LinkRooms<L::Waits>>()
 }
 
 /// What the face at a place of the table of rooms names.
 #[derive(Clone, Copy)]
-struct RoomPlace {
+pub(crate) struct RoomPlace {
     on: WaitOn,
     /// The table's mark when the face took the place.
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -1324,17 +1342,13 @@ impl Drop for SendingOn<'_> {
 }
 
 impl<W: LinkWaits> LinkRooms<W> {
-    /// The rooms of a session over a stack whose waits are `waits`, a place for each of the
-    /// `places` places a face of the session may hold, made now: none grows after.
-    pub(crate) fn new(waits: W, places: usize) -> Self {
-        let mut table = Vec::with_capacity(places);
-        table.resize(places, None);
+    /// The rooms of a session over a stack whose waits are `waits`, a place for each row of
+    /// `places`, each free: none grows after.
+    pub(crate) fn new(waits: W, mut places: RoomPlaces) -> Self {
+        while places.push(None).is_ok() {}
         Self {
             waits,
-            rooms: Mutex::new(RoomTable {
-                places: table,
-                mark: 0,
-            }),
+            rooms: Mutex::new(RoomTable { places, mark: 0 }),
         }
     }
 
@@ -1375,9 +1389,7 @@ impl<W: LinkWaits> LinkRooms<W> {
 
     /// Let go of what every face named: the faces' links are ended.
     pub(crate) fn forget_all(&self) {
-        for place in &mut lock(&self.rooms).places {
-            *place = None;
-        }
+        lock(&self.rooms).places.fill(None);
     }
 
     /// The set of place `at` alone, as the table stands now: every face when no face holds the
@@ -1739,8 +1751,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// of a pass of its tasks: the one way a task reaches it.
     registry_lend: RegistryLend,
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
-    /// session held ([`CoopEngine::live_to_publish`]).
-    rooms: Arc<LinkRooms<L::Waits>>,
+    /// session held ([`CoopEngine::live_to_publish`]). They lie in the arena, owned here, before
+    /// the arena, and reached by the engine through a handle that counts nothing.
+    rooms: Placed<LinkRooms<L::Waits>>,
     /// The wake of the links' stack that the program's word that the clock moved on wakes, which
     /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
     /// by itself, or a stack that makes no wake. Held for the session: a wait names it by value.
@@ -2675,15 +2688,18 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
 }
 
 /// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells `cells` sizes
-/// for each link and then the ABI's places `held` names, after every other row: the one plan an
-/// open reserves by. Laid out where the plan lies, which `lend_session` reads in its own frame: a
-/// plan handed back by value would be moved again, twice, by the open that reads it.
+/// for each link, the faces' rooms of `rooms` bytes and then the ABI's places `held` names, after
+/// every other row: the one plan an open reserves by. Laid out where the plan lies, which
+/// `lend_session` reads in its own frame: a plan handed back by value would be moved again, twice,
+/// by the open that reads it.
 pub(crate) fn lay_out_open(
     plan: &mut ArenaPlan,
     cells: LinkCells<usize>,
+    rooms: usize,
     held: &HeldPlaces,
 ) -> Result<(), ArenaRefused> {
     plan.holding_cells(cells)?;
+    plan.holding_rooms(rooms)?;
     plan.holding(held)
 }
 
@@ -4058,6 +4074,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids.admit(&policy)?;
         let mut lent = lend_session(
             link_cells::<C>(&links),
+            link_rooms_bytes(&links),
             &held,
             from,
             memory,
@@ -4069,11 +4086,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
         let written = write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints));
-        // One refusal for both, so what the arena lent is let go of on one path.
-        let (wire, entropy) = written.and_then(|()| {
+        // One refusal for the three, so what the arena lent is let go of on one path. The rooms
+        // lie in the row the plan laid out for them, a handle at each place a face may hold, the
+        // dial role's and each group's among them.
+        let (wire, entropy, rooms) = written.and_then(|()| {
             let mut entropy = SessionEntropy::new(entropy);
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
-            Ok((wire, entropy))
+            let rooms = lent
+                .arena
+                .arena_mut()
+                .place(LinkRooms::new(links.waits(), lent.room_places))
+                .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            Ok((wire, entropy, rooms))
         })?;
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "listen")]
@@ -4097,13 +4121,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
-        // Each field is made in the order its makers need: the rooms ask the links' waits before the
-        // supervisor takes the links, and the config and policy are read before they are moved.
+        // Each field is made in the order its makers need: the config and policy are read before
+        // they are moved.
         let core = Core {
             local,
             clock,
-            // A handle at each place a face may hold, the dial role's and each group's among them.
-            rooms: Arc::new(LinkRooms::new(links.waits(), places)),
+            rooms,
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,
@@ -4230,7 +4253,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             feature = "declarations-synced-event"
         ))]
         let decl_watches = core.session.registry.decl_watches.clone();
-        let rooms = core.rooms.clone();
+        // SAFETY: the engine holds the handle beside the `Core` that owns the rooms, which is
+        // dropped before the handle and hands out no `&mut` of them.
+        let rooms = unsafe { core.rooms.share() };
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
         #[cfg(any(feature = "listen", feature = "group"))]

@@ -139,7 +139,9 @@ use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-use crate::engine::{CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROUTER_LEND_BYTES};
+use crate::engine::{
+    CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES,
+};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -226,6 +228,8 @@ pub enum ArenaPart {
     DeliveryRound,
     RegistryLend,
     RouterLend,
+    LinkRooms,
+    RoomPlaces,
     ReassemblyFlags,
     ReassemblyBuffers,
     HandedLegFlags,
@@ -327,6 +331,8 @@ impl ArenaPart {
             Self::DeliveryRound => ("delivery round", ""),
             Self::RegistryLend => ("registry lend", ""),
             Self::RouterLend => ("router lend", ""),
+            Self::LinkRooms => ("link rooms", ""),
+            Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
             Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
             Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
@@ -460,6 +466,9 @@ const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
 /// The faces' sets, and the index of the held ones where the build takes faces beside its dial
 /// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
 const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
+/// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
+/// for each set of face tables.
+const ROOM_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
 const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
@@ -508,6 +517,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
     + FACE_ROWS
+    + ROOM_ROWS
     + PEER_ROWS
     + OWED_ROWS
     + ENTITY_ROWS
@@ -1844,6 +1854,13 @@ impl ArenaPlan {
             self.session.peers.sets(),
             HELD_SET_BYTES,
         );
+        // What the face holding each set names for a wait for its room, a place for each set
+        // (`crate::engine::LinkRooms`).
+        self.put(
+            ArenaPart::RoomPlaces,
+            self.session.peers.sets(),
+            ROOM_PLACE_BYTES,
+        );
         let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
         self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
@@ -2194,6 +2211,16 @@ impl ArenaPlan {
         }
         self.transport.cell_bytes = LinkCells::from_array(laid);
         self.transport.cells_held = held;
+        self.settled()
+    }
+
+    /// Lay out the place of the faces' rooms, `bytes` large: what each face that is up names for a
+    /// wait for its room, which the open places in the arena (`crate::engine::LinkRooms`). Their
+    /// size is the stack's waits', which the plan of the session's limits does not know, so it is
+    /// laid out at the open, once, as the links' cells are ([`Self::holding_cells`]). The plan is
+    /// laid out where it lies; a refused one is no plan to open by.
+    pub fn holding_rooms(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
+        self.put(ArenaPart::LinkRooms, 1, bytes);
         self.settled()
     }
 
