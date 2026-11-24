@@ -2245,6 +2245,31 @@ mod tests {
         assert_eq!(LentStaging::<4, 64>::none().available(), 0);
     }
 
+    /// A chain that starts after an earlier one ended takes the place that chain left, and the
+    /// count of open chains is over every place: a place held after the free one still counts.
+    #[test]
+    fn a_lent_staging_counts_every_held_place_when_a_chain_starts() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let cells = lent_cells(8, 4);
+        let mut staging = LentStaging::<4, 64>::over(&cells, 2);
+        let first = staging.acquire().expect("a buffer");
+        let _second = staging.acquire().expect("another buffer");
+        staging.release(first);
+        assert_eq!((staging.available(), cells.in_use()), (1, 1));
+        let _third = staging.acquire().expect("the place the first left");
+        assert_eq!(cells.in_use(), 2);
+        assert!(
+            staging.acquire().is_none(),
+            "two chains open: the table has two buffers free and the staging takes no third chain"
+        );
+        assert_eq!(cells.in_use(), 2, "the refused chain claimed nothing");
+        assert!(
+            LentStaging::<4, 64>::none().acquire().is_none(),
+            "a staging of no table refuses every chain"
+        );
+    }
+
     /// The stagings of two links over their session's one table share its buffers: a chain of one
     /// link that finds every buffer held by the other's is refused, and the buffer the other's
     /// chain gives back when it ends serves it.
