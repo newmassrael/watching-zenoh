@@ -262,27 +262,28 @@ impl<Q: Storage> SubscriberPeer<Q> {
             return;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.deliver_lent(subs, cx, push, reliability) {
+        let sender = record.sender();
+        match self.deliver_lent(subs, cx, push, reliability, sender) {
             Ok(()) => {}
             // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
                 self.in_place_fallbacks.instrumented =
                     self.in_place_fallbacks.instrumented.saturating_add(1);
                 #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(subs, cx, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
             }
         }
     }
@@ -297,6 +298,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
+        sender: u64,
     ) -> Result<(), Fallback> {
         let Some(body) = lent_body(push)? else {
             return Ok(());
@@ -327,7 +329,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // of it into the room before the delivery writes it.
         let (keyexpr, held) = match resolve_wireexpr_view_held_over(
             &push.keyexpr.body,
-            naming.spaces(),
+            naming.spaces().from_sender(sender),
             subs.own_space(),
             ComposeRoom::buffer(compose, &mut frame),
         ) {
@@ -405,12 +407,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
+        sender: u64,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(subs, cx, &owned, reliability, true);
+            self.dispatch_push(subs, cx, &owned, reliability, true, sender);
         }
     }
 }

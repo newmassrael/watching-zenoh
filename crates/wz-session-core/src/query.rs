@@ -3792,7 +3792,7 @@ impl QueryPeer {
                         queryables,
                         cx,
                         request,
-                        peer_keyexpr_table,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
                         pending_replies,
                         pending_final_rids,
                     );

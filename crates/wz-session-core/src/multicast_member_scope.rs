@@ -20,6 +20,14 @@
 //! and when the member leaves, an undeclaration of each id it still holds is made
 //! ([`MemberDeclarations::retracted`]). Both upstreams number an entity in 32 bits, so the
 //! low half holds every id a member can send; an id past it is left as sent.
+//!
+//! Where the group's records are lent, the keyexprs a member declares are the member's too: every
+//! record it sent reaches the observer under its tag, by which the session's one alias table of
+//! the group binds and reads the member's keyexpr ids, and the ids it still holds are unbound when
+//! it leaves, as zenoh-pico drops a peer's resources with the peer
+//! (`vendor/zenoh-pico/src/transport/peer.c` @ `_z_resource_slist_free(&src->_remote_resources);`).
+//! A member holds at most `MAX_MEMBER_KEYEXPRS` of them, in rows of its own, so one member cannot
+//! take the room of the others.
 
 use alloc::collections::BTreeSet;
 
@@ -52,6 +60,15 @@ impl MemberTags {
             subscribers: BTreeSet::new(),
             queryables: BTreeSet::new(),
             tokens: BTreeSet::new(),
+            #[cfg(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            keyexprs: MemberKeyexprs::new(),
         }
     }
 }
@@ -64,9 +81,107 @@ pub(crate) struct MemberDeclarations {
     subscribers: BTreeSet<u64>,
     queryables: BTreeSet<u64>,
     tokens: BTreeSet<u64>,
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    keyexprs: MemberKeyexprs,
+}
+
+/// The keyexpr ids one member holds declared, in rows of its own.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace"),
+    not(feature = "multicast-declarations"),
+    not(feature = "multicast-ingress-gate")
+))]
+#[derive(Debug)]
+struct MemberKeyexprs {
+    ids: [crate::wire_id::ExprId; crate::caps::MAX_MEMBER_KEYEXPRS],
+    held: usize,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace"),
+    not(feature = "multicast-declarations"),
+    not(feature = "multicast-ingress-gate")
+))]
+impl MemberKeyexprs {
+    const fn new() -> Self {
+        Self {
+            ids: [0; crate::caps::MAX_MEMBER_KEYEXPRS],
+            held: 0,
+        }
+    }
+
+    fn held(&self) -> &[crate::wire_id::ExprId] {
+        &self.ids[..self.held]
+    }
+
+    /// Note that the member declared `id`: `false` for a new id with every row held, which is
+    /// not noted. A redeclared id is held already.
+    fn declare(&mut self, id: crate::wire_id::ExprId) -> bool {
+        if self.held().contains(&id) {
+            return true;
+        }
+        let Some(row) = self.ids.get_mut(self.held) else {
+            return false;
+        };
+        *row = id;
+        self.held += 1;
+        true
+    }
+
+    /// Note that the member retracted `id`.
+    fn undeclare(&mut self, id: crate::wire_id::ExprId) {
+        if let Some(at) = self.held().iter().position(|held| *held == id) {
+            self.held -= 1;
+            self.ids.swap(at, self.held);
+        }
+    }
+}
+
+/// What a lent Declare a member sent is handed on as (`MemberDeclarations::scope_lent`).
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace"),
+    not(feature = "multicast-declarations"),
+    not(feature = "multicast-ingress-gate")
+))]
+pub(crate) enum LentScope<'f> {
+    /// As the member sent it.
+    AsSent,
+    /// As this copy of it, its id under the member's tag.
+    Scoped(wz_codecs::lent::Declare<'f>),
+    /// A keyexpr of a new id past the ids the member may hold: no alias is bound for it.
+    PastBound,
 }
 
 impl MemberDeclarations {
+    /// The tag the member's records reach the observer under.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) const fn tag(&self) -> u64 {
+        self.tag
+    }
+
     /// `id` under this member's tag; an id 0 (a retraction that names its key instead) or one
     /// past 32 bits is left as it is.
     fn scoped(&self, id: u64) -> u64 {
@@ -130,8 +245,9 @@ impl MemberDeclarations {
     }
 
     /// The lent form of [`Self::scope`] for one Declare read where its frame lies: a copy of it
-    /// with the id under this member's tag, the raw id kept as `scope` keeps it, or `None` for a
-    /// declaration this does not scope, which reaches the observer as it lies.
+    /// with the id under this member's tag, the raw id kept as `scope` keeps it, or the
+    /// declaration as it lies for one this does not scope. A keyexpr the member declares or
+    /// retracts is noted, and one of a new id past the ids it may hold is refused.
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
@@ -143,7 +259,8 @@ impl MemberDeclarations {
     pub(crate) fn scope_lent<'f>(
         &mut self,
         declare: &wz_codecs::lent::Declare<'f>,
-    ) -> Option<wz_codecs::lent::Declare<'f>> {
+    ) -> LentScope<'f> {
+        use crate::wire_id::declared_expr_id;
         use wz_codecs::lent::DeclareVariant as V;
         let (kind, raw, declared) = match &declare.body {
             V::CodecZenohDeclSubscriber(d) => (DeclKind::Subscriber, d.id, true),
@@ -152,9 +269,22 @@ impl MemberDeclarations {
             V::CodecZenohUndeclQueryable(u) => (DeclKind::Queryable, u.id, false),
             V::CodecZenohDeclToken(d) => (DeclKind::Token, d.id, true),
             V::CodecZenohUndeclToken(u) => (DeclKind::Token, u.id, false),
-            _ => return None,
+            V::CodecZenohDeclKexpr(d) => {
+                return if self.keyexprs.declare(declared_expr_id(d.id)) {
+                    LentScope::AsSent
+                } else {
+                    LentScope::PastBound
+                };
+            }
+            V::CodecZenohUndeclKexpr(u) => {
+                self.keyexprs.undeclare(declared_expr_id(u.id));
+                return LentScope::AsSent;
+            }
+            _ => return LentScope::AsSent,
         };
-        let scoped_id = self.note(kind, raw, declared)?;
+        let Some(scoped_id) = self.note(kind, raw, declared) else {
+            return LentScope::AsSent;
+        };
         let mut scoped = declare.clone();
         match &mut scoped.body {
             V::CodecZenohDeclSubscriber(d) => d.id = scoped_id,
@@ -165,25 +295,65 @@ impl MemberDeclarations {
             V::CodecZenohUndeclToken(u) => u.id = scoped_id,
             _ => {}
         }
-        Some(scoped)
+        LentScope::Scoped(scoped)
     }
 
     /// An undeclaration of every subscriber, queryable and token the member still holds, by its
-    /// scoped id: what the session's observer is handed when the member leaves.
+    /// scoped id, and, where its records are lent, of every keyexpr it holds, by its own id under
+    /// its tag: what the session's observer is handed when the member leaves.
     pub(crate) fn retracted(&self) -> impl Iterator<Item = Retraction> + '_ {
-        let subscribers = self.subscribers.iter().map(move |&id| Retraction {
-            kind: DeclKind::Subscriber,
+        let entity = move |kind: DeclKind, id: u64| Retraction {
+            kind,
             id: self.scoped(id),
-        });
-        let queryables = self.queryables.iter().map(move |&id| Retraction {
-            kind: DeclKind::Queryable,
-            id: self.scoped(id),
-        });
-        let tokens = self.tokens.iter().map(move |&id| Retraction {
-            kind: DeclKind::Token,
-            id: self.scoped(id),
-        });
-        subscribers.chain(queryables).chain(tokens)
+            #[cfg(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            sender: self.tag,
+        };
+        let subscribers = self
+            .subscribers
+            .iter()
+            .map(move |&id| entity(DeclKind::Subscriber, id));
+        let queryables = self
+            .queryables
+            .iter()
+            .map(move |&id| entity(DeclKind::Queryable, id));
+        let tokens = self
+            .tokens
+            .iter()
+            .map(move |&id| entity(DeclKind::Token, id));
+        let entities = subscribers.chain(queryables).chain(tokens);
+        #[cfg(all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        ))]
+        {
+            entities.chain(self.keyexprs.held().iter().map(move |&id| Retraction {
+                kind: DeclKind::Keyexpr,
+                id: u64::from(id),
+                sender: self.tag,
+            }))
+        }
+        #[cfg(not(all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            not(feature = "transport-stats"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        )))]
+        {
+            entities
+        }
     }
 }
 
@@ -196,6 +366,16 @@ pub(crate) enum DeclKind {
     Queryable,
     /// A liveliness token.
     Token,
+    /// A keyexpr, by the member's own id: retracted lent, under the member's tag.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    Keyexpr,
 }
 
 /// The undeclaration of one declaration a member that left still held, by the id it reached the
@@ -205,6 +385,16 @@ pub(crate) enum DeclKind {
 pub(crate) struct Retraction {
     kind: DeclKind,
     id: u64,
+    /// The tag of the member that held it, which the lent form is handed under.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    sender: u64,
 }
 
 impl Retraction {
@@ -217,6 +407,17 @@ impl Retraction {
             DeclKind::Subscriber => build_undeclare_subscriber(self.id),
             DeclKind::Queryable => build_undeclare_queryable(self.id),
             DeclKind::Token => build_undeclare_token(self.id),
+            #[cfg(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            DeclKind::Keyexpr => crate::declare_build::build_undeclare_kexpr(
+                crate::wire_id::declared_expr_id(self.id),
+            ),
         };
         NetworkMessage::Declare(alloc::boxed::Box::new(declare))
     }
@@ -252,11 +453,29 @@ impl Retraction {
                 id: self.id,
                 extensions: None,
             }),
+            DeclKind::Keyexpr => V::CodecZenohUndeclKexpr(wz_codecs::lent::UndeclKexpr {
+                header: wire_const::D_MID_UNDECL_KEXPR,
+                id: self.id,
+                extensions: None,
+            }),
         };
         wz_codecs::lent::Declare {
             body,
             ..Default::default()
         }
+    }
+
+    /// The tag of the member that held it, which its lent form is handed under.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    pub(crate) const fn sender(self) -> u64 {
+        self.sender
     }
 }
 
@@ -319,5 +538,128 @@ mod tests {
         member.scope(&mut undeclared);
         assert_eq!(subscriber_id(&undeclared[0]), subscriber_id(&declared[0]));
         assert!(member.retracted().next().is_none());
+    }
+
+    /// The lent Declare a frame read in place carries for `declare`.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    fn lent_wire(declare: &crate::transport_profile::owned::DeclareOwned) -> Vec<u8> {
+        declare
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec()
+    }
+
+    /// What `member` makes of the keyexpr declaration (`declared`) or retraction of `id`.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    fn keyexpr_scope(member: &mut MemberDeclarations, id: u16, declared: bool) -> &'static str {
+        let owned = if declared {
+            crate::declare_build::build_declare_kexpr(id, "demo/member/key").expect("a keyexpr")
+        } else {
+            crate::declare_build::build_undeclare_kexpr(id)
+        };
+        let wire = lent_wire(&owned);
+        let view =
+            wz_codecs::lent::Declare::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
+                .expect("it decodes");
+        match member.scope_lent(&view) {
+            LentScope::AsSent => "as sent",
+            LentScope::Scoped(_) => "scoped",
+            LentScope::PastBound => "past bound",
+        }
+    }
+
+    /// A member holds as many keyexpr ids as its rows: one more new id is refused, a held id is
+    /// declared again, and a retraction frees a row for the next.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    #[test]
+    fn a_member_holds_its_keyexprs_to_its_rows() {
+        let rows = crate::caps::MAX_MEMBER_KEYEXPRS;
+        let past = u16::try_from(rows + 1).expect("the rows fit an id");
+        let mut member = MemberTags::new().admit();
+        for id in 1..past {
+            assert_eq!(keyexpr_scope(&mut member, id, true), "as sent", "id {id}");
+        }
+        assert_eq!(
+            keyexpr_scope(&mut member, past, true),
+            "past bound",
+            "one more new id than the member's rows"
+        );
+        if rows > 0 {
+            assert_eq!(
+                keyexpr_scope(&mut member, 1, true),
+                "as sent",
+                "a held id again"
+            );
+            assert_eq!(keyexpr_scope(&mut member, 1, false), "as sent");
+            assert_eq!(
+                keyexpr_scope(&mut member, past, true),
+                "as sent",
+                "the retraction freed a row"
+            );
+        }
+    }
+
+    /// A member that leaves retracts the keyexprs it still holds, each by its own id under its
+    /// tag, and nothing of another member's.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    #[test]
+    fn a_departed_member_retracts_its_keyexprs_under_its_tag() {
+        if crate::caps::MAX_MEMBER_KEYEXPRS < 2 {
+            return;
+        }
+        let mut tags = MemberTags::new();
+        let mut leaving = tags.admit();
+        let mut staying = tags.admit();
+        for id in [3, 5] {
+            keyexpr_scope(&mut leaving, id, true);
+        }
+        keyexpr_scope(&mut leaving, 5, false);
+        keyexpr_scope(&mut staying, 3, true);
+        let retracted: Vec<(u64, u64)> = leaving
+            .retracted()
+            .map(|retraction| {
+                let declare = retraction.lent();
+                match declare.body {
+                    wz_codecs::lent::DeclareVariant::CodecZenohUndeclKexpr(u) => {
+                        (u.id, retraction.sender())
+                    }
+                    _ => panic!("a keyexpr's retraction is an UndeclKexpr"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            retracted,
+            [(3, leaving.tag())],
+            "the id it still holds, under its own tag"
+        );
+        assert_ne!(leaving.tag(), staying.tag());
     }
 }

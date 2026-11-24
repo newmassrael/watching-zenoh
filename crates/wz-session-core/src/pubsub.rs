@@ -1555,6 +1555,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         push: &PushOwned,
         reliability: Reliability,
         is_remote: bool,
+        sender: u64,
     ) {
         // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
         // the peer mapping table via the shared `resolve_wireexpr` SSOT
@@ -1571,7 +1572,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // likely FIND an entry and fire the wrong subscriber).
         let resolved: String = match resolve_wireexpr_in(
             &push.keyexpr.body,
-            self.mapping_spaces_over(subs.own_space()),
+            self.mapping_spaces_over(subs.own_space())
+                .from_sender(sender),
         ) {
             Some(r) => r,
             None => {
@@ -1944,12 +1946,27 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(feature = "codec-declare")]
         if let Some(declare) = record.declare() {
-            self.absorb_declare_view(&declare.body, subs.own_space(), 0);
+            #[cfg(all(
+                feature = "session-multicast",
+                feature = "alloc",
+                feature = "codec-declare",
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            if record.is_past_sender_bound() {
+                self.naming.aliases.count_refused();
+                return;
+            }
+            self.absorb_declare_view(&declare.body, subs.own_space(), record.sender());
         }
         #[cfg(feature = "declare-subscriber")]
         if let Some(interest) = record.interest() {
             #[cfg(feature = "interest-answer")]
-            self.respond_to_subscriber_interest_view(subs, interest);
+            self.respond_to_subscriber_interest_view(subs, interest, record.sender());
             #[cfg(not(feature = "interest-answer"))]
             Self::ignore_subscriber_interest(interest.interest_id);
         }
@@ -2006,7 +2023,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
             // unguarded — it does not depend on the wire codec gate.
             #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true),
+            NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true, 0),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
@@ -2125,6 +2142,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         &mut self,
         subs: &mut L,
         interest: &wz_codecs::lent::Interest<'_>,
+        sender: u64,
     ) {
         let SubscriberPeer {
             naming,
@@ -2147,7 +2165,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let pattern: Option<&str> = match &body.keyexpr {
             Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view_over(
                 &w.body,
-                naming.spaces(),
+                naming.spaces().from_sender(sender),
                 subs.own_space(),
                 crate::wireexpr_resolve::ComposeRoom::buffer(compose, &mut frame),
             ) {
@@ -6148,6 +6166,68 @@ mod tests {
         // Second call to unregister returns false (idempotent) and
         // does not panic.
         assert!(!registry.unregister(id));
+    }
+
+    /// A group member's keyexpr reaches the alias table under the member's tag, so another
+    /// sender's same id reads nothing of it; one the member declared past the ids it may hold
+    /// binds nothing and is counted with the declarations the table had no room for.
+    #[cfg(all(
+        feature = "session-multicast",
+        feature = "storage-profile",
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "session-unicast",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate")
+    ))]
+    #[test]
+    fn a_members_keyexpr_binds_under_its_tag_and_one_past_its_bound_is_counted() {
+        use crate::driver_loop::InPlaceRecord;
+        let declare = wz_codecs::lent::Declare {
+            body: wz_codecs::lent::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::lent::DeclKexpr {
+                    id: 7,
+                    keyexpr: wz_codecs::lent::Wireexpr {
+                        body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                            id: 0,
+                            suffix_len: Some(12),
+                            suffix: Some(
+                                sce_forge_runtime::codec::Bounded::new("theirs/seven").unwrap(),
+                            ),
+                        }),
+                    },
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        let record =
+            InPlaceRecord::declare_of_frame(&declare, true, 0, crate::qos::Priority::DEFAULT)
+                .from_sender(3);
+        let mut registry = SubscriberRegistry::new();
+        registry.dispatch_iteration_event(IterationEvent::InPlace(record.past_sender_bound()));
+        assert_eq!(
+            (registry.alias_count(), registry.alias_refusals()),
+            (0, 1),
+            "past the member's bound: nothing bound, one refusal counted"
+        );
+        registry.dispatch_iteration_event(IterationEvent::InPlace(record));
+        let spaces = registry.mapping_spaces();
+        assert_eq!(
+            spaces
+                .peer()
+                .get(&crate::wire_id::sender_peer_key(3, 7))
+                .map(AsRef::<str>::as_ref),
+            Some("theirs/seven"),
+            "the member's alias is bound under its tag"
+        );
+        assert!(
+            spaces.peer().get(&7).is_none(),
+            "the one peer of a link reads nothing of a member's id"
+        );
     }
 
     // ── R121d DECLARE-resolver behaviour ──

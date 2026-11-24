@@ -604,6 +604,12 @@ pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
 /// A JOIN from one more is not admitted while every row is held.
 pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
 
+/// The keyexpr ids one member of a multicast group may hold declared to a session whose group
+/// lends its records: the rows each member's are noted in, so that what it declared is unbound when
+/// it leaves. A declaration of one more new id is refused and counted as one past the alias table's
+/// room is, and a key the member names by it is dropped, as one naming an undeclared id is.
+pub const MAX_MEMBER_KEYEXPRS: usize = generated::MAX_MEMBER_KEYEXPRS;
+
 /// The transport or link events a connectivity listener declared with history holds while its
 /// history is replayed. Past them, the rest of the replay's window is told by comparing the
 /// transports that stand with those the listener was told.

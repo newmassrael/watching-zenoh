@@ -1185,12 +1185,15 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     {
         for retraction in self.member_retractions.drain(..) {
             let declare = retraction.lent();
-            sink.record(crate::driver_loop::InPlaceRecord::declare_of_frame(
-                &declare,
-                true,
-                0,
-                crate::qos::Priority::DEFAULT,
-            ));
+            sink.record(
+                crate::driver_loop::InPlaceRecord::declare_of_frame(
+                    &declare,
+                    true,
+                    0,
+                    crate::qos::Priority::DEFAULT,
+                )
+                .from_sender(retraction.sender()),
+            );
         }
     }
 
@@ -2837,17 +2840,27 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
             not(feature = "multicast-declarations"),
             not(feature = "multicast-ingress-gate")
         ))]
-        if let (Some(member), Some(declare)) = (self.member.as_deref_mut(), record.declare()) {
-            if let Some(scoped) = member.scope_lent(declare) {
-                self.inner
-                    .record(crate::driver_loop::InPlaceRecord::declare_of_frame(
-                        &scoped,
-                        record.reliable(),
-                        record.sn(),
-                        record.priority(),
-                    ));
-                return;
-            }
+        if let Some(member) = self.member.as_deref_mut() {
+            use crate::multicast_member_scope::LentScope;
+            let tag = member.tag();
+            let record = match record.declare().map(|declare| member.scope_lent(declare)) {
+                Some(LentScope::Scoped(scoped)) => {
+                    self.inner.record(
+                        crate::driver_loop::InPlaceRecord::declare_of_frame(
+                            &scoped,
+                            record.reliable(),
+                            record.sn(),
+                            record.priority(),
+                        )
+                        .from_sender(tag),
+                    );
+                    return;
+                }
+                Some(LentScope::PastBound) => record.past_sender_bound(),
+                Some(LentScope::AsSent) | None => record,
+            };
+            self.inner.record(record.from_sender(tag));
+            return;
         }
         self.inner.record(record);
     }

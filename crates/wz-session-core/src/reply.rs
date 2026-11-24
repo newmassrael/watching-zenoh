@@ -1952,7 +1952,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             IterationEvent::InPlace(record) => {
                 #[cfg(feature = "codec-response")]
                 if let Some(response) = record.response() {
-                    self.dispatch_response_in_place(response, peer_keyexpr_table);
+                    self.dispatch_response_in_place(
+                        response,
+                        MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                    );
                 }
                 #[cfg(all(
                     feature = "rx-lent-control",
