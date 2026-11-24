@@ -56,8 +56,8 @@ use wz_ext_pubsub::advanced_publisher::{
     MissDetectionConfig, Sequencing,
 };
 use wz_ext_pubsub::advanced_subscriber::{
-    AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, Miss,
-    MissHandlers, OnSample, RecoveryConfig, SubscriberDetection,
+    AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, LentCore,
+    Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
 };
 use wz_session_core::publish_options::PublishError;
 
@@ -944,10 +944,44 @@ pub(crate) struct AdvSubState {
     session: Option<crate::ffi::CountIn>,
 }
 
-/// An advanced subscriber's place: its state, which its owner lets go of, and the C sample closure
-/// the host calls past it, with the hold on a background subscriber's session; the last of the
-/// owner and the closure gives the place back (`crate::object_slot::Answering`).
-pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, SubscriberKept>;
+/// An advanced subscriber's place: its state, which its owner lets go of, and what the host reads
+/// past it ([`AdvSubKept`]); the last of the owner, the closure and the hold of the host's part
+/// gives the place back (`crate::object_slot::Answering`).
+pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubKept>;
+
+/// What an advanced subscriber's place keeps past its state for the host: the C sample closure
+/// the host calls, with the hold on a background subscriber's session, taken out when the host
+/// lets go of it; and the part the host's callbacks, gets and jobs share, lodged here, with the
+/// hold of the place it keeps open until the host gives it back ([`let_go_core`]).
+pub(crate) struct AdvSubKept {
+    sample: SubscriberKept,
+    core: SubscriberCore<Engine>,
+    core_hold: core::mem::MaybeUninit<crate::ffi::HeldIn>,
+}
+
+impl AdvSubKept {
+    /// `sample` kept, with no part lodged and no hold for one.
+    fn new(sample: SubscriberKept) -> Self {
+        Self {
+            sample,
+            core: SubscriberCore::vacant(),
+            core_hold: core::mem::MaybeUninit::uninit(),
+        }
+    }
+}
+
+/// The host gave back the place of its part: the hold of the subscriber's place it kept open is
+/// let go of, which gives the place back if its owner and every closure went first.
+///
+/// # Safety
+/// `context` is the kept part of an advanced subscriber's place whose hold for the host's part
+/// was written ([`declare_subscriber_state`]) and is let go of once, here.
+unsafe fn let_go_core(context: *mut c_void) {
+    let kept = context.cast::<AdvSubKept>();
+    // SAFETY: the caller's: the hold is read out of the place once and dropped out of it, as its
+    // drop may give the place back.
+    drop(unsafe { core::ptr::addr_of!((*kept).core_hold).read().assume_init() });
+}
 
 /// The sample callback the host keeps for an advanced subscriber, lent over the subscriber's
 /// place: it reads the C closure where the place keeps it, so nothing is allocated for it.
@@ -958,9 +992,9 @@ pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, Subscri
 unsafe fn hand_adv_sample(context: *mut c_void, sample: Delivery<'_>) {
     // SAFETY: the caller's: the place stands while the closure it keeps is counted in it.
     let kept = unsafe {
-        &*crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(context.cast::<AdvSubState>())
+        &*crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(context.cast::<AdvSubState>())
     };
-    crate::pubsub::hand_sample(&kept.closure, sample.view());
+    crate::pubsub::hand_sample(&kept.sample.closure, sample.view());
 }
 
 /// The host let go of the sample callback, after its last call: the C closure is taken out of the
@@ -969,9 +1003,13 @@ unsafe fn hand_adv_sample(context: *mut c_void, sample: Delivery<'_>) {
 /// # Safety
 /// As [`hand_adv_sample`]'s, called once, after the last call.
 unsafe fn let_go_adv_sample(context: *mut c_void) {
-    // SAFETY: the caller's: what the place keeps is taken out once, here, and dropped out of it,
-    // as the closure's drop may give the place back.
-    drop(unsafe { crate::pubsub::take_kept::<AdvSubState>(context) });
+    // SAFETY: the caller's: the closure the place keeps is taken out once, here, and dropped out
+    // of it, as its drop may give the place back.
+    drop(unsafe {
+        let kept =
+            crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(context.cast::<AdvSubState>());
+        core::ptr::addr_of!((*kept).sample).read()
+    });
 }
 
 /// The miss listener the host holds from the start, lent over a count of the subscriber's miss
@@ -1177,23 +1215,43 @@ unsafe fn declare_subscriber_state(
                 miss: miss.clone(),
                 session: Some(session),
             },
-            SubscriberKept::new(closure, background.then(|| session.hold())),
+            AdvSubKept::new(SubscriberKept::new(
+                closure,
+                background.then(|| session.hold()),
+            )),
         ))
         .cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
     // closure is counted in the place before anything can call it or let it go, so the place
     // stands until the host lets go of the sample callback, and a C sample closure is called from
     // any thread (`CClosure` is `Sync` for it).
+    let kept = unsafe { crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(state) };
+    // SAFETY: as above.
     let on_sample = unsafe {
-        let kept = crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(state);
-        crate::object_slot::count_in_entity::<AdvSubState, SubscriberKept, _>(
+        crate::object_slot::count_in_entity::<AdvSubState, AdvSubKept, _>(
             state,
-            &mut (*kept).closure,
+            &mut (*kept).sample.closure,
         );
         OnSample::lent(
             hand_adv_sample,
             state.cast::<c_void>(),
             Some(let_go_adv_sample),
+        )
+    };
+    // The host's part is lodged in the place, which a hold keeps open until the host gives the
+    // part back, after the last of its callbacks, gets and jobs.
+    // SAFETY: as above; the hold is written before the part is lent, and the part lies in the
+    // place, which stands until `let_go_core` lets go of the hold, once, and takes no lock.
+    let core = unsafe {
+        (*kept)
+            .core_hold
+            .write(crate::object_slot::hold_entity::<AdvSubState, AdvSubKept>(
+                state,
+            ));
+        LentCore::new(
+            core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*kept).core)),
+            let_go_core,
+            kept.cast::<c_void>(),
         )
     };
     // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
@@ -1205,7 +1263,7 @@ unsafe fn declare_subscriber_state(
             Some(let_go_miss_set),
         )
     };
-    let declared = EngineSubscriber::declare_with(&engine, ke, opts, on_sample, misses);
+    let declared = EngineSubscriber::declare_in(&engine, ke, opts, on_sample, misses, core);
     match declared {
         Ok(subscriber) => {
             (*state).subscriber = Some(subscriber);
@@ -1213,9 +1271,10 @@ unsafe fn declare_subscriber_state(
             Ok(state)
         }
         Err(refused) => {
-            // The refusal dropped the sample callback, which let the closure go; the owner lets
-            // go of the place with the state.
-            crate::object_slot::retire_entity::<AdvSubState, SubscriberKept>(state);
+            // The refusal dropped the sample callback, which let the closure go, and the host's
+            // part, whose place goes back once nothing holds it; the owner lets go of the place
+            // with the state.
+            crate::object_slot::retire_entity::<AdvSubState, AdvSubKept>(state);
             Err(match refused {
                 // A bound that asks for nothing is the caller's, as upstream's own builder
                 // refuses it.
@@ -1236,8 +1295,8 @@ unsafe fn declare_subscriber_state(
 unsafe fn free_advanced_subscriber(state: *mut AdvSubState) {
     drop((*state).subscriber.take());
     (*state).background_miss.clear();
-    crate::object_slot::closures_of::<AdvSubState, SubscriberKept>(state).wait_none();
-    crate::object_slot::retire_entity::<AdvSubState, SubscriberKept>(state);
+    crate::object_slot::closures_of::<AdvSubState, AdvSubKept>(state).wait_none();
+    crate::object_slot::retire_entity::<AdvSubState, AdvSubKept>(state);
 }
 
 /// Deliver one wz [`Miss`] to every declared C miss listener.
@@ -1820,7 +1879,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_l
         };
         // Counted in the subscriber's place, so its undeclare waits for this closure too and the
         // place stands until it is let go of.
-        crate::object_slot::count_in_entity::<AdvSubState, SubscriberKept, _>(state, &mut cclosure);
+        crate::object_slot::count_in_entity::<AdvSubState, AdvSubKept, _>(state, &mut cclosure);
         // No handle exists to remove it, which is what "background" means: the subscriber's
         // undeclare removes it.
         state.background_miss.insert(Arc::new(cclosure));
@@ -1914,7 +1973,7 @@ pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
                 if let Some(subscriber) = (*state).subscriber.take() {
                     subscriber.background();
                 }
-                crate::object_slot::retire_entity::<AdvSubState, SubscriberKept>(state);
+                crate::object_slot::retire_entity::<AdvSubState, AdvSubKept>(state);
                 Z_OK
             }
             Err(code) => code,
@@ -2129,7 +2188,10 @@ mod tests {
             },
             // The C closure kept beside the state is counted in nothing and taken out by nothing:
             // the subscriber's callback is the Rust closure above.
-            SubscriberKept::new(CClosure::uncounted(std::ptr::null_mut(), None, None), None),
+            AdvSubKept::new(SubscriberKept::new(
+                CClosure::uncounted(std::ptr::null_mut(), None, None),
+                None,
+            )),
         ));
         let owned = ze_owned_advanced_subscriber_t {
             handle: state.cast::<c_void>(),
@@ -2623,6 +2685,91 @@ mod tests {
             1,
             "the close returns with the background subscriber's closure let go of"
         );
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// An advanced subscriber that recovers runs a periodic job beside the part its host keeps in
+    /// the subscriber's place: an owned one gives the place back with its undeclare, and a
+    /// background one by the time its session's close returns, the job ending with the session.
+    /// Turned red by a part whose place is never given back, or a close that leaves a job holding
+    /// it in a session that runs no job again.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_recovering_advanced_subscribers_place_goes_back_with_its_job() {
+        use crate::object_slot::{Kind, Slot};
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            z_session_loan, z_session_loan_mut, z_session_move,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many advanced subscribers' places `engine` has free: each claimed, then all given
+        // back.
+        let free = |engine: &Arc<Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
+                    .collect();
+            claimed.len()
+        };
+        // SAFETY: a view is plain data, and the text is a live C string.
+        let mut view: crate::abi::z_view_keyexpr_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        let viewed =
+            unsafe { crate::keyexpr::z_view_keyexpr_from_str(&mut view, c"demo/adv/rec".as_ptr()) };
+        assert_eq!(viewed, Z_OK);
+        // SAFETY: the view is live for the rest of the frame.
+        let ke = unsafe { crate::keyexpr::z_view_keyexpr_loan(&view) };
+        // SAFETY: an options struct is plain data, filled with pico's defaults here.
+        let mut options: ze_advanced_subscriber_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `options` is live.
+        unsafe { ze_advanced_subscriber_options_default(&mut options) };
+        options.recovery.is_enabled = true;
+        options.history.is_enabled = true;
+        let places = free(&engine);
+
+        let owned_drops = AtomicUsize::new(0);
+        let mut callback = counted_sample_closure(&owned_drops);
+        let mut subscriber = ze_owned_advanced_subscriber_t::null_value();
+        // SAFETY: every pointer is live.
+        let code = unsafe {
+            ze_declare_advanced_subscriber(loaned, &mut subscriber, ke, &mut callback, &mut options)
+        };
+        assert_eq!(code, Z_OK, "a recovering subscriber declares");
+        assert_eq!(free(&engine), places - 1);
+        // SAFETY: the subscriber is live and owned here, and given up by this call.
+        let code = unsafe {
+            ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut subscriber))
+        };
+        assert_eq!(code, Z_OK);
+        assert_eq!(free(&engine), places, "its undeclare gives the place back");
+        assert_eq!(owned_drops.load(Ordering::SeqCst), 1);
+
+        let background_drops = AtomicUsize::new(0);
+        let mut callback = counted_sample_closure(&background_drops);
+        // SAFETY: as the declaration above.
+        let code = unsafe {
+            ze_declare_background_advanced_subscriber(loaned, ke, &mut callback, &mut options)
+        };
+        assert_eq!(code, Z_OK);
+        assert_eq!(free(&engine), places - 1, "held past its declaration");
+
+        // SAFETY: the session is live and owned here.
+        let code = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(background_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            free(&engine),
+            places,
+            "the close returns with the place given back, its job ended"
+        );
+        drop(engine);
         // SAFETY: the session is owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }

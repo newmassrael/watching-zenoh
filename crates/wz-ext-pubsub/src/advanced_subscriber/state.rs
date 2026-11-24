@@ -254,16 +254,59 @@ impl StateCell for Mutex<State> {
 /// undeclare a listener on the same subscriber from inside its own callback.
 pub struct SampleMissListener {
     id: usize,
-    statesref: Weak<dyn StateCell>,
+    statesref: StatesRef,
     undeclare_on_drop: bool,
 }
+
+/// What a listener reaches its subscriber's state through.
+enum StatesRef {
+    /// The state's lock, held weakly.
+    Weak(Weak<dyn StateCell>),
+    /// A host's own weak count of its subscriber ([`SampleMissListener::lent`]).
+    Lent {
+        context: *mut c_void,
+        unregister: unsafe fn(context: *mut c_void, id: usize),
+        let_go: unsafe fn(context: *mut c_void),
+    },
+}
+
+// SAFETY: a `Weak` of a `Send + Sync` cell is both; a lent context is admitted from any thread by
+// `SampleMissListener::lent`'s contract, and is only read through its two functions.
+unsafe impl Send for SampleMissListener {}
+// SAFETY: as `Send`; a shared listener calls nothing.
+unsafe impl Sync for SampleMissListener {}
 
 impl SampleMissListener {
     /// The listener registered as `id` in the state `statesref` names.
     pub fn new(id: usize, statesref: Weak<impl StateCell + 'static>) -> Self {
         Self {
             id,
-            statesref,
+            statesref: StatesRef::Weak(statesref),
+            undeclare_on_drop: true,
+        }
+    }
+
+    /// The listener registered as `id` in the state a host reaches through `context`, a weak
+    /// count of its own: `unregister(context, id)` retracts the listener, if the subscriber still
+    /// stands, and `let_go(context)` lets go of the count, once, last. Nothing is allocated for
+    /// it.
+    ///
+    /// # Safety
+    /// `context` stands until `let_go(context)` runs, and both functions may be called with it
+    /// from any thread.
+    pub unsafe fn lent(
+        id: usize,
+        context: *mut c_void,
+        unregister: unsafe fn(context: *mut c_void, id: usize),
+        let_go: unsafe fn(context: *mut c_void),
+    ) -> Self {
+        Self {
+            id,
+            statesref: StatesRef::Lent {
+                context,
+                unregister,
+                let_go,
+            },
             undeclare_on_drop: true,
         }
     }
@@ -285,10 +328,20 @@ impl SampleMissListener {
         // Cleared first, as upstream does, so a panic in here cannot make the
         // `Drop` below try again.
         self.undeclare_on_drop = false;
-        if let Some(cell) = self.statesref.upgrade() {
-            lock_or_panic(cell.state_cell(), STATE_POISONED)
-                .miss_handlers
-                .unregister(self.id);
+        match &self.statesref {
+            StatesRef::Weak(statesref) => {
+                if let Some(cell) = statesref.upgrade() {
+                    lock_or_panic(cell.state_cell(), STATE_POISONED)
+                        .miss_handlers
+                        .unregister(self.id);
+                }
+            }
+            // SAFETY: `Self::lent`'s: the context stands until it is let go of, in the drop.
+            StatesRef::Lent {
+                context,
+                unregister,
+                ..
+            } => unsafe { (*unregister)(*context, self.id) },
         }
     }
 }
@@ -297,6 +350,13 @@ impl Drop for SampleMissListener {
     fn drop(&mut self) {
         if self.undeclare_on_drop {
             self.undeclare_impl();
+        }
+        if let StatesRef::Lent {
+            context, let_go, ..
+        } = self.statesref
+        {
+            // SAFETY: `Self::lent`'s: the count is let go of once, here, after its last use.
+            unsafe { let_go(context) };
         }
     }
 }

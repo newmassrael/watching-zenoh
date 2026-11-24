@@ -36,7 +36,8 @@ use super::super::options::{
     SubscriberDetection,
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
-use super::{EngineSubscriber, HostError};
+use super::lodge::{Lodging, Strong};
+use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
 const ZID: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x01];
@@ -989,7 +990,7 @@ fn allocations() -> usize {
 fn shared_on(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
-) -> Arc<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<dyn SessionEngine>> {
     shared_on_key(script, delivered, "demo/data")
 }
 
@@ -998,7 +999,7 @@ fn shared_on_key(
     script: &Arc<Script>,
     delivered: &Arc<Mutex<Vec<u8>>>,
     base: &str,
-) -> Arc<super::Shared<dyn SessionEngine>> {
+) -> Strong<super::Shared<dyn SessionEngine>> {
     let d = Arc::clone(delivered);
     let state = State::new(
         Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
@@ -1006,7 +1007,7 @@ fn shared_on_key(
     )
     .with_retransmission(true)
     .with_history(1, usize::MAX);
-    Arc::new(super::Shared::new(
+    Strong::boxed(super::Shared::new(
         Arc::downgrade(&engine(script)),
         state,
         super::fixed_key(base).expect("a key a session stores"),
@@ -1050,7 +1051,7 @@ fn a_get_its_legs_and_its_end_take_no_memory() {
     assert_eq!(during, 0, "asking and ending a get allocates nothing");
     assert_eq!(shared.token.active(), 0, "the get's end dropped its fan");
     assert_eq!(
-        Arc::strong_count(&shared),
+        Strong::strong_count(&shared),
         1,
         "every leg let go of the subscriber"
     );
@@ -1081,13 +1082,13 @@ fn the_subscribers_own_callback_takes_no_memory_and_holds_it() {
 
     assert_eq!(during, 0, "the callback allocates nothing");
     assert_eq!(
-        Arc::strong_count(&shared),
+        Strong::strong_count(&shared),
         2,
         "the callback holds the subscriber"
     );
     drop(sink);
     assert_eq!(
-        Arc::strong_count(&shared),
+        Strong::strong_count(&shared),
         1,
         "its drop let the subscriber go"
     );
@@ -1335,4 +1336,178 @@ fn a_subscribers_key_is_kept_inline_and_one_too_long_is_refused() {
     );
     assert!(matches!(refused, Err(HostError::Refused(_))));
     assert!(script.events().is_empty(), "nothing was declared");
+}
+
+/// Counts each call of a place's give-back in the `AtomicU64` the context names.
+///
+/// # Safety
+/// `context` is a live `AtomicU64`.
+unsafe fn count_given_back(context: *mut core::ffi::c_void) {
+    // SAFETY: the caller's.
+    unsafe { &*context.cast_const().cast::<AtomicU64>() }.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The context [`count_given_back`] counts into.
+fn given_back_into(given: &AtomicU64) -> *mut core::ffi::c_void {
+    core::ptr::from_ref(given)
+        .cast_mut()
+        .cast::<core::ffi::c_void>()
+}
+
+/// A value lodged in a place its maker lends takes no memory, nor do its counts: the last count
+/// of the value drops it once, a weak count keeps the place and upgrades no more once the value is
+/// gone, and the place is given back once, with the last count of either kind.
+#[test]
+fn a_value_lodged_in_a_lent_place_takes_no_memory_and_goes_back_once() {
+    struct Dropped<'a>(&'a AtomicU64);
+    impl Drop for Dropped<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = AtomicU64::new(0);
+    let given = AtomicU64::new(0);
+    let mut place = Lodging::<Dropped<'_>>::vacant();
+
+    let before = allocations();
+    // SAFETY: `place` is free and outlives every count; `given` outlives the give-back.
+    let strong = unsafe {
+        Strong::lodge(
+            core::ptr::NonNull::from(&mut place),
+            Dropped(&drops),
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let raw = Strong::into_raw(strong.clone());
+    let weak = Strong::downgrade(&strong);
+    let upgraded = weak.upgrade();
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "lodging and counting allocate nothing");
+    assert_eq!(Strong::strong_count(&strong), 3);
+    drop(upgraded);
+    // SAFETY: `raw` is the count `into_raw` gave up above, taken back once.
+    drop(unsafe { Strong::<Dropped<'_>>::from_raw(raw) });
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        0,
+        "a count still holds the value"
+    );
+    drop(strong);
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "the last count drops it once"
+    );
+    assert_eq!(
+        given.load(Ordering::SeqCst),
+        0,
+        "the weak count keeps the place"
+    );
+    assert!(
+        weak.upgrade().is_none(),
+        "a value gone is not counted again"
+    );
+    drop(weak);
+    assert_eq!(given.load(Ordering::SeqCst), 1, "the place goes back once");
+}
+
+/// A subscriber whose shared part is lodged in a place its host lends gives the place back once,
+/// after the last of its handle, the engine's callbacks and jobs, and a miss listener's weak count
+/// let go of it; one refused before the part is made gives it back at once, with nothing declared.
+#[test]
+fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder() {
+    let options = || {
+        AdvancedSubscriberOptions::new()
+            .with_history(HistoryConfig::new().detect_late_publishers())
+            .with_recovery(
+                RecoveryConfig::new()
+                    .with_periodic_queries(Duration::from_millis(500))
+                    .with_retention_period(Duration::from_secs(60)),
+            )
+    };
+    let given = AtomicU64::new(0);
+    let mut core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let script = Script::new(1);
+    // SAFETY: `core` is free and outlives the subscriber and every holder of its part; `given`
+    // outlives the give-back.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut core),
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let subscriber = EngineSubscriber::declare_in(
+        &engine(&script),
+        "demo/data",
+        options(),
+        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+        MissHandlers::default(),
+        lent,
+    )
+    .expect("the subscriber declares in the lent place");
+    let listener = subscriber.sample_miss_listener(|_| {});
+    drop(subscriber);
+    assert_eq!(
+        given.load(Ordering::SeqCst),
+        0,
+        "the engine's callbacks and jobs still hold the part"
+    );
+    drop(script);
+    assert_eq!(
+        given.load(Ordering::SeqCst),
+        0,
+        "the listener's weak count keeps the place"
+    );
+    drop(listener);
+    assert_eq!(given.load(Ordering::SeqCst), 1, "the place goes back once");
+
+    let refused_back = AtomicU64::new(0);
+    let mut refused_core = SubscriberCore::<dyn SessionEngine>::vacant();
+    let script = Script::new(1);
+    // SAFETY: as above.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut refused_core),
+            count_given_back,
+            given_back_into(&refused_back),
+        )
+    };
+    let refused = EngineSubscriber::declare_in(
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new().with_history(HistoryConfig::new().max_samples(0)),
+        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+        MissHandlers::default(),
+        lent,
+    );
+    assert!(matches!(refused, Err(HostError::HistoryBoundZero { .. })));
+    assert_eq!(refused_back.load(Ordering::SeqCst), 1, "given back at once");
+    assert!(script.events().is_empty(), "nothing was declared");
+}
+
+/// The late-publisher subscription's callback is the engine's raw form over a count of the
+/// subscriber, so declaring it takes no closure of its own, and the engine letting it go lets go
+/// of the count.
+#[test]
+fn the_late_publisher_callback_is_a_count_of_the_subscriber() {
+    let script = Script::new(1);
+    let options = AdvancedSubscriberOptions::new()
+        .with_history(HistoryConfig::new().detect_late_publishers());
+    let subscriber = EngineSubscriber::declare(&engine(&script), "demo/data", options, |_| {})
+        .expect("a late-publisher subscriber declares");
+    let held = Strong::strong_count(&subscriber.shared);
+    let sink = script.liveliness.lock().unwrap().remove(0).3;
+    assert!(
+        matches!(*sink, LivelinessSink::Raw(_)),
+        "the callback is the raw form, which allocates no closure"
+    );
+    drop(sink);
+    assert_eq!(
+        Strong::strong_count(&subscriber.shared),
+        held - 1,
+        "letting the callback go let go of its count"
+    );
 }
