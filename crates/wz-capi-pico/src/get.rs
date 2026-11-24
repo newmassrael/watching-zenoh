@@ -2282,18 +2282,18 @@ mod tests {
     #[test]
     fn transmitted_anyke_is_recovered_by_the_responder_parse() {
         for selector in [&b""[..], b"a=1", b"a=1;b=2", b"no_anyke", b"_anykey=1"] {
-            let sent = sent(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
+            let any = sent(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
             assert!(
-                parameters_has_anyke(&sent),
-                "an ANY get's selector {sent:?} must parse as _anyke on the responder"
+                parameters_has_anyke(&any),
+                "an ANY get's selector {any:?} must parse as _anyke on the responder"
             );
-            let sent = sent(
+            let matching = sent(
                 selector,
                 crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
             );
             assert!(
-                !parameters_has_anyke(&sent),
-                "a MATCHING_QUERY get's selector {sent:?} must NOT parse as _anyke"
+                !parameters_has_anyke(&matching),
+                "a MATCHING_QUERY get's selector {matching:?} must NOT parse as _anyke"
             );
         }
     }
