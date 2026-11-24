@@ -278,6 +278,7 @@ mod tests {
                 name: name.map(alloc::string::String::from),
                 ts_resol: 9,
                 ts_offset,
+                comments: alloc::vec::Vec::new(),
             };
         assert_eq!(
             got,
@@ -377,9 +378,9 @@ mod tests {
             assert!(
                 doc.contains(
                     "\"capture_interfaces\":[{\"section\":0,\"id\":0,\"link_type\":1,\
-                     \"name\":null,\"ts_resolution\":6,\"ts_offset_s\":0},\
+                     \"name\":null,\"ts_resolution\":6,\"ts_offset_s\":0,\"comments\":[]},\
                      {\"section\":0,\"id\":1,\"link_type\":1,\"name\":null,\
-                     \"ts_resolution\":6,\"ts_offset_s\":0}]"
+                     \"ts_resolution\":6,\"ts_offset_s\":0,\"comments\":[]}]"
                 ),
                 "{doc}"
             );

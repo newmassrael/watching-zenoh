@@ -120,7 +120,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::payload::formats::PayloadField;
+use crate::payload::formats::{PayloadField, TypedValue};
 
 /// Where a walk stopped, and why, in the shape `crate::payload` already uses.
 pub(crate) type CborErr = (usize, &'static str);
@@ -412,6 +412,47 @@ mod path_builder {
 
 use path_builder::{Path, Segment};
 
+/// The typed reading of one data item: its kind and, where the item holds one
+/// value, that value as JSON text, written as a schema's typed value is
+/// ([`crate::proto_decode_json`]).
+///
+/// The kinds a JSON reading shares are spelled as JSON's walk spells them
+/// (`number` for an integer and a float alike, `string`, `bool`, `null`,
+/// `array`); the rest are CBOR's own (`map`, `bytes`, `tag`, `undefined`,
+/// `simple`). Bytes are standard base64 with padding. A container, a tag, an
+/// indefinite-length string, `undefined` and an unassigned simple value have a
+/// kind and no value: a container's members are the rows below it, a tag's
+/// item is the row below it, and an indefinite string is walked chunk by chunk
+/// and never held whole.
+fn typed_reading(kind: CborKind, form: KeyForm<'_>) -> TypedValue {
+    use crate::proto_decode_json::{bytes_json, float_json, integer_json, text_json};
+    let (ty, json) = match (kind, form) {
+        (CborKind::Unsigned | CborKind::Negative, KeyForm::Int(v)) => {
+            ("number", Some(integer_json(v)))
+        }
+        (CborKind::Float, KeyForm::Float(v)) => ("number", Some(float_json(v))),
+        (CborKind::Unsigned | CborKind::Negative | CborKind::Float, _) => ("number", None),
+        (CborKind::Text, KeyForm::Text(text)) => ("string", Some(text_json(text))),
+        (CborKind::Text, _) => ("string", None),
+        (CborKind::Bytes, KeyForm::Bytes(bytes)) => ("bytes", Some(bytes_json(bytes))),
+        (CborKind::Bytes, _) => ("bytes", None),
+        (CborKind::Array, _) => ("array", None),
+        (CborKind::Map, _) => ("map", None),
+        (CborKind::Tag, _) => ("tag", None),
+        (CborKind::Simple, KeyForm::Simple("null")) => ("null", Some(String::from("null"))),
+        (CborKind::Simple, KeyForm::Simple(word @ ("false" | "true"))) => {
+            ("bool", Some(String::from(word)))
+        }
+        (CborKind::Simple, KeyForm::Simple(word)) => (word, None),
+        (CborKind::Simple, _) => ("simple", None),
+    };
+    TypedValue {
+        ty: Some(String::from(ty)),
+        json,
+        enum_number: None,
+    }
+}
+
 /// The rows a walk is building, or `None` when it is only validating.
 struct Emit {
     fields: Vec<PayloadField>,
@@ -596,9 +637,9 @@ impl<'a> Walk<'a> {
         Some(at)
     }
 
-    /// Write the reserved row, now that the item's extent and rendering are
-    /// known.
-    fn fill(&mut self, slot: Option<usize>, start: usize, value: String) {
+    /// Write the reserved row, now that the item's extent, rendering and
+    /// typed reading are known.
+    fn fill(&mut self, slot: Option<usize>, start: usize, value: String, typed: TypedValue) {
         let Some(slot) = slot else { return };
         let end = self.i;
         let Some(e) = self.emit.as_mut() else { return };
@@ -608,7 +649,7 @@ impl<'a> Walk<'a> {
             value,
             start,
             end,
-            typed: None,
+            typed: Some(typed),
         };
     }
 
@@ -684,7 +725,7 @@ impl<'a> Walk<'a> {
             // bytes is the one outcome this crate refuses everywhere else.
             _ => return Err((start, "a major type outside 0-7")),
         };
-        self.fill(slot, start, value);
+        self.fill(slot, start, value, typed_reading(kind, form));
         Ok((kind, form))
     }
 

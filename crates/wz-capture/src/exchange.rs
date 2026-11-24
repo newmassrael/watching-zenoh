@@ -430,6 +430,8 @@ impl ExchangeScope {
 struct RowPlace {
     names: crate::filter::MessageNames,
     place: Option<(crate::link::FlowKey, Option<usize>)>,
+    /// The row's produced-index in its list, for a `row` term.
+    produced: Option<u64>,
     list: usize,
     direction: Direction,
     /// The flow's word for whether its bytes are zenoh, as the walk's census
@@ -446,6 +448,7 @@ impl RowPlace {
         Self {
             names: crate::filter::MessageNames::of(frame, Some(message.name())),
             place: ctx.place(),
+            produced: ctx.produced(),
             list: ctx.list(),
             direction: frame.direction,
             zenoh: ctx.zenoh(),
@@ -457,6 +460,7 @@ impl RowPlace {
         Some(crate::filter::RowFacts::of(
             self.names.as_slice(),
             packet,
+            self.produced,
             self.list,
             &flow,
             self.direction,
@@ -490,6 +494,9 @@ pub struct OpenExchange {
     /// request. A `zid` that meant the replier on a row whose `dir` meant the
     /// requester would be two ends of one exchange wearing one row.
     zid: Option<alloc::vec::Vec<u8>>,
+    /// The ZID of the end the request went TO, the replier's, owned for the
+    /// reason `zid` is: what the `zids` and `session` terms read beside it.
+    receiver_zid: Option<alloc::vec::Vec<u8>>,
     /// The request's kind and payload size, from the throughput plane's
     /// classifier, for `kind` and `bytes` terms at close.
     kind: crate::filter::RecordKind,
@@ -883,6 +890,7 @@ impl ExchangeTable {
                     keyexpr: resolved.ok(),
                     direction,
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
+                    receiver_zid: ctx.zid(direction.peer()).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
                     value: match crate::agg::payload_content(message) {
@@ -1150,6 +1158,7 @@ impl ExchangeTable {
             // R2757 (open debt 790) — the requester's, kept since the rid was
             // minted; see `OpenExchange::zid` for why it is that end.
             zid: entry.zid.as_deref(),
+            receiver_zid: entry.receiver_zid.as_deref(),
             keyexpr: entry.keyexpr.as_deref(),
             kind: crate::filter::Record::Is(entry.kind),
             payload_bytes: entry.payload_bytes,
@@ -1625,7 +1634,7 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
             // Placed and holding: see `crate::payload`'s fold.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.open,
             &mut self.spaces,

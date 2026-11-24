@@ -220,6 +220,42 @@ impl ConfigIngestError {
     }
 }
 
+/// `access_control/rules`.
+#[cfg(feature = "access-acl")]
+const KEY_ACL_RULES: &str = "access_control/rules";
+/// `access_control/subjects`.
+#[cfg(feature = "access-acl")]
+const KEY_ACL_SUBJECTS: &str = "access_control/subjects";
+/// `access_control/policies`.
+#[cfg(feature = "access-acl")]
+const KEY_ACL_POLICIES: &str = "access_control/policies";
+
+#[cfg(feature = "access-acl")]
+impl crate::zenoh_config::AclCompileError {
+    /// This refusal as fields. The document was read, and its
+    /// `access_control` subtree cannot become a policy.
+    ///
+    /// An id that is blank or given twice can sit in any of the three lists
+    /// and the refusal does not say which, so it blames all three, as
+    /// `Unreachable` blames every key that could have given a node a peer. A
+    /// literal the reader accepted and the engine does not know is this
+    /// reader's defect, not the document's, and blames no key.
+    pub fn finding(&self, node: Option<&str>) -> Finding {
+        let keys: &[&str] = match self {
+            Self::BlankId | Self::DuplicateId { .. } => {
+                &[KEY_ACL_RULES, KEY_ACL_SUBJECTS, KEY_ACL_POLICIES]
+            }
+            Self::EmptyPolicy { .. } => &[KEY_ACL_POLICIES],
+            Self::UnknownRule { .. } => &[KEY_ACL_POLICIES],
+            Self::UnknownSubject { .. } => &[KEY_ACL_POLICIES],
+            Self::BlankUsername { .. } => &[KEY_ACL_SUBJECTS],
+            Self::BlankCertCommonName { .. } => &[KEY_ACL_SUBJECTS],
+            Self::VocabularyDrift { .. } => &[],
+        };
+        Finding::describing(self, None, sites_in(node, keys))
+    }
+}
+
 impl TopologyDefect {
     /// This defect as fields. The nodes are already named inside the defect,
     /// by whatever name the verdict was asked with.
@@ -286,6 +322,48 @@ mod tests {
             .iter()
             .filter_map(|site| site.key.as_deref())
             .collect()
+    }
+
+    /// An `access_control` subtree that was read and cannot become a policy
+    /// blames the list the refusal is about, under the refusal's own name.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn an_acl_compile_refusal_blames_the_list_it_is_about() {
+        use crate::zenoh_config::AclCompileError;
+        let unknown = AclCompileError::UnknownRule {
+            id: String::from("ghost"),
+            index: 1,
+        }
+        .finding(Some("west"));
+        assert_eq!(unknown.variant, "UnknownRule");
+        assert_eq!(keys_of(&unknown), vec!["access_control/policies"]);
+        assert_eq!(unknown.sites[0].node.as_deref(), Some("west"));
+
+        let blank = AclCompileError::BlankCertCommonName {
+            subject: String::from("s1"),
+        }
+        .finding(None);
+        assert_eq!(keys_of(&blank), vec!["access_control/subjects"]);
+
+        let twice = AclCompileError::DuplicateId {
+            id: String::from("r1"),
+        }
+        .finding(None);
+        assert_eq!(
+            keys_of(&twice),
+            vec![
+                "access_control/rules",
+                "access_control/subjects",
+                "access_control/policies"
+            ]
+        );
+
+        let drift = AclCompileError::VocabularyDrift {
+            literal: String::from("x"),
+        }
+        .finding(None);
+        assert!(keys_of(&drift).is_empty());
+        assert_eq!(drift.sites.len(), 1, "a finding always has a site");
     }
 
     /// The whole point of the field: the same string sitting in the OTHER list
@@ -488,6 +566,24 @@ mod tests {
             }
             .finding(None),
         );
+        #[cfg(feature = "access-acl")]
+        for refusal in [
+            crate::zenoh_config::AclCompileError::BlankId,
+            crate::zenoh_config::AclCompileError::DuplicateId { id: node() },
+            crate::zenoh_config::AclCompileError::EmptyPolicy { index: 0 },
+            crate::zenoh_config::AclCompileError::UnknownRule {
+                id: node(),
+                index: 0,
+            },
+            crate::zenoh_config::AclCompileError::UnknownSubject {
+                id: node(),
+                index: 0,
+            },
+            crate::zenoh_config::AclCompileError::BlankUsername { subject: node() },
+            crate::zenoh_config::AclCompileError::BlankCertCommonName { subject: node() },
+        ] {
+            findings.push(refusal.finding(None));
+        }
         assert!(findings.len() > 15, "the population shrank: {findings:?}");
         for finding in &findings {
             for key in keys_of(finding) {

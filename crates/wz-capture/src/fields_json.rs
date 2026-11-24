@@ -190,14 +190,33 @@ pub(crate) fn judged_by(
     if filter.is_any() {
         return None;
     }
-    Some(match coordinates {
+    let read = read_against_the_documents(d, filter, coordinates);
+    Some(RowJudgement::of(d, &read, grouping, map))
+}
+
+/// `filter` read against the numbers the documents print, before any row is
+/// judged: a `flow` term against the caller's list numbers where it numbers
+/// its lists itself ([`crate::filter::Filter::numbered_by`]), and a `row`
+/// term against the places [`row_ordinals`] gives the rows of `d`
+/// ([`crate::filter::Filter::rows_numbered_by`]). The places are counted only
+/// for a selector that names `row`.
+pub(crate) fn read_against_the_documents(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    coordinates: Option<&dyn RowCoordinates>,
+) -> crate::filter::Filter {
+    let numbered = match coordinates {
         Some(c) => {
             let lists = d.message_lists_with_origin().count();
-            let numbered = filter.numbered_by(lists, &|list| c.list_id(list));
-            RowJudgement::of(d, &numbered, grouping, map)
+            filter.numbered_by(lists, &|list| c.list_id(list))
         }
-        None => RowJudgement::of(d, filter, grouping, map),
-    })
+        None => filter.clone(),
+    };
+    if numbered.reads_row_ordinal() {
+        numbered.rows_numbered_by(&row_ordinals(d))
+    } else {
+        numbered
+    }
 }
 
 /// The selector's document, with each row carrying the
@@ -1323,6 +1342,9 @@ pub const RETIRABLE_ROW_CELLS: &[&str] = &[
     "/first_byte",
     "/l2",
     "/name",
+    // Revision 81: the comments of the packet holding the first byte, read
+    // through the same packet map, which goes with the bytes.
+    "/packet_comments",
     // Revision 64: the walk's own facts go with the walk.
     "/transport_header",
     "/unnamed_extensions",
@@ -2268,6 +2290,50 @@ pub(crate) struct RenderedLists {
     /// after it USE, and folding them is what keeps this document's answer to
     /// "does this id resolve" the same as the census plane's.
     sub: alloc::vec::Vec<alloc::vec::Vec<usize>>,
+}
+
+/// THE PLACE OF EVERY ROW in the order the documents write rows: what a
+/// selector's `row` terms compare ([`crate::filter::RowOrdinals`]).
+///
+/// The order is the selection document's, which is the field document's: the
+/// stream flows, each in capture order (`FlowDissection::capture_order_from`,
+/// the order both walk), then each datagram flow's transport rows and its
+/// scouting rows. A list contributes every row it ever PRODUCED, the ones a
+/// ceiling has taken from its front included, so the place of a held row is the
+/// rows produced before it in the order and no trim moves it. A scouting row is
+/// never judged and holds its place all the same; a list no document writes (a
+/// recovered QUIC stream, a serial line) has no places.
+pub(crate) fn row_ordinals(d: &crate::Dissection) -> crate::filter::RowOrdinals {
+    let lists = RenderedLists::of(d);
+    let mut ordinals = crate::filter::RowOrdinals::default();
+    let mut next = 0u64;
+    for (i, flow) in d.flows().iter().enumerate() {
+        let produced = flow.frames.produced();
+        let first = produced - flow.frames.len() as u64;
+        if let Some(&list) = lists.stream.get(i) {
+            ordinals.write_list(list);
+            let order = flow
+                .capture_order_from(0, 0, None, usize::MAX)
+                .into_iter()
+                .flat_map(|(order, _, _)| order);
+            for (rank, position) in order.enumerate() {
+                ordinals.place(list, first + position as u64, next + first + rank as u64);
+            }
+        }
+        next += produced;
+    }
+    for (i, flow) in d.datagram_flows().iter().enumerate() {
+        let produced = flow.frames.produced();
+        let first = produced - flow.frames.len() as u64;
+        if let Some(&list) = lists.datagram.get(i) {
+            ordinals.write_list(list);
+            for at in first..produced {
+                ordinals.place(list, at, next + at);
+            }
+        }
+        next += produced + flow.scouting().produced();
+    }
+    ordinals.sorted()
 }
 
 impl RenderedLists {
@@ -5426,6 +5492,30 @@ fn push_first_byte<W: DocOut>(at: Option<FirstByte>, reread: Option<&Reread>, ou
             .and_then(|p| crate::link::ethernet_header(p.link_type, p.data)),
         out,
     );
+    push_packet_comments(packet.as_ref().map(|p| p.options), out);
+}
+
+/// The row's `packet_comments` key (revision 81): every `opt_comment` of the
+/// packet that holds the row's first byte, in the order its block lists them,
+/// each as [`crate::report::write_comment`] writes it. `[]` for a packet with
+/// none (every classic pcap record), and `null` when the packet is not in
+/// hand: no first byte, or a packet this document could not re-read.
+///
+/// The first byte's packet and no other, so the comment sits on the rows a
+/// viewer lists under that packet; a packet holding no row's first byte is
+/// counted in the summary's `comments` and is on no row.
+fn push_packet_comments<W: DocOut>(options: Option<crate::pcapng::OptionList<'_>>, out: &mut W) {
+    out.key("packet_comments");
+    match options {
+        None => out.null(),
+        Some(options) => {
+            out.open_array();
+            for value in options.comments() {
+                crate::report::write_comment(&crate::pcapng::Comment::of(value), out);
+            }
+            out.close_array();
+        }
+    }
 }
 
 /// The row's `l2` key: the Ethernet II header's source, destination and place
@@ -6276,6 +6366,9 @@ fn write_dns<W: DocOut>(
 /// the high bit set; 6 is microseconds), `ts_offset_s` the `if_tsoffset`
 /// seconds every timestamp of the interface is shifted by. Empty for a classic
 /// pcap, whose one interface is the file's own link type.
+///
+/// Revision 81 adds `comments`, the IDB's `opt_comment` values in order, each
+/// as [`crate::report::write_comment`] writes it; `[]` when it has none.
 fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
     out.key("capture_interfaces");
     out.open_array();
@@ -6293,6 +6386,12 @@ fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
         out.uint(u64::from(i.ts_resol));
         out.key("ts_offset_s");
         out.int(i.ts_offset);
+        out.key("comments");
+        out.open_array();
+        for comment in &i.comments {
+            crate::report::write_comment(comment, out);
+        }
+        out.close_array();
         out.close_map();
     }
     out.close_array();
@@ -8141,6 +8240,8 @@ struct RereadPacket<'a> {
     link_type: u32,
     index: usize,
     data: &'a [u8],
+    /// The block's option list, empty for a classic pcap record.
+    options: crate::pcapng::OptionList<'a>,
 }
 
 impl<'a> Reread<'a> {
@@ -8204,6 +8305,7 @@ impl<'a> Reread<'a> {
             link_type: frame.link_type,
             index: first_packet + frame.index,
             data: frame.data,
+            options: frame.options,
         };
         match &self.packets {
             RereadPackets::All(frames) => {
@@ -10369,6 +10471,44 @@ mod tests {
             let pcapng = crate::pcapng::write(&[(crate::link::LINKTYPE_ETHERNET, 6)], &[]);
             arms.push(members(|out| write_capture_interfaces(&pcapng, out)));
         }
+        // Revision 81 — a comment object, which a capture whose packets carry
+        // no comment never opens.
+        arms.push(members(|out| {
+            out.key("packet_comments");
+            out.open_array();
+            crate::report::write_comment(&crate::pcapng::Comment::of(b"note"), out);
+            out.close_array();
+        }));
+        // Revision 82 — how a format was chosen, each word on a decoding that
+        // read the payload and on one that was refused, an encoding schema
+        // present on one and absent on the other.
+        for chosen_by in crate::payload_decode::ChosenBy::ALL {
+            let decoded = crate::payload_decode::PayloadDecoding::Decoded {
+                keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
+                format: String::from("json"),
+                fields: Vec::new(),
+                despite_encoding: None,
+                typed: true,
+                schema: None,
+                chosen_by,
+                encoding_schema: Some(String::from("pkg.Reading")),
+            };
+            let refused = crate::payload_decode::PayloadDecoding::Refused {
+                keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
+                format: String::from("text"),
+                why: String::from("byte 0: not UTF-8"),
+                chosen_by,
+                encoding_schema: None,
+            };
+            for decoding in [decoded, refused] {
+                arms.push(members(|out| {
+                    out.key("payload_decode");
+                    write_decoding(&decoding, out);
+                }));
+            }
+        }
         // Revision 74 — every `open_syn` and `open_ack` word, on a context.
         {
             use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
@@ -11908,6 +12048,74 @@ mod tests {
         }
     }
 
+    /// Revision 81 — A PACKET'S COMMENTS ARE ON THE ROWS IT HOLDS THE FIRST
+    /// BYTE OF, every one in its block's order, a value that is not UTF-8
+    /// carried replaced and marked. A packet with none says `[]`. A datagram
+    /// row whose packet the document cannot re-read is not written at all (it
+    /// is named under `disagreements`), so it carries no comments to get wrong;
+    /// the stream row whose bytes were discarded, which does say `null`, is the
+    /// C ABI's row-change test's.
+    #[test]
+    fn a_packets_comments_reach_the_rows_it_holds_the_first_byte_of() {
+        use crate::datagram_tests::{init_datagram, udp_packet};
+        use crate::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let syn = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &init_datagram(false, &[]),
+        );
+        let ack = udp_packet(
+            [10, 0, 0, 2],
+            7447,
+            [10, 0, 0, 1],
+            43210,
+            &init_datagram(true, &[]),
+        );
+        let commented = PacketSpec {
+            interface: 0,
+            ticks: 1_000_000,
+            data: &syn,
+            options: &[(OPT_COMMENT, b"slow reply"), (OPT_COMMENT, b"\xff")],
+        };
+        let plain = PacketSpec {
+            interface: 0,
+            ticks: 2_000_000,
+            data: &ack,
+            options: &[],
+        };
+        let ifaces = [(LINKTYPE_ETHERNET, 6u8)];
+        let capture = write_with_options(ByteOrder::Little, &ifaces, &[commented, plain]);
+        let d = Dissection::from_capture(&capture).expect("the capture reads");
+        let doc = fields_json(&d, &capture, None, None);
+        let marked = "\"packet_comments\":[{\"text\":\"slow reply\",\"utf8\":true},\
+                      {\"text\":\"\u{fffd}\",\"utf8\":false}]";
+        assert_eq!(doc.matches(marked).count(), 1, "{doc}");
+        assert_eq!(doc.matches("\"packet_comments\":[]").count(), 1, "{doc}");
+
+        // The same two rows against a container holding only the first packet:
+        // the commented row still carries its comments, and the other is named
+        // rather than written.
+        let first_only = write_with_options(ByteOrder::Little, &ifaces, &[commented]);
+        let doc = fields_json(&d, &first_only, None, None);
+        assert_eq!(doc.matches(marked).count(), 1, "{doc}");
+        assert_eq!(doc.matches("\"packet_comments\"").count(), 1, "{doc}");
+        assert!(
+            doc.contains("\"named\":[{\"at\":1,\"why\":\"absent\"}]"),
+            "{doc}"
+        );
+
+        // A classic pcap has no options: every row says none.
+        let classic = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, syn.as_slice()), (1, 0, ack.as_slice())],
+        );
+        let d = Dissection::from_capture(&classic).expect("the capture reads");
+        let doc = fields_json(&d, &classic, None, None);
+        assert_eq!(doc.matches("\"packet_comments\":[]").count(), 2, "{doc}");
+    }
+
     #[test]
     fn the_field_documents_key_set_is_pinned() {
         use crate::payload::formats::FormatMap;
@@ -12110,6 +12318,8 @@ mod tests {
                     despite_encoding: None,
                     typed: false,
                     schema: None,
+                    chosen_by: crate::payload_decode::ChosenBy::Rule,
+                    encoding_schema: None,
                 },
                 &mut out,
             );
@@ -12367,6 +12577,12 @@ mod tests {
             // 80).
             (rev::FIELDS, "qtype", crate::dns::QueryType::names()),
             (rev::FIELDS, "rcode", crate::dns::Rcode::names()),
+            // How a payload's format was chosen (revision 82).
+            (
+                rev::FIELDS,
+                "chosen_by",
+                crate::payload_decode::ChosenBy::names(),
+            ),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the
@@ -15718,6 +15934,83 @@ mod tests {
             .map(|s| s.revision)
             .min();
         assert_eq!(arrived, Some(67), "the key arrived with its revision");
+    }
+
+    /// Revision 82 — A PUBLISHER'S OWN ENCODING CHOOSES THE FORMAT WHERE NO
+    /// RULE COVERS THE KEY. Under one encoding rule, an `application/json`
+    /// sample is read into fields whose number leaf carries its typed value, and
+    /// the decoding says the encoding chose it and names the encoding's schema;
+    /// a `text/plain` sample is one string; a sample whose encoding names no
+    /// built-in, and one that declared none, are covered by no rule. A key rule
+    /// wins over the encoding rule whichever is declared first.
+    #[test]
+    fn a_declared_encoding_chooses_the_format_where_no_rule_covers_the_key() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload::tests_support as build;
+        let records = [
+            build::push_with_encoding(
+                "demo/json",
+                Some((encoding_id("application/json"), Some("pkg.Reading"))),
+                br#"{"t":21.5}"#,
+            ),
+            build::push_with_encoding("demo/text", Some((encoding_id("text/plain"), None)), b"hi"),
+            build::push_with_encoding(
+                "demo/raw",
+                Some((encoding_id("application/octet-stream"), None)),
+                b"\x01",
+            ),
+            build::push_with_encoding("demo/plain", None, b"xyz"),
+        ];
+        let (d, file, _) = one_frame_per_record(&records);
+
+        let mut map = FormatMap::new();
+        map.declare("**=encoding").expect("an encoding rule");
+        let run = Declarations::new(&map);
+        let doc = fields_json(&d, &file, None, Some(&run));
+        for expected in [
+            "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/json\",\
+             \"matched_rule\":{\"index\":0,\"pattern\":\"**\"},\"typed\":true,\
+             \"schema\":null,\"despite_encoding\":null,\"format\":\"json\"",
+            "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
+             \"chosen_by\":\"encoding\",\"encoding_schema\":\"pkg.Reading\"}",
+            "\"format\":\"text\",\"fields\":[{\"path\":\"$\",\"name\":null,\
+             \"value\":\"text \\\"hi\\\"\"",
+            "\"type\":\"string\",\"typed_value\":\"hi\",\"enum_number\":null}],\
+             \"chosen_by\":\"encoding\",\"encoding_schema\":null}",
+            "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/raw\",\
+             \"matched_rule\":null}",
+            "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/plain\",\
+             \"matched_rule\":null}",
+        ] {
+            assert_eq!(doc.matches(expected).count(), 1, "{expected}\n{doc}");
+        }
+
+        for (rules, at) in [
+            ("**=encoding\ndemo/json=json", 1),
+            ("demo/json=json\n**=encoding", 0),
+        ] {
+            let mut map = FormatMap::new();
+            map.declare_all(rules).expect("two rules");
+            let run = Declarations::new(&map);
+            let doc = fields_json(&d, &file, None, Some(&run));
+            let ruled = alloc::format!(
+                "\"keyexpr\":\"demo/json\",\"matched_rule\":{{\"index\":{at},\
+                 \"pattern\":\"demo/json\"}}"
+            );
+            assert_eq!(doc.matches(ruled.as_str()).count(), 1, "{rules}\n{doc}");
+            assert_eq!(
+                doc.matches("\"chosen_by\":\"rule\",\"encoding_schema\":\"pkg.Reading\"}")
+                    .count(),
+                1,
+                "{rules}\n{doc}"
+            );
+            assert_eq!(
+                doc.matches("\"chosen_by\":\"encoding\",\"encoding_schema\":null}")
+                    .count(),
+                1,
+                "the text sample is still chosen by its encoding: {rules}\n{doc}"
+            );
+        }
     }
 
     /// A row whose key does not resolve still names its payload.

@@ -350,8 +350,10 @@ transport_compression = ["wz-capi-core/transport_compression"]
 # dictionary file. Off, neither is built, as in a zenoh-c built without `auth_usrpwd`.
 auth_usrpwd = ["wz-capi-core/auth_usrpwd"]
 # The traffic policy a node's config states (`access_control`, `low_pass_filter`, `downsampling`),
-# compiled and enforced on every face. Off, a config that states one fails the open.
-interceptors = ["wz-capi-core/interceptors"]
+# compiled and enforced on every face. Off, a config that states one fails the open. The runtime's
+# `access-acl` is named here as well because `wz_capi_c_config_acl_verdicts` (with `config-verdict`)
+# names the access control's compile and engine types itself.
+interceptors = ["wz-capi-core/interceptors", "wz-runtime-tokio/access-acl"]
 
 [dependencies]
 # The ABI stamp this artifact carries as an ELF note (beside `WZ_CAPI_C_ABI_REVISION` in `abi.rs`).

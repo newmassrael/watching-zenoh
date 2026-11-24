@@ -100,7 +100,7 @@ CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
 #
 # BOTH surfaces reach these.
 BOTH = {
-    # ABI 60 — the serial declaration, which the command line took first. The
+    # ABI 61 — the serial declaration, which the command line took first. The
     # ABI takes it as a field of the options a handle is opened under, so a file
     # read through that handle and a link pushed to it read the same line.
     "declaring a link type to be raw serial": (
@@ -309,7 +309,7 @@ ONLY_CLI = {
         "--quic",
         "DELIBERATE for now: a declaration is a human judgement about a capture "
         "that begins mid-connection, and the report says which flows were declared "
-        "rather than recognised. Since ABI 60 a declaration crosses as a field of "
+        "rather than recognised. Since ABI 61 a declaration crosses as a field of "
         "the sized options a live handle is opened under, and a port list would be "
         "one more field there; no linking consumer has read a capture that needs "
         "it, so the command line is the one surface that takes it.",
@@ -990,6 +990,17 @@ ONLY_CAPI = {
         "command line prints each decoded field once, with its type "
         "(`--payload-format`), so the values are already on its listing and there "
         "is no earlier answer for a later one to be relative to.",
+        (),
+    ),
+    # (ABI 60) -- the binder with the zone a list shows times in. Filed in the
+    # round that added the symbol.
+    "the offset a list shows times in, written onto a selector's clock times": (
+        "wz_dissect_selector_bind_in_zone",
+        "DELIBERATE. A `time` literal with no offset is read in UTC by both "
+        "surfaces, through the one parser. The door is for a list whose zone is "
+        "a setting the reader chose and not text the reader typed; a person at "
+        "the command line types the offset into the literal (`12:04+09:00`), "
+        "and `--select` reads it as every door does.",
         (),
     ),
     # (ABI 59) -- the same values, bounded to a window of sequence numbers.

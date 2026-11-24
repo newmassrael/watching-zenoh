@@ -1654,7 +1654,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// (`wz_capi_c_time_base_new`, `_advanced`, `_loan`, `_move`, `_drop`, `wz_capi_c_config_time_base`
 /// and the two internal doors) and the structs they take, in a build with `time-base` (off by
 /// default).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 19;
+///
+/// It moves to 20 for what a config's access control decides for a list of messages
+/// (`crate::acl_verdict`, `wz_capi_c_config_acl_verdicts`), one new symbol answering refusals in
+/// the revision-4 verdict rows, in a build with `config-verdict` and `interceptors` (both on by
+/// default).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 20;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;

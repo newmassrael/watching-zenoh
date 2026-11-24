@@ -74,7 +74,7 @@ fn the_options_layout_is_the_one_the_header_declares() {
     assert_eq!(offset_of!(O, stream_bytes_per_direction), 40);
     assert_eq!(offset_of!(O, reassembly_window_ms), 48);
     assert_eq!(offset_of!(O, chain_bytes), 56);
-    assert_eq!(size_of::<O>(), 64, "ABI 61 appended two fields, ABI 63 one");
+    assert_eq!(size_of::<O>(), 64, "ABI 62 appended two fields, ABI 64 one");
     assert_eq!(
         LIVE_OPTIONS_FIRST_SIZE, 40,
         "the six fields the first published struct holds"
@@ -399,7 +399,7 @@ fn a_byte_ceiling_the_caller_raises_keeps_an_old_messages_bytes() {
     unsafe { wz_dissect_live_close(raised) };
 }
 
-/// THE TWO FIELDS ABI 61 APPENDED REACH THE DISSECTION, and a caller compiled
+/// THE TWO FIELDS ABI 62 APPENDED REACH THE DISSECTION, and a caller compiled
 /// against the struct before them keeps the preset's figures whatever lies past
 /// the size it wrote.
 #[test]

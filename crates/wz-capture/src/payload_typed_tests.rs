@@ -365,6 +365,8 @@ mod rendered {
             despite_encoding: None,
             typed: format.reads_types(),
             schema: format.body_schema().map(|s| s.message.to_string()),
+            chosen_by: crate::payload_decode::ChosenBy::Rule,
+            encoding_schema: None,
         };
         let mut out = String::new();
         push_decoding(&decoded, &mut out);
@@ -404,6 +406,8 @@ mod rendered {
             despite_encoding: None,
             typed: format.reads_types(),
             schema: None,
+            chosen_by: crate::payload_decode::ChosenBy::Rule,
+            encoding_schema: None,
         };
         let mut out = String::new();
         push_decoding(&decoded, &mut out);

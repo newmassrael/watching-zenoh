@@ -1173,7 +1173,7 @@ static int check_open_bounded_door(void) {
 static size_t pcap_of_frames(unsigned char *out, const unsigned char *frame,
                              size_t frame_len, size_t n);
 
-/* (ABI 60) -- THE OPTIONS DOOR, driven from C: a sized struct the caller owns,
+/* (ABI 61) -- THE OPTIONS DOOR, driven from C: a sized struct the caller owns,
  * zeroed and given its own size. It refuses a NULL struct, a size below the
  * first published one and a link-type count with no list; and a declared link
  * type is read as a serial line where the same packet on an undeclared handle
@@ -1245,7 +1245,7 @@ static int check_open_with_door(void) {
     wz_dissect_live_close(h);
     h = NULL;
 
-    /* (ABI 61) The byte ceiling is the caller's, and the document that names
+    /* (ABI 62) The byte ceiling is the caller's, and the document that names
      * the ceilings echoes it. */
     memset(&o, 0, sizeof o);
     o.size = sizeof o;
@@ -1275,7 +1275,7 @@ static int check_open_with_door(void) {
     return 0;
 }
 
-/* (ABI 62) -- ONE CAPTURE AS TWO CONTAINERS, driven from C: a handle that
+/* (ABI 63) -- ONE CAPTURE AS TWO CONTAINERS, driven from C: a handle that
  * read the first goes on into the second, numbers its packets on from the
  * first's, hands out the messages of both, and is lent no container after it
  * moved. */
@@ -4135,11 +4135,13 @@ int main(void) {
      * Revision 8 is `zenoh` joining the fields, and nothing on this branch.
      * Revision 9 is its words becoming the sequential test's three, and
      * nothing on this branch either; nor is revision 10, the four e2e fields
-     * joining.
+     * joining, nor revision 11, `row` joining, nor revision 12, the dates,
+     * clock times and units of `time` and the intervals, and `zids` and
+     * `session`, joining.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -4517,9 +4519,12 @@ int main(void) {
      * flow. A key arrives; nothing retires.
      * 8: `skips` gains `link_type_interfaces`, the unread interfaces each with
      * its link type and count. A key arrives; nothing retires.
-     * 9: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * 9: the document gains `comments`, the pcapng capture's commented packets
+     * counted and its section comments carried. Eight keys arrive; nothing
+     * retires.
+     * 10: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
      * retires. */
-    revisioned[1].revision = 9;
+    revisioned[1].revision = 10;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -4813,9 +4818,16 @@ int main(void) {
      * 80: the document gains `dns`, the capture's name lookups and what
      * answered them. Eighteen keys and two families arrive; nothing
      * retires.
-     * 81: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
+     * 81: each row gains `packet_comments` and each capture interface
+     * `comments`, the pcapng comments of the packet holding the row's first
+     * byte and of the interface. Four keys arrive; no family.
+     * 82: a decoding that applied a format gains `chosen_by` and
+     * `encoding_schema`: whether a rule or the sample's declared encoding
+     * chose it. Two keys and one family arrive; a json or cbor decoding is
+     * now typed.
+     * 83: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
      * nothing retires. */
-    revisioned[2].revision = 81;
+    revisioned[2].revision = 83;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4860,7 +4872,7 @@ int main(void) {
     /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
      * same `health` object; 4 on the summary's move to 7, `caps` gaining
      * `frames_total`; 5 on the summary's move to 8, `skips` gaining
-     * `link_type_interfaces`; 6 on the summary's move to 9, `caps` gaining
+     * `link_type_interfaces`; 6 on the summary's move to 10, `caps` gaining
      * `chain_bytes`. */
     revisioned[5].revision = 6;
     revisioned[5].doc = NULL;
@@ -5036,6 +5048,30 @@ int main(void) {
     revisioned[16].doc = NULL;
     rc = wz_dissect_selector_bind("kind == put", NULL, &revisioned[16].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_bind document rc=%d", rc);
+    /* (ABI 60) -- the zone binder writes the binder's document, with the
+     * caller's offset after a `time` literal that carries none, and refuses an
+     * offset no zone has with no string. */
+    {
+        char *zoned = NULL;
+        rc = wz_dissect_selector_bind_in_zone("time > 12:04", NULL, 540, &zoned);
+        CHECK(rc == WZ_DISSECT_OK && zoned != NULL, "selector_bind_in_zone rc=%d", rc);
+        if (zoned != NULL) {
+            CHECK(strncmp(zoned, "{\"document\":{\"name\":\"selector_bind\",\"revision\":1},",
+                          strlen("{\"document\":{\"name\":\"selector_bind\",\"revision\":1},")) ==
+                      0,
+                  "the zone binder writes the binder's document: %s", zoned);
+            CHECK(strstr(zoned, "\"selector\":\"time > 12:04+09:00\"") != NULL,
+                  "the offset is not written after the literal: %s", zoned);
+            wz_dissect_string_free(zoned);
+        }
+        zoned = NULL;
+        rc = wz_dissect_selector_bind_in_zone("time > 12:04", NULL, 1440, &zoned);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && zoned == NULL,
+              "an offset past 23:59 rc=%d", rc);
+        rc = wz_dissect_selector_bind_in_zone(NULL, NULL, 0, &zoned);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && zoned == NULL,
+              "a null selector rc=%d", rc);
+    }
     /* (ABI 36) -- the message list, at 1: the cheapest input it answers is one
      * file with one message. */
     revisioned[17].name = "proto_message_list";
@@ -5081,8 +5117,11 @@ int main(void) {
     revisioned[19].name = "selector_fields";
     /* 5: `renamed`, the renames of published paths, joined; empty here.
      * 6: the end-to-end judge's four fields join the fixed fields; no key
-     * moves. */
-    revisioned[19].revision = 6;
+     * moves.
+     * 7: `row`, the row's place in the documents, joins them; no key moves.
+     * 8: `zids` and `session` join them, and `time` and the intervals read
+     * dates, clock times and units; no key moves. */
+    revisioned[19].revision = 8;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);
@@ -5476,12 +5515,12 @@ int main(void) {
         return 1;
     }
 
-    /* (ABI 60) -- and the open that takes its options as a sized struct. */
+    /* (ABI 61) -- and the open that takes its options as a sized struct. */
     if (check_open_with_door() != 0) {
         return 1;
     }
 
-    /* (ABI 62) -- and one capture read as two containers by one handle. */
+    /* (ABI 63) -- and one capture read as two containers by one handle. */
     if (check_follow_next_door() != 0) {
         return 1;
     }
