@@ -50,7 +50,7 @@ fn plain_put(value: &[u8]) -> Result<MsgPut<'_>, CodecError> {
 }
 
 /// The `M` flag of the Push header: the id is in the sender's mapping.
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
 const FLAG_PUSH_M: u8 = 0x40;
 
 /// A Put's header with no timestamp, no encoding and no extension: the payload

@@ -48,9 +48,9 @@ use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
 use crate::sink::{FanOut, SampleDelivery, SampleView};
-use crate::wireexpr_resolve::{
-    resolve_plain_parts_over, resolve_wireexpr_view_held_over, KeyexprBuf, KeyexprPastBound,
-};
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+use crate::wireexpr_resolve::resolve_plain_parts_over;
+use crate::wireexpr_resolve::{resolve_wireexpr_view_held_over, KeyexprBuf, KeyexprPastBound};
 
 /// The sample a Push read in place is delivered as: every field a range of the
 /// frame or a value read off it, valid for the delivery call.
