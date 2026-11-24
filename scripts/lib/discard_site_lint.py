@@ -145,6 +145,15 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/ros_type_hash.rs",
+        "while let Some(next) = queue.pop() {",
+        "The RIHS01 hash collects every type a ROS type reaches with a work list: "
+        "a name leaves the list when its definition is read into the set of "
+        "referenced types, or is skipped because that set already holds it. "
+        "Nothing read from a capture is dropped; a name no declared definition "
+        "defines is returned as the refusal.",
+    ),
+    (
         "wz-capture/ros_msg.rs",
         "inside.pop();",
         "The check that a ROS message definition does not contain itself walks "
