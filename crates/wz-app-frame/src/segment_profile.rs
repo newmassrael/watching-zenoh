@@ -92,8 +92,8 @@ use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::{width_mask, Crc};
 use crate::e2e_profile::{
-    array, at, check_keys, child, object, optional, read_crc_engine, read_json, read_name,
-    read_string, read_uint, required, DocError, MAX_FIELDS,
+    array, at, check_keys, child, object, optional, read_crc_object, read_json, read_name,
+    read_string, read_uint, required, CrcFields, DocError, MAX_FIELDS,
 };
 
 /// The largest whole message a segment profile may admit, in bytes.
@@ -580,74 +580,43 @@ fn read_fields(value: &Json5Value, path: &str) -> Result<Vec<Field>, DocError> {
     Ok(fields)
 }
 
-fn read_crc(value: &Json5Value, path: &str, fields: &[Field]) -> Result<CrcSpec, DocError> {
-    let entries = object(value, path)?;
-    check_keys(
-        entries,
-        &[
-            "field", "width", "poly", "init", "refin", "refout", "xorout", "cover",
-        ],
-        path,
-    )?;
-    let field_path = child(path, "field");
-    let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
-    if fields[field].equals.is_some() {
-        return Err(DocError::invalid(
-            field_path,
-            format!(
-                "the crc field `{field_name}` holds a fixed value (`equals`): it holds the \
-                 result"
-            ),
-        ));
-    }
-    let engine = read_crc_engine(entries, path)?;
-    let width = engine.params().width;
-    if usize::from(width) > fields[field].bytes * 8 {
-        return Err(DocError::invalid(
-            field_path,
-            format!(
-                "the crc field `{field_name}` is {} bits wide, narrower than the {width}-bit CRC",
-                fields[field].bytes * 8
-            ),
-        ));
+impl CrcFields for &[Field] {
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.iter().position(|f| f.name == name)
     }
 
-    let cover_path = child(path, "cover");
-    let items = array(required(entries, "cover", path)?, &cover_path)?;
-    if items.is_empty() {
-        return Err(DocError::invalid(
-            cover_path,
-            "the cover list is empty: the CRC would take no input",
-        ));
+    fn bytes_of(&self, index: usize) -> usize {
+        self[index].bytes
     }
-    let mut cover: Vec<Cover> = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
-        let here = at(&cover_path, i);
-        let name = read_string(item, &here)?;
-        let entry = if name == CHUNK {
-            Cover::Chunk
-        } else {
-            Cover::Field(field_named(fields, name, &here)?)
-        };
-        if entry == Cover::Field(field) {
+
+    fn may_hold_crc(&self, index: usize, path: &str) -> Result<(), DocError> {
+        if self[index].equals.is_some() {
             return Err(DocError::invalid(
-                here,
-                format!("the crc field `{name}` is never covered: it holds the result"),
+                path,
+                format!(
+                    "the crc field `{}` holds a fixed value (`equals`): it holds the result",
+                    self[index].name
+                ),
             ));
         }
-        if cover.contains(&entry) {
-            return Err(DocError::invalid(
-                here,
-                format!("`{name}` is covered twice"),
-            ));
-        }
-        cover.push(entry);
+        Ok(())
     }
+
+    fn body(&self) -> &'static str {
+        CHUNK
+    }
+}
+
+fn read_crc(value: &Json5Value, path: &str, fields: &[Field]) -> Result<CrcSpec, DocError> {
+    let crc = read_crc_object(value, path, &fields)?;
     Ok(CrcSpec {
-        field,
-        engine,
-        cover,
+        field: crc.field,
+        engine: crc.engine,
+        cover: crc
+            .cover
+            .into_iter()
+            .map(|c| c.map_or(Cover::Chunk, Cover::Field))
+            .collect(),
     })
 }
 
@@ -722,7 +691,8 @@ pub mod synthetic {
 mod tests {
     use alloc::string::String;
 
-    use super::{Field, Order};
+    use super::{Cover, Field, Order, SegmentProfile};
+    use crate::e2e_profile::DocError;
 
     /// Every byte distinct and the top bit set, so a byte out of place or a
     /// sign carried down shows.
@@ -735,6 +705,91 @@ mod tests {
             offset: 1,
             order,
             equals: None,
+        }
+    }
+
+    /// A segment profile whose CRC object is `crc`, every other part valid.
+    fn with_crc(crc: &str) -> String {
+        alloc::format!(
+            concat!(
+                r#"{{"name":"t","segments":{{"fields":["#,
+                r#"{{"name":"mark","bytes":2,"equals":"0xA5C3"}},"#,
+                r#"{{"name":"number","bytes":1}},"#,
+                r#"{{"name":"size","bytes":2}},"#,
+                r#"{{"name":"at","bytes":2}},"#,
+                r#"{{"name":"check","bytes":2}}],"#,
+                r#""crc":{},"transfer":"number","total":"size","offset":"at","#,
+                r#""total_max":4096}}}}"#
+            ),
+            crc
+        )
+    }
+
+    fn crc(field: &str, width: u8, cover: &str) -> String {
+        alloc::format!(
+            r#"{{"field":"{field}","width":{width},"poly":"0x8005","init":"0x0000","refin":true,"refout":true,"xorout":"0x0000","cover":{cover}}}"#
+        )
+    }
+
+    fn refused(text: &str) -> (String, String) {
+        match SegmentProfile::parse(text) {
+            Err(DocError::Invalid { path, reason }) => (path, reason),
+            other => panic!("expected a refusal with a place, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_crc_object_is_read_with_the_chunk_word_and_refused_at_its_place() {
+        let profile =
+            SegmentProfile::parse(&with_crc(&crc("check", 16, r#"["@chunk","mark","size"]"#)))
+                .expect("a valid profile");
+        let spec = profile.crc().expect("the profile has a CRC");
+        assert_eq!(spec.field, 4);
+        assert_eq!(spec.cover, [Cover::Chunk, Cover::Field(0), Cover::Field(2)]);
+
+        let cases: [(String, &str, &str); 7] = [
+            (
+                crc("nope", 16, r#"["@chunk"]"#),
+                "/segments/crc/field",
+                "no field is called `nope`",
+            ),
+            (
+                crc("mark", 16, r#"["@chunk"]"#),
+                "/segments/crc/field",
+                "the crc field `mark` holds a fixed value (`equals`): it holds the result",
+            ),
+            (
+                crc("check", 32, r#"["@chunk"]"#),
+                "/segments/crc/field",
+                "the crc field `check` is 16 bits wide, narrower than the 32-bit CRC",
+            ),
+            (
+                crc("check", 16, "[]"),
+                "/segments/crc/cover",
+                "the cover list is empty: the CRC would take no input",
+            ),
+            (
+                crc("check", 16, r#"["mark","check"]"#),
+                "/segments/crc/cover/1",
+                "the crc field `check` is never covered: it holds the result",
+            ),
+            (
+                crc("check", 16, r#"["@chunk","@chunk"]"#),
+                "/segments/crc/cover/1",
+                "`@chunk` is covered twice",
+            ),
+            (
+                crc("check", 16, r#"["@payload"]"#),
+                "/segments/crc/cover/0",
+                "no field is called `@payload`",
+            ),
+        ];
+        for (object, path, reason) in cases {
+            assert_eq!(
+                refused(&with_crc(&object)),
+                (String::from(path), String::from(reason)),
+                "{object}"
+            );
         }
     }
 

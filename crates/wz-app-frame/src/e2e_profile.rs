@@ -1037,11 +1037,10 @@ fn plain(field: &Field, role: &str, path: &str) -> Result<(), DocError> {
 }
 
 /// The engine a CRC object describes: its `width`, `poly`, `init`, `refin`,
-/// `refout` and `xorout`, each refused at its own place. Shared by every
-/// profile kind that carries a CRC, so the six parameters are read and
-/// refused one way wherever a deployment writes them; the caller checks the
-/// keys of the object and reads the rest of it (which field, what is covered).
-pub(crate) fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocError> {
+/// `refout` and `xorout`, each refused at its own place. [`read_crc_object`]
+/// checks the keys of the object and reads the rest of it (which field, what
+/// is covered).
+fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocError> {
     let width_path = child(path, "width");
     let width = read_uint(required(entries, "width", path)?, &width_path)?;
     if !u8::try_from(width).is_ok_and(|w| SUPPORTED_WIDTHS.contains(&w)) {
@@ -1074,8 +1073,54 @@ pub(crate) fn read_crc_engine(entries: &Entries, path: &str) -> Result<Crc, DocE
     })
 }
 
-fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
-    let path = "/crc";
+/// A profile kind's header fields as its CRC object reads them.
+pub(crate) trait CrcFields {
+    /// The index of the field called `name`.
+    fn index_of(&self, name: &str) -> Option<usize>;
+    /// How many bytes the field at `index` spans.
+    fn bytes_of(&self, index: usize) -> usize;
+    /// Refuse, at `path`, the field at `index` as the one the CRC is
+    /// written to, by the kind's own rule.
+    fn may_hold_crc(&self, index: usize, path: &str) -> Result<(), DocError>;
+    /// The `cover` entry that stands for the bytes after the header.
+    fn body(&self) -> &'static str;
+}
+
+impl CrcFields for &[Field] {
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.iter().position(|f| f.name == name)
+    }
+
+    fn bytes_of(&self, index: usize) -> usize {
+        self[index].bytes
+    }
+
+    fn may_hold_crc(&self, index: usize, path: &str) -> Result<(), DocError> {
+        plain(&self[index], "crc", path)
+    }
+
+    fn body(&self) -> &'static str {
+        PAYLOAD
+    }
+}
+
+/// A CRC object once read: the field the CRC is written to, the engine, and
+/// what is fed in that order, `None` standing for the bytes after the header.
+pub(crate) struct CrcObject {
+    pub(crate) field: usize,
+    pub(crate) engine: Crc,
+    pub(crate) cover: Vec<Option<usize>>,
+}
+
+/// The CRC object of every profile kind that carries one, read and refused
+/// one way: the kinds differ only in their fields, the rule for the field
+/// that holds the CRC, and the word for the body ([`CrcFields`]). Not
+/// generic, so one body serves every kind.
+pub(crate) fn read_crc_object(
+    value: &Json5Value,
+    path: &str,
+    fields: &dyn CrcFields,
+) -> Result<CrcObject, DocError> {
     let entries = object(value, path)?;
     check_keys(
         entries,
@@ -1084,21 +1129,25 @@ fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
         ],
         path,
     )?;
+    let named = |name: &str, here: &str| {
+        fields
+            .index_of(name)
+            .ok_or_else(|| DocError::invalid(here, format!("no field is called `{name}`")))
+    };
 
     let field_path = child(path, "field");
     let field_name = read_string(required(entries, "field", path)?, &field_path)?;
-    let field = field_named(fields, field_name, &field_path)?;
-    plain(&fields[field], "crc", &field_path)?;
+    let field = named(field_name, &field_path)?;
+    fields.may_hold_crc(field, &field_path)?;
 
     let engine = read_crc_engine(entries, path)?;
     let width = engine.params().width;
-    if usize::from(width) > fields[field].bytes * 8 {
+    let bits = fields.bytes_of(field) * 8;
+    if usize::from(width) > bits {
         return Err(DocError::invalid(
             field_path,
             format!(
-                "the crc field `{}` is {} bits wide, narrower than the {width}-bit CRC",
-                fields[field].name,
-                fields[field].bytes * 8
+                "the crc field `{field_name}` is {bits} bits wide, narrower than the {width}-bit CRC"
             ),
         ));
     }
@@ -1111,16 +1160,17 @@ fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
             "the cover list is empty: the CRC would take no input",
         ));
     }
-    let mut cover: Vec<Cover> = Vec::with_capacity(items.len());
+    let body = fields.body();
+    let mut cover: Vec<Option<usize>> = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let here = at(&cover_path, i);
         let name = read_string(item, &here)?;
-        let entry = if name == PAYLOAD {
-            Cover::Payload
+        let entry = if name == body {
+            None
         } else {
-            Cover::Field(field_named(fields, name, &here)?)
+            Some(named(name, &here)?)
         };
-        if entry == Cover::Field(field) {
+        if entry == Some(field) {
             return Err(DocError::invalid(
                 here,
                 format!("the crc field `{name}` is never covered: it holds the result"),
@@ -1134,11 +1184,23 @@ fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
         }
         cover.push(entry);
     }
-
-    Ok(CrcSpec {
+    Ok(CrcObject {
         field,
         engine,
         cover,
+    })
+}
+
+fn read_crc(value: &Json5Value, fields: &[Field]) -> Result<CrcSpec, DocError> {
+    let crc = read_crc_object(value, "/crc", &fields)?;
+    Ok(CrcSpec {
+        field: crc.field,
+        engine: crc.engine,
+        cover: crc
+            .cover
+            .into_iter()
+            .map(|c| c.map_or(Cover::Payload, Cover::Field))
+            .collect(),
     })
 }
 
