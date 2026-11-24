@@ -2760,6 +2760,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // config alone.
             limits: *resolve_limits(&self.config),
             cookie_signing_key,
+            region: None,
         };
         // The link's session is the transport's to make; what the session's tables keep of the
         // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).

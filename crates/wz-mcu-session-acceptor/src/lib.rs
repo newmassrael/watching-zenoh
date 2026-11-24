@@ -807,6 +807,7 @@ pub(crate) fn acceptor_params(
         limits: *limits,
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
+        region: None,
     }
 }
 

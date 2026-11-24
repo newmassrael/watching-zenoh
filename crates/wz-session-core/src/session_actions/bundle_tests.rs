@@ -211,6 +211,7 @@ fn params() -> SessionInitParams {
             .expect("32-byte test key"),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
+        region: None,
     }
 }
 

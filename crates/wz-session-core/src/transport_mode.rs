@@ -159,7 +159,9 @@ pub struct SessionOffer {
     /// The region this node names itself (`region_name`), which every session it opens or accepts
     /// announces in the `RegionName` extension of its Init (upstream's `RegionNameFsm` takes the
     /// transport manager's name for each handshake). `None` announces no region, and the peer
-    /// assigns one.
+    /// assigns one. The open puts it in the parameters the session is made with
+    /// ([`SessionInitParams::region`](crate::session_init_params::SessionInitParams::region)),
+    /// since a session's region does not change once it is made.
     pub region: Option<OfferedRegion>,
 }
 
