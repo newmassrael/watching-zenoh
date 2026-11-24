@@ -586,20 +586,20 @@ mod tests {
     #[test]
     fn a_watch_is_woken_at_each_word_until_it_is_dropped() {
         let (_now, hold) = time_at(0);
-        let (wakes, waker) = wakes();
+        let (woken, waker) = wakes();
         let watch = hold.watch(waker);
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "CONTROL: no word yet");
+        assert_eq!(woken.0.load(Ordering::SeqCst), 0, "CONTROL: no word yet");
         hold.advanced();
         hold.advanced();
         assert_eq!(
-            wakes.0.load(Ordering::SeqCst),
+            woken.0.load(Ordering::SeqCst),
             2,
             "each word woke the watch, with no wait due"
         );
         drop(watch);
         hold.advanced();
         assert_eq!(
-            wakes.0.load(Ordering::SeqCst),
+            woken.0.load(Ordering::SeqCst),
             2,
             "a dropped watch is woken no more"
         );
