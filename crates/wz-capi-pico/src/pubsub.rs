@@ -889,53 +889,69 @@ pub unsafe extern "C" fn z_timestamp_new(
         };
         #[cfg(not(feature = "clock-source"))]
         let reading = Some(wall_clock_ntp64());
-        match session_timestamp(reading, &state.ext.time, state.drive.zid()) {
-            Ok(given) => {
-                *ts = given;
-                Z_OK
-            }
-            Err(code) => code,
-        }
+        session_timestamp(reading, &state.ext.time, state.drive.zid(), &mut *ts)
     })
 }
 
-/// What [`z_timestamp_new`] gives a session whose times given are `session_time` and whose id is
-/// `zid`, for a clock that reads `reading` (`None` when it cannot say what time it is): pico's rule
-/// (`vendor/zenoh-pico/src/api/api.c` @ `if (time > s->_last_timestamp) {`), with pico's codes for
-/// a time that cannot be read and for a session with no greater time left to give.
+/// Write into `ts` what [`z_timestamp_new`] gives a session whose times given are `session_time`
+/// and whose id is `zid`, for a clock that reads `reading` (`None` when it cannot say what time it
+/// is): pico's rule (`vendor/zenoh-pico/src/api/api.c` @ `if (time > s->_last_timestamp) {`), with
+/// pico's codes for a time that cannot be read and for a session with no greater time left to give,
+/// which write nothing. Written where the caller's timestamp lies rather than handed back, since a
+/// timestamp handed back had its id, which lies one byte in, moved into place byte by byte.
 fn session_timestamp(
     reading: Option<u64>,
     session_time: &crate::last_timestamp::SessionTime,
     zid: [u8; crate::zid::Z_ID_SIZE],
-) -> Result<z_timestamp_t, ZResult> {
-    let reading = reading.ok_or(Z_ERR_GENERIC)?;
-    let time = session_time
-        .give(reading)
-        .ok_or(Z_ERR_TIMESTAMP_GENERATION_FAILED)?;
-    Ok(z_timestamp_t {
+    ts: &mut z_timestamp_t,
+) -> ZResult {
+    let Some(reading) = reading else {
+        return Z_ERR_GENERIC;
+    };
+    let Some(time) = session_time.give(reading) else {
+        return Z_ERR_TIMESTAMP_GENERATION_FAILED;
+    };
+    *ts = z_timestamp_t {
         valid: true,
         id: crate::zid::z_id_t { id: zid },
         time,
-    })
+    };
+    Z_OK
 }
 
 #[cfg(test)]
 mod session_timestamp_tests {
-    use super::session_timestamp;
+    use super::{session_timestamp, z_timestamp_t};
     use crate::last_timestamp::SessionTime;
-    use crate::result::{Z_ERR_GENERIC, Z_ERR_TIMESTAMP_GENERATION_FAILED};
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_OK};
 
     const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x3a; crate::zid::Z_ID_SIZE];
 
-    fn time_of(reading: Option<u64>, last: &SessionTime) -> u64 {
-        match session_timestamp(reading, last, ZID) {
-            Ok(given) => {
-                assert!(given.valid, "a given timestamp is valid");
-                assert_eq!(given.id.id, ZID, "and carries the session's zid");
-                given.time
-            }
-            Err(code) => panic!("refused with {code}"),
+    /// A timestamp as `z_timestamp_new` clears it before it reads the clock.
+    fn cleared() -> z_timestamp_t {
+        z_timestamp_t {
+            valid: false,
+            id: crate::zid::z_id_t::empty(),
+            time: 0,
         }
+    }
+
+    fn time_of(reading: Option<u64>, last: &SessionTime) -> u64 {
+        let mut given = cleared();
+        assert_eq!(session_timestamp(reading, last, ZID, &mut given), Z_OK);
+        assert!(given.valid, "a given timestamp is valid");
+        assert_eq!(given.id.id, ZID, "and carries the session's zid");
+        given.time
+    }
+
+    /// The code a refused stamp answers with, each refusal checked to have written nothing.
+    fn refusal_of(reading: Option<u64>, last: &SessionTime) -> crate::result::ZResult {
+        let mut refused = cleared();
+        let code = session_timestamp(reading, last, ZID, &mut refused);
+        assert!(!refused.valid, "a refused stamp writes nothing");
+        assert_eq!(refused.id.id, [0; crate::zid::Z_ID_SIZE]);
+        assert_eq!(refused.time, 0);
+        code
     }
 
     /// The wall clock reads the same word twice (two calls within its resolution): the second
@@ -969,10 +985,7 @@ mod session_timestamp_tests {
     fn a_clock_that_cannot_be_read_is_refused_and_moves_nothing() {
         let last = SessionTime::new();
         assert_eq!(time_of(Some(50), &last), 50);
-        assert_eq!(
-            session_timestamp(None, &last, ZID).err(),
-            Some(Z_ERR_GENERIC)
-        );
+        assert_eq!(refusal_of(None, &last), Z_ERR_GENERIC);
         assert_eq!(time_of(Some(50), &last), 51);
     }
 
@@ -983,8 +996,8 @@ mod session_timestamp_tests {
         let last = SessionTime::new();
         assert_eq!(time_of(Some(u64::MAX), &last), u64::MAX);
         assert_eq!(
-            session_timestamp(Some(u64::MAX), &last, ZID).err(),
-            Some(Z_ERR_TIMESTAMP_GENERATION_FAILED)
+            refusal_of(Some(u64::MAX), &last),
+            Z_ERR_TIMESTAMP_GENERATION_FAILED
         );
     }
 }
@@ -1000,7 +1013,7 @@ mod one_session_time_tests {
     use wz_session_core::ntp64::Ntp64;
     use wz_session_core::WhatAmI;
 
-    use super::session_timestamp;
+    use super::{session_timestamp, z_timestamp_t};
     use crate::last_timestamp::SessionTime;
 
     const ZID: [u8; crate::zid::Z_ID_SIZE] = [0x4b; crate::zid::Z_ID_SIZE];
@@ -1035,9 +1048,17 @@ mod one_session_time_tests {
 
     /// What `z_timestamp_new` gives for a clock that reads `reading`.
     fn program(reading: Option<u64>, time: &SessionTime) -> u64 {
-        session_timestamp(reading, time, ZID)
-            .expect("the program is given a time")
-            .time
+        let mut given = z_timestamp_t {
+            valid: false,
+            id: crate::zid::z_id_t::empty(),
+            time: 0,
+        };
+        assert_eq!(
+            session_timestamp(reading, time, ZID, &mut given),
+            crate::result::Z_OK,
+            "the program is given a time"
+        );
+        given.time
     }
 
     /// What the advanced publisher stamps a sample with: the node clock's proposal, as the
