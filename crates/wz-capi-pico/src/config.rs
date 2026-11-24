@@ -124,7 +124,8 @@ impl Row {
 
     /// The first byte past the value's place.
     fn place_end(&self) -> usize {
-        self.start as usize + self.room as usize
+        // A place lies in the text, so its end does not saturate.
+        (self.start as usize).saturating_add(self.room as usize)
     }
 }
 
@@ -182,20 +183,28 @@ impl ConfigEntries {
     }
 
     fn row(&self, key: u8) -> Option<&Row> {
-        self.rows[..self.held].iter().find(|row| row.key == key)
+        self.rows
+            .get(..self.held)?
+            .iter()
+            .find(|row| row.key == key)
+    }
+
+    /// The value of `key` with its terminator, as its place holds it.
+    fn stored(&self, key: u8) -> Option<&[u8]> {
+        let row = self.row(key)?;
+        self.text.get(row.start as usize..)?.get(..row.len as usize)
     }
 
     /// The value of `key`, without its terminator.
     pub(crate) fn get(&self, key: u8) -> Option<&str> {
-        let row = self.row(key)?;
-        let start = row.start as usize;
-        core::str::from_utf8(&self.text[start..start + row.len as usize - 1]).ok()
+        let (_terminator, value) = self.stored(key)?.split_last()?;
+        core::str::from_utf8(value).ok()
     }
 
     /// The value of `key` as the C string [`zp_config_get`] lends.
     fn c_str(&self, key: u8) -> Option<*const c_char> {
-        self.row(key)
-            .map(|row| self.text[row.start as usize..].as_ptr().cast::<c_char>())
+        self.stored(key)
+            .map(|stored| stored.as_ptr().cast::<c_char>())
     }
 
     /// Keeps `value` under `key`, in place of the value the key held, or
@@ -240,7 +249,9 @@ impl ConfigEntries {
             room: room as u32,
         };
         let (Some(place), Some(slot)) = (
-            self.text.get_mut(start..start + need),
+            self.text
+                .get_mut(start..)
+                .and_then(|rest| rest.get_mut(..need)),
             self.rows.get_mut(found.unwrap_or(self.held)),
         ) else {
             return Z_ERR_CONFIG_FAILED_INSERT;
@@ -251,9 +262,10 @@ impl ConfigEntries {
         }
         *slot = row;
         if found.is_none() {
-            self.held += 1;
+            // A new key was refused above unless a row past the held ones was free.
+            self.held = self.held.saturating_add(1);
         }
-        self.end = self.end.max(start + room);
+        self.end = self.end.max(start.saturating_add(room));
         Z_OK
     }
 }
@@ -523,6 +535,20 @@ mod tests {
         let state = unsafe { &*(config.0.handle as *const ConfigState) };
         assert_eq!(state.get(Z_CONFIG_MODE_KEY), Some("client"));
         assert_eq!(state.get(Z_CONFIG_CONNECT_KEY), None);
+    }
+
+    /// An empty value is its terminator alone: read back empty, and lent as a C string of no
+    /// bytes.
+    #[test]
+    fn an_empty_value_is_read_back_empty() {
+        let mut config = Config::new();
+        assert_eq!(config.insert(Z_CONFIG_LISTEN_KEY, ""), Z_OK);
+        assert_eq!(config.text(Z_CONFIG_LISTEN_KEY).as_deref(), Some(""));
+        // SAFETY: the config is live and holds a `ConfigState`.
+        let state = unsafe { &*(config.0.handle as *const ConfigState) };
+        assert_eq!(state.get(Z_CONFIG_LISTEN_KEY), Some(""));
+        assert_eq!(state.entries.stored(Z_CONFIG_LISTEN_KEY), Some(&[0u8][..]));
+        assert_eq!(state.entries.stored(Z_CONFIG_MODE_KEY), None);
     }
 
     /// An insert replaces the key's value, and one that fits is written over the old place, as

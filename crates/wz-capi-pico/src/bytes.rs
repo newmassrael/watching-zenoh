@@ -182,7 +182,8 @@ impl Block {
         unsafe {
             head.as_ptr().write(BlockHead {
                 refs: AtomicUsize::new(1),
-                room: bytes - HEAD,
+                // A block taken is at least the bytes asked for, which hold the head.
+                room: bytes.saturating_sub(HEAD),
             })
         };
         Some(Self { head })
@@ -252,7 +253,12 @@ impl Block {
     /// This is the block's one holder, the block holds bytes of its own, and `at + bytes.len()` is
     /// within its room.
     unsafe fn write(&mut self, at: usize, bytes: &[u8]) {
-        debug_assert!(!self.is_alias() && at + bytes.len() <= self.room());
+        debug_assert!(
+            !self.is_alias()
+                && at
+                    .checked_add(bytes.len())
+                    .is_some_and(|end| end <= self.room())
+        );
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.contents().add(at), bytes.len());
     }
 
@@ -279,7 +285,8 @@ impl Drop for Block {
             return;
         }
         fence(Ordering::Acquire);
-        let bytes = HEAD + self.room();
+        // The room is what the block took past its head, so the sum is the bytes it took.
+        let bytes = HEAD.saturating_add(self.room());
         if self.is_alias() {
             // SAFETY: the last holder lets the record go once, which runs the caller's release.
             unsafe { core::ptr::drop_in_place(self.contents().cast::<Alias>()) };
@@ -510,7 +517,8 @@ impl ByteBuf {
             // these bytes after its own.
             unsafe { block.write(self.len, bytes) };
         }
-        self.len += bytes.len();
+        // `reserve` counted these bytes after the payload's with checked arithmetic.
+        self.len = self.len.saturating_add(bytes.len());
     }
 
     /// Whether the payload is ONE slice, which is what
@@ -536,10 +544,9 @@ impl ByteBuf {
         if self.bounds.is_empty() {
             return (idx == 0 && !data.is_empty()).then_some(data);
         }
-        let start = if idx == 0 {
-            0
-        } else {
-            *self.bounds.get(idx - 1)?
+        let start = match idx.checked_sub(1) {
+            None => 0,
+            Some(before) => *self.bounds.get(before)?,
         };
         let end = *self.bounds.get(idx)?;
         data.get(start..end)
@@ -559,11 +566,9 @@ impl ByteBuf {
         if self.bounds.is_empty() && self.len != 0 {
             self.bounds.push(self.len);
         }
-        let mut idx = 0usize;
-        while let Some(segment) = other.segment(idx) {
+        for segment in (0..).map_while(|idx| other.segment(idx)) {
             self.put_after(segment);
             self.bounds.push(self.len);
-            idx += 1;
         }
         Ok(())
     }
@@ -1552,7 +1557,7 @@ pub unsafe extern "C" fn z_bytes_slice_iterator_next(
         let Some(segment) = buf.segment((*iter)._slice_idx) else {
             return false;
         };
-        (*iter)._slice_idx += 1;
+        (*iter)._slice_idx = (*iter)._slice_idx.saturating_add(1);
         *out = z_view_slice_t {
             _start: segment.as_ptr(),
             _len: segment.len(),
@@ -2284,6 +2289,24 @@ mod block_tests {
         assert_eq!(writer.segment(2), Some(&b"tail"[..]));
         assert_eq!(writer.segment(3), None);
         assert_eq!(tail.as_slice(), b"tail");
+    }
+
+    /// A payload of several segments appended to a writer brings each of them, in order, and no
+    /// index past the last names one.
+    #[test]
+    fn a_segmented_payload_appends_each_of_its_segments() {
+        let mut writer = ByteBuf::copy_of(b"x").expect("room");
+        let mut parts = ByteBuf::copy_of(b"p").expect("room");
+        parts
+            .append_segments(&ByteBuf::copy_of(b"q").expect("room"))
+            .expect("room");
+        writer.append_segments(&parts).expect("room");
+        assert_eq!(writer.as_slice(), b"xpq");
+        assert_eq!(writer.segment(0), Some(&b"x"[..]));
+        assert_eq!(writer.segment(1), Some(&b"p"[..]));
+        assert_eq!(writer.segment(2), Some(&b"q"[..]));
+        assert_eq!(writer.segment(3), None);
+        assert_eq!(writer.segment(usize::MAX), None);
     }
 
     /// A block whose holders are past half the address space is not shared again: the share is

@@ -345,7 +345,10 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
         };
         let mut vle = [0u8; VLE_LEN];
         let n = encode_zint(&mut vle, len as u64);
-        match buf.write_all(&vle[..n]) {
+        let Some(encoded) = vle.get(..n) else {
+            return Z_ERR_GENERIC;
+        };
+        match buf.write_all(encoded) {
             Ok(()) => Z_OK,
             Err(no_room) => no_room.code(),
         }
@@ -469,10 +472,17 @@ impl z_bytes_reader_t {
     /// # Safety
     /// `data` must be valid for `len` bytes.
     unsafe fn remaining(&self) -> &[u8] {
-        if self.data.is_null() || self.pos >= self.len {
-            return &[];
+        match self.len.checked_sub(self.pos) {
+            Some(left) if left != 0 && !self.data.is_null() => {
+                core::slice::from_raw_parts(self.data.add(self.pos), left)
+            }
+            _ => &[],
         }
-        core::slice::from_raw_parts(self.data.add(self.pos), self.len - self.pos)
+    }
+
+    /// Move past `n` bytes of what [`Self::remaining`] showed; never past the end.
+    fn advance(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.len);
     }
 }
 
@@ -506,7 +516,7 @@ pub unsafe extern "C" fn z_bytes_reader_read(
         let n = len.min(available.len());
         if n != 0 {
             core::ptr::copy_nonoverlapping(available.as_ptr(), dst, n);
-            (*reader).pos += n;
+            (*reader).advance(n);
         }
         n
     })
@@ -616,7 +626,7 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_sequence_length(
                 let Ok(value) = usize::try_from(value) else {
                     return Z_ERR_GENERIC;
                 };
-                reader.pos += used;
+                reader.advance(used);
                 *len = value;
                 Z_OK
             }
@@ -642,7 +652,7 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_slice(
             Some((body, end)) => {
                 let rc = store_owned_slice(val, ByteBuf::copy_of(body));
                 if rc == Z_OK {
-                    (*deserializer)._reader.pos += end;
+                    (*deserializer)._reader.advance(end);
                 }
                 rc
             }
@@ -666,7 +676,7 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
             Some((body, end)) => {
                 let rc = store_owned_string(val, body);
                 if rc == Z_OK {
-                    (*deserializer)._reader.pos += end;
+                    (*deserializer)._reader.advance(end);
                 }
                 rc
             }
@@ -1087,6 +1097,28 @@ mod tests {
             0,
             "pico's inline deserialize helpers pass &deserializer->_reader"
         );
+    }
+
+    /// A reader shows the bytes after its position, none at or past the end, and moving past more
+    /// than it shows leaves it at the end.
+    #[test]
+    fn a_reader_moves_no_further_than_its_end() {
+        let held = *b"abc";
+        let mut reader = z_bytes_reader_t {
+            data: held.as_ptr(),
+            len: held.len(),
+            pos: 1,
+            _reserved: 0,
+        };
+        // SAFETY: `data` is valid for `len` bytes while `held` lives.
+        assert_eq!(unsafe { reader.remaining() }, b"bc");
+        reader.advance(usize::MAX);
+        assert_eq!(reader.pos, 3);
+        // SAFETY: as above.
+        assert!(unsafe { reader.remaining() }.is_empty());
+        reader.pos = 5;
+        // SAFETY: a position past the end shows nothing and reads no byte.
+        assert!(unsafe { reader.remaining() }.is_empty());
     }
 
     /// An appended payload a delivered sample lent is read where its marshal holds it: its bytes

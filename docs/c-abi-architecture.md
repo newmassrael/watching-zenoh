@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (59) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (36) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -275,20 +275,8 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
-| TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
-| TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |
-| TD-158 | `wz-capi-pico` | `config` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |
-| TD-160 | `wz-capi-pico` | `serde` | `indexing_slicing`, `arithmetic_side_effects` | 15 | in flight |
-| TD-161 | `wz-capi-pico` | `zid` | `indexing_slicing`, `arithmetic_side_effects` | 14 | in flight |
-| TD-163 | `wz-capi-pico` | `config_policy` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 10 | in flight |
-| TD-164 | `wz-capi-pico` | `keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 10 | in flight |
-| TD-165 | `wz-capi-pico` | `pubsub` | `arithmetic_side_effects` | 10 | in flight |
-| TD-166 | `wz-capi-pico` | `scout` | `indexing_slicing`, `arithmetic_side_effects` | 9 | in flight |
-| TD-167 | `wz-capi-pico` | `session` | `indexing_slicing`, `arithmetic_side_effects` | 9 | in flight |
+| TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing` | 2 | in flight |
 | TD-168 | `wz-capi-pico` | `connectivity` | `indexing_slicing`, `arithmetic_side_effects` | 8 | in flight |
-| TD-169 | `wz-capi-pico` | `get` | `arithmetic_side_effects` | 8 | in flight |
-| TD-170 | `wz-capi-pico` | `querier` | `arithmetic_side_effects` | 8 | in flight |
-| TD-171 | `wz-capi-pico` | `session_memory` | `expect_used`, `arithmetic_side_effects` | 8 | in flight |
 | TD-176 | `wz-capi-pico` | `handlers` | `unreachable`, `arithmetic_side_effects` | 5 | in flight |
 | TD-181 | `wz-capi-pico` | `matching` | `arithmetic_side_effects` | 3 | in flight |
 | TD-185 | `wz-capi-pico` | `app_transport` | `arithmetic_side_effects` | 2 | in flight |
@@ -348,7 +336,10 @@ TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn`
 array of `N` waits when the build is compiled, and TD-102 (`ext_name`) keeps it for
 `identities_of`, a `const fn` that projects a row table into a `[u8; N]` of identities. Each
 writes an element of an array whose length is a generic, which a `const fn` of Rust 1.81 can do
-only by index, as TD-207 says; both are paid with `get_mut` when the MSRV is 1.83.
+only by index, as TD-207 says; both are paid with `get_mut` when the MSRV is 1.83. TD-156
+(`process_pool`) keeps it for `Plan::with`, the `const fn` that writes a kind's slots and their
+bytes into the plan the build works out when it is compiled; its two writes are the module's last
+sites, paid with `get_mut` at the same MSRV.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,

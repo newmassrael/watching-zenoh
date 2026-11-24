@@ -477,8 +477,6 @@ mod advanced_plane;
 // Totality debt TD-185 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::arithmetic_side_effects)]
 pub mod app_transport;
-// Totality debt TD-157 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
 pub mod c_enum;
@@ -497,18 +495,10 @@ pub mod revision;
 #[cfg(all(feature = "unstable-api", feature = "query"))]
 pub mod cancellation;
 pub mod codec;
-// Totality debt TD-158 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod config;
 // The policies a config states for its session, from code and from a zenoh document: wz doors
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
-// Totality debt TD-163 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod config_policy;
 // What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
 // unstable surface (docs/target-build-contract.md T9).
@@ -584,8 +574,6 @@ pub mod ext_interface;
 // (the supervision deadline of the observation plane).
 mod ffi;
 #[cfg(feature = "query")]
-// Totality debt TD-169 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod get;
 // A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
 // `targeted-query` policy is off.
@@ -606,8 +594,6 @@ pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
 pub mod key_ids;
-// Totality debt TD-164 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr;
 mod last_timestamp;
 #[cfg(any(feature = "connectivity", feature = "admin-space"))]
@@ -644,24 +630,16 @@ pub mod platform;
 // process: in every library without the tokio engine, and in one with it that has their doors.
 #[cfg(wz_process_pools)]
 // Totality debt TD-156 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::indexing_slicing)]
 mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema: the instance keys' and the message payloads'.
 #[cfg(any(feature = "instance-key", feature = "message-payload"))]
 #[cfg(not(wz_additional_apart))]
 pub mod proto_file;
-// Totality debt TD-165 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod pubsub;
 pub mod qos;
 #[cfg(feature = "query")]
-// Totality debt TD-170 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
@@ -678,18 +656,12 @@ pub mod replay_subscriber;
 pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-// Totality debt TD-166 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod scout;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]
 pub mod segment_sender;
-// Totality debt TD-160 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod serde;
-// Totality debt TD-167 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session;
 mod session_ext;
 // The place a session's handle lies in, and what stays in it once the handle is let go of.
@@ -697,8 +669,6 @@ mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]
-// Totality debt TD-171 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod session_memory;
 // The structs the doors write into memory the program sized: each starts with its size.
 #[cfg(any(
@@ -737,8 +707,6 @@ pub mod sync;
 pub mod time_base;
 pub mod whatami;
 mod write_filter;
-// Totality debt TD-161 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod zid;
 
 // Re-export the ABI types and every exported function at the crate root so the

@@ -1273,29 +1273,30 @@ pub(crate) fn stated_zid(text: Option<&str>) -> Result<Option<SessionZid>, ZResu
 /// reader was written for and refuses the rest, and an id of sixteen zero bytes, which zenoh
 /// refuses.
 fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
-    let digits = text.as_bytes();
-    if digits.len() != 36 {
+    let mut bytes = [0u8; 16];
+    let mut out = bytes.iter_mut();
+    // The five groups the dashes part, of 8, 4, 4, 4 and 12 hex digits: two digits to a byte.
+    let mut groups = text.split('-');
+    for digits in [8, 4, 4, 4, 12] {
+        let group = groups.next()?.as_bytes();
+        if group.len() != digits {
+            return None;
+        }
+        for pair in group.chunks_exact(2) {
+            let [hi, lo] = pair else {
+                return None;
+            };
+            let hi = char::from(*hi).to_digit(16)?;
+            let lo = char::from(*lo).to_digit(16)?;
+            *out.next()? = ((hi << 4) | lo) as u8;
+        }
+    }
+    if groups.next().is_some() {
         return None;
     }
-    let mut bytes = [0u8; 16];
-    let mut at = 0;
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        // The dashes come before the 5th, 7th, 9th and 11th byte (`i == 8, 12, 16, 18` over the
-        // hex digits in pico's loop).
-        if matches!(i, 4 | 6 | 8 | 10) {
-            if digits[at] != b'-' {
-                return None;
-            }
-            at += 1;
-        }
-        let hi = (digits[at] as char).to_digit(16)?;
-        let lo = (digits[at + 1] as char).to_digit(16)?;
-        *byte = ((hi << 4) | lo) as u8;
-        at += 2;
-    }
     // Written up to the last non-zero byte, as zenoh writes an id.
-    let length = bytes.iter().rposition(|byte| *byte != 0)? + 1;
-    Some(bytes[..length].to_vec())
+    let last = bytes.iter().rposition(|byte| *byte != 0)?;
+    bytes.get(..=last).map(<[u8]>::to_vec)
 }
 
 #[cfg(test)]
@@ -1338,6 +1339,9 @@ mod zid_tests {
             "ff00000-00000-0000-0000-000000000001",
             "gf000000-0000-0000-0000-000000000001",
             "00000000-0000-0000-0000-000000000000",
+            "ff000000-0000-0000-0000-000000000001-",
+            "ff000000-0000-0000-0000-0000000000\u{e9}",
+            "+f000000-0000-0000-0000-000000000001",
         ] {
             assert!(
                 pico_uuid_wire(text).is_none(),
@@ -1995,7 +1999,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let unicast_dials = if joins_a_group {
         0
     } else {
-        usize::from(stated.is_some()) + request.scouted.len()
+        request
+            .scouted
+            .len()
+            .saturating_add(usize::from(stated.is_some()))
     };
     let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link

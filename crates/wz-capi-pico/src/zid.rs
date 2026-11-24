@@ -76,8 +76,9 @@ impl z_id_t {
     /// dropping the peer from the enumeration would hide a real face.
     pub(crate) fn from_wire(bytes: &[u8]) -> Self {
         let mut id = [0u8; Z_ID_SIZE];
-        let n = bytes.len().min(Z_ID_SIZE);
-        id[..n].copy_from_slice(&bytes[..n]);
+        for (to, from) in id.iter_mut().zip(bytes) {
+            *to = *from;
+        }
         Self { id }
     }
 }
@@ -351,9 +352,13 @@ pub(crate) fn zid_hex(id: &[u8; Z_ID_SIZE]) -> [u8; Z_ID_SIZE * 2] {
     // then its low one. Every index below is in range by its type, so the rendering has no
     // refusal path.
     for (pair, byte) in buf.chunks_exact_mut(2).rev().zip(id) {
-        if let [high, low] = pair {
-            *high = HEX[usize::from(byte >> 4)];
-            *low = HEX[usize::from(byte & 0x0F)];
+        let digits = (
+            HEX.get(usize::from(byte >> 4)),
+            HEX.get(usize::from(byte & 0x0F)),
+        );
+        if let ([high, low], (Some(&high_digit), Some(&low_digit))) = (pair, digits) {
+            *high = high_digit;
+            *low = low_digit;
         }
     }
     buf
@@ -369,15 +374,9 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// "public API only" export policy would miss.
 #[no_mangle]
 pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
-    let mut len = Z_ID_SIZE as u8;
-    while len > 0 {
-        len -= 1;
-        if id.id[len as usize] != 0 {
-            len += 1;
-            break;
-        }
-    }
-    len
+    let trailing_zeros = id.id.iter().rev().take_while(|&&byte| byte == 0).count();
+    // At most the id's sixteen bytes, so the length fits a byte.
+    Z_ID_SIZE.saturating_sub(trailing_zeros) as u8
 }
 
 /// Build an owned zid closure from a callback + drop + context (pico
@@ -470,5 +469,13 @@ mod tests {
         assert_eq!(id.id[0], 0xAA);
         assert_eq!(id.id[1], 0xBB);
         assert!(id.id[2..].iter().all(|b| *b == 0));
+    }
+
+    /// A wire zid longer than an id keeps its first sixteen bytes.
+    #[test]
+    fn a_long_wire_zid_keeps_its_first_sixteen_bytes() {
+        let wire: alloc::vec::Vec<u8> = (1..=17).collect();
+        let id = z_id_t::from_wire(&wire);
+        assert_eq!(id.id.as_slice(), &wire[..Z_ID_SIZE]);
     }
 }
