@@ -28,8 +28,9 @@ use crate::policy_binding::{
 use crate::policy_document::{Profile, Statement};
 
 /// What `WZ_POLICY_DOMAINS` states: whether an allowance the build does not state keeps
-/// only the build default, else whether the target has no operating system; `None` for a
-/// word that is neither `full` nor `defaults`.
+/// only the build default, else whether the target has no operating system or nothing in
+/// the build selects a policy after it (no `policy-selection`); `None` for a word
+/// that is neither `full` nor `defaults`.
 const STATED_DOMAINS: Option<bool> = policy_defaults_only(option_env!("WZ_POLICY_DOMAINS"));
 
 /// Whether an allowance the build does not state keeps only the build default.
