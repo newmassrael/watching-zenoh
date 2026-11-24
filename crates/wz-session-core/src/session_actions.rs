@@ -221,7 +221,7 @@ use crate::handshake_encode::encode_close;
 #[cfg(all(feature = "alloc", feature = "codec-init-body"))]
 use crate::handshake_encode::encode_init_with_caps;
 #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
-use crate::handshake_encode::encode_open;
+use crate::handshake_encode::encode_open_chain;
 
 // R3b — the Z_EXT_AUTH dispatch wired into the four handshake send/recv stages.
 #[cfg(feature = "session-extauth")]
@@ -4773,7 +4773,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if patch {
                 // SAFETY: written just above.
                 R::with_mutex_mut(unsafe { &*at }, |chain| {
-                    chain.push(default_init_patch_ext_entry());
+                    crate::ext_chain::stage(
+                        chain,
+                        crate::ext_chain::StagedExt::Patch,
+                        Some(default_init_patch_ext_entry()),
+                    );
                 });
             }
         }
@@ -6579,7 +6583,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 &self.params,
                 caps,
                 is_ack,
-                chain,
+                crate::ext_chain::ChainRef::from(&*chain),
                 cookie_override,
             )
         });
@@ -6591,7 +6595,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     &self.params,
                     caps,
                     is_ack,
-                    chain,
+                    crate::ext_chain::ChainRef::from(&*chain),
                     cookie_override,
                 )
             })?;
@@ -6631,6 +6635,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The chain counted here is the one written below: the send is the
         // chain's only consumer, and the drive loop is one task on this profile.
         let (has_ext, chain_len) = R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let chain = crate::ext_chain::ChainRef::from(&*chain);
             (!chain.is_empty(), crate::ext_chain::ext_chain_len(chain))
         });
         // The message's own length, so the link lends a slot that holds this
@@ -6661,7 +6666,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
             }
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                crate::handshake_encode::encode_held_chain_into(buf, chain)
+                crate::handshake_encode::encode_held_chain_into(
+                    buf,
+                    crate::ext_chain::ChainRef::from(&*chain),
+                )
             })?;
             // The initiator's OpenSyn is the answer a replay sends again, as written.
             if holds_answer(role) {
@@ -7217,9 +7225,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
     ///
-    /// Absent under `session-slot`, where the four chains are arrays of the
-    /// session's own storage and the stagers fill them one entry per extension
-    /// kind: a caller there has no vector to hand over.
+    /// Absent under `session-fixed-storage`, where each of the four chains holds
+    /// one place per extension kind in the session's own storage and the stagers
+    /// fill their own places: a caller there has no vector to hand over.
     ///
     /// The entries are held in upstream's encode order, ascending extension
     /// id (stable, so entries of one id keep the order given): the stagers
@@ -7265,6 +7273,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // encode call composes against `&chain` without an extra clone.
         let caps = self.init_caps(is_ack);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let chain = crate::ext_chain::ChainRef::from(&*chain);
             encode_init_with_caps(&self.params, caps, is_ack, chain, cookie_override)
         })
     }
@@ -7296,7 +7305,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let params_owned = self.open_params();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             let params = params_owned.as_ref().unwrap_or(&self.params);
-            encode_open(params, is_ack, cookie_override, chain)
+            encode_open_chain(
+                params,
+                is_ack,
+                cookie_override,
+                crate::ext_chain::ChainRef::from(&*chain),
+            )
         })
     }
 
@@ -7921,7 +7935,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let ext = R::with_mutex_mut(&self.auth, produce).ok().flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, crate::extauth::AUTH_EXT_ID, ext);
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Auth, ext);
         });
     }
 
@@ -8063,11 +8077,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             slot.as_mut().and_then(|d| produce(d).ok().flatten())
         });
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extmultilink::MULTILINK_EXT_ID,
-                ext,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Multilink, ext);
         });
     }
 
@@ -8581,7 +8591,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// for a session whose identity was cleared after a first Init staged one.
     ///
     /// The entry takes its place in upstream's encode order wherever the other
-    /// stagers put theirs (`ext_chain::stage_in_canonical_order`, crate-private
+    /// stagers put theirs (`ext_chain::stage`, crate-private
     /// and so not an intra-doc link from this `pub` item). A name that does not
     /// encode leaves the chain as it was.
     pub fn stage_local_region(&self, role: ExtChainRole) {
@@ -8593,11 +8603,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => None,
         };
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extregion::REGION_NAME_EXT_ID,
-                entry,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RegionName, entry);
         });
     }
 
@@ -8735,11 +8741,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let bound = self.local_remote_bound();
         let entry = bound.map(crate::extbound::encode_remote_bound_ext);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::ext_header::ext_id(crate::extbound::REMOTE_BOUND_EXT_HEADER),
-                entry,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RemoteBound, entry);
         });
     }
 
@@ -8874,7 +8876,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// ## Where the entry sits
     ///
     /// Where upstream's encoder writes it: after compression and before the
-    /// region name (`ext_chain::stage_in_canonical_order`). Both reference
+    /// region name (`ext_chain::stage`). Both reference
     /// decoders walk a chain by header id, so the position is not what they
     /// judge; it is what makes wz's InitAck the bytes a zenoh acceptor would
     /// have sent. That function's unit tests hold the rule, and the
@@ -8895,7 +8897,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let entry = (level != crate::extpatch::NO_PATCH)
             .then(|| crate::extpatch::encode_patch_ext_at(level));
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, crate::extpatch::PATCH_EXT_ID, entry);
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Patch, entry);
         });
     }
 
@@ -8916,7 +8918,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// this exact extension).
     pub fn advertised_patch(&self) -> u8 {
         R::with_mutex_mut(&self.init_syn_ext, |chain| {
-            crate::extpatch::peer_patch(chain)
+            crate::extpatch::peer_patch_in(chain.iter())
         })
     }
 
@@ -9527,11 +9529,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         let produced = self.is_shm().then(|| produce(self)).flatten();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(
-                chain,
-                crate::extshm::SHM_ESTABLISHMENT_EXT_ID,
-                produced,
-            );
+            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::Shm, produced);
         });
     }
 
@@ -9542,11 +9540,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// form or the z64 `QoSLink` form depending on the staged metadata. Every
     /// pre-existing caller passes a `fn` item, which coerces unchanged.
     ///
-    /// The `retain` keys on `ext_id()` (the 4-bit id FIELD), not on the full
-    /// header, which is load-bearing here: the unit `QoS` and the z64 `QoSLink`
-    /// share id `0x1` and zenoh forbids emitting both at once
-    /// ("Extensions QoS and QoSOptimized cannot both be enabled at once"), so
-    /// clearing by id is what makes a re-stage REPLACE rather than accumulate.
+    /// The chain keeps one entry per `kind`, not per header, which is
+    /// load-bearing here: the unit `QoS` and the z64 `QoSLink` share id `0x1`
+    /// and zenoh forbids emitting both at once ("Extensions QoS and
+    /// QoSOptimized cannot both be enabled at once"), so they are one kind and
+    /// a re-stage REPLACES rather than accumulates.
     ///
     /// R311y507 — gated on the exact condition under which it has a CALLER.
     /// Every call site is a capability stage inside the Init send blocks, so the
@@ -9565,14 +9563,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept",),
     ))]
-    fn stage_capability(&self, role: ExtChainRole, offer: bool, build: impl Fn() -> ExtEntryOwned) {
+    fn stage_capability(
+        &self,
+        role: ExtChainRole,
+        kind: crate::ext_chain::StagedExt,
+        offer: bool,
+        build: impl Fn() -> ExtEntryOwned,
+    ) {
         // Built once, outside the chain's guard: the QoS form reads the link
         // metadata under a mutex of its own, and the MCU profile's mutexes do
         // not nest.
         let entry = build();
-        let ext_id = entry.ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage_in_canonical_order(chain, ext_id, offer.then_some(entry));
+            crate::ext_chain::stage(chain, kind, offer.then_some(entry));
         });
     }
 
@@ -18639,6 +18642,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(feature = "transport-lowlatency")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::LowLatency,
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
@@ -18651,16 +18655,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Qos,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
             #[cfg(feature = "session-extqos")]
-            a.stage_capability(ExtChainRole::InitSyn, a.is_qos(), || {
-                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
-            });
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Qos,
+                a.is_qos(),
+                || crate::extqos::encode_qos_ext_for(&a.qos_link_metadata()),
+            );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitSyn,
+                crate::ext_chain::StagedExt::Compression,
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
@@ -18679,6 +18688,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             } else {
                 a.stage_capability(
                     ExtChainRole::InitSyn,
+                    crate::ext_chain::StagedExt::Shm,
                     a.is_shm(),
                     crate::extshm::encode_shm_establishment_ext,
                 );
@@ -18819,6 +18829,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(feature = "transport-lowlatency")]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::LowLatency,
                 a.is_lowlatency(),
                 crate::extlowlatency::encode_lowlatency_ext,
             );
@@ -18831,16 +18842,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Qos,
                 a.is_qos(),
                 crate::extqos::encode_qos_ext,
             );
             #[cfg(feature = "session-extqos")]
-            a.stage_capability(ExtChainRole::InitAck, a.is_qos(), || {
-                crate::extqos::encode_qos_ext_for(&a.qos_link_metadata())
-            });
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Qos,
+                a.is_qos(),
+                || crate::extqos::encode_qos_ext_for(&a.qos_link_metadata()),
+            );
             #[cfg(feature = "session-extcompression")]
             a.stage_capability(
                 ExtChainRole::InitAck,
+                crate::ext_chain::StagedExt::Compression,
                 a.is_compression(),
                 crate::extcompression::encode_compression_ext,
             );
@@ -18854,6 +18870,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             } else {
                 a.stage_capability(
                     ExtChainRole::InitAck,
+                    crate::ext_chain::StagedExt::Shm,
                     a.is_shm(),
                     crate::extshm::encode_shm_establishment_ext,
                 );

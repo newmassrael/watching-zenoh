@@ -848,8 +848,6 @@ pub mod capacity;
 /// is no longer a list to grow. `alloc` is the real dependency and always was:
 /// the decoder returns an owned `Vec` of entries.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-051 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 mod ext_chain;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +
