@@ -1255,6 +1255,10 @@ fn push_unpeered<'s>(
 /// Write a set at the end of `sets` and lend it its rows there, `gets` and `peer` of them from
 /// `arena`, the peer's keys kept in `keys` and what it writes in `pools`, held to `limits`. A
 /// refused set stays in `sets`, whole, and goes with it.
+///
+/// Never inlined: the open calls it in a loop, and a loop whose first turn the compiler peels
+/// would carry the set's writing and lending twice.
+#[inline(never)]
 fn lend_set(
     sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     arena: &mut Arena,
