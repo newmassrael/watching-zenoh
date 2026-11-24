@@ -722,6 +722,18 @@ pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
 }
 
 impl<T, const N: usize> BoundedVec<T, N, Lent> {
+    /// The `room` rows at `base`, a span an arena lent, none of them holding a value yet: the
+    /// table `Arena::lend` hands out, made by the caller that lent the span itself.
+    ///
+    /// # Safety
+    /// `base` is aligned for `T`, and the `room` rows of `T` from it are valid for reads and
+    /// writes, hold no value and are used by nothing else for as long as the table lives.
+    pub(crate) const unsafe fn lent_over(base: NonNull<T>, room: u32) -> Self {
+        // SAFETY: the caller's contract, which is `LentSeq::lent`'s.
+        let inner = unsafe { LentSeq::lent(base, room) };
+        Self { inner }
+    }
+
     /// The next row, for `write` to build a value in where the table keeps it, counted as held
     /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
     /// every row it was lent. For a value too large to be one of its own in a frame, which
@@ -1370,6 +1382,69 @@ impl fmt::Display for LendRefused {
 
 impl core::error::Error for LendRefused {}
 
+/// Lends the tables of a set from an [`Arena`] in the order they are asked, keeping the first
+/// refusal: every table asked after it is lent no rows, as a table made without an arena is, and
+/// [`Self::finish`] hands the refusal back. The set is built whole either way and given up whole,
+/// once, so its maker has no path of its own for each table that gives up the ones before it.
+pub struct TableLender<'a> {
+    arena: &'a mut Arena,
+    refused: Option<LendRefused>,
+}
+
+impl<'a> TableLender<'a> {
+    /// A lender of the tables of one set from `arena`.
+    pub fn new(arena: &'a mut Arena) -> Self {
+        Self {
+            arena,
+            refused: None,
+        }
+    }
+
+    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// (`Arena::lend_rows`). Once a table is refused, this one among them, a span of no rows
+    /// where the arena has got to, which takes nothing and starts on [`ARENA_ALIGN`] as every span
+    /// does: the table made over it holds no value, as a full one, so its maker needs no path of
+    /// its own for a refusal.
+    pub(crate) fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> (NonNull<u8>, u32) {
+        if self.refused.is_none() {
+            match self.arena.lend_rows(rows, ceiling, bytes) {
+                Ok(span) => return span,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        (self.arena.next_span(), 0)
+    }
+
+    /// A table of `rows` rows of `T`, at most the build's ceiling `N`, as [`Arena::lend`] lends
+    /// one; a table of no rows, which takes no value, once a table is refused, this one among them.
+    pub fn table<T, const N: usize>(&mut self, rows: usize) -> BoundedVec<T, N, Lent> {
+        const {
+            assert!(
+                core::mem::align_of::<T>() <= ARENA_ALIGN,
+                "a row of a lent table asks for more alignment than an arena's spans start on"
+            )
+        };
+        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
+        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
+        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        // (asserted above).
+        unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
+    }
+
+    /// The first refusal, if a table was refused.
+    pub fn finish(self) -> Result<(), LendRefused> {
+        match self.refused {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Arena {
     /// An arena of the `bytes` bytes at `base`, none of them lent.
     ///
@@ -1442,16 +1517,24 @@ impl Arena {
         // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
-        let inner = unsafe { LentSeq::lent(at.cast::<T>(), room) };
-        Ok(BoundedVec { inner })
+        Ok(unsafe { BoundedVec::lent_over(at.cast::<T>(), room) })
+    }
+
+    /// Where the next span starts: a span of no bytes, aligned to [`ARENA_ALIGN`] as every span
+    /// is, which no row lies in.
+    fn next_span(&self) -> NonNull<u8> {
+        // SAFETY: `lent` never passes `bytes`, so the address is inside the arena or one past its
+        // end, a multiple of `ARENA_ALIGN` from a base aligned to it.
+        unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) }
     }
 
     /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
     /// rows taking `bytes` (`None` past the address space), at most `ceiling`, and the rows
     /// counted in 32 bits. Refused, taking nothing, past the ceiling, past what is left or past a
-    /// 32-bit count.
+    /// 32-bit count. A table of several columns lends each through this, in one body of its own
+    /// for every row type (`slot_map`).
     #[inline(never)]
-    fn lend_rows(
+    pub(crate) fn lend_rows(
         &mut self,
         rows: usize,
         ceiling: usize,

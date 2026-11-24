@@ -339,11 +339,6 @@ impl SessionEngine for SharedSession {
     fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
         SharedSession::retain_keyexpr(self, mapping_id)
     }
-
-    fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
-        SharedSession::keyexpr_declarations(self)
-    }
-
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,

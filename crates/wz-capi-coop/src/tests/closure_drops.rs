@@ -299,3 +299,159 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
         "nothing more after the close"
     );
 }
+
+/// A queryable undeclared while a query owes it a call is handed nothing more, and its callback is
+/// let go of once, after that call ended: two queryables on one key are reached by one query, and
+/// whichever's callback runs first undeclares the other, whose call the query still owes. The
+/// query's Final follows once both were done with it. The CONTROL is the first callback's reply,
+/// which reaches the router before the Final.
+#[cfg(feature = "queryable")]
+#[test]
+fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
+    use std::sync::Mutex;
+    use wz_capi_port::{QblId, QueryCallback, QueryHolder, QueryableSink};
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let ids: Arc<Mutex<Option<[QblId; 2]>>> = Arc::default();
+    let called = Arc::new(AtomicUsize::new(0));
+    let counts = Counts::default();
+    let sink = |me: usize| -> QueryableSink {
+        let (ids, called, dropped) = (
+            ids.clone(),
+            called.clone(),
+            counts.callbacks_dropped.clone(),
+        );
+        let undeclaring = engine.clone();
+        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
+            let (ids, called, undeclaring) = (ids.clone(), called.clone(), undeclaring.clone());
+            let guard = Dropped(dropped.clone());
+            Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let _held = &guard;
+                called.fetch_add(1, Ordering::SeqCst);
+                let both = ids.lock().unwrap().take();
+                if let Some(both) = both {
+                    undeclaring.undeclare_queryable(both[1 - me]);
+                }
+                out.reply_keyed(query.keyexpr(), b"one")
+                    .expect("a reply on the query's own key");
+            }) as QueryCallback
+        })
+    };
+    let declare = |me: usize| {
+        engine
+            .declare_queryable_on_wire(
+                "demo/drop/owed",
+                WireKey::literal(),
+                false,
+                Locality::Remote,
+                None,
+                sink(me),
+            )
+            .expect("a row is free")
+    };
+    let both = [declare(0), declare(1)];
+    *ids.lock().unwrap() = Some(both);
+    super::until(&engine, "the router to see both queryables", || {
+        router.seen(|s| s.declares) >= 2
+    });
+
+    router.send(super::Command::Query(5, "demo/drop/owed"));
+    super::until(&engine, "the reply and the final", || {
+        router.seen(|s| s.answers.len()) >= 2
+    });
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["reply", "final"],
+        "CONTROL: the first callback's reply, then the Final"
+    );
+    super::until(&engine, "the undeclared queryable's callback to go", || {
+        counts.callbacks_dropped() >= 1
+    });
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        1,
+        "the undeclared queryable is handed nothing of the query it was owed"
+    );
+    assert_eq!(
+        counts.callbacks_dropped(),
+        1,
+        "the undeclared queryable's callback is let go of once, the other's is held"
+    );
+    SessionDrive::close(&*engine);
+    assert_eq!(
+        counts.callbacks_dropped(),
+        2,
+        "the queryable still declared is let go of with the close"
+    );
+}
+
+/// A liveliness subscriber undeclared while a token's delivery owes it a call is handed nothing
+/// more, and its callback is let go of once, after that call ended: two subscribers on one key are
+/// owed one token's appearance, and whichever's callback runs first undeclares the other. The
+/// CONTROL is the first callback, which is handed the token.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscriber_undeclared_while_a_token_owes_it_a_call_is_let_go_of_after_it() {
+    use std::sync::Mutex;
+    use wz_capi_port::{LivelinessSink, SubId};
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let ids: Arc<Mutex<Option<[SubId; 2]>>> = Arc::default();
+    let called = Arc::new(AtomicUsize::new(0));
+    let counts = Counts::default();
+    let sink = |me: usize| -> LivelinessSink {
+        let (ids, called) = (ids.clone(), called.clone());
+        let guard = Dropped(counts.callbacks_dropped.clone());
+        let undeclaring = engine.clone();
+        LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
+            let _held = &guard;
+            called.fetch_add(1, Ordering::SeqCst);
+            let both = ids.lock().unwrap().take();
+            if let Some(both) = both {
+                undeclaring.undeclare_subscriber(both[1 - me]);
+            }
+        })
+    };
+    let declare = |me: usize| {
+        engine
+            .declare_liveliness_subscriber_on_wire(
+                "demo/drop/**",
+                WireKey::literal(),
+                false,
+                sink(me),
+            )
+            .expect("a row is free")
+    };
+    let both = [declare(0), declare(1)];
+    *ids.lock().unwrap() = Some(both);
+    super::until(&engine, "the router to see both Interests", || {
+        router.seen(|s| s.interests) >= 2
+    });
+
+    router.send(super::Command::DeclareToken(1, "demo/drop/t"));
+    super::until(
+        &engine,
+        "the undeclared subscriber's callback to go",
+        || counts.callbacks_dropped() >= 1,
+    );
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        1,
+        "CONTROL: the first callback is handed the token, the undeclared one nothing"
+    );
+    assert_eq!(
+        counts.callbacks_dropped(),
+        1,
+        "the undeclared subscriber's callback is let go of once, the other's is held"
+    );
+    SessionDrive::close(&*engine);
+    assert_eq!(
+        counts.callbacks_dropped(),
+        2,
+        "the subscriber still declared is let go of with the close"
+    );
+}

@@ -163,6 +163,8 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         l.select_max_publishers(Quota::at_most(3))?;
         l.select_max_queriers(Quota::at_most(4))?;
         l.select_max_matching_listeners(Quota::at_most(5))?;
+        l.select_max_queryables(Quota::at_most(7))?;
+        l.select_max_liveliness_subscriptions(Quota::at_most(3))?;
         l.select_max_declared_keyexprs(Quota::at_most(6))
     });
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
@@ -195,6 +197,36 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         count("key expressions"),
         None,
         "a key expression is one row, the session's table set's"
+    );
+    assert_eq!(
+        plan.tables().queryables,
+        if cfg!(feature = "queryable") { 7 } else { 0 },
+        "a queryable is a row of the session's one table set, in a build that has them"
+    );
+    assert_eq!(
+        count("queryables"),
+        None,
+        "the observer keeps no table of queryables beside the session's"
+    );
+    assert_eq!(
+        count("queryable declarations"),
+        None,
+        "a queryable is one row, the session core's"
+    );
+    assert_eq!(
+        plan.tables().liveliness_subscribers,
+        if cfg!(feature = "liveliness") { 3 } else { 0 },
+        "a liveliness subscriber is a row of the session's one table set, in a build that has them"
+    );
+    assert_eq!(
+        count("liveliness subscribers"),
+        None,
+        "the observer keeps no table of liveliness subscribers beside the session's"
+    );
+    assert_eq!(
+        count("liveliness subscriber declarations"),
+        None,
+        "a liveliness subscriber is one row, the session core's"
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
@@ -652,4 +684,34 @@ fn a_wild_key_is_declared_and_reaches_the_router() {
         0,
         "the declared callback is held"
     );
+}
+
+/// A key expression declaration the link refuses is not made: nothing is sent for it, the session
+/// keeps no row or block of it, and the replay is left as it was, so the next declaration is the
+/// one the link is told. The CONTROL is a key the link takes, declared after.
+#[test]
+fn a_key_expression_the_link_refuses_is_not_declared() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let used = engine.key_counts().used;
+    let seen = router.seen(|s| s.declares);
+    // A key zenoh-pico's canonizer aborts on (a one-byte chunk between `**` and `*`): the link
+    // refuses to send its declaration.
+    assert_eq!(
+        engine.acquire_keyexpr("**/a/*"),
+        Err(Refusal::ExceedsCapacity)
+    );
+    assert_eq!(
+        engine.key_counts().used,
+        used,
+        "the refused key keeps no block"
+    );
+    settle(&engine);
+    assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
+    engine
+        .acquire_keyexpr("demo/kx/ok")
+        .expect("CONTROL: a key the link takes");
+    until(&engine, "the router to see the declaration", || {
+        router.seen(|s| s.declares) > seen
+    });
 }

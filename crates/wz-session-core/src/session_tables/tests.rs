@@ -956,6 +956,26 @@ fn lent_tables_past_a_build_bound_are_refused() {
     ));
 }
 
+/// A table refused past its build bound leaves the tables after it rowless: the arena keeps the
+/// key expressions' table lent before the refusal, and lends nothing after it. The CONTROL is the
+/// same rows within the bound, which take every table's span.
+#[test]
+fn a_refused_table_leaves_the_tables_after_it_unlent() {
+    let within = small_rows();
+    let past = TableRows {
+        subscribers: caps::MAX_SUBSCRIPTIONS + 1,
+        ..small_rows()
+    };
+    let before = <Keyexprs<Lent>>::arena_bytes(past.keyexprs).unwrap();
+    let mut refused = arena(1 << 16);
+    assert!(SessionTables::<Calls, Lent>::lent(&mut refused, keys(64), &past).is_err());
+    assert_eq!(refused.high_water(), before);
+    let bytes = SessionTables::<Calls, Lent>::arena_bytes(&within).unwrap();
+    let mut whole = arena(bytes);
+    SessionTables::<Calls, Lent>::lent(&mut whole, keys(64), &within).unwrap();
+    assert_eq!(whole.high_water(), bytes, "CONTROL: every table is lent");
+}
+
 #[test]
 fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     let mut tables = Tables::new();

@@ -1594,7 +1594,8 @@ mod door_reading_tests {
 mod tests {
     use super::*;
 
-    fn session() -> Arc<Engine> {
+    /// A registry with no face, read back through its own key table.
+    fn session() -> Arc<wz_capi_core::faces::SharedSession> {
         Arc::new(
             wz_capi_core::faces::SharedSession::new(
                 wz_capi_core::runtime::runtime_impl::TokioTime::new(),
@@ -1603,7 +1604,6 @@ mod tests {
             )
             .expect("test host entropy"),
         )
-        .as_engine()
     }
 
     /// The checked view constructors refuse what pico refuses: a text that is
@@ -1665,9 +1665,10 @@ mod tests {
     #[test]
     fn a_declaration_lives_as_long_as_its_last_holder() {
         let shared = session();
-        let program = DeclaredKeyexpr::declare(&shared, "demo/kd/decl", None).expect("declared");
+        let engine = shared.as_engine();
+        let program = DeclaredKeyexpr::declare(&engine, "demo/kd/decl", None).expect("declared");
         assert_eq!(shared.keyexpr_declarations().len(), 1);
-        let entity = DeclaredKeyexpr::declare(&shared, "demo/kd/decl", Some(&program))
+        let entity = DeclaredKeyexpr::declare(&engine, "demo/kd/decl", Some(&program))
             .expect("an already-declared key is shared, not redeclared");
         assert_eq!(
             shared.keyexpr_declarations().len(),
@@ -1689,16 +1690,17 @@ mod tests {
     #[test]
     fn a_prefix_declaration_names_the_rest_of_the_key_as_suffix() {
         let shared = session();
-        let key = DeclaredKeyexpr::declare_non_wild_prefix(&shared, "demo/kd/qbl/*/x", None)
+        let engine = shared.as_engine();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/qbl/*/x", None)
             .expect("declared");
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.wire(Arc::as_ref(&shared));
+        let wire = key.wire(Arc::as_ref(&engine));
         assert_eq!(wire.mapping_id, declarations[0].0);
         assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
 
-        let other = session();
+        let other = session().as_engine();
         assert_eq!(
             key.wire(&*other).mapping_id,
             0,
@@ -2148,23 +2150,31 @@ mod arena_key_tests {
     #[test]
     fn a_declaration_lasts_as_long_as_its_last_holder() {
         let (session, engine) = listening();
-        let declared = |engine: &Arc<Engine>| {
-            engine
-                .keyexpr_declarations()
-                .iter()
-                .any(|(_, key)| key == "demo/hold/a")
-        };
-        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/a", None).expect("declared");
-        assert!(declared(&engine));
+        // The arena keeps room for one key of the declared one's length, which the declaration
+        // takes: whether its block is back says whether the declaration is.
+        let text = "demo/hold/a";
+        let held = fill_leaving(&engine, text.len(), 1);
+        let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
+        assert!(
+            !room_for(&engine, text.len()),
+            "the declaration takes the last block"
+        );
         let shared = key.share();
         let wire = key.wire(Arc::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
-        assert!(declared(&engine), "the share holds it");
+        assert!(!room_for(&engine, text.len()), "the share holds it");
         drop(shared);
-        assert!(declared(&engine), "the wire key holds it");
+        assert!(
+            !room_for(&engine, text.len()),
+            "the wire key holds the declaration, and the declaration its key"
+        );
         drop(wire);
-        assert!(!declared(&engine), "the last holder retracts it");
+        assert!(
+            room_for(&engine, text.len()),
+            "the last holder retracts it and its key's block goes back"
+        );
+        give_back(&engine, held);
         close(session);
     }
 
@@ -2175,20 +2185,21 @@ mod arena_key_tests {
     #[test]
     fn a_key_holds_the_declaration_its_entity_retracts_by() {
         let (session, engine) = listening();
-        let declared = |engine: &Arc<Engine>| {
-            engine
-                .keyexpr_declarations()
-                .iter()
-                .any(|(_, key)| key == "demo/hold/entity")
-        };
-        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/entity", None).expect("declared");
+        // As above: the declaration takes the arena's last block of the key's length.
+        let text = "demo/hold/entity";
+        let held = fill_leaving(&engine, text.len(), 1);
+        let key = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
         let wire =
             WireKey::literal().holding_also(key.declaration_hold().expect("the key is declared"));
         assert!(wire.is_literal(), "the wire names no declaration");
         drop(key);
-        assert!(declared(&engine), "the announcing key holds it");
+        assert!(
+            !room_for(&engine, text.len()),
+            "the announcing key holds the declaration, and the declaration its key"
+        );
         drop(wire);
-        assert!(!declared(&engine), "and lets it go");
+        assert!(room_for(&engine, text.len()), "and lets it go");
+        give_back(&engine, held);
         close(session);
     }
 
@@ -2203,8 +2214,10 @@ mod arena_key_tests {
             DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/pk/**", None).err(),
             Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
-        assert!(engine.keyexpr_declarations().is_empty(), "nothing declared");
-        assert!(room_for(&engine, 10), "the key's block went back");
+        assert!(
+            room_for(&engine, 10),
+            "nothing was declared, and the key's block went back"
+        );
         give_back(&engine, held);
         close(session);
     }
@@ -2220,8 +2233,10 @@ mod arena_key_tests {
             let key = DeclaredKeyexpr::declare(&engine, &text, None).expect("the block given back");
             assert_eq!(key.literal(), text);
         }
-        assert!(engine.keyexpr_declarations().is_empty());
-        assert!(room_for(&engine, 10));
+        assert!(
+            room_for(&engine, 10),
+            "every declaration went, and its block with it"
+        );
         give_back(&engine, held);
         close(session);
     }

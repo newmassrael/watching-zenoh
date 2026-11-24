@@ -31,17 +31,17 @@
 //! ([`TurnEnd::EndsLink`]).
 
 use wz_runtime_coop::session_drive::SessionLinks;
-use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
-#[cfg(feature = "liveliness")]
-use wz_session_core::session_tables::TokenHandle;
+#[cfg(feature = "queryable")]
+use wz_session_core::session_tables::QueryableHandle;
 use wz_session_core::session_tables::{KeyexprHandle, SubscriberHandle};
+#[cfg(feature = "liveliness")]
+use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
-use crate::prelude::*;
 
 /// The kinds of declaration a session holds, which is to say the lists the replay walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,11 +198,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Kind::Subscriber => super::tables(&self.registry).subscribers().len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
-            Kind::Queryable => self.queryables.len(),
+            Kind::Queryable => super::tables(&self.registry).queryables().len(),
             #[cfg(feature = "liveliness")]
             Kind::Token => super::tables(&self.registry).tokens().len(),
             #[cfg(feature = "liveliness")]
-            Kind::LiveSub => self.live_subs.len(),
+            Kind::LiveSub => super::tables(&self.registry).liveliness_subscribers().len(),
         }
     }
 
@@ -255,9 +255,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
-                    let entry = &self.queryables[left];
-                    let named = entry.named(&super::tables(&self.registry));
-                    named.is_some_and(|key| entry.declare(key, actions))
+                    let tables = super::tables(&self.registry);
+                    let row = tables.queryables().iter().nth(left);
+                    let told = row.map_or(true, |(_, row)| {
+                        tables
+                            .named(row.key())
+                            .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                    });
+                    told
                 }
                 #[cfg(feature = "liveliness")]
                 Kind::Token => {
@@ -271,7 +276,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     told
                 }
                 #[cfg(feature = "liveliness")]
-                Kind::LiveSub => self.live_subs[left].ask(actions),
+                Kind::LiveSub => {
+                    let tables = super::tables(&self.registry);
+                    let row = tables.liveliness_subscribers().iter().nth(left);
+                    let asked = row.map_or(true, |(_, row)| {
+                        row.callback()
+                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                    });
+                    asked
+                }
             };
         }
         // A place past the sequence is a defect of the cursor and has nothing to send.
@@ -334,8 +347,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: usize,
         on_refusal: OnRefusal,
-        send: impl Fn(&McuActions<C>) -> bool,
-        undo: impl Fn(&McuActions<C>),
+        send: &dyn Fn(&McuActions<C>) -> bool,
+        undo: &dyn Fn(&McuActions<C>),
     ) -> bool {
         announce_on(self.links.faces_mut(), place, on_refusal, send, undo)
     }
@@ -343,9 +356,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
     /// that a link refused is counted as told, and the peer learns it when the session declares
     /// over a new link.
-    pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
+    pub(super) fn announce(&mut self, kind: Kind, send: &dyn Fn(&McuActions<C>) -> bool) {
         let place = self.end_of(kind);
-        self.announce_with(place, OnRefusal::Forget, send, |_| {});
+        self.announce_with(place, OnRefusal::Forget, send, &undo_nothing::<C>);
     }
 
     /// The place in the replay's order of the subscriber `handle` names, the one past the last for
@@ -371,7 +384,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let told = tables.subscribers().get(handle).is_some_and(|row| {
                     tables
@@ -380,7 +393,45 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 told
             },
-            |_| {},
+            &undo_nothing::<C>,
+        );
+    }
+
+    /// The place in the replay's order of the queryable `handle` names, the one past the last for
+    /// a handle that names none: its rank in the table's slot order, which the replay tells them
+    /// in.
+    #[cfg(feature = "queryable")]
+    pub(super) fn queryable_place(&self, handle: QueryableHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let queryables = tables.queryables();
+        let rank = queryables
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(queryables.len());
+        self.start_of(Kind::Queryable) + rank
+    }
+
+    /// Tell each face that is up of the queryable `handle` names, as [`Self::announce`] tells a
+    /// declaration: the row is the declaration itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    #[cfg(feature = "queryable")]
+    pub(super) fn announce_queryable(&mut self, handle: QueryableHandle) {
+        let place = self.queryable_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            &|actions| {
+                let tables = super::tables(registry);
+                let told = tables.queryables().get(handle).is_some_and(|row| {
+                    tables
+                        .named(row.key())
+                        .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                });
+                told
+            },
+            &undo_nothing::<C>,
         );
     }
 
@@ -389,8 +440,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn announce_or_undo_at(
         &mut self,
         place: usize,
-        send: impl Fn(&McuActions<C>) -> bool,
-        undo: impl Fn(&McuActions<C>),
+        send: &dyn Fn(&McuActions<C>) -> bool,
+        undo: &dyn Fn(&McuActions<C>),
     ) -> bool {
         self.announce_with(place, OnRefusal::Undo, send, undo)
     }
@@ -432,7 +483,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let taken = tables.tokens().get(handle).is_some_and(|row| {
                     tables
@@ -441,81 +492,127 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 taken
             },
-            |_| {},
+            &undo_nothing::<C>,
         );
     }
 
-    /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
-    /// over ([`Self::retract_at`]). Call it once, before the removal.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<SessionHandle<C>> {
-        let place = self.start_of(kind) + index;
-        self.retract_at(place)
+    /// The place in the replay's order of the liveliness subscriber `handle` names, the one past
+    /// the last for a handle that names none: its rank in the table's slot order, which the replay
+    /// asks them in.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn liveliness_place(&self, handle: LivelinessSubscriberHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let subscribers = tables.liveliness_subscribers();
+        let rank = subscribers
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(subscribers.len());
+        self.start_of(Kind::LiveSub) + rank
     }
 
-    /// The declaration at `place` in the replay's order is about to be removed: the links to
-    /// retract it over, which are those of the faces that are up and whose peers were told of it.
-    /// Call it once, before the removal.
-    pub(super) fn retract_at(&mut self, place: usize) -> Vec<SessionHandle<C>> {
-        let mut links = Vec::new();
+    /// Ask each face that is up for what the liveliness subscriber `handle` names asks, as
+    /// [`Self::announce`] tells a declaration: the row is the subscriber itself, so the tables
+    /// stored it before any link is asked, and each link is asked from the row.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn announce_liveliness(&mut self, handle: LivelinessSubscriberHandle) {
+        let place = self.liveliness_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            &|actions| {
+                let tables = super::tables(registry);
+                let asked = tables
+                    .liveliness_subscribers()
+                    .get(handle)
+                    .is_some_and(|row| {
+                        row.callback()
+                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                    });
+                asked
+            },
+            &undo_nothing::<C>,
+        );
+    }
+
+    /// The declaration at `index` of `kind`'s list was removed: retract it with `send`
+    /// ([`Self::retract_at`]). `index` is where it lay, and the kinds before it in the replay's
+    /// order are as they were.
+    pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn Fn(&McuActions<C>)) {
+        let place = self.start_of(kind) + index;
+        self.retract_at(place, send);
+    }
+
+    /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
+    /// each face that is up and whose peer was told of it, and move every face's replay past it.
+    /// Call it once, after the row went, with the place read while it stood: a send then finds
+    /// none of the session's tables borrowed, and nothing is kept to send later.
+    #[inline(never)]
+    pub(super) fn retract_at(&mut self, place: usize, send: &dyn Fn(&McuActions<C>)) {
         for face in self.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
             if matches!(face.replay.cursor.removed(place), Removal::Retract) {
-                links.push(wire.actions.clone());
+                send(&wire.actions);
             }
         }
-        links
     }
 }
 
+/// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
+/// for every such caller, so the call through `&dyn Fn` is made once.
+fn undo_nothing<C: ClockSource + 'static>(_actions: &McuActions<C>) {}
+
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
-/// (a row of the session core's tables) in `send` while the faces are written.
+/// (a row of the session core's tables) in `send` while the faces are written. One body for every
+/// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
+///
+/// Each face that is up is offered the declaration where its replay stands, and the replays move
+/// only once the declaration is made: a refusal that undoes it stops at the face that refused,
+/// takes back what the faces before it were sent and leaves every replay as it was, so nothing is
+/// kept to put back.
+#[inline(never)]
 fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
     faces: &mut [Face<C, L>],
     place: usize,
     on_refusal: OnRefusal,
-    send: impl Fn(&McuActions<C>) -> bool,
-    undo: impl Fn(&McuActions<C>),
+    send: &dyn Fn(&McuActions<C>) -> bool,
+    undo: &dyn Fn(&McuActions<C>),
 ) -> bool {
-    // What each face's replay was and what its link made of the declaration, so that a refusal
-    // that undoes the declaration can put every face back.
-    let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
-    for (at, face) in faces.iter_mut().enumerate() {
+    // Whether the replay of `face` is past the declaration, so its link is told it now.
+    let emits_now = |face: &Face<C, L>| {
+        let mut cursor = face.replay.cursor;
+        cursor.inserted(place) == Insertion::EmitNow
+    };
+    let mut refused_at = None;
+    for (at, face) in faces.iter().enumerate() {
         let Link::Up(wire) = &face.link else {
             continue;
         };
-        let before = face.replay.cursor;
-        let outcome = match face.replay.cursor.inserted(place) {
-            Insertion::Owed => Told::Owed,
-            Insertion::EmitNow if send(&wire.actions) => Told::Sent,
-            Insertion::EmitNow => Told::Refused,
-        };
-        told.push((at, before, outcome));
-    }
-    let refused = told.iter().any(|(_, _, outcome)| *outcome == Told::Refused);
-    if !refused || on_refusal == OnRefusal::Forget {
-        return true;
-    }
-    for (at, before, outcome) in told {
-        let face = &mut faces[at];
-        face.replay.cursor = before;
-        if let (Told::Sent, Link::Up(wire)) = (outcome, &face.link) {
-            undo(&wire.actions);
+        if emits_now(face) && !send(&wire.actions) && on_refusal == OnRefusal::Undo {
+            refused_at = Some(at);
+            break;
         }
     }
-    false
-}
-
-/// What a face's link made of a declaration it was offered.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Told {
-    /// The face's replay has not reached the declaration: it is sent in its turn.
-    Owed,
-    /// The link took it now.
-    Sent,
-    /// The link refused it.
-    Refused,
+    if let Some(refused) = refused_at {
+        for face in faces.iter().take(refused) {
+            if let Link::Up(wire) = &face.link {
+                if emits_now(face) {
+                    undo(&wire.actions);
+                }
+            }
+        }
+        return false;
+    }
+    for face in faces.iter_mut() {
+        if matches!(face.link, Link::Up(_)) {
+            // The face was told it above, or its replay tells it in its turn.
+            let _ = face.replay.cursor.inserted(place);
+        }
+    }
+    true
 }
 
 #[cfg(test)]

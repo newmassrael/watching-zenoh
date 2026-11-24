@@ -1131,7 +1131,7 @@ impl Engine {
     #[cfg(test)]
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
+            Engine::Tokio(state) => state.shared.keyexpr_declarations(),
             Engine::Router(_) => Vec::new(),
         }
     }
