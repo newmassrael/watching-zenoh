@@ -227,10 +227,10 @@ fn a_cancelled_get_ends_without_a_step() {
 }
 
 /// A raw leg's call: the tests of a get's cost read no reply.
-unsafe fn ignore_reply(_context: *mut core::ffi::c_void, _reply: &dyn ReplyView) {}
+pub(super) unsafe fn ignore_reply(_context: *mut core::ffi::c_void, _reply: &dyn ReplyView) {}
 
 /// A raw leg's end: one more on the counter its context names.
-unsafe fn count_end(context: *mut core::ffi::c_void) {
+pub(super) unsafe fn count_end(context: *mut core::ffi::c_void) {
     // SAFETY: the context is the test's counter, which outlives every leg it was minted for.
     unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
 }
