@@ -227,10 +227,10 @@ const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
-/// (`query`) and pending liveliness gets (`liveliness-get`), as many as the ABI asks places of,
-/// at most these.
+/// (`query`) and pending liveliness gets (`liveliness-get`), and matching listeners, as many as
+/// the ABI asks places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
-    * (3 + cfg!(feature = "queryable") as usize
+    * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
         + cfg!(feature = "query") as usize
         + cfg!(feature = "liveliness-get") as usize);
@@ -296,6 +296,11 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "pending liveliness get place flags",
             "pending liveliness get places",
             "MAX_PENDING_LIVELINESS_GETS",
+        ),
+        EntityKind::MatchingListener => (
+            "matching listener place flags",
+            "matching listener places",
+            "MAX_MATCHING_LISTENERS",
         ),
     }
 }
@@ -508,6 +513,7 @@ impl EntityRows {
             EntityKind::Querier => self.queriers,
             EntityKind::PendingGet => self.pending_gets,
             EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
+            EntityKind::MatchingListener => self.matching_listeners,
         }
     }
 

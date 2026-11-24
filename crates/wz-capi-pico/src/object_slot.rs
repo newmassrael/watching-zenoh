@@ -67,6 +67,9 @@ pub(crate) enum Kind {
     /// A liveliness get the program issued, held as a get is.
     #[cfg(feature = "liveliness-get")]
     LivelinessGet = 16,
+    /// A matching listener of a publisher or a querier, held while its write filter can reach it
+    /// (`crate::matching::MatchingPlace`).
+    MatchingListener = 17,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -290,6 +293,10 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::PendingLivelinessGet,
             InSession::<crate::get::GetPlace>::LAYOUT,
         )),
+        Kind::MatchingListener => Some((
+            EntityKind::MatchingListener,
+            InSession::<crate::matching::MatchingPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -329,6 +336,7 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         querier,
         get,
         LIVELINESS_GET,
+        Some(Kind::MatchingListener),
     ]
     .into_iter()
     .flatten()
@@ -417,18 +425,38 @@ pub(crate) unsafe fn count_in_entity<T, K, C>(
     object: *const T,
     closure: &mut crate::ffi::CClosure<C>,
 ) {
+    // SAFETY: the caller's.
+    closure.count_in(unsafe { count_of::<T, K>(object) });
+}
+
+/// Hold the place of the entity whose object is at `object` open as a closure counted in it does:
+/// for what reaches the place apart from its owner (a write filter's list of its listeners), so
+/// the place stands until the hold is dropped, which gives it back if its owner and every closure
+/// went first.
+///
+/// # Safety
+/// As [`count_in_entity`].
+pub(crate) unsafe fn hold_entity<T, K>(object: *const T) -> crate::ffi::HeldIn {
+    // SAFETY: the caller's.
+    unsafe { count_of::<T, K>(object) }.hold()
+}
+
+/// The count of the entity whose object is at `object`, and how its place is given back.
+///
+/// # Safety
+/// As [`count_in_entity`].
+unsafe fn count_of<T, K>(object: *const T) -> crate::ffi::CountIn {
     let at = object.cast::<Answering<T, K>>();
     // SAFETY: the caller's: the place holds an `Answering<T, K>`, whose count stands until the
     // place goes back, which only `give_back_answering` does, called by whichever of the owner's
-    // release and the last closure counted goes last.
-    let owner = unsafe {
+    // release and the last hold counted goes last.
+    unsafe {
         crate::ffi::CountIn::new(
             &(*at).open,
             NonNull::new_unchecked(at.cast_mut().cast()),
             give_back_answering::<T, K>,
         )
-    };
-    closure.count_in(owner);
+    }
 }
 
 /// Let go of an entity's object for its owner: drop the object, and give its place back now when
