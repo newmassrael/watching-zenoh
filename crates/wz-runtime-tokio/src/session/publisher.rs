@@ -669,6 +669,9 @@ pub enum PublishAliasError {
     /// at once; projected from the underlying [`PublishError::HeldConduit`]. No wire bytes were
     /// emitted.
     HeldConduit,
+    /// The sample is larger than a row of its advanced publisher's cache; projected from the
+    /// underlying [`PublishError::ExceedsCacheRow`]. No wire bytes were emitted.
+    ExceedsCacheRow,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -719,6 +722,11 @@ impl std::fmt::Display for PublishAliasError {
                  conduit and the queue profile drops it at once; the Push was not \
                  emitted"
             ),
+            PublishAliasError::ExceedsCacheRow => write!(
+                f,
+                "PublishAliasError: the sample is larger than a row of its \
+                 publisher's cache; the Push was not emitted"
+            ),
         }
     }
 }
@@ -735,6 +743,7 @@ impl From<PublishError> for PublishAliasError {
             PublishError::TimestampExhausted => PublishAliasError::TimestampExhausted,
             PublishError::ClockUntrusted => PublishAliasError::ClockUntrusted,
             PublishError::HeldConduit => PublishAliasError::HeldConduit,
+            PublishError::ExceedsCacheRow => PublishAliasError::ExceedsCacheRow,
         }
     }
 }
