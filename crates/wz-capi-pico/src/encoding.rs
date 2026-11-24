@@ -81,20 +81,21 @@ use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 /// one its marshal holds.
 ///
 /// The schema is a start and a length whoever holds its bytes, so reading the encoding
-/// ([`Self::view`]) has no branch on where they lie; what holds them is `block`, beside the read.
+/// ([`Self::view`]) has no branch on where they lie; what holds them is `_block`, beside the read.
 pub(crate) struct EncodingState {
     packed_id: u32,
     /// Where the schema starts, null for an encoding that carries none. The bytes are another's:
     /// a received message's, read for as long as the marshal that holds this state does
     /// ([`Self::lent`]), or the room of the held encoding this state is part of, which never moves
-    /// while it lives; or they lie in `block`.
+    /// while it lives; or they lie in `_block`.
     schema_start: *const u8,
     schema_len: usize,
-    /// The block of the payloads' area a kept schema lies in ([`Self::kept`]), let go with the
-    /// state: what a sample, a reply or a query kept past its callback holds, whose message's bytes
-    /// it may outlive. It takes no encoding of the pool, whose count is the program's own
-    /// encodings. None for a schema another holds, for an empty one and for none.
-    block: Option<Block>,
+    /// Held for its drop alone, never read: the block of the payloads' area a kept schema lies
+    /// in ([`Self::kept`]), let go with the state. It is what a sample, a reply or a query kept
+    /// past its callback holds, whose message's bytes it may outlive. It takes no encoding of the
+    /// pool, whose count is the program's own encodings. None for a schema another holds, for an
+    /// empty one and for none.
+    _block: Option<Block>,
 }
 
 // SAFETY: a lent schema is its holder's, valid and unchanged for as long as the state lives
@@ -113,7 +114,7 @@ impl EncodingState {
             packed_id: (id as u32) << 1,
             schema_start: core::ptr::null(),
             schema_len: 0,
-            block: None,
+            _block: None,
         }
     }
 
@@ -127,7 +128,7 @@ impl EncodingState {
             packed_id,
             schema_start: schema.map_or(core::ptr::null(), <[u8]>::as_ptr),
             schema_len: schema.map_or(0, <[u8]>::len),
-            block: None,
+            _block: None,
         }
     }
 
@@ -167,7 +168,7 @@ impl EncodingState {
             packed_id: self.packed_id,
             schema_start,
             schema_len: self.schema_len,
-            block,
+            _block: block,
         })
     }
 }
@@ -1057,7 +1058,7 @@ mod tests {
         let bare_kept = bare.kept().expect("an encoding of no schema keeps nothing");
         assert_eq!(bare_kept.view().schema, None);
         assert!(
-            bare_kept.block.is_none(),
+            bare_kept._block.is_none(),
             "an encoding of no schema holds no block"
         );
     }
@@ -1069,24 +1070,27 @@ mod tests {
     fn a_states_schema_is_one_start_and_length_whoever_holds_it() {
         let constant = EncodingState::constant(4);
         assert_eq!(constant.view().schema, None);
-        assert!(constant.block.is_none());
+        assert!(constant._block.is_none());
 
         let message = b"utf8".to_vec();
         // SAFETY: the states that borrow `message` are dropped before it.
         let received = unsafe { EncodingState::lent((4 << 1) | 1, Some(message.as_slice())) };
         assert!(
-            received.block.is_none(),
+            received._block.is_none(),
             "a received schema is read where it lies"
         );
         assert_eq!(received.schema_start, message.as_ptr());
         let kept = received.kept().expect("room for the kept schema");
-        assert!(kept.block.is_some(), "a kept schema holds a block");
+        assert!(kept._block.is_some(), "a kept schema holds a block");
         assert_ne!(kept.schema_start, message.as_ptr());
 
         // SAFETY: as above.
         let empty = unsafe { EncodingState::lent((4 << 1) | 1, Some(&message[..0])) };
         let empty_kept = empty.kept().expect("an empty schema takes no room");
-        assert!(empty_kept.block.is_none(), "an empty schema takes no block");
+        assert!(
+            empty_kept._block.is_none(),
+            "an empty schema takes no block"
+        );
         drop((received, empty));
         drop(message);
         assert_eq!(kept.view().schema, Some(&b"utf8"[..]));
