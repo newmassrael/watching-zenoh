@@ -3850,7 +3850,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // sends what they answer.
             #[cfg(feature = "queryable")]
             {
-                let answering: Weak<dyn crate::round::AnswersQueries> = Weak::<Self>::clone(this);
+                let answering: Weak<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
+                    Weak::<Self>::clone(this);
                 samples.answer_queries_with(answering);
             }
             Self {
@@ -7830,8 +7831,8 @@ impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G
 }
 
 #[cfg(feature = "queryable")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> crate::round::AnswersQueries
-    for CoopEngine<L, C>
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
+    crate::round::AnswersQueries<crate::round::CoopCalls> for CoopEngine<L, C>
 {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
         self.run_queryable(call, query, generation);

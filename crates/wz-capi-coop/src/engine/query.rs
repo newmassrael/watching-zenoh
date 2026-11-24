@@ -883,7 +883,7 @@ impl QueryPlane {
 
     /// What a query that reached the queryable `row` does: hold its
     /// Final and begin a call on the row, the query held in `round` where its parts lie
-    /// ([`Round::offer_query`](crate::round::Round::offer_query)); or, with no row left for its
+    /// ([`Round::offer_query`](crate::round::RoundOf::offer_query)); or, with no row left for its
     /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
     /// it is counted. Under the session's lock, from its dispatch.
     pub(super) fn arrive(
@@ -1384,7 +1384,7 @@ mod round_tests {
     //! A link's query held in the session's round of deliveries: handed to the queryable it reached
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
-    use crate::round::{AnswersQueries, Round};
+    use crate::round::{AnswersQueries, CoopCalls, Round};
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
     /// where they lie, the generation it came in under, and its encoding's packed id with where
@@ -1394,7 +1394,7 @@ mod round_tests {
     /// An engine stand-in that notes what it is asked to answer.
     struct Noting(Noted);
 
-    impl AnswersQueries for Noting {
+    impl AnswersQueries<CoopCalls> for Noting {
         fn answer_query(&self, _call: &QueryableCall, query: &dyn QueryView, generation: u64) {
             self.0.lock().unwrap().push((
                 query.keyexpr().to_owned(),

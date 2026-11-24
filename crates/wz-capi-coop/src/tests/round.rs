@@ -1119,7 +1119,7 @@ struct OneLeg {
 }
 
 #[cfg(feature = "query")]
-impl crate::round::LegHolders for OneLeg {
+impl crate::round::LegHolders<crate::round::CoopCalls> for OneLeg {
     fn hold(&self, leg: LegId) -> bool {
         assert_eq!(leg, LegId::FIRST, "the test's one leg");
         self.held.fetch_add(1, Ordering::SeqCst);
