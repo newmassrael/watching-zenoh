@@ -37,6 +37,9 @@ use wz_session_mcu::dial::McuActions;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(feature = "group")]
+use super::transport::TellGroups;
+
 /// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
 /// entity it names.
 #[cfg(feature = "group")]
