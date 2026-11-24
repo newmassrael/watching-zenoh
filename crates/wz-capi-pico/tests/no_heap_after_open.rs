@@ -280,11 +280,12 @@ enum Round {
     TransportEventsListener,
     E2eSenderDemux,
     E2eSupervision,
+    InstanceKey,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 28] = [
+    const ALL: [Round; 29] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -313,6 +314,7 @@ impl Round {
         Round::TransportEventsListener,
         Round::E2eSenderDemux,
         Round::E2eSupervision,
+        Round::InstanceKey,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -333,6 +335,13 @@ impl Round {
                 cfg!(all(feature = "e2e-sender", feature = "e2e-sender-demux"))
             }
             Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
+            Round::InstanceKey => {
+                cfg!(all(
+                    feature = "instance-key",
+                    feature = "e2e-sender",
+                    feature = "e2e-receiver"
+                ))
+            }
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -362,7 +371,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 32] = [
+const FAMILIES: [(&str, Round, Part); 33] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -413,6 +422,7 @@ const FAMILIES: [(&str, Round, Part); 32] = [
     ),
     ("e2e-sender-demux", Round::E2eSenderDemux, Part::All),
     ("e2e-supervision", Round::E2eSupervision, Part::All),
+    ("instance-key", Round::InstanceKey, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -594,6 +604,212 @@ impl E2e {
     unsafe fn drop_both(mut self) {
         use wz_capi_pico::e2e_receiver::{wz_ext_e2e_receiver_drop, wz_ext_e2e_receiver_move};
         use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
+        wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
+        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+    }
+}
+
+/// The schema of the message whose instances a keyer reads. Synthetic.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_SCHEMA: &CStr = cr#"
+syntax = "proto3";
+package syn.noheap;
+message Reading {
+  optional uint32 bay = 1;
+  sint32 tilt = 2;
+  bytes body = 3;
+}
+"#;
+
+/// Three bays and two tilts: six instances, the tilt varying fastest. Synthetic.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_DESCRIPTION: &CStr = cr#"{
+  "message": "syn.noheap.Reading",
+  "fields": [
+    {"path": "bay", "values": [12, 30, 44]},
+    {"path": "tilt", "values": [-3, 5]}
+  ],
+  "report_interval_ms": 1000
+}"#;
+
+/// How many instances `INSTANCE_DESCRIPTION` makes: the streams the sender and the receiver keep.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCES: usize = 6;
+
+/// A reading of bay 12 and tilt -3 (zigzagged to 5), with a body of one byte: instance 0, laid by
+/// hand.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+const INSTANCE_PAYLOAD: [u8; 7] = [0x08, 0x0C, 0x10, 0x05, 0x1A, 0x01, 0x61];
+
+/// A keyer at each end of a message whose instances are streams of the end-to-end doors: the
+/// sending one protects a payload on its instance's counter, the receiving one judges the frame
+/// in its instance's stream.
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+struct Keyed {
+    sending: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
+    receiving: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
+    sender: wz_capi_pico::e2e_sender::wz_ext_owned_e2e_sender_t,
+    receiver: wz_capi_pico::e2e_receiver::wz_ext_owned_e2e_receiver_t,
+    now_ms: u64,
+}
+
+#[cfg(all(
+    feature = "instance-key",
+    feature = "e2e-sender",
+    feature = "e2e-receiver"
+))]
+impl Keyed {
+    unsafe fn new() -> Self {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_new, wz_ext_e2e_receiver_options_default,
+            wz_ext_e2e_receiver_options_t,
+        };
+        use wz_capi_pico::e2e_sender::{
+            wz_ext_e2e_sender_new, wz_ext_e2e_sender_options_default, wz_ext_e2e_sender_options_t,
+        };
+        let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
+        let values = std::ffi::CString::new(E2E_VALUES).expect("no NUL in the values");
+        let mut keyed = Self {
+            sending: Self::keyer(),
+            receiving: Self::keyer(),
+            sender: std::mem::zeroed(),
+            receiver: std::mem::zeroed(),
+            now_ms: 0,
+        };
+        let mut sending: wz_ext_e2e_sender_options_t = std::mem::zeroed();
+        wz_ext_e2e_sender_options_default(&mut sending);
+        sending.streams = INSTANCES;
+        assert_eq!(
+            wz_ext_e2e_sender_new(
+                &mut keyed.sender,
+                profile.as_ptr(),
+                values.as_ptr(),
+                &sending,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a sender of a stream per instance is made"
+        );
+        let mut receiving: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
+        wz_ext_e2e_receiver_options_default(&mut receiving);
+        receiving.streams = INSTANCES;
+        assert_eq!(
+            wz_ext_e2e_receiver_new(
+                &mut keyed.receiver,
+                profile.as_ptr(),
+                values.as_ptr(),
+                &receiving,
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a receiver of a stream per instance is made"
+        );
+        keyed
+    }
+
+    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SCHEMA`, keeping no last values.
+    unsafe fn keyer() -> wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t {
+        use wz_capi_pico::instance_key::wz_ext_instance_keyer_new;
+        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
+        let files = [wz_ext_proto_file_t {
+            name: c"syn/noheap.proto".as_ptr(),
+            text: INSTANCE_SCHEMA.as_ptr(),
+        }];
+        let mut keyer: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t =
+            std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_new(
+                &mut keyer,
+                files.as_ptr(),
+                files.len(),
+                INSTANCE_DESCRIPTION.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a keyer of the synthetic schema is made"
+        );
+        keyer
+    }
+
+    /// Protect the payload on its instance's stream and judge the frame in the same instance's.
+    unsafe fn round(&mut self) {
+        use wz_capi_pico::e2e_receiver::{
+            wz_ext_e2e_receiver_loan, wz_ext_e2e_verdict_t, WZ_EXT_E2E_FIRST, WZ_EXT_E2E_OK,
+        };
+        use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_loan;
+        use wz_capi_pico::instance_key::{
+            wz_ext_instance_key_t, wz_ext_instance_keyer_judge, wz_ext_instance_keyer_loan,
+            wz_ext_instance_keyer_protect, WZ_EXT_INSTANCE_KEY_INDEXED,
+        };
+        let mut frame = [0u8; E2E_FRAME_ROOM];
+        let mut written = 0usize;
+        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_protect(
+                wz_ext_instance_keyer_loan(&self.sending),
+                wz_ext_e2e_sender_loan(&self.sender),
+                INSTANCE_PAYLOAD.as_ptr(),
+                INSTANCE_PAYLOAD.len(),
+                self.now_ms,
+                frame.as_mut_ptr(),
+                frame.len(),
+                &mut written,
+                std::ptr::null_mut(),
+                &mut key,
+            ),
+            Z_OK,
+            "a payload is protected on its instance's stream"
+        );
+        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        self.now_ms += 1;
+        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_instance_keyer_judge(
+                wz_ext_instance_keyer_loan(&self.receiving),
+                wz_ext_e2e_receiver_loan(&self.receiver),
+                frame.as_ptr(),
+                written,
+                self.now_ms,
+                &mut key,
+                &mut verdict,
+            ),
+            Z_OK,
+            "a frame is judged in its instance's stream"
+        );
+        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        assert!(
+            verdict.status == WZ_EXT_E2E_OK || verdict.status == WZ_EXT_E2E_FIRST,
+            "a frame protected in order is judged in order: {verdict:?}"
+        );
+    }
+
+    unsafe fn drop_all(mut self) {
+        use wz_capi_pico::e2e_receiver::{wz_ext_e2e_receiver_drop, wz_ext_e2e_receiver_move};
+        use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
+        use wz_capi_pico::instance_key::{wz_ext_instance_keyer_drop, wz_ext_instance_keyer_move};
+        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.sending));
+        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.receiving));
         wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
         wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
     }
@@ -938,6 +1154,12 @@ struct Bench {
     e2e_demux: E2e,
     #[cfg(feature = "e2e-supervision")]
     supervision: Supervision,
+    #[cfg(all(
+        feature = "instance-key",
+        feature = "e2e-sender",
+        feature = "e2e-receiver"
+    ))]
+    keyed: Keyed,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
     #[cfg(feature = "advanced")]
@@ -978,6 +1200,12 @@ impl Bench {
         let e2e_demux = E2e::sender_keyed();
         #[cfg(feature = "e2e-supervision")]
         let supervision = Supervision::new();
+        #[cfg(all(
+            feature = "instance-key",
+            feature = "e2e-sender",
+            feature = "e2e-receiver"
+        ))]
+        let keyed = Keyed::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
         #[cfg(feature = "advanced")]
@@ -1024,6 +1252,12 @@ impl Bench {
             e2e_demux,
             #[cfg(feature = "e2e-supervision")]
             supervision,
+            #[cfg(all(
+                feature = "instance-key",
+                feature = "e2e-sender",
+                feature = "e2e-receiver"
+            ))]
+            keyed,
             #[cfg(feature = "replay-cache")]
             replay,
             #[cfg(feature = "advanced")]
@@ -1118,6 +1352,14 @@ impl Bench {
             Round::E2eSupervision => {
                 #[cfg(feature = "e2e-supervision")]
                 self.supervision.round();
+            }
+            Round::InstanceKey => {
+                #[cfg(all(
+                    feature = "instance-key",
+                    feature = "e2e-sender",
+                    feature = "e2e-receiver"
+                ))]
+                self.keyed.round();
             }
         }
     }
@@ -1576,6 +1818,12 @@ impl Bench {
         self.e2e_demux.drop_both();
         #[cfg(feature = "e2e-supervision")]
         self.supervision.drop_all();
+        #[cfg(all(
+            feature = "instance-key",
+            feature = "e2e-sender",
+            feature = "e2e-receiver"
+        ))]
+        self.keyed.drop_all();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
         #[cfg(feature = "advanced")]
