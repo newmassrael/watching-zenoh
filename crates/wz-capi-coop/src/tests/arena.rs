@@ -225,7 +225,8 @@ fn held_plan(
     config: &CoopConfig,
     held: &crate::arena::HeldPlaces,
 ) -> Result<ArenaPlan, ArenaRefused> {
-    let mut plan = ArenaPlan::of(config, &config.limits)?;
+    let mut plan = ArenaPlan::vacant();
+    plan.count(config, &config.limits)?;
     crate::engine::lay_out_open(
         &mut plan,
         crate::engine::link_cells::<PosixClock>(&PosixLinks::new(super::LOOPBACK, PosixTcpDial)),

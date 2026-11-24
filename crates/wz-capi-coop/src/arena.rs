@@ -906,13 +906,41 @@ pub struct ArenaPlan {
 }
 
 impl ArenaPlan {
-    /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
-    /// is over the build's value or the arena is past the address space.
+    /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]): out of line,
+    /// so the plan is made where its caller keeps it and the rows' empty fill is one body.
     #[inline(never)]
+    pub fn vacant() -> Self {
+        Self {
+            rows: [None; ARENA_ROWS],
+            len: 0,
+            refused: None,
+            transport: TransportRows::default(),
+            session: SessionRows::default(),
+            places: PlaceRows::default(),
+        }
+    }
+
+    /// The rows of a session `config` opens under `limits` (see the module), as a value: a
+    /// [`Self::vacant`] plan [`Self::count`] lays out. Refused as `count` refuses it.
     pub fn of<E: EndpointList>(
         config: &CoopConfig<E>,
         limits: &SessionLimits,
     ) -> Result<Self, ArenaRefused> {
+        let mut plan = Self::vacant();
+        plan.count(config, limits)?;
+        Ok(plan)
+    }
+
+    /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session `config` opens under
+    /// `limits` (see the module), where the plan lies: an open that keeps its plan in its own frame
+    /// moves no 2 KB plan out of a returned value. Refused when a limit is over the build's value
+    /// or the arena is past the address space; a refused plan is no plan to open by.
+    #[inline(never)]
+    pub fn count<E: EndpointList>(
+        &mut self,
+        config: &CoopConfig<E>,
+        limits: &SessionLimits,
+    ) -> Result<(), ArenaRefused> {
         hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
         hold(
             "MAX_STATIC_CONNECT",
@@ -935,34 +963,27 @@ impl ArenaPlan {
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
         let link_bytes = link_batch(config, limits)?;
-        let mut plan = Self {
-            rows: [None; ARENA_ROWS],
-            len: 0,
-            refused: None,
-            transport: TransportRows {
-                links,
-                rx_buffers: links,
-                tx_slots: links,
-                link_bytes,
-                reassembly_bytes: 0,
-                reassembly_chains: SESSION_CHAIN_BUFFERS,
-                endpoint_rows: (config.endpoints.count(), config.listen.count()),
-                cell_bytes: LinkCells::default(),
-                #[cfg(any(feature = "listen", feature = "group"))]
-                handed_legs: 0,
-                #[cfg(feature = "group")]
-                group_rx: (0, 0),
-                #[cfg(feature = "listen")]
-                port_rx: (0, 0),
-                #[cfg(feature = "listen")]
-                port_peers: 0,
-            },
-            session: SessionRows::default(),
-            places: PlaceRows::default(),
+        self.transport = TransportRows {
+            links,
+            rx_buffers: links,
+            tx_slots: links,
+            link_bytes,
+            reassembly_bytes: 0,
+            reassembly_chains: SESSION_CHAIN_BUFFERS,
+            endpoint_rows: (config.endpoints.count(), config.listen.count()),
+            cell_bytes: LinkCells::default(),
+            #[cfg(any(feature = "listen", feature = "group"))]
+            handed_legs: 0,
+            #[cfg(feature = "group")]
+            group_rx: (0, 0),
+            #[cfg(feature = "listen")]
+            port_rx: (0, 0),
+            #[cfg(feature = "listen")]
+            port_peers: 0,
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
         // value over the build's is refused under its own name.
-        plan.transport.reassembly_bytes = plan.lent(
+        self.transport.reassembly_bytes = self.lent(
             "PICO_FRAG_MAX_BYTES",
             limits.pico_frag_max_bytes(),
             caps::PICO_FRAG_MAX_BYTES,
@@ -976,14 +997,14 @@ impl ArenaPlan {
         // the faces it attaches, and lends each link a buffer and a slot of its own.
         #[cfg(feature = "listen")]
         {
-            plan.transport.rx_buffers = plan
+            self.transport.rx_buffers = self
                 .lent(
                     "RX_POOL_BUFFERS",
                     Quota::at_most(limits.rx_pool_buffers()),
                     caps::RX_POOL_BUFFERS,
                 )
                 .min(links);
-            plan.transport.tx_slots = plan
+            self.transport.tx_slots = self
                 .lent(
                     "TX_POOL_SLOTS",
                     Quota::at_most(limits.tx_pool_slots()),
@@ -991,39 +1012,39 @@ impl ArenaPlan {
                 )
                 .min(links);
         }
-        plan.session.round = RoundRowCounts {
-            records: plan.lent(
+        self.session.round = RoundRowCounts {
+            records: self.lent(
                 "DELIVERY_LANE_EVENTS",
                 limits.delivery_lane_events(),
                 caps::DELIVERY_LANE_EVENTS,
             ),
-            callbacks: plan.lent(
+            callbacks: self.lent(
                 "DELIVERY_LANE_CALLBACKS",
                 limits.delivery_lane_callbacks(),
                 caps::DELIVERY_LANE_CALLBACKS,
             ),
-            longest_key: plan.lent(
+            longest_key: self.lent(
                 "MAX_KEYEXPR_BYTES",
                 limits.max_keyexpr_bytes(),
                 caps::MAX_KEYEXPR_BYTES,
             ),
         };
-        plan.session.key_bytes = plan.lent(
+        self.session.key_bytes = self.lent(
             "KEY_ARENA_BYTES",
             Quota::at_most(limits.key_arena_bytes()),
             caps::KEY_ARENA_BYTES,
         );
-        let faces = plan.sized(faces_of(config));
+        let faces = self.sized(faces_of(config));
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
         // (`TransportRows::lent_from`): one row of the plan, the two tables' spans.
-        let (dial_rows, listen_rows) = plan.transport.endpoint_rows;
-        let texts = plan.sized(
+        let (dial_rows, listen_rows) = self.transport.endpoint_rows;
+        let texts = self.sized(
             Arena::table_bytes::<LocatorText>(dial_rows)
                 .zip(Arena::table_bytes::<LocatorText>(listen_rows))
                 .and_then(|(dial, listen)| dial.checked_add(listen)),
         );
-        plan.put(
+        self.put(
             "endpoint texts",
             "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
             1,
@@ -1031,22 +1052,22 @@ impl ArenaPlan {
         );
         // The links' rows are lent when the session opens, in this order
         // (`TransportRows::links_from`).
-        plan.put_table(
+        self.put_table(
             ["link receive flags", "link receive buffers"],
             RX_BASIS,
-            plan.transport.rx_buffers,
+            self.transport.rx_buffers,
             link_bytes,
         );
-        plan.put_table(
+        self.put_table(
             ["link transmit flags", "link transmit slots"],
             TX_BASIS,
-            plan.transport.tx_slots,
+            self.transport.tx_slots,
             link_bytes,
         );
         // A place for each link, which bounds the links that open where the slots are a pool:
         // the flags of a table of buffers of no bytes.
         #[cfg(feature = "listen")]
-        plan.put(
+        self.put(
             "link places",
             "MAX_FACES + MAX_ACCEPT_PENDING",
             links,
@@ -1067,8 +1088,8 @@ impl ArenaPlan {
                 .max()
                 .unwrap_or(0)
                 .min(limits.pico_multicast_batch_bytes());
-            plan.transport.group_rx = (buffers, bytes);
-            plan.put_table(
+            self.transport.group_rx = (buffers, bytes);
+            self.put_table(
                 ["link group receive flags", "link group receive buffers"],
                 "PICO_MULTICAST_BATCH_BYTES",
                 buffers,
@@ -1081,15 +1102,15 @@ impl ArenaPlan {
         // session that listens on nothing holds none.
         #[cfg(feature = "listen")]
         {
-            let slots = plan.lent(
+            let slots = self.lent(
                 "UDP_PORT_SLOTS",
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
             let listens = config.listen.count() > 0;
             let slots = if listens { slots } else { 0 };
-            plan.transport.port_rx = (slots, link_bytes);
-            plan.put_table(
+            self.transport.port_rx = (slots, link_bytes);
+            self.put_table(
                 ["link port datagram flags", "link port datagram slots"],
                 "UDP_PORT_SLOTS",
                 slots,
@@ -1099,49 +1120,49 @@ impl ArenaPlan {
             // the datagrams sorted for them, a row for each slot a datagram holds while it waits
             // (`TransportRows::lent_from`).
             let peers = if listens { links } else { 0 };
-            plan.transport.port_peers = peers;
-            let peer_rows = plan.sized(Arena::table_bytes::<PortPeerRow>(peers));
-            plan.put(
+            self.transport.port_peers = peers;
+            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(peers));
+            self.put(
                 "udp port peers",
                 "MAX_FACES + MAX_ACCEPT_PENDING",
                 1,
                 peer_rows,
             );
-            let queue_rows = plan.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-            plan.put("udp port queue", "UDP_PORT_SLOTS", 1, queue_rows);
+            let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+            self.put("udp port queue", "UDP_PORT_SLOTS", 1, queue_rows);
         }
         // The round's tables (`crate::round::RoundRows::lent`).
-        plan.put(
+        self.put(
             "delivery records",
             "DELIVERY_LANE_EVENTS",
-            plan.session.round.records,
+            self.session.round.records,
             RECORD_BYTES,
         );
-        plan.put(
+        self.put(
             "delivery callbacks",
             "DELIVERY_LANE_CALLBACKS",
-            plan.session.round.callbacks,
+            self.session.round.callbacks,
             CALLBACK_BYTES,
         );
-        plan.put(
+        self.put(
             "delivery keys",
             "MAX_KEYEXPR_BYTES",
             1,
-            plan.session.round.key_bytes(),
+            self.session.round.key_bytes(),
         );
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
-        plan.put_table(
+        self.put_table(
             ["reassembly flags", "reassembly buffers"],
             "PICO_FRAG_MAX_BYTES",
-            plan.transport.reassembly_chains,
-            plan.transport.reassembly_bytes,
+            self.transport.reassembly_chains,
+            self.transport.reassembly_bytes,
         );
         // The publishes the session keeps for its other faces while a send holds it, each in a
         // place of a link's batch: a publish longer than one is dropped on every face, as one
         // that finds every place held is.
         #[cfg(any(feature = "listen", feature = "group"))]
         {
-            let bytes = plan.lent(
+            let bytes = self.lent(
                 "HANDED_LEG_BYTES",
                 Quota::at_most(limits.handed_leg_bytes()),
                 caps::HANDED_LEG_BYTES,
@@ -1157,30 +1178,30 @@ impl ArenaPlan {
             } else {
                 0
             };
-            plan.transport.handed_legs = legs;
-            plan.put_table(
+            self.transport.handed_legs = legs;
+            self.put_table(
                 ["handed leg flags", "handed leg places"],
                 "HANDED_LEG_BYTES",
                 legs,
                 link_bytes,
             );
-            let rows = plan.sized(Arena::table_bytes::<Handed>(legs));
-            plan.put("handed legs", "HANDED_LEG_BYTES", 1, rows);
+            let rows = self.sized(Arena::table_bytes::<Handed>(legs));
+            self.put("handed legs", "HANDED_LEG_BYTES", 1, rows);
         }
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
-        plan.session.entities = plan.kept(entity_rows(limits));
+        self.session.entities = self.kept(entity_rows(limits));
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
-        let watchers = plan.lent(
+        let watchers = self.lent(
             "MAX_DECL_OBSERVERS",
             limits.max_decl_observers(),
             caps::MAX_DECL_OBSERVERS,
         );
-        let watcher_bytes = plan.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
+        let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
             watchers,
         ));
-        plan.put(
+        self.put(
             "declaration watchers",
             "MAX_DECL_OBSERVERS",
             1,
@@ -1188,7 +1209,7 @@ impl ArenaPlan {
         );
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
-            plan.lent(
+            self.lent(
                 "MAX_PENDING_QUERIES",
                 limits.max_pending_queries(),
                 caps::MAX_PENDING_QUERIES,
@@ -1197,7 +1218,7 @@ impl ArenaPlan {
             0
         };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
-            plan.lent(
+            self.lent(
                 "MAX_PENDING_LIVELINESS_GETS",
                 limits.max_pending_liveliness_gets(),
                 caps::MAX_PENDING_LIVELINESS_GETS,
@@ -1205,8 +1226,8 @@ impl ArenaPlan {
         } else {
             0
         };
-        let tables = plan.sized(faces.checked_add(usize::from(cfg!(feature = "local-queryable"))));
-        plan.session.gets = GetTables {
+        let tables = self.sized(faces.checked_add(usize::from(cfg!(feature = "local-queryable"))));
+        self.session.gets = GetTables {
             rows: RequesterRows {
                 queries,
                 liveliness_gets,
@@ -1217,11 +1238,11 @@ impl ArenaPlan {
         // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
         #[cfg(feature = "query")]
         {
-            let get_bytes = plan.sized(FaceGets::arena_bytes(plan.session.gets.rows));
-            plan.put(
+            let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
+            self.put(
                 "pending gets",
                 "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
-                plan.session.gets.tables,
+                self.session.gets.tables,
                 get_bytes,
             );
         }
@@ -1230,20 +1251,20 @@ impl ArenaPlan {
         #[cfg(feature = "query")]
         {
             const BASIS: &str = "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS";
-            let legs = plan.sized(plan.session.gets.legs());
-            plan.put(
+            let legs = self.sized(self.session.gets.legs());
+            self.put(
                 "ended legs",
                 BASIS,
                 legs,
                 core::mem::size_of::<crate::engine::Ended>(),
             );
-            plan.put(
+            self.put(
                 "leg callbacks",
                 BASIS,
                 legs,
                 core::mem::size_of::<Option<crate::engine::LegRow>>(),
             );
-            plan.put(
+            self.put(
                 "pending legs",
                 BASIS,
                 legs,
@@ -1254,52 +1275,52 @@ impl ArenaPlan {
         // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
         #[cfg(feature = "query")]
         {
-            plan.session.held_replies = plan.lent(
+            self.session.held_replies = self.lent(
                 "MAX_PENDING_REPLIES",
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
-            plan.put(
+            self.put(
                 "held replies",
                 "MAX_PENDING_REPLIES",
-                plan.session.held_replies,
+                self.session.held_replies,
                 core::mem::size_of::<HeldReply<u64, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
-        plan.session.peers = FacePeers {
-            rows: plan.kept(peer_rows(limits)),
+        self.session.peers = FacePeers {
+            rows: self.kept(peer_rows(limits)),
             tables: faces,
-            pools: plan.kept(pool_rows(limits, faces)),
+            pools: self.kept(pool_rows(limits, faces)),
             dial: dials(config),
         };
         // The sets of face tables themselves, one for each face, in one table
         // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
-        plan.put(
+        self.put(
             "face tables",
             "MAX_FACES + 1",
-            plan.session.peers.sets(),
+            self.session.peers.sets(),
             FACE_SET_BYTES,
         );
         // Which face holds which set, a row for each set.
-        plan.put(
+        self.put(
             "held faces",
             "MAX_FACES + 1",
-            plan.session.peers.sets(),
+            self.session.peers.sets(),
             HELD_SET_BYTES,
         );
-        let peer_bytes = plan.sized(PeerTables::<Lent>::arena_bytes(plan.session.peers.rows));
-        plan.put(
+        let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
+        self.put(
             "peer tables",
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
-            plan.session.peers.tables,
+            self.session.peers.tables,
             peer_bytes,
         );
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
         if SHARES_ROWS {
-            let pools = plan.session.peers.pools;
+            let pools = self.session.peers.pools;
             for (part, kind, bytes) in [
                 ("peer alias pool", &ALIAS_LIMITS, pools.alias_bytes()),
                 ("peer declaration pools", &DECL_LIMITS, pools.decl_bytes()),
@@ -1309,25 +1330,25 @@ impl ArenaPlan {
                     pools.interest_bytes(),
                 ),
             ] {
-                let bytes = plan.sized(bytes);
-                plan.put(part, kind.session, 1, bytes);
+                let bytes = self.sized(bytes);
+                self.put(part, kind.session, 1, bytes);
             }
         }
         // The tokens the faces that went still owe, lent with the pools
         // (`engine::registry::Registry::new`).
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        if plan.session.peers.owed_tokens() > 0 {
-            plan.put(
+        if self.session.peers.owed_tokens() > 0 {
+            self.put(
                 "owed tokens",
                 "SESSION_MAX_REMOTE_DECLS",
-                plan.session.peers.owed_tokens(),
+                self.session.peers.owed_tokens(),
                 core::mem::size_of::<
                     wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
                 >(),
             );
         }
-        plan.session.held_queries = if cfg!(feature = "queryable") {
-            plan.lent(
+        self.session.held_queries = if cfg!(feature = "queryable") {
+            self.lent(
                 "MAX_PENDING_FINALS",
                 limits.max_pending_finals(),
                 caps::MAX_PENDING_FINALS,
@@ -1339,14 +1360,14 @@ impl ArenaPlan {
         // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`).
         #[cfg(feature = "queryable")]
         {
-            let held = plan.session.held_queries;
-            plan.put(
+            let held = self.session.held_queries;
+            self.put(
                 "held finals",
                 "MAX_PENDING_FINALS",
                 held,
                 core::mem::size_of::<crate::engine::FinalHold>(),
             );
-            plan.put(
+            self.put(
                 "refused finals",
                 "MAX_PENDING_FINALS",
                 held,
@@ -1355,23 +1376,22 @@ impl ArenaPlan {
         }
         #[cfg(feature = "advanced-cache")]
         {
-            plan.session.cache_bytes = plan.lent(
+            self.session.cache_bytes = self.lent(
                 "ADVANCED_CACHE_BYTES",
                 Quota::at_most(caps::ADVANCED_CACHE_BYTES),
                 caps::ADVANCED_CACHE_BYTES,
             );
-            if plan.session.cache_bytes != 0 {
-                plan.put_table(
+            if self.session.cache_bytes != 0 {
+                self.put_table(
                     ["cache ring flag", "cache ring"],
                     "ADVANCED_CACHE_BYTES",
                     1,
-                    plan.session.cache_bytes,
+                    self.session.cache_bytes,
                 );
             }
         }
-        plan.put_entities();
-        plan.settled()?;
-        Ok(plan)
+        self.put_entities();
+        self.settled()
     }
 
     /// The rows the session's transport lends its tables from.
@@ -2327,14 +2347,7 @@ mod tests {
     use super::*;
 
     fn empty_plan() -> ArenaPlan {
-        ArenaPlan {
-            rows: [None; ARENA_ROWS],
-            len: 0,
-            refused: None,
-            transport: TransportRows::default(),
-            session: SessionRows::default(),
-            places: PlaceRows::default(),
-        }
+        ArenaPlan::vacant()
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
