@@ -195,10 +195,12 @@ impl ConfigEntries {
         self.text.get(row.start as usize..)?.get(..row.len as usize)
     }
 
-    /// The value of `key`, without its terminator.
+    /// The value of `key`, without its terminator. Out of line: an open reads several keys, and
+    /// each read inlined carried the search of the rows of its own.
+    #[inline(never)]
     pub(crate) fn get(&self, key: u8) -> Option<&str> {
         let (_terminator, value) = self.stored(key)?.split_last()?;
-        core::str::from_utf8(value).ok()
+        crate::abi::text_of(value)
     }
 
     /// The value of `key` as the C string [`zp_config_get`] lends.

@@ -25,14 +25,14 @@
 //!   The ring that "consecutive" is judged on is the caller's ([`SnRing`]):
 //!   a reader that never saw the handshake passes none, and only a step of
 //!   plain `+1` — consecutive on every ring — is then admitted.
-//! - **The wire `more` bit — the FSM.** `more` is a real per-fragment
-//!   field (`fragment_chunk_schema.scxml`), so the slot FSM guards
-//!   Continue (`more != 0`, stay Receiving) vs Final (`more == 0`,
-//!   -> Complete) natively.
+//! - **The wire `more` bit — the event the Router raises.** An in-order
+//!   fragment with M set is `fragment.more` and one with M clear is
+//!   `fragment.last`, so the slot FSM splits Continue (stay Receiving) from
+//!   Final (-> Complete) by its transitions, and no slot event carries a
+//!   payload.
 //! - **Storage — the Router; staging — the slot machine's duties.** The
 //!   Router owns the arena ([`ChainStaging`]) and each slot's handle into
-//!   it, because the payload never flows through the FSM
-//!   (`fragment_chunk_schema.scxml` carries the `more` bit only). What the
+//!   it, because the payload never flows through the FSM. What the
 //!   Router does with them is decided by the machine: every
 //!   `<sce:action effect="duty">` of `reassembly_slot.scxml` is the one
 //!   cause of its effect (below).
@@ -109,10 +109,7 @@
 
 use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
-use crate::reassembly_slot::{
-    ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
-    ReassemblySlotInject, ReassemblySlotPolicy,
-};
+use crate::reassembly_slot::{ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotPolicy};
 use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
@@ -821,6 +818,22 @@ fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
     .unwrap_or_else(|never| match never {});
 }
 
+/// Post `event` to a slot machine, run the macrostep it starts, and drain the duties its
+/// transition ran (none when the current state does not answer it).
+///
+/// The one way into a slot machine after its start: every input a slot sends comes through here,
+/// so the machine's turn is compiled once for every Router type and every caller, as its start is
+/// in [`start_slot_engine`]. A second way in would carry a second copy of the turn. No slot event
+/// carries a payload (the chart's payload type is `()`): the wire `more` bit is which event is
+/// posted. The chart has no `<final>` state, so a started machine runs until it is dropped and no
+/// input meets a stopped one.
+#[inline(never)]
+fn turn_slot_engine(engine: &mut SlotEngine, event: ReassemblySlotEvent) -> u8 {
+    engine.raise_external_typed(event, ());
+    engine.step();
+    engine.policy().actions().take()
+}
+
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: ChainPeers>
     Slot<SLOTS, CAP, S, P>
 {
@@ -862,16 +875,13 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
     /// Send `event` to the slot engine and drain the duties its transition
     /// ran (none when the current state does not answer the event).
     fn drive(&mut self, event: ReassemblySlotEvent) -> u8 {
-        self.engine.process_event(event);
-        self.engine.policy().actions().take()
+        turn_slot_engine(&mut self.engine, event)
     }
 
-    /// Send a `fragment.chunk` carrying the wire `more` bit, which the
-    /// machine's guards split on, and drain the duties its transition ran.
+    /// Send an in-order fragment as the event its wire `more` bit names and drain the duties its
+    /// transition ran.
     fn drive_chunk(&mut self, more: u8) -> u8 {
-        self.engine.raise_fragment_chunk(chunk_event(more));
-        self.engine.step();
-        self.engine.policy().actions().take()
+        self.drive(chunk_event(more))
     }
 
     /// Raise `slot.release` and perform `reset_slot` if the machine ran it:
@@ -918,13 +928,39 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
         }
     }
 
-    /// [`Self::release`] from a state the chart makes terminal, and
-    /// [`Self::replace`] if the machine was not in one after all.
-    fn release_or_replace(&mut self, staging: &mut S) {
-        if !self.release(staging) {
+    /// Take the slot out of service as `ending` says, the chain's staging back to the arena
+    /// whichever way: reset in place when the machine reaches a terminal state and answers
+    /// `slot.release` there ([`Self::release`]), replaced ([`Self::replace`]) when it does not.
+    ///
+    /// The one way a slot leaves service, out of line: a delivery, a refused stage, an abort and
+    /// a sweep all end a chain, and each that held the release and the replacement inline carried
+    /// its own copy of both. The machine's turn stays behind [`turn_slot_engine`], so this adds
+    /// no copy of it.
+    #[inline(never)]
+    fn end(&mut self, staging: &mut S, ending: SlotEnding) {
+        let released = match ending {
+            SlotEnding::Release => self.release(staging),
+            SlotEnding::Abort(event) => {
+                self.drive(event) & duty::ABORT != 0 && self.release(staging)
+            }
+            SlotEnding::Replace => false,
+        };
+        if !released {
             self.replace(staging);
         }
     }
+}
+
+/// How a slot gives up the chain it holds ([`Slot::end`]).
+#[derive(Clone, Copy, Debug)]
+enum SlotEnding {
+    /// The chain is done with where it stands (delivered, timed out, or refused by the arena at
+    /// its last stage): `slot.release`, which only a terminal state answers.
+    Release,
+    /// The chain is ended by this abort arm of the machine, then released.
+    Abort(ReassemblySlotEvent),
+    /// The machine and the Router disagree about the slot: it gets a fresh machine.
+    Replace,
 }
 
 pub use crate::chain_loss::ChainLoss;
@@ -1248,36 +1284,24 @@ where
         }
     }
 
-    /// The `finalize_message` duty: stage the final payload onto the chain in
-    /// `idx`, hand the completed chain to `deliver` and raise `slot.release`,
-    /// whose `reset_slot` reclaims the slot.
+    /// The `finalize_message` duty, the final payload staged: hand the completed chain in `idx`
+    /// to `deliver` and raise `slot.release`, whose `reset_slot` reclaims the slot.
     ///
     /// Lent or kept when `hand` asks it and the arena can: the Router slot is
     /// released first (the chain's staging is no longer the Router's), then the
     /// bytes are delivered. Otherwise borrowed: delivered while the staging is
     /// still held, and released after, which is the only order a borrow allows.
-    ///
-    /// An arena that refuses the final payload ends the chain undelivered as
-    /// [`AbortReason::CapacityOverflow`]; the release is raised all the same,
-    /// since the machine is already in `Complete`.
     fn finish<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         idx: usize,
-        sn: u64,
-        payload: &[u8],
         hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
-        let staged = self.stage(idx, sn, payload);
         let Self { slots, staging, .. } = self;
         let Some(slot) = slots.get_mut(idx) else {
             // No slot holds the chain, so none is delivered and none released.
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         };
-        if !staged {
-            slot.release_or_replace(staging);
-            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
-        }
         let taken = if hand == Hand::Borrow {
             None
         } else {
@@ -1299,7 +1323,7 @@ where
         };
         let released_first = handed_up.is_some();
         if released_first {
-            slot.release_or_replace(staging);
+            slot.end(staging, SlotEnding::Release);
         }
         // One call of `deliver` for both hands, so the delivery is compiled in here once.
         let bytes = handed_up.or_else(|| {
@@ -1311,7 +1335,7 @@ where
             deliver(bytes);
         }
         if !released_first {
-            slot.release_or_replace(staging);
+            slot.end(staging, SlotEnding::Release);
             if let Some(chain) = held {
                 staging.release(chain);
             }
@@ -1417,7 +1441,7 @@ where
     /// [`Self::displaced_by_last_ingest`], since the ingest's own outcome is
     /// the fragment's.
     fn evict(&mut self, idx: usize, why: DisplacedChain) {
-        self.end_chain(idx, ReassemblySlotEvent::SlotEvict);
+        self.end_slot(idx, SlotEnding::Abort(ReassemblySlotEvent::SlotEvict));
         self.displaced = Some(why);
     }
 
@@ -1504,7 +1528,7 @@ where
             // `record_timeout` is a notice and posts no duty; the release
             // below is the sweep's own act on its own clock.
             slot.drive(ReassemblySlotEvent::ReassemblyTimeout);
-            slot.release_or_replace(staging);
+            slot.end(staging, SlotEnding::Release);
             released(reliable, priority);
             loss.bytes = loss.bytes.saturating_add(staged);
             loss.chains = loss.chains.saturating_add(1);
@@ -1708,9 +1732,9 @@ where
         hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
-        // `Empty --fragment.chunk--> { Receiving | Complete }` for a first fragment and
-        // `Receiving --fragment.chunk--> { Receiving | Complete }` for a continuation, the slot
-        // FSM's `more` guard deciding. A well-formed chain's first fragment has M=1 (a
+        // `Empty --fragment.more/last--> { Receiving | Complete }` for a first fragment and
+        // `Receiving --fragment.more/last--> { Receiving | Complete }` for a continuation, the
+        // wire `more` bit naming the event. A well-formed chain's first fragment has M=1 (a
         // single-fragment message rides T_MID_FRAME, not T_MID_FRAGMENT) and lands in
         // Receiving -> Begun. A lone M=0 first fragment — stranded when a duplicate mid-chain
         // fragment trips the channel SN gate ([`Self::abort_channel`] clears the chain) and the
@@ -1738,10 +1762,7 @@ where
             duties & (duty::APPEND | duty::FINALIZE) == 0
         };
         if disagrees {
-            let Self { slots, staging, .. } = self;
-            if let Some(slot) = slots.get_mut(idx) {
-                slot.replace(staging);
-            }
+            self.end_slot(idx, SlotEnding::Replace);
             return if starts {
                 IngestOutcome::Refused(RefuseReason::PoolExhausted)
             } else {
@@ -1751,29 +1772,35 @@ where
         if starts {
             self.opened = P::after(self.opened);
         }
-        // A continuation stages its payload when its transition appended it, which it does
-        // before finalizing; a first fragment does unless the same transition finalized the
-        // chain, whose `finalize_message` stages the one payload it has.
-        let stages = if starts {
-            !finalizes
+        // Whether the chunk completed the message. A continuation whose transition appended its
+        // payload did not, whatever else the transition posted, as the machine appends before it
+        // finalizes; a first fragment did when the same transition finalized the chain.
+        let completes = if starts {
+            finalizes
         } else {
-            duties & duty::APPEND != 0
+            duties & duty::APPEND == 0
         };
-        if stages {
-            if !self.stage(idx, frag.sn, frag.payload) {
-                return self.abort(
-                    idx,
-                    ReassemblySlotEvent::CodecError,
-                    AbortReason::CapacityOverflow,
-                );
-            }
+        // Each chunk the machine took stages its payload once, by whichever of `begin_chain`,
+        // `append_fragment_payload` and `finalize_message` its transition ran.
+        if !self.stage(idx, frag.sn, frag.payload) {
+            // A completed chain's machine is in `Complete`, where no abort arm is left, and is
+            // released there; one still receiving is ended through its codec-error arm.
+            let ending = if completes {
+                SlotEnding::Release
+            } else {
+                SlotEnding::Abort(ReassemblySlotEvent::CodecError)
+            };
+            self.end_slot(idx, ending);
+            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
+        }
+        if !completes {
             return if starts {
                 IngestOutcome::Begun
             } else {
                 IngestOutcome::Continued
             };
         }
-        self.finish(idx, frag.sn, frag.payload, hand, deliver)
+        self.finish(idx, hand, deliver)
     }
 
     /// Send the open chain in `idx` an abort `event` and report it ended for
@@ -1784,24 +1811,18 @@ where
         event: ReassemblySlotEvent,
         reason: AbortReason,
     ) -> IngestOutcome {
-        self.end_chain(idx, event);
+        self.end_slot(idx, SlotEnding::Abort(event));
         IngestOutcome::Aborted(reason)
     }
 
-    /// Send the open chain in `idx` an abort `event` and perform the abort
-    /// duty its arm runs: raise `slot.release`, whose `reset_slot` reclaims
-    /// the slot. A machine that does not take the arm, or does not reset after
-    /// it, is replaced, so the chain the Router ended is ended either way.
-    fn end_chain(&mut self, idx: usize, event: ReassemblySlotEvent) {
+    /// End the chain in `idx` as `ending` says ([`Slot::end`]). An abort arm the machine does
+    /// not take, or a release it does not answer, replaces it, so the chain the Router ended is
+    /// ended either way.
+    fn end_slot(&mut self, idx: usize, ending: SlotEnding) {
         let Self { slots, staging, .. } = self;
         // No slot in `idx` holds no chain to end.
-        let Some(slot) = slots.get_mut(idx) else {
-            return;
-        };
-        if slot.drive(event) & duty::ABORT != 0 {
-            slot.release_or_replace(staging);
-        } else {
-            slot.replace(staging);
+        if let Some(slot) = slots.get_mut(idx) {
+            slot.end(staging, ending);
         }
     }
 
@@ -1857,15 +1878,16 @@ where
     }
 }
 
-/// Build the typed `fragment.chunk` event. The slot FSM's only guard
-/// reads `more`, and the body never flows through the FSM (the Router
-/// stages it through the slot's arena handle), so the event carries just the
-/// wire M bit. R311in removed the schema's former `payload: bytes
-/// max-size 1472` field — it inlined a 1472-byte buffer into every queued
-/// event (x the per-slot queue depth x N slots) and was the no_std
-/// MCU-footprint blocker; the body was never read through the FSM.
-fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
-    ReassemblySlotFragmentChunkPayload { more }
+/// The event an in-order fragment is sent to its slot as: `fragment.more` when its wire M bit is
+/// set, `fragment.last` when it is clear. The body never flows through the FSM (the Router stages
+/// it through the slot's arena handle), so the M bit is all the machine is told, and it is told
+/// as the event.
+fn chunk_event(more: u8) -> ReassemblySlotEvent {
+    if more != 0 {
+        ReassemblySlotEvent::FragmentMore
+    } else {
+        ReassemblySlotEvent::FragmentLast
+    }
 }
 
 /// Run one reassembly deadline sweep and report the eviction count.
@@ -2948,6 +2970,46 @@ mod duty_tests {
         assert_eq!(state(&slot), State::Receiving);
     }
 
+    /// Each way a slot leaves service ends where a slot never used starts: the machine at `Empty`
+    /// with nothing posted, no chain held, and the chain's staging back in the arena. An abort
+    /// the machine takes and a release from `Complete` reset it in place; a release it does not
+    /// answer, an abort arm it does not have and a replacement start it again.
+    #[test]
+    fn every_ending_of_a_slot_frees_it_and_its_staging() {
+        let mut staging = <HeapStaging<1, 64> as BuildsOwnStorage<1, 64>>::new();
+        // A slot whose machine took a first chunk (`more`), holding the chain it began.
+        let opened = |staging: &mut HeapStaging<1, 64>, more: u8| {
+            let mut slot = TestSlot::new();
+            let chain = staging.acquire().expect("the arena holds one buffer");
+            slot.open = Some(OpenChain {
+                key: ChainKey::new(PEER, true, Priority::DEFAULT),
+                last_sn: 0,
+                deadline_ms: 0,
+                opened: 0,
+                chain,
+            });
+            chunk(&mut slot, more);
+            assert_eq!(staging.available(), 0);
+            slot
+        };
+        let cases = [
+            (1, SlotEnding::Abort(Event::FragmentOoo), State::Receiving),
+            (0, SlotEnding::Release, State::Complete),
+            (1, SlotEnding::Release, State::Receiving),
+            (0, SlotEnding::Abort(Event::CodecError), State::Complete),
+            (1, SlotEnding::Replace, State::Receiving),
+        ];
+        for (more, ending, before) in cases {
+            let mut slot = opened(&mut staging, more);
+            assert_eq!(state(&slot), before, "{ending:?}");
+            slot.end(&mut staging, ending);
+            assert_eq!(state(&slot), State::Empty, "{ending:?} from {before:?}");
+            assert_eq!(slot.engine.policy().actions().pending(), 0, "{ending:?}");
+            assert!(slot.is_free(), "{ending:?}");
+            assert_eq!(staging.available(), 1, "{ending:?} gave the staging back");
+        }
+    }
+
     /// Every transition of `reassembly_slot.scxml` posts exactly the duties of
     /// the actions it names, and a state that does not answer an event posts
     /// nothing. This is the binding checked against the machine, transition
@@ -2998,6 +3060,75 @@ mod duty_tests {
             "Empty has no release"
         );
         assert_eq!(state(&slot), State::Empty);
+    }
+
+    /// The wire `more` bit is the event a fragment is sent as, `fragment.more` for a set bit of
+    /// any value and `fragment.last` for a clear one, and the one way into a slot machine posts
+    /// it with no payload. From `Empty` a set bit begins a chain and a clear one begins and
+    /// finalizes it; from `Receiving` a set bit appends and a clear one finalizes; `Complete`
+    /// answers neither. Each turn leaves the outbox drained.
+    #[test]
+    fn the_more_bit_is_the_event_a_fragment_is_sent_as() {
+        assert_eq!(chunk_event(1), Event::FragmentMore);
+        assert_eq!(chunk_event(0x80), Event::FragmentMore);
+        assert_eq!(chunk_event(0), Event::FragmentLast);
+        assert_eq!(
+            core::mem::size_of::<
+                <ReassemblySlotPolicy<SlotBinding> as sce_rust_runtime::StatePolicy>::Payload,
+            >(),
+            0,
+            "no slot event carries a payload"
+        );
+
+        let mut slot = TestSlot::new();
+        let last = turn_slot_engine(&mut slot.engine, Event::FragmentLast);
+        assert_eq!(last, duty::BEGIN | duty::FINALIZE, "a lone last fragment");
+        assert_eq!(state(&slot), State::Complete);
+        for event in [Event::FragmentMore, Event::FragmentLast] {
+            assert_eq!(
+                turn_slot_engine(&mut slot.engine, event),
+                0,
+                "{event:?} in Complete"
+            );
+            assert_eq!(state(&slot), State::Complete, "{event:?}");
+        }
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
+            duty::RESET
+        );
+
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentMore),
+            duty::BEGIN
+        );
+        assert_eq!(state(&slot), State::Receiving);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentMore),
+            duty::APPEND
+        );
+        assert_eq!(state(&slot), State::Receiving);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentLast),
+            duty::FINALIZE
+        );
+        assert_eq!(state(&slot), State::Complete);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
+            duty::RESET
+        );
+
+        let timeout = {
+            assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+            turn_slot_engine(&mut slot.engine, Event::ReassemblyTimeout)
+        };
+        assert_eq!(timeout, 0, "the timeout's action is a notice");
+        assert_eq!(state(&slot), State::TimedOut);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
+            duty::RESET
+        );
+        assert_eq!(state(&slot), State::Empty);
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
     }
 
     /// No ingest path, and neither the channel abort nor the sweep, leaves a
@@ -3512,7 +3643,7 @@ mod chain_boundary_marker_tests {
     /// to `Aborted` therefore stays parked in `Receiving` while the
     /// Router-side key reads free — a desynchronised engine that every
     /// behavioural assertion still passes, because `Receiving` and `Empty`
-    /// both accept a `fragment.chunk` and both complete on `more == 0`.
+    /// both accept a `fragment.more` and both complete on a `fragment.last`.
     /// A measured damage probe confirmed it: deleting the
     /// `process_event(FragmentDrop)` line left the whole suite green until
     /// this assertion was added.

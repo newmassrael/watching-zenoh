@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 79216c735dd86dd9532118d0c98574f76585ec6be4ef85b635858df72ac15262
+// source-hash: 4507e63c6181ac6af80d86ec5b78e3264c9b5b6635c6fbfbcc9c477e334ac073
 // source: reassembly_slot.scxml
 
 
@@ -72,7 +72,7 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: reassembly_slot.scxml:93 :: _machine
+// SCE-MAP: reassembly_slot.scxml:94 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
@@ -118,14 +118,15 @@ pub enum ReassemblySlotState {
 #[repr(u16)]
 pub enum ReassemblySlotEvent {
     CodecError = 0,
-    FragmentChunk = 1,
-    FragmentDrop = 2,
-    FragmentOoo = 3,
-    ReassemblyTimeout = 4,
-    SlotEvict = 5,
-    SlotRelease = 6,
+    FragmentDrop = 1,
+    FragmentLast = 2,
+    FragmentMore = 3,
+    FragmentOoo = 4,
+    ReassemblyTimeout = 5,
+    SlotEvict = 6,
+    SlotRelease = 7,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null = 7,
+    Null = 8,
 }
 
 // ======================================================================
@@ -217,7 +218,7 @@ pub const REASSEMBLY_SLOT_TABLES: ::sce_rust_runtime::DocumentTables<'static> = 
         targets: &[],
         initial: TransitionId(12),
         default_state: ::sce_rust_runtime::StateId(ReassemblySlotState::Empty as u16),
-        null_event: ::sce_rust_runtime::EventId(7),
+        null_event: ::sce_rust_runtime::EventId(8),
         error_events: &[],
         history: None,
         parallel: None,
@@ -242,44 +243,14 @@ impl ReassemblySlotEvent {
     /// on the name.
     pub const EXTERNALLY_DRIVABLE_EVENTS: &'static [ReassemblySlotEvent] = &[
         ReassemblySlotEvent::CodecError,
-        ReassemblySlotEvent::FragmentChunk,
         ReassemblySlotEvent::FragmentDrop,
+        ReassemblySlotEvent::FragmentLast,
+        ReassemblySlotEvent::FragmentMore,
         ReassemblySlotEvent::FragmentOoo,
         ReassemblySlotEvent::ReassemblyTimeout,
         ReassemblySlotEvent::SlotEvict,
         ReassemblySlotEvent::SlotRelease,
     ];
-}
-
-// ── NL→IR Item C1 Path A: EventSchema typed `_event.data` payload ──
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ReassemblySlotFragmentChunkPayload {
-    pub more: u8,
-}
-
-/// NL→IR Item C1 Path A: typed `_event.data` payload sum for the EventSchema-imported events whose transition guards lowered natively.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum ReassemblySlotPayload {
-    /// Schemaless / not-yet-populated default (W3C §5.10 empty `_event.data`).
-    #[default]
-    None,
-    FragmentChunk(ReassemblySlotFragmentChunkPayload),
-}
-
-/// NL→IR Item C1 Path A: per-event typed `_event.data` inject seam.
-/// Bring into scope with `use …::ReassemblySlotInject;` to call the
-/// `raise_<event>` methods on the engine.
-pub trait ReassemblySlotInject {
-    /// Typed `_event.data` inject for `fragment.chunk`.
-    /// Binds the event name and payload variant in one call (name↔type
-    /// pairing cannot be constructed inconsistently).
-    fn raise_fragment_chunk(&mut self, payload: ReassemblySlotFragmentChunkPayload);
-}
-
-impl<A: ReassemblySlotActions + 'static> ReassemblySlotInject for ::sce_rust_runtime::Engine<ReassemblySlotPolicy<A>> {
-    fn raise_fragment_chunk(&mut self, payload: ReassemblySlotFragmentChunkPayload) {
-        self.raise_external_typed(ReassemblySlotEvent::FragmentChunk, ReassemblySlotPayload::FragmentChunk(payload));
-    }
 }
 
 // ── W3C SCXML G.7: <sce:action> host-dispatch trait ──
@@ -308,10 +279,6 @@ pub struct ReassemblySlotPolicy<A: ReassemblySlotActions + 'static> {
     // The generated machine dispatches each native action through this field
     // (`self.actions.<op>(…)`) instead of a runtime script engine.
     actions: A,
-    // NL→IR Item C1 Path A: typed `_event.data` payload for the current
-    // event, stored by `populate_event_payload` and read by native
-    // transition guards (`matches!(&self.pending_payload, …)`).
-    pending_payload: ReassemblySlotPayload,
     // W3C SCXML 5.10: the session's id, bound when the machine is built and
     // never empty (docs/adr/0045). SCE Protocol-Synthesis RFC §synth-5-J-2:
     // under `--no-std` it is the text the host gave, held rather than copied,
@@ -320,10 +287,9 @@ pub struct ReassemblySlotPolicy<A: ReassemblySlotActions + 'static> {
 }
 
 impl<A: ReassemblySlotActions + 'static> ReassemblySlotPolicy<A> {
-    fn build(session_id: &'static str, actions: A) -> Self {
+    const fn build(session_id: &'static str, actions: A) -> Self {
         Self {
             actions,
-            pending_payload: ReassemblySlotPayload::default(),
             session_id,
         }
     }
@@ -390,6 +356,28 @@ impl<A: ReassemblySlotActions + 'static> ReassemblySlotPolicy<A> {
         Self::build(session_id.as_str(), actions)
     }
 
+    /// [`new_with_session_id`](Self::new_with_session_id), in a constant
+    /// expression: the machine a program keeps in a `static`, with
+    /// `Engine::new_const`, so that nothing is built at start-up and no copy of
+    /// it is made on a stack.
+    /// A host whose `REALIZATION` is `Simulates` does not compile here.
+    ///
+    /// # Panics
+    ///
+    /// At compile time, when the id is not an XML Nmtoken (the empty text, a
+    /// space, a `#`): a `static` holding such an id does not build. The reason
+    /// is the one `new_with_session_id` gives for the same id.
+    pub const fn new_const(session_id: &'static str, actions: A) -> Self {
+        let () = Self::HOST_PERFORMS_DUTIES;
+        Self::build(::sce_rust_runtime::helpers::session_id::SessionId::new(session_id).as_str(), actions)
+    }
+
+    /// [`new_const`](Self::new_const) with a host that only simulates its duties
+    /// — a recorder, a test double — as the caller's statement that it means to.
+    pub const fn new_simulated_const(session_id: &'static str, actions: A) -> Self {
+        Self::build(::sce_rust_runtime::helpers::session_id::SessionId::new(session_id).as_str(), actions)
+    }
+
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched
     /// to — read back, e.g. a recording host's calls, since the machine owns it.
     pub fn actions(&self) -> &A {
@@ -415,7 +403,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // EventSchema native lowering: `()` = schemaless (dynamic
     // `_event.data` baseline); a `<Machine>Payload` sum is emitted when a
     // transition guard reads a typed `_event.data.<field>` (NL→IR C1 Path A).
-    type Payload = ReassemblySlotPayload;
+    type Payload = ();
     // SCE Protocol-Synthesis RFC §synth-5-J-2: under no_std the std-backed `StdHal`
     // (`std::time::Instant` / `OnceLock`) does not implement `Hal`. The
     // generated machine defaults to `NoOpHal` so the no_std surface compiles
@@ -483,8 +471,9 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     const HISTORIES: &'static [Self::History] = &[];
     const EVENTS: &'static [Self::Event] = &[
         ReassemblySlotEvent::CodecError,
-        ReassemblySlotEvent::FragmentChunk,
         ReassemblySlotEvent::FragmentDrop,
+        ReassemblySlotEvent::FragmentLast,
+        ReassemblySlotEvent::FragmentMore,
         ReassemblySlotEvent::FragmentOoo,
         ReassemblySlotEvent::ReassemblyTimeout,
         ReassemblySlotEvent::SlotEvict,
@@ -558,8 +547,9 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
             ReassemblySlotEvent::CodecError => "codec.error",
-            ReassemblySlotEvent::FragmentChunk => "fragment.chunk",
             ReassemblySlotEvent::FragmentDrop => "fragment.drop",
+            ReassemblySlotEvent::FragmentLast => "fragment.last",
+            ReassemblySlotEvent::FragmentMore => "fragment.more",
             ReassemblySlotEvent::FragmentOoo => "fragment.ooo",
             ReassemblySlotEvent::ReassemblyTimeout => "reassembly.timeout",
             ReassemblySlotEvent::SlotEvict => "slot.evict",
@@ -571,8 +561,9 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     fn get_event_from_name(name: &str) -> Option<Self::Event> {
         match name {
             "codec.error" => Some(ReassemblySlotEvent::CodecError),
-            "fragment.chunk" => Some(ReassemblySlotEvent::FragmentChunk),
             "fragment.drop" => Some(ReassemblySlotEvent::FragmentDrop),
+            "fragment.last" => Some(ReassemblySlotEvent::FragmentLast),
+            "fragment.more" => Some(ReassemblySlotEvent::FragmentMore),
             "fragment.ooo" => Some(ReassemblySlotEvent::FragmentOoo),
             "reassembly.timeout" => Some(ReassemblySlotEvent::ReassemblyTimeout),
             "slot.evict" => Some(ReassemblySlotEvent::SlotEvict),
@@ -609,14 +600,6 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         ReassemblySlotEvent::Null
     }
 
-    // NL→IR Item C1 Path A: store the current event's typed `_event.data`
-    // payload so native transition guards can read it without a script
-    // engine. Called by the engine's pop loop for every dequeued event;
-    // events injected without a typed payload carry the `#[default] None`
-    // variant, against which the variant-specific guards simply fail.
-    fn populate_event_payload(&mut self, payload: &Self::Payload) {
-        self.pending_payload = payload.clone();
-    }
 
     // ======================================================================
     // Instance methods - generated executable content
@@ -625,8 +608,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:93 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
@@ -637,8 +620,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:93 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -660,8 +643,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
     // the ordered set. `Event::Null` asks for eventless transitions.
-    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:93 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: Self::State,
@@ -688,14 +671,14 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 None
             }
             ReassemblySlotState::Empty => {
-                if event == ReassemblySlotEvent::FragmentChunk {
-                    if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more != 0) {
+                if event == ReassemblySlotEvent::FragmentMore {
+                    {
                         // Empty, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentChunk {
-                    if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more == 0) {
+                if event == ReassemblySlotEvent::FragmentLast {
+                    {
                         // Empty, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
@@ -703,14 +686,14 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 None
             }
             ReassemblySlotState::Receiving => {
-                if event == ReassemblySlotEvent::FragmentChunk {
-                    if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more != 0) {
+                if event == ReassemblySlotEvent::FragmentMore {
+                    {
                         // Receiving, transition 0
                         return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentChunk {
-                    if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more == 0) {
+                if event == ReassemblySlotEvent::FragmentLast {
+                    {
                         // Receiving, transition 1
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
@@ -763,8 +746,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
-    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:93 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
@@ -773,7 +756,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         match transition.0 {
             // Aborted, transition 0
             11 => {
-                // SCE-MAP: reassembly_slot.scxml:182 :: Aborted :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:183 :: Aborted :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -784,7 +767,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Complete, transition 0
             9 => {
-                // SCE-MAP: reassembly_slot.scxml:167 :: Complete :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:168 :: Complete :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -820,7 +803,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 0
             2 => {
-                // SCE-MAP: reassembly_slot.scxml:141 :: Receiving :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:142 :: Receiving :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -831,7 +814,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 1
             3 => {
-                // SCE-MAP: reassembly_slot.scxml:144 :: Receiving :: _transition_1
+                // SCE-MAP: reassembly_slot.scxml:145 :: Receiving :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -842,7 +825,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 2
             4 => {
-                // SCE-MAP: reassembly_slot.scxml:147 :: Receiving :: _transition_2
+                // SCE-MAP: reassembly_slot.scxml:148 :: Receiving :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -853,7 +836,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 3
             5 => {
-                // SCE-MAP: reassembly_slot.scxml:150 :: Receiving :: _transition_3
+                // SCE-MAP: reassembly_slot.scxml:151 :: Receiving :: _transition_3
                 // W3C SCXML 3.13: Transition 3 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -864,7 +847,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 4
             6 => {
-                // SCE-MAP: reassembly_slot.scxml:153 :: Receiving :: _transition_4
+                // SCE-MAP: reassembly_slot.scxml:154 :: Receiving :: _transition_4
                 // W3C SCXML 3.13: Transition 4 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -875,7 +858,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 5
             7 => {
-                // SCE-MAP: reassembly_slot.scxml:156 :: Receiving :: _transition_5
+                // SCE-MAP: reassembly_slot.scxml:157 :: Receiving :: _transition_5
                 // W3C SCXML 3.13: Transition 5 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -886,7 +869,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 6
             8 => {
-                // SCE-MAP: reassembly_slot.scxml:159 :: Receiving :: _transition_6
+                // SCE-MAP: reassembly_slot.scxml:160 :: Receiving :: _transition_6
                 // W3C SCXML 3.13: Transition 6 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -897,7 +880,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // TimedOut, transition 0
             10 => {
-                // SCE-MAP: reassembly_slot.scxml:174 :: TimedOut :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:175 :: TimedOut :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {

@@ -53,7 +53,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
-use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
@@ -176,7 +176,9 @@ pub(crate) struct SampleMarshal {
     /// which reads the Rust `keyexpr` field below.
     _pico_keyexpr: [u8; PICO_SAMPLE_PAYLOAD_OFFSET],
     /// pico `_z_sample_t.payload` — a BORROWED view of `payload` below, bound by
-    /// [`SampleMarshal::bind`] once the marshal is at its final address.
+    /// [`SampleMarshal::bind`] once the marshal is at its final address. It is also the loaned
+    /// payload `z_sample_payload` hands out, as pico's is `&sample->payload`: one view, which a
+    /// program that copies it, as a field or through the accessor, holds as a borrow.
     pico_payload: z_owned_bytes_t,
     keyexpr: KeyText,
     payload: ByteBuf,
@@ -210,7 +212,6 @@ pub(crate) struct SampleMarshal {
     /// accessor returns a pointer, and a stack temporary would dangle.
     source_info: Option<z_source_info_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
-    loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
     loaned_encoding: crate::encoding::z_loaned_encoding_t,
 }
@@ -257,9 +258,12 @@ impl SampleMarshal {
     /// is kept past the call is copied when it is kept: a clone of the payload ([`ByteBuf`]) and
     /// an owned sample ([`Self::deep_copy`]). Its cached views are unbound, as [`Self::new`]'s.
     ///
+    /// Nothing it holds is its own, so it is handed back not to be dropped: a delivery lets it go
+    /// without running the drop of a key, a payload, an attachment and an encoding that own none.
+    ///
     /// # Safety
-    /// The marshal is dropped before the borrow of `view` ends.
-    pub(crate) unsafe fn lent(view: &dyn SampleView) -> Self {
+    /// The marshal is let go before the borrow of `view` ends.
+    pub(crate) unsafe fn lent(view: &dyn SampleView) -> core::mem::ManuallyDrop<Self> {
         let mut marshal = Self::keyed(
             KeyText::Lent(view.keyexpr() as *const str),
             ByteBuf::lent(view.payload()),
@@ -268,7 +272,7 @@ impl SampleMarshal {
         if let Some(attachment) = view.attachment() {
             marshal.attachment = Some(ByteBuf::lent(attachment));
         }
-        marshal.with_metadata(view)
+        core::mem::ManuallyDrop::new(marshal.with_metadata(view))
     }
 
     /// [`Self::new`] for a key held as `keyexpr`.
@@ -286,10 +290,6 @@ impl SampleMarshal {
             reliability: Reliability::default(),
             source_info: None,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            loaned_payload: z_loaned_bytes_t {
-                handle: core::ptr::null_mut(),
-                _pad: [core::ptr::null_mut(); 3],
-            },
             loaned_attachment: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
@@ -365,18 +365,24 @@ impl SampleMarshal {
     pub(crate) fn bind(&mut self) {
         let keyexpr = self.keyexpr.as_str();
         self.loaned_keyexpr = z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
-        self.loaned_payload.handle = &self.payload as *const ByteBuf as *mut c_void;
         // The pico-layout slot binds here for the same reason the cached views
         // do: it points into THIS marshal, so it can only be written once the
         // value has stopped moving.
         self.pico_payload = z_owned_bytes_t::borrowed(&self.payload as *const ByteBuf as *const _);
-        if let Some(attachment) = self.attachment.as_ref() {
-            self.loaned_attachment.handle = attachment as *const ByteBuf as *mut c_void;
-        }
-        if let Some(encoding) = self.encoding.as_ref() {
-            self.loaned_encoding.handle =
-                encoding as *const crate::encoding::EncodingState as *mut c_void;
-        }
+        // Written whether or not there is one: a copy's views are its original's until this runs
+        // (`Self::write_copy`), and the accessors read the field, not the view, for none.
+        self.loaned_attachment.handle = self
+            .attachment
+            .as_ref()
+            .map_or(core::ptr::null_mut(), |attachment| {
+                attachment as *const ByteBuf as *mut c_void
+            });
+        self.loaned_encoding.handle = self
+            .encoding
+            .as_ref()
+            .map_or(core::ptr::null_mut(), |encoding| {
+                encoding as *const crate::encoding::EncodingState as *mut c_void
+            });
     }
 
     /// This marshal viewed as the borrowed `z_loaned_sample_t` the C side gets.
@@ -388,14 +394,19 @@ impl SampleMarshal {
     /// callback with.
     ///
     /// Every owned field is duplicated — including the encoding, whose schema
-    /// the copy keeps in a slot of its own of the pool of encodings, since the
-    /// message the original reads it from may be gone before the copy is. The cached loaned views
-    /// are deliberately left UNBOUND: they point at the copy's own fields, so
-    /// they can only be set once the copy has reached its final address, which
-    /// is [`Self::bind`]'s whole contract.
+    /// the copy keeps in a block of its own, since the message the original reads
+    /// it from may be gone before the copy is. The cached loaned views still read
+    /// the original: they point at the copy's own fields only once the copy has
+    /// reached its final address and [`Self::bind`] has run, which is its whole contract.
     #[cfg(any(feature = "query", test))]
     pub(crate) fn deep_copy(&self) -> Result<Self, NoRoom> {
-        self.kept_parts().map(|parts| self.copy_with(parts))
+        let parts = self.kept_parts()?;
+        let mut copy = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: `copy` is room for a marshal that holds none, and `write_copy` writes it whole.
+        unsafe {
+            self.write_copy(parts, copy.as_mut_ptr());
+            Ok(copy.assume_init())
+        }
     }
 
     /// What a copy of this marshal owns apart from it and can be refused room for: its payload,
@@ -418,42 +429,30 @@ impl SampleMarshal {
         })
     }
 
-    /// The copy of this marshal that owns `parts`, unbound ([`Self::deep_copy`]). Inlined into
-    /// its caller so the copy is made where the caller puts it: a sample taken from its callback is
-    /// written straight into its place rather than made on the stack and moved there.
-    #[inline(always)]
-    fn copy_with(&self, parts: KeptParts) -> Self {
+    /// Write at `at` the copy of this marshal that owns `parts` and a key of its own, its views
+    /// unbound ([`Self::deep_copy`]). The copy is this marshal's bytes with the four fields it
+    /// owns written over them: every other field is a plain value, the same in both, and every
+    /// view is written again by [`Self::bind`]. One copy of the whole and four writes, rather
+    /// than each field written apart.
+    ///
+    /// # Safety
+    /// `at` is valid for the write of a marshal and holds none, so nothing there is dropped.
+    unsafe fn write_copy(&self, parts: KeptParts, at: *mut Self) {
+        let keyexpr = KeyText::Owned(self.keyexpr.as_str().to_owned());
         let KeptParts {
             payload,
             attachment,
             encoding,
         } = parts;
-        Self {
-            _pico_keyexpr: [0u8; PICO_SAMPLE_PAYLOAD_OFFSET],
-            // Left UNBOUND for the same reason the cached views below are: it
-            // borrows the COPY's `payload`, an address that does not exist until
-            // the copy has landed and `bind` runs.
-            pico_payload: z_owned_bytes_t::null_value(),
-            keyexpr: KeyText::Owned(self.keyexpr.as_str().to_owned()),
-            // A lent payload's clone, and its attachment's, is a copy (`ByteBuf::try_clone`).
-            payload,
-            kind: self.kind,
-            attachment,
-            timestamp: self.timestamp,
-            qos: self.qos,
-            reliability: self.reliability,
-            source_info: self.source_info,
-            encoding,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            loaned_payload: z_loaned_bytes_t {
-                handle: core::ptr::null_mut(),
-                _pad: [core::ptr::null_mut(); 3],
-            },
-            loaned_attachment: z_loaned_bytes_t {
-                handle: core::ptr::null_mut(),
-                _pad: [core::ptr::null_mut(); 3],
-            },
-            loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
+        // SAFETY: the caller's. The bitwise copy holds this marshal's key, payload, attachment
+        // and encoding until each is written over, without a drop, by the copy's own; nothing in
+        // between reads them or can unwind.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self, at, 1);
+            core::ptr::addr_of_mut!((*at).keyexpr).write(keyexpr);
+            core::ptr::addr_of_mut!((*at).payload).write(payload);
+            core::ptr::addr_of_mut!((*at).attachment).write(attachment);
+            core::ptr::addr_of_mut!((*at).encoding).write(encoding);
         }
     }
 }
@@ -492,7 +491,7 @@ unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_v
     };
     let parts = marshal.kept_parts().map_err(NoRoom::code)?;
     // What can be refused is taken above; the copy itself is written where it lies.
-    let owned = slot.fill_in_place(|at: *mut SampleMarshal| at.write(marshal.copy_with(parts)));
+    let owned = slot.fill_in_place(|at: *mut SampleMarshal| marshal.write_copy(parts, at));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -678,7 +677,7 @@ pub(crate) fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
         Some(f) => f,
         None => return,
     };
-    // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+    // SAFETY: the marshal is let go at the end of this call, inside the borrow of `view`.
     let mut marshal = unsafe { SampleMarshal::lent(view) };
     // Bind AFTER the move out of `lent` — the marshal is at its final
     // address only here. See `SampleMarshal::bind`.
@@ -3151,7 +3150,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let entity =
-            match PlainPublisher::declare_entity(&session, ke, declared_of(keyexpr), &declared) {
+            match PlainPublisher::declare_entity(session, ke, declared_of(keyexpr), &declared) {
                 Ok(entity) => entity,
                 Err(rc) => return rc,
             };
@@ -3445,20 +3444,20 @@ unsafe fn declare_subscriber_with(
     // no copy is made for the call. One the outbound gate refuses is refused before anything is
     // declared.
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
-    let engine = engine_of(handle);
+    let engine = engine_held(handle);
     let Some(slot) = crate::object_slot::Slot::<SubscriberPlace>::take_entity(
-        &engine,
+        engine,
         crate::object_slot::Kind::Subscriber,
     ) else {
         return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     let session = background.then(|| crate::session::session_count(zs).hold());
-    let state = fill_subscriber_place(slot, &engine, closure, session);
+    let state = fill_subscriber_place(slot, engine, closure, session);
     // The row calls the closure where the place keeps it; a refusal drops the sink, which lets
     // the closure go.
     let declared = declare_subscriber_in(
         handle,
-        &engine,
+        engine,
         keyexpr,
         ke,
         options,
@@ -3545,7 +3544,8 @@ pub unsafe extern "C" fn z_sample_payload(
         return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
-    &marshal.loaned_payload as *const z_loaned_bytes_t
+    // The loaned bytes are the owned bytes' layout, read by their handle alone (`handle_ref`).
+    core::ptr::from_ref(&marshal.pico_payload).cast::<z_loaned_bytes_t>()
 }
 
 /// How the sample was issued — Put or Delete (pico `z_sample_kind`).
@@ -4035,7 +4035,7 @@ mod tests {
     fn a_subscribers_place_goes_back_when_its_row_lets_go_of_the_closure() {
         use crate::object_slot::{retire_entity, Kind, Slot};
         use crate::session::{
-            listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4047,7 +4047,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many subscriber places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: alloc::vec::Vec<Slot<u64>> =
@@ -4102,7 +4102,7 @@ mod tests {
         marshal.bind();
         let kept = marshal.deep_copy().expect("room for the copy");
         let clone = marshal.payload.try_clone().expect("room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         assert_eq!(kept.keyexpr.as_str(), "demo/lent");
         assert_ne!(kept.keyexpr.as_str().as_ptr(), view.key.as_ptr());
         assert_eq!(kept.payload.as_slice(), b"payload");
@@ -4112,6 +4112,114 @@ mod tests {
         assert_ne!(attachment.as_slice().as_ptr(), view.attachment.as_ptr());
         assert_eq!(clone.as_slice(), b"payload");
         assert_ne!(clone.as_slice().as_ptr(), view.payload.as_ptr());
+    }
+
+    /// A sample's payload view is its pico-layout payload field, as zenoh-pico's `z_sample_payload`
+    /// is `&sample->payload`: it reads the sample's payload, and a copy of it is a borrow, which
+    /// the drop of an owned bytes made of it does not let go. Turned red by an accessor that hands
+    /// out a view of its own.
+    #[test]
+    fn a_samples_payload_view_is_its_pico_payload_field() {
+        let view = HeldView {
+            key: "demo/payload",
+            payload: b"payload",
+            attachment: b"",
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.bind();
+        let sample = marshal.as_loaned();
+        // SAFETY: a sample this crate marshalled and bound.
+        let payload = unsafe { z_sample_payload(sample) };
+        assert_eq!(
+            payload as usize,
+            sample as usize + PICO_SAMPLE_PAYLOAD_OFFSET,
+            "the view is the field a C program reads as sample->payload"
+        );
+        // SAFETY: the loaned payload of the live marshal.
+        let bytes = unsafe { handle_ref::<z_loaned_bytes_t, ByteBuf>(payload) }.expect("bound");
+        assert_eq!(bytes.as_slice(), b"payload");
+        // SAFETY: the loaned bytes have the owned bytes' layout.
+        let as_owned = unsafe { &*payload.cast::<z_owned_bytes_t>() };
+        assert!(
+            crate::abi::HandleOwnership::handle_is_borrowed(as_owned),
+            "a copy of the view is a borrow"
+        );
+    }
+
+    /// A clone of a kept sample, whose original owns what it holds, is a copy of its own: its key
+    /// is its own bytes, every view it hands out reads it and not the original, one it carries no
+    /// attachment for reads none, and it reads the same once the original is let go. Turned red by
+    /// a copy that keeps the original's key, or a view the copy's bind leaves on the original.
+    #[test]
+    fn a_clone_of_a_kept_sample_is_its_own_and_reads_the_same() {
+        let view = EncodedView { schema: b"utf8" };
+        // SAFETY: the marshal is let go before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.bind();
+        // SAFETY: a marshal this crate made and bound.
+        let first = unsafe { clone_sample_marshal(marshal.as_loaned()) }.expect("a first copy");
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
+        let first = first.cast::<SampleMarshal>();
+        // SAFETY: the place the first clone filled, live until it is let go of below.
+        let second = unsafe { clone_sample_marshal((*first).as_loaned()) }.expect("a second copy");
+        let second = second.cast::<SampleMarshal>();
+        // SAFETY: both places are live until they are let go of below.
+        unsafe {
+            let key = (*second).keyexpr.as_str();
+            assert_eq!(key, "demo/encoded");
+            assert_ne!(key.as_ptr(), (*first).keyexpr.as_str().as_ptr());
+            assert_eq!((*second).loaned_keyexpr._start, key.as_ptr());
+            assert_eq!(
+                (*second).pico_payload.handle as usize,
+                core::ptr::addr_of!((*second).payload) as usize
+            );
+            assert!(
+                (*second).loaned_attachment.handle.is_null(),
+                "no attachment carried, no view of one"
+            );
+            let encoding = (*second).encoding.as_ref().expect("the view carried one");
+            assert_eq!(
+                (*second).loaned_encoding.handle as usize,
+                encoding as *const crate::encoding::EncodingState as usize
+            );
+            assert_eq!((*second).kind, (*first).kind);
+            assert_eq!((*second).reliability, (*first).reliability);
+            free_sample_marshal(first.cast::<c_void>());
+            assert_eq!((*second).payload.as_slice(), b"x");
+            let encoding = (*second).encoding.as_ref().expect("the view carried one");
+            assert_eq!(encoding.view().schema, Some(&b"utf8"[..]));
+            free_sample_marshal(second.cast::<c_void>());
+        }
+    }
+
+    /// The marshal a callback is handed holds nothing of its own: its key, payload, attachment and
+    /// encoding schema are read where the view holds them, which is what lets a delivery skip its
+    /// drop ([`SampleMarshal::lent`]). Turned red by a lent marshal that copies any of them,
+    /// which nothing would then let go.
+    #[test]
+    fn a_sample_handed_to_its_callback_holds_only_what_its_view_lends() {
+        let view = HeldView {
+            key: "demo/lends",
+            payload: b"payload",
+            attachment: b"attachment",
+        };
+        // SAFETY: the marshal is let go before `view`.
+        let marshal = unsafe { SampleMarshal::lent(&view) };
+        assert_eq!(marshal.keyexpr.as_str().as_ptr(), view.key.as_ptr());
+        assert_eq!(marshal.payload.as_slice().as_ptr(), view.payload.as_ptr());
+        let attachment = marshal.attachment.as_ref().expect("the view carried one");
+        assert_eq!(attachment.as_slice().as_ptr(), view.attachment.as_ptr());
+
+        let encoded = EncodedView { schema: b"utf8" };
+        // SAFETY: the marshal is let go before `encoded`.
+        let marshal = unsafe { SampleMarshal::lent(&encoded) };
+        let schema = marshal
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.view().schema)
+            .expect("the view carried a schema");
+        assert_eq!(schema.as_ptr(), encoded.schema.as_ptr());
     }
 
     /// A sample taken from its callback is a copy of its own, written in its place and bound there:
@@ -4130,7 +4238,7 @@ mod tests {
         // SAFETY: a marshal this crate made and bound.
         let owned = unsafe { clone_sample_marshal(marshal.as_loaned()) }
             .expect("a place and room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         let copy = owned.cast::<SampleMarshal>();
         // SAFETY: the place the clone filled, live until it is let go of below.
         unsafe {
@@ -4143,7 +4251,7 @@ mod tests {
                 Some(&b"attachment"[..])
             );
             assert_eq!(
-                (*copy).loaned_payload.handle as usize,
+                (*copy).pico_payload.handle as usize,
                 core::ptr::addr_of!((*copy).payload) as usize,
                 "the payload's view is bound to the copy"
             );
@@ -4196,7 +4304,7 @@ mod tests {
         assert!(!loaned.is_null(), "the sample carried an encoding");
         // SAFETY: the loaned encoding the accessor handed out, of the live marshal.
         let handle = unsafe { (*loaned).handle } as usize;
-        let start = &marshal as *const SampleMarshal as usize;
+        let start = &*marshal as *const SampleMarshal as usize;
         assert!(
             (start..start + core::mem::size_of::<SampleMarshal>()).contains(&handle),
             "the encoding lies in the marshal, not in a box of its own"
@@ -4210,7 +4318,7 @@ mod tests {
             "the schema is read where the view holds it, not copied"
         );
         let mut kept = marshal.deep_copy().expect("room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         kept.bind();
         // SAFETY: the kept copy, bound at its final address.
         let kept_loaned = unsafe { z_sample_encoding(kept.as_loaned()) };

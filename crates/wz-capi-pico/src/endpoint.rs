@@ -37,11 +37,20 @@ pub(crate) fn scheme_of(endpoint: &str) -> &str {
 
 /// `text` cut at its first `separator`, an ASCII byte, which neither half keeps; `None` when
 /// `text` has none. Every separator of an endpoint's text is ASCII, so the text is read a byte at
-/// a time and not searched for a character's encoding, as `str::split_once` searches it.
+/// a time and not searched for a character's encoding, as `str::split_once` searches it, and the
+/// halves are taken without asking again whether the cut lies between two characters: an ASCII
+/// byte is a whole character, so both of its sides do. Each cut a reading makes is inlined, and
+/// that question would be a copy of its own at each.
 fn cut(text: &str, separator: u8) -> Option<(&str, &str)> {
+    debug_assert!(separator.is_ascii());
     let at = text.bytes().position(|byte| byte == separator)?;
-    let (head, tail) = text.split_at_checked(at)?;
-    Some((head, tail.get(1..)?))
+    // SAFETY: the byte at `at` is the ASCII `separator`, a whole character, so `at` lies on a
+    // character boundary of `text`, and so does the end of that byte, the start of what follows it
+    // in `rest`, at most at its end.
+    unsafe {
+        let rest = text.get_unchecked(at..);
+        Some((text.get_unchecked(..at), rest.get_unchecked(1..)))
+    }
 }
 
 /// An endpoint as pico reads it with a link's `keys`: views into the endpoint's own text.
@@ -323,6 +332,10 @@ mod tests {
         assert_eq!(cut("a#b#c", b'#'), Some(("a", "b#c")));
         assert_eq!(cut("#", b'#'), Some(("", "")));
         assert_eq!(cut("abc", b'#'), None);
+        // Characters of more than one byte on either side of the cut are kept whole.
+        assert_eq!(cut("\u{e9}#\u{fc}x", b'#'), Some(("\u{e9}", "\u{fc}x")));
+        assert_eq!(cut("\u{e9}#", b'#'), Some(("\u{e9}", "")));
+        assert_eq!(cut("\u{e9}\u{fc}", b'#'), None);
         assert_eq!(scheme_of("tcp/127.0.0.1:9000"), "tcp");
         assert_eq!(scheme_of("no-scheme"), "");
         assert_eq!(

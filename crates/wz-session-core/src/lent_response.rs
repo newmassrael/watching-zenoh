@@ -1036,8 +1036,8 @@ mod tests {
                             let mut sink = SliceSink::new(&mut generic);
                             writer.encode_generic(&mut sink).expect("fits");
                             let generic_len = sink.position();
-                            // The bytes through a window of a slice buffer, of a capped one,
-                            // and of a vector, against the codec's own encoder.
+                            // The bytes through a window of a slice buffer, of one held to a
+                            // budget, and of a vector, against the codec's own encoder.
                             assert_eq!(writer.direct_len(), generic_len, "the measure");
                             assert_eq!(writer.encoded_len(), Ok(generic_len), "the count");
                             let mut storage = [0u8; 2048];
@@ -1045,12 +1045,12 @@ mod tests {
                             let mut tx = crate::tx_buf::TxSink::over(&mut slice);
                             writer.encode_tx(&mut tx).expect("fits");
                             assert_eq!(slice_bytes(&slice), &generic[..generic_len], "window");
-                            let mut storage = [0u8; 2048];
+                            let mut storage = [0u8; 4096];
                             let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
-                            let mut capped = crate::tx_buf::CappedTxBuf::new(&mut slice, 2048);
-                            let mut tx = crate::tx_buf::TxSink::over(&mut capped);
+                            slice.hold_to(2048);
+                            let mut tx = crate::tx_buf::TxSink::over(&mut slice);
                             writer.encode_tx(&mut tx).expect("fits");
-                            assert_eq!(slice_bytes(&capped), &generic[..generic_len], "capped");
+                            assert_eq!(slice_bytes(&slice), &generic[..generic_len], "held");
                             let mut vector: Vec<u8> = Vec::new();
                             let mut tx = crate::tx_buf::TxSink::over(&mut vector);
                             writer.encode_tx(&mut tx).expect("grows");
@@ -1097,10 +1097,14 @@ mod tests {
             assert_eq!(slice.len(), 0, "room {room}: nothing of it is kept");
             let mut storage = [0u8; 256];
             let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
-            let mut capped = crate::tx_buf::CappedTxBuf::new(&mut slice, room);
-            let mut tx = crate::tx_buf::TxSink::over(&mut capped);
+            slice.hold_to(room);
+            let mut tx = crate::tx_buf::TxSink::over(&mut slice);
             assert_eq!(writer.encode_tx(&mut tx), Err(CodecError::BufferOverflow));
-            assert_eq!(capped.len(), 0, "cap {room}: nothing of it is kept");
+            assert_eq!(slice.len(), 0, "held to {room}: nothing of it is kept");
+            assert!(
+                storage[room..].iter().all(|b| *b == 0),
+                "held to {room}: nothing was written past the budget"
+            );
         }
         let mut storage = [0u8; 256];
         let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage[..whole]);

@@ -115,7 +115,7 @@ pub unsafe extern "C" fn wz_ext_time_base_new(
         };
         // The program's drop runs when the last hold goes: the program's, a config's or a
         // session's.
-        let hold = crate::object_slot::boxed(wz_capi_port::time_base::over_calls(
+        let hold = Box::new(wz_capi_port::time_base::over_calls(
             calls.context,
             now_ns,
             calls.drop,
@@ -492,7 +492,7 @@ mod tests {
     ) -> std::sync::Arc<crate::session::Engine> {
         let handle = crate::session::session_handle(crate::session::z_session_loan(session))
             .expect("an open session");
-        crate::session::engine_of(handle)
+        crate::session::engine_held(handle).clone()
     }
 
     #[cfg(feature = "peer")]

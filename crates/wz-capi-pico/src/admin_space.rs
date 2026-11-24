@@ -167,8 +167,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
                 answerer.answer(query, out)
             },
         );
-        let pico = match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink)
-        {
+        let pico = match PlainQueryable::declare(PicoSession::of(handle), &key, None, false, sink) {
             Ok(queryable) => queryable,
             Err(code) => return code,
         };
@@ -208,7 +207,7 @@ fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQuerya
             }
         },
     );
-    PlainQueryable::declare(&PicoSession::of(handle), &declared, None, false, sink)
+    PlainQueryable::declare(PicoSession::of(handle), &declared, None, false, sink)
 }
 
 /// Stop the session's admin space (pico `zp_stop_admin_space`): its queryable

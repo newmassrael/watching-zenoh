@@ -1410,6 +1410,23 @@ pub struct TxSlotGrant {
     pub headroom: usize,
 }
 
+/// The TX conduits a session holds a batch open on at once: one for each priority where the build
+/// carries QoS conduits (`transport-qos`), one otherwise.
+#[cfg(feature = "transport-qos")]
+pub const SESSION_TX_CONDUITS: usize = crate::qos::Priority::NUM;
+/// The TX conduits a session holds a batch open on at once: one for each priority where the build
+/// carries QoS conduits (`transport-qos`), one otherwise.
+#[cfg(not(feature = "transport-qos"))]
+pub const SESSION_TX_CONDUITS: usize = 1;
+
+/// The slots a link lends a session so that no send of the session finds every one out: one for
+/// the batch each conduit may hold open across the calls of a window ([`SESSION_TX_CONDUITS`]),
+/// and one for the frame that leaves while every conduit holds one (a frame handed over as bytes,
+/// a transport message). A link that lends this many from storage of its own always has a slot
+/// for the session's next frame, so a frame whose sequence number is minted is never refused for
+/// want of one.
+pub const SESSION_TX_SLOTS: usize = SESSION_TX_CONDUITS + 1;
+
 /// Whether a session of this build can carry more than one link to its peer: the
 /// `transport-multilink` build, in which a second link is joined to the session it
 /// names and the session's `link_endpoints_all` lists every one of them. Without it

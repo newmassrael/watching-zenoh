@@ -8,9 +8,8 @@
   once per pool slot as an SCE Engine<ReassemblySlotPolicy<A>>. First
   `network/`-kind statechart in watching-zenoh, and the first wz
   statechart that is fully script-engine-free (no_std): every effect is
-  a `<sce:action>` native host-trait call and every guard is a typed
-  `_event.data` comparison, so the generated policy carries no
-  IScriptEngine.
+  a `<sce:action>` native host-trait call and no transition has a guard,
+  so the generated policy carries no IScriptEngine and no event payload.
 
   Lowering of the reassembly-fsm prose-sketch §2.2 slot-states + §2.4
   transitions + §2.5 strict-in-order policy.
@@ -28,15 +27,17 @@
     is stateful (event.sn vs the chain's expected next SN) and therefore
     cannot be a typed `_event.data` guard — a native guard may reference
     `_event.data` fields and literals only, never stored state. So the
-    dispatcher resolves in-order-ness and raises distinct typed inject
-    events:
-      - in-order fragment      -> `fragment.chunk` (more bit only)
-      - out-of-order fragment  -> `fragment.ooo`   (signal-only)
-    What stays in the FSM is the wire `more` bit (a real per-fragment
-    field, fragment_chunk_schema.scxml), guarded natively to split a
-    Continue (more != 0, keep receiving) from a Final (more == 0,
-    complete). Stateful SN counting in the dispatcher; the wire more-bit
-    in the FSM.
+    dispatcher resolves in-order-ness and raises distinct signal events:
+      - in-order fragment, M set   -> `fragment.more`
+      - in-order fragment, M clear -> `fragment.last`
+      - out-of-order fragment      -> `fragment.ooo`
+    The wire `more` bit decides which of the first two the dispatcher
+    raises, so it reaches the FSM as the event itself: a Continue
+    (`fragment.more`, keep receiving) and a Final (`fragment.last`,
+    complete) are two events, and no event carries `_event.data`. The
+    machine's events are then plain numbers in its queue, with no typed
+    payload bound at each dequeue. Stateful SN counting in the dispatcher;
+    the Continue / Final split in the FSM's transitions.
 
     First-vs-Continue is the source state, not a guard: the dispatcher
     routes a chain-starting fragment to a free (Empty) slot and an
@@ -65,7 +66,7 @@
   Host actions (the generated ReassemblySlotActions trait, one method per
   distinct `<sce:action name>`). R311in — none takes a payload argument:
   the body is not passed through the FSM (the Router stages it in its
-  arena, see fragment_chunk_schema.scxml). Each duty is the one cause of
+  arena). Each duty is the one cause of
   its effect: the dispatcher drains what the transition posted and
   performs it (docs/adr/0038 of SCE).
     begin_chain             — bind the reserved staging, arm the chain key,
@@ -84,8 +85,8 @@
   The INTERNAL queue is the generator's: nothing this document does puts an event on it, and
   the generator proves the depth 0 (SCE ADR 0076). The EXTERNAL queue is the host's statement:
   the dispatcher puts one event on it and runs the machine at once, every time
-  (`crates/wz-session-core/src/reassembly_dispatch.rs` `Slot::drive`: `process_event`, which
-  raises the event and steps; `Slot::drive_chunk`: `raise_fragment_chunk` then `step`), and
+  (`crates/wz-session-core/src/reassembly_dispatch.rs` `turn_slot_engine`, the one door every
+  slot input takes: it posts the event, then steps), and
   a step runs every queued event to the end, so the queue holds one event at most. Declared at
   1: a machine that declares nothing gets the runtime's depth of 64, in the engine every
   reassembly slot holds.
@@ -101,16 +102,15 @@
        datamodel="ecmascript"
        initial="Empty">
 
-  <sce:import src="fragment_chunk_schema.scxml" kind="event-schema" as="FragmentChunk"/>
-
   <!-- Slot free, awaiting a chain-starting fragment routed here by the
        Router. The dispatcher only routes a first fragment to a free slot,
-       so the chunk is a chain start; the wire more bit then splits the
-       well-formed case from a degenerate one.
+       so the fragment is a chain start; the wire more bit, as the event
+       the dispatcher raised, then splits the well-formed case from a
+       degenerate one.
 
-       more != 0 — the normal multi-fragment chain begins (-> Receiving).
+       fragment.more — the normal multi-fragment chain begins (-> Receiving).
 
-       more == 0 — a FIRST fragment that is ALSO final. A well-formed
+       fragment.last — a FIRST fragment that is ALSO final. A well-formed
        sender never mints one (a single-fragment message rides T_MID_FRAME,
        not T_MID_FRAGMENT), but a lossy / duplicating link or a malicious
        peer can strand one: a duplicate mid-chain fragment trips the
@@ -124,24 +124,25 @@
        decode (it is a chain remnant, not a whole frame), so it is dropped
        — exactly pico's outcome. -->
   <state id="Empty">
-    <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
+    <transition event="fragment.more" target="Receiving">
       <sce:action name="begin_chain" effect="duty"/>
     </transition>
-    <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
+    <transition event="fragment.last" target="Complete">
       <sce:action name="begin_chain" effect="duty"/>
       <sce:action name="finalize_message" effect="duty"/>
     </transition>
   </state>
 
-  <!-- Chain in progress. The dispatcher has already proven this chunk is
+  <!-- Chain in progress. The dispatcher has already proven this fragment is
        in-order (an out-of-order fragment arrives as fragment.ooo). The
-       wire more bit splits a continuation (more != 0) from the final
-       fragment (more == 0). Strict in-order parity (§2.5, OQ-W21). -->
+       wire more bit, as the event raised, splits a continuation
+       (fragment.more) from the final fragment (fragment.last). Strict
+       in-order parity (§2.5, OQ-W21). -->
   <state id="Receiving">
-    <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
+    <transition event="fragment.more" target="Receiving">
       <sce:action name="append_fragment_payload" effect="duty"/>
     </transition>
-    <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
+    <transition event="fragment.last" target="Complete">
       <sce:action name="finalize_message" effect="duty"/>
     </transition>
     <transition event="fragment.ooo" target="Aborted">

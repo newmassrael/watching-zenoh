@@ -277,42 +277,6 @@
       "why": "the byte cells of the link"
     },
     {
-      "id": "txbuf-len",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.len()"},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::len$",
-      "why": "the capped buffer asks the buffer it wraps for its length, in its own length and in each of the three checks of its cap (one call written four times, so one rule: a fifth would be the same call). The buffer it wraps is never a capped buffer: its five constructions (session_actions.rs twice, multicast_tx.rs, lent_response.rs twice) wrap a lent slot, a SliceTxBuf or a slice, so its own methods are not among the callees"
-    },
-    {
-      "id": "txbuf-append-byte",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.append_byte("},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::append_byte$",
-      "why": "the capped buffer appends to the buffer it wraps, never a capped buffer (txbuf-len)"
-    },
-    {
-      "id": "txbuf-inner-append",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.append(bytes)"},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::append$",
-      "why": "the capped buffer appends a slice to the buffer it wraps, never a capped buffer (txbuf-len); a tail call (bx), which the reader of register calls sees since 2026-11-21"
-    },
-    {
-      "id": "txbuf-inner-reserve",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.reserve(n)"},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::reserve$",
-      "why": "the capped buffer reserves in the buffer it wraps, never a capped buffer (txbuf-len); a tail call"
-    },
-    {
-      "id": "txbuf-inner-as-slice",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.as_slice()"},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::as_slice$",
-      "why": "the capped buffer's bytes are the buffer's it wraps, never a capped buffer (txbuf-len); a tail call"
-    },
-    {
-      "id": "txbuf-inner-truncate",
-      "where": {"file": "tx_buf.rs", "anchor": "self.inner.truncate(len)"},
-      "callees": "^<(?!wz_session_core::tx_buf::CappedTxBuf as ).* as wz_session_core::tx_buf::TxBuf>::truncate$",
-      "why": "the capped buffer truncates the buffer it wraps, never a capped buffer (txbuf-len); a tail call"
-    },
-    {
       "id": "sink-vle-last-byte",
       "where": {"file": "forge-runtime/src/codec.rs", "anchor": "while v >= 0x80 && n < cont_max {"},
       "callees": "TxBuf>::append_byte$",

@@ -203,9 +203,23 @@ pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them.
 pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<FaceId>();
 
-/// What the index of held sets reads for a set no face holds: the session numbers its faces
-/// from 1 (`LinkSupervisor::next_face_id`), so no face is known by it.
-const NO_FACE: FaceId = 0;
+/// What the index of held sets reads for a free set: the session numbers its faces up from 1
+/// one at a time (`LinkSupervisor::next_face_id`), so no face is known by it.
+const NO_FACE: FaceId = FaceId::MAX;
+
+/// What the index of held sets reads for a set whose place a face that went keeps, emptied, while
+/// a replaying listener is still owed its departure (`told`): neither a face's nor free.
+#[cfg(feature = "connectivity")]
+const KEPT: FaceId = FaceId::MAX - 1;
+
+/// A row of the index of held sets at or past this names no face: the free and the kept rows lie
+/// at the top of the ids, so whether a row names a face is one comparison.
+const NAMES_NO_FACE: FaceId = FaceId::MAX - 1;
+
+/// Whether `holder`, a row of the index of held sets, names the face that holds its set.
+fn names_face(holder: FaceId) -> bool {
+    holder < NAMES_NO_FACE
+}
 
 #[cfg(any(feature = "listen", feature = "group", test))]
 mod adding;
@@ -216,7 +230,7 @@ fn place_of(holders: &[FaceId], id: FaceId) -> Option<usize> {
     holders
         .iter()
         .position(|holder| *holder == id)
-        .filter(|_| id != NO_FACE)
+        .filter(|_| names_face(id))
 }
 
 /// A face as the dispatch of its link or group names it: the place of its set and its id, read
@@ -227,6 +241,26 @@ fn place_of(holders: &[FaceId], id: FaceId) -> Option<usize> {
 pub(super) struct HeldFace {
     at: usize,
     id: FaceId,
+}
+
+impl HeldFace {
+    /// The key of face `id` whose set lies at `at`: the place the face keeps in every table of
+    /// the session while it is held.
+    pub(super) const fn new(at: usize, id: FaceId) -> Self {
+        Self { at, id }
+    }
+
+    /// The place of the face's set, which its link and its room keep too.
+    #[cfg(any(feature = "listen", feature = "group", test))]
+    pub(super) const fn at(&self) -> usize {
+        self.at
+    }
+
+    /// The face's id.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(super) const fn id(&self) -> FaceId {
+        self.id
+    }
 }
 
 /// Where a liveliness subscriber's history stands ([`Registry::next_history_token`]): the face
@@ -256,7 +290,7 @@ impl Others<'_> {
         let after = self.after.iter().zip(self.held_after);
         before
             .chain(after)
-            .filter(|(_, holder)| **holder != NO_FACE)
+            .filter(|(_, holder)| names_face(**holder))
             .map(|(set, _)| set)
     }
 }
@@ -395,11 +429,13 @@ pub(super) struct Registry {
     /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
     sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
-    /// The face that holds each set, by the set's place among `sets`, and [`NO_FACE`] for a set
-    /// no face holds: the dial role's face holds the first. Every walk over the faces and every
-    /// lookup of one reads this and the held sets alone; the open lends a set for each face the
-    /// config admits, most of them free at any time. Lent at the open with a row for each set
-    /// lent, so a face coming or going writes its set's row and moves none.
+    /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
+    /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
+    /// the first. The place is the face's in every table of the session (its link's, its room's).
+    /// Every walk over the faces and every lookup of one reads this and the held sets alone; the
+    /// open lends a set for each face the config admits, most of them free at any time. Lent at
+    /// the open with a row for each set lent, so a face coming or going writes its set's row and
+    /// moves none.
     holders: BoundedVec<FaceId, MAX_FACE_SETS, Lent>,
     /// The tokens of faces that went before each was retracted, in the order the faces went: each
     /// the token table the face's set held, its rows still in the session's pool, the set given
@@ -644,7 +680,7 @@ impl Registry {
         self.holders
             .iter()
             .enumerate()
-            .filter(|(_, holder)| **holder != NO_FACE)
+            .filter(|(_, holder)| names_face(**holder))
             .filter_map(|(at, _)| self.set(at))
     }
 
@@ -659,7 +695,7 @@ impl Registry {
         self.holders
             .iter()
             .copied()
-            .filter(|holder| *holder != NO_FACE)
+            .filter(|holder| names_face(*holder))
     }
 
     /// The tables of face `id`, while the session holds it.
@@ -707,7 +743,7 @@ impl Registry {
             .sets
             .iter_mut()
             .zip(self.holders.iter())
-            .filter(|(_, holder)| **holder != NO_FACE)
+            .filter(|(_, holder)| names_face(**holder))
             .map(|(face, _)| &mut face.gets);
         #[cfg(feature = "local-queryable")]
         let gets = gets.chain(core::iter::once(&mut self.local));
@@ -725,36 +761,77 @@ impl Registry {
         self.face_mut(id).map(|face| &mut face.gets)
     }
 
-    /// The tables of face `id`, gone with the face and left, emptied, where they lie for the next
-    /// face. The dial role's face is never removed.
-    pub(super) fn remove_face(&mut self, id: FaceId) {
-        if id == DIAL_FACE {
+    /// How many places the open lent a set for: the places of every table of the session's faces.
+    pub(super) fn places(&self) -> usize {
+        self.sets.len()
+    }
+
+    /// The tables of `face`, gone with the face and left, emptied, where they lie for the next
+    /// face: its place is free. The dial role's face is never removed, and the key of a face that
+    /// is not held removes nothing.
+    pub(super) fn remove_face(&mut self, face: HeldFace) {
+        self.let_go(face, NO_FACE);
+    }
+
+    /// The tables of `face`, gone with the face as [`Self::remove_face`] takes them, its place
+    /// kept for the tomb a replaying listener is still owed the departure of: no face takes it
+    /// until [`Self::free_kept`].
+    #[cfg(feature = "connectivity")]
+    pub(super) fn depart(&mut self, face: HeldFace) {
+        self.let_go(face, KEPT);
+    }
+
+    /// A free place kept for a tomb of a face whose place holds another (`told`): where it lies,
+    /// `None` when every place is held or kept.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn keep_place(&mut self) -> Option<usize> {
+        let at = self.holders.iter().position(|holder| *holder == NO_FACE)?;
+        let row = self.holders.get_mut(at)?;
+        *row = KEPT;
+        Some(at)
+    }
+
+    /// The place at `at` a tomb kept is free again; a place a face holds is left as it is.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn free_kept(&mut self, at: usize) {
+        if let Some(row) = self.holders.get_mut(at).filter(|row| **row == KEPT) {
+            *row = NO_FACE;
+        }
+    }
+
+    /// Empty the set `face` holds, its row then reading `row`.
+    fn let_go(&mut self, face: HeldFace, row: FaceId) {
+        if face.id == DIAL_FACE {
             return;
         }
-        if let Some(at) = self.held_at(id) {
-            self.writing();
-            if let Some(holder) = self.holders.get_mut(at) {
-                *holder = NO_FACE;
-            }
-            // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
-            #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-            self.owe_tokens_of(at);
-            if let Some(set) = self.sets.get_mut(at) {
-                set.give_back();
-            }
+        let Some(at) = self.place(face) else {
+            return;
+        };
+        self.writing();
+        if let Some(holder) = self.holders.get_mut(at) {
+            *holder = row;
+        }
+        // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        self.owe_tokens_of(at);
+        if let Some(set) = self.sets.get_mut(at) {
+            set.give_back();
         }
     }
 
     /// The tables of every face but the dial role's, gone with their faces and left, emptied,
-    /// where they lie.
+    /// where they lie, and every place free but the dial role's, a tomb's among them.
     pub(super) fn remove_accepted_faces(&mut self) {
         self.writing();
         let Self { sets, holders, .. } = self;
         for (set, holder) in sets.iter_mut().zip(holders.iter_mut()) {
-            if *holder != NO_FACE && *holder != DIAL_FACE {
-                set.give_back();
-                *holder = NO_FACE;
+            if *holder == DIAL_FACE {
+                continue;
             }
+            if names_face(*holder) {
+                set.give_back();
+            }
+            *holder = NO_FACE;
         }
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
         self.owed.clear();
@@ -804,14 +881,17 @@ impl Registry {
             app,
             delivery,
             sets,
+            // Only the others of a face read who holds each set; a build that holds one face has
+            // none.
+            #[cfg(any(feature = "listen", feature = "group", test))]
             holders,
             ..
         } = self;
-        let holders: &[FaceId] = &holders[..];
         #[cfg(any(feature = "listen", feature = "group", test))]
         let (face, others) = {
             let (before, rest) = sets.split_at_mut_checked(at)?;
             let (face, after) = rest.split_first_mut()?;
+            let holders: &[FaceId] = &holders[..];
             let (held_before, rest) = holders.split_at_checked(at)?;
             let others = Others {
                 before: &*before,
@@ -1388,6 +1468,12 @@ mod tests {
         registry.held_ids().collect()
     }
 
+    /// Remove face `id` by the key its link or its group holds.
+    fn remove(registry: &mut Registry, id: FaceId) {
+        let face = registry.held(id);
+        registry.remove_face(face);
+    }
+
     /// Where the sets the walk over the faces takes lie.
     fn walked(registry: &Registry) -> Vec<*const FaceTables> {
         registry
@@ -1536,7 +1622,7 @@ mod tests {
             "nothing more is lent as the face comes"
         );
         assert_eq!(listening.registry.sets.len(), 2);
-        listening.registry.remove_face(DIAL_FACE);
+        remove(&mut listening.registry, DIAL_FACE);
         assert_eq!(
             face_ids(&listening.registry),
             vec![DIAL_FACE, 5],
@@ -1639,7 +1725,7 @@ mod tests {
         let accepted = face(&mut held.registry, 5);
         accepted.peer.finals.owe(1, QosLevel::DEFAULT);
         let lies_at: *const FaceTables = accepted;
-        held.registry.remove_face(5);
+        remove(&mut held.registry, 5);
         assert_eq!(free_lent(&held), 1, "the set went back");
         assert_eq!(held.registry.sets.len(), 2, "and stayed where it lies");
         assert_eq!(
@@ -1739,8 +1825,8 @@ mod tests {
         let lies_at: *const FaceTables = face(&mut held.registry, 5);
         held.registry.lose_tokens(5);
         held.registry.lose_tokens(6);
-        held.registry.remove_face(5);
-        held.registry.remove_face(6);
+        remove(&mut held.registry, 5);
+        remove(&mut held.registry, 6);
         assert_eq!(held.registry.owed.len(), 2, "each face's tokens owed apart");
         let tokens_used = |held: &Held| held.registry.pools.counts().map(|c| c.tokens.used);
         assert_eq!(
@@ -1807,7 +1893,7 @@ mod tests {
             );
         }
         assert_eq!(free_lent(&held), 0);
-        held.registry.remove_face(5);
+        remove(&mut held.registry, 5);
         held.registry.remove_accepted_faces();
         assert_eq!(free_lent(&held), 2, "every lent set is free again");
         assert_eq!(
@@ -1946,11 +2032,11 @@ mod tests {
             "no rows were lent"
         );
         assert_eq!(held.registry.sets.len(), 2, "the sets are the open's");
-        held.registry.remove_face(5);
+        remove(&mut held.registry, 5);
         assert_eq!(
-            held.registry.add_face(6),
-            Ok(()),
-            "CONTROL: a set is free again"
+            held.registry.add_face(6).map(|face| face.at()),
+            Ok(1),
+            "CONTROL: a set is free again, at the place the face left"
         );
         assert!(in_a_lent_set(&held, 6));
     }
@@ -1971,7 +2057,7 @@ mod tests {
             None,
             "no key of it finds a set"
         );
-        held.registry.remove_face(NO_FACE);
+        remove(&mut held.registry, NO_FACE);
         assert_eq!(
             &held.registry.holders[..],
             &[DIAL_FACE, 5, NO_FACE],
@@ -1981,6 +2067,56 @@ mod tests {
             held.registry.held_at(5),
             Some(1),
             "CONTROL: a face is found"
+        );
+    }
+
+    /// A place a tomb keeps is taken by no face that comes and named by no walk until it is freed,
+    /// and a face that departs keeps its place the same way. Turned red by a kept row read as
+    /// free (the face that comes takes the kept place) or as a face's (the walk names it).
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_kept_place_is_taken_by_no_face_until_it_is_freed() {
+        let mut held = held(4);
+        let five = held
+            .registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        assert_eq!(five.at(), 1);
+        held.registry.depart(five);
+        assert_eq!(
+            &held.registry.holders[..],
+            &[DIAL_FACE, KEPT, NO_FACE, NO_FACE]
+        );
+        assert_eq!(
+            held.registry.keep_place(),
+            Some(2),
+            "a tomb apart takes the first free place"
+        );
+        assert_eq!(
+            face_ids(&held.registry),
+            vec![DIAL_FACE],
+            "no walk names a kept place"
+        );
+        assert_eq!(held.registry.held_at(KEPT), None);
+        let six = held.registry.add_face(6).expect("one place is free");
+        assert_eq!(six.at(), 3, "the kept places are passed over");
+        assert_eq!(held.registry.add_face(7), Err(FacesFull));
+        held.registry.free_kept(1);
+        held.registry.free_kept(3);
+        assert_eq!(
+            held.registry.holders[3], 6,
+            "a face's place is not freed as a kept one"
+        );
+        assert_eq!(
+            held.registry.add_face(7).map(|face| face.at()),
+            Ok(1),
+            "CONTROL: the freed place"
+        );
+        held.registry.remove_accepted_faces();
+        assert_eq!(
+            &held.registry.holders[..],
+            &[DIAL_FACE, NO_FACE, NO_FACE, NO_FACE],
+            "a tomb's place goes with the faces'"
         );
     }
 
@@ -2000,7 +2136,7 @@ mod tests {
             Some(0),
             "CONTROL: the dial role's face"
         );
-        held.registry.remove_face(5);
+        remove(&mut held.registry, 5);
         held.registry
             .add_face(6)
             .expect("the set the face left is free");
@@ -2029,7 +2165,7 @@ mod tests {
             walked(&held.registry),
             lying_at(&held.registry, &[0, 1, 2, 3])
         );
-        held.registry.remove_face(6);
+        remove(&mut held.registry, 6);
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 5, 7]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1, 3]));
         held.registry
@@ -2046,7 +2182,7 @@ mod tests {
         );
         let taken = lying_at(&held.registry, &[2])[0];
         assert!(ptr::eq(&*face(&mut held.registry, 8), taken));
-        held.registry.remove_face(DIAL_FACE);
+        remove(&mut held.registry, DIAL_FACE);
         held.registry.remove_accepted_faces();
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0]));
@@ -2068,8 +2204,8 @@ mod tests {
                 .add_face(id)
                 .expect("the open lent a set for the face");
         }
-        held.registry.remove_face(5);
-        held.registry.remove_face(8);
+        remove(&mut held.registry, 5);
+        remove(&mut held.registry, 8);
         let own = lying_at(&held.registry, &[3])[0];
         let others = lying_at(&held.registry, &[0, 2]);
         let Split {
@@ -2209,7 +2345,7 @@ mod tests {
             6,
             "CONTROL: the pool is full"
         );
-        held.registry.remove_face(5);
+        remove(&mut held.registry, 5);
         assert_eq!(
             held.registry
                 .pools

@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 86435df20c0d4970594a70582567e26e98997bad30b196da3b1490406bbcc706
+// source-hash: 345beda32337f2445f6398517d838470ba2860b7f85e2903918bd590b1fbc36c
 // source: scouting.scxml
 
 
