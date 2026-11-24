@@ -660,7 +660,7 @@ impl Table {
         let start = match span.place {
             Place::Key => return self.keys.get(at..at.saturating_add(len)).unwrap_or(&[]),
             Place::Held | Place::Shared => {
-                let Some(space) = self.key_space else {
+                let Some(space) = self.key_space.as_ref() else {
                     return &[];
                 };
                 // SAFETY: a record of the table holds the block from when it was written
