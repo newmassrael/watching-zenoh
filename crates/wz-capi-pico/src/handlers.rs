@@ -505,61 +505,61 @@ unsafe fn push(
 /// # Safety
 /// `dst` must be writable storage for one element of the collection's element
 /// type, and `move_f` must be the matching mover.
-#[inline(never)]
 unsafe fn pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f) -> ZResult {
-    let Some(channel) = channel(context) else {
-        return Z_ERR_GENERIC;
-    };
-    let mut state = channel.state.lock();
-    // The multi-threaded arm waits for an element or the close.
-    #[cfg(feature = "multi-thread")]
-    while state.items.is_empty() && !state.closed {
-        state = channel.not_empty.wait(state);
-    }
-    let Some(bits) = state.items.pop_front() else {
-        // Empty: closed, or (single-threaded only) nothing yet, which upstream
-        // answers with `_Z_RES_OK` and the destination untouched.
-        return if state.closed {
-            Z_RES_CHANNEL_CLOSED
-        } else {
-            Z_OK
-        };
-    };
-    let raw = bits as *mut c_void;
-    drop(state);
-    channel.not_full.notify_one();
-    // Outside the lock, for the same re-entrancy reason `push` releases the
-    // evicted element outside it.
-    if let Some(mover) = move_f {
-        mover(dst, raw);
-    }
-    Z_OK
+    // Empty and open: nothing yet (single-threaded only), which upstream answers with
+    // `_Z_RES_OK` and the destination untouched.
+    take_one(dst, context, move_f, true, Z_OK)
 }
 
 /// Pull one element if one is immediately available.
 ///
 /// # Safety
 /// As [`pull`].
-#[inline(never)]
 unsafe fn try_pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f) -> ZResult {
+    take_one(dst, context, move_f, false, Z_RES_CHANNEL_NODATA)
+}
+
+/// The body [`pull`] and [`try_pull`] share, out of line so the four pull doors hold one copy:
+/// one element taken and handed to `move_f`, after the multi-threaded arm has waited for one or
+/// the close when `wait` asks; `Z_RES_CHANNEL_CLOSED` for a closed channel with nothing left, and
+/// `empty` for an open one with nothing in it.
+///
+/// # Safety
+/// As [`pull`].
+#[inline(never)]
+unsafe fn take_one(
+    dst: *mut c_void,
+    context: *mut c_void,
+    move_f: z_element_move_f,
+    wait: bool,
+    empty: ZResult,
+) -> ZResult {
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
     let mut state = channel.state.lock();
+    #[cfg(feature = "multi-thread")]
+    if wait {
+        while state.items.is_empty() && !state.closed {
+            state = channel.not_empty.wait(state);
+        }
+    }
+    // The single-threaded arm never waits: pico's pull there is a try.
+    #[cfg(not(feature = "multi-thread"))]
+    let _ = wait;
     let popped = state.items.pop_front();
     let closed = state.closed;
     drop(state);
-    match popped {
-        Some(bits) => {
-            channel.not_full.notify_one();
-            if let Some(mover) = move_f {
-                mover(dst, bits as *mut c_void);
-            }
-            Z_OK
-        }
-        None if closed => Z_RES_CHANNEL_CLOSED,
-        None => Z_RES_CHANNEL_NODATA,
+    let Some(bits) = popped else {
+        return if closed { Z_RES_CHANNEL_CLOSED } else { empty };
+    };
+    channel.not_full.notify_one();
+    // Outside the lock, for the same re-entrancy reason `push` releases the
+    // evicted element outside it.
+    if let Some(mover) = move_f {
+        mover(dst, bits as *mut c_void);
     }
+    Z_OK
 }
 
 /// Mark the channel closed and wake every waiter.
