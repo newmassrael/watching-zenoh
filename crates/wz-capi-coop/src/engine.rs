@@ -1114,11 +1114,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
-        CoreGuard::taken(self.0.lock())
+        // Marked before the take, so a take on the thread that holds the lock already fails a
+        // debug build instead of waiting on itself.
+        let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
+        CoreGuard::taken(self.0.lock(), held)
     }
 
     fn try_lock(&self) -> Option<CoreGuard<'_, L, C>> {
-        self.0.try_lock().map(CoreGuard::taken)
+        let guard = self.0.try_lock()?;
+        let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
+        Some(CoreGuard::taken(guard, held))
     }
 
     /// The state with no lock, the engine being let go of: the key arena is marked held for the
@@ -1133,12 +1138,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
 struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
     guard: MutexGuard<'a, Confined<Core<L, C>>>,
+    // The thread's mark of the hold, which a debug build reads: a second take of this lock on
+    // this thread, or a C ABI's place given back under it, fails there instead of waiting.
+    _held: wz_capi_port::sync::SessionHeld,
 }
 
 impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
-    fn taken(guard: MutexGuard<'a, Confined<Core<L, C>>>) -> Self {
+    fn taken(
+        guard: MutexGuard<'a, Confined<Core<L, C>>>,
+        held: wz_capi_port::sync::SessionHeld,
+    ) -> Self {
         guard.0.keys.owner_lock_taken();
-        Self { guard }
+        Self { guard, _held: held }
     }
 }
 
@@ -4553,6 +4564,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(test)]
     pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
         self.core.lock().0.places.counts(kind)
+    }
+
+    /// Run `f` while this thread holds the session's lock, as a drop made under it would.
+    #[cfg(test)]
+    pub(crate) fn under_the_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _held = self.core.lock();
+        f()
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
