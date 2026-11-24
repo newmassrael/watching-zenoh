@@ -52,6 +52,7 @@
   <sce:feature name="ext-pubsub-group-membership" requires="alloc wire-bincode"/>
   <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
   <sce:feature name="initial-sn-compact"/>
+  <sce:feature name="interest-answer"/>
   <sce:feature name="key-set-closed"/>
   <sce:feature name="keyexpr-dollar-star"/>
   <sce:feature name="keyexpr-includes"/>
@@ -114,11 +115,11 @@
   <sce:feature name="session-extshm" requires="session-unicast transport-shm"/>
   <sce:feature name="session-fixed-storage"/>
   <sce:feature name="session-matching" requires="alloc keyexpr-includes"/>
-  <sce:feature name="session-multicast" requires="rx-control rx-push rx-response"/>
+  <sce:feature name="session-multicast" requires="interest-answer rx-control rx-push rx-response"/>
   <sce:feature name="session-reconnect" requires="alloc"/>
   <sce:feature name="session-slot" requires="bounded-heapless rx-lent-control session-fixed-storage storage-profile tx-lend-only"/>
   <sce:feature name="session-unicast"/>
-  <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
+  <sce:feature name="session-unicast-accept" requires="interest-answer rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
   <sce:feature name="shared-key-ids" requires="alloc"/>
   <sce:feature name="south-subregions" requires="alloc"/>
