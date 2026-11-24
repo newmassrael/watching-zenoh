@@ -50,7 +50,7 @@
 //! question asked of the arena, on the same rule as `append`, so the answer
 //! stays the trait's.
 
-use crate::byte_cells::{ByteBuf, LentByteCells};
+use crate::byte_cells::{ByteBuf, KeptBytes, LentByteCells};
 
 /// Why an arena refused bytes.
 ///
@@ -214,6 +214,20 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// released, as before this existed.
     #[cfg(feature = "rx-shared-bytes")]
     fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        Err(chain)
+    }
+
+    /// Hand a COMPLETED chain's buffer up whole, with what was staged in it, consuming the handle,
+    /// or give the handle back (`Err`) when this arena cannot.
+    ///
+    /// The delivery holds the buffer for as long as it reads what was decoded out of it, and the
+    /// buffer is the arena's again only when the [`KeptBytes`] drop: a type, not a rule that no
+    /// fragment is staged meanwhile, keeps the next chain from writing over it. The Router frees
+    /// its own slot either way, so a chain that starts while the buffer is kept stages into
+    /// another of the arena's buffers.
+    ///
+    /// The provided answer is `Err`: the chain is then delivered borrowed for the call.
+    fn keep(&mut self, chain: Self::Chain) -> Result<KeptBytes, Self::Chain> {
         Err(chain)
     }
 }
@@ -474,6 +488,16 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
         into.copy_from_slice(payload);
         chain.len = end;
         Ok(())
+    }
+
+    /// The chain's buffer, taken out of the staging with what was staged in it: the chain's place
+    /// is free for the next chain at once, and the buffer is its table's again when the keeper
+    /// drops it, so a chain started meanwhile claims another buffer of the table.
+    fn keep(&mut self, chain: Self::Chain) -> Result<KeptBytes, Self::Chain> {
+        match self.bufs.get_mut(chain.at).and_then(Option::take) {
+            Some(buf) => Ok(KeptBytes::of(buf, chain.len)),
+            None => Err(chain),
+        }
     }
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {

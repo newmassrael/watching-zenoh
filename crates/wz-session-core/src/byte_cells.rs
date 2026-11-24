@@ -263,6 +263,28 @@ impl Drop for ByteBuf {
     }
 }
 
+/// The first bytes of a buffer a table lent, kept past the call that wrote them: the cell is lent
+/// to no other claim until this drops, so what reads those bytes where they lie may do so for as
+/// long as it holds this. A completed reassembly chain is handed up as one when its staging can
+/// give its buffer away (`ChainStaging::keep`). Not `Send`, as the claim it holds is not.
+pub struct KeptBytes {
+    buf: ByteBuf,
+    len: usize,
+}
+
+impl KeptBytes {
+    /// The first `len` bytes of `buf`, at most the whole buffer.
+    pub fn of(buf: ByteBuf, len: usize) -> Self {
+        let len = len.min(buf.len);
+        Self { buf, len }
+    }
+
+    /// The bytes kept.
+    pub fn as_slice(&self) -> &[u8] {
+        self.buf.as_slice().get(..self.len).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +343,27 @@ mod tests {
         drop(again);
         drop(a);
         assert_eq!(table.in_use(), 0);
+    }
+
+    /// Kept bytes are the first bytes of their claim, read where the claim lies, at most the whole
+    /// buffer, and the cell is lent to no other claim until they drop. Turned red by a keep that
+    /// copies the bytes out or lets the cell go while they are held.
+    #[test]
+    fn kept_bytes_hold_their_cell_until_they_drop() {
+        static CELLS: ByteCells<4, 1> = ByteCells::new();
+        let mut buf = CELLS.claim().expect("the cell");
+        buf.as_mut_slice().copy_from_slice(&[1, 2, 3, 4]);
+        let base = buf.raw().0.cast_const();
+        let kept = KeptBytes::of(buf, 3);
+        assert_eq!(kept.as_slice(), &[1, 2, 3]);
+        assert_eq!(kept.as_slice().as_ptr(), base, "read where the claim lies");
+        assert!(
+            CELLS.claim().is_none(),
+            "the cell is lent to no other claim"
+        );
+        drop(kept);
+        let whole = KeptBytes::of(CELLS.claim().expect("the cell, given back"), 9);
+        assert_eq!(whole.as_slice(), &[1, 2, 3, 4], "at most the whole buffer");
     }
 
     /// A claim kept past its own life is taken back by the address it starts at, once, and an
