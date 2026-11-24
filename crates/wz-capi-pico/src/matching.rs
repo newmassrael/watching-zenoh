@@ -928,15 +928,42 @@ mod tests {
         assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
     }
 
+    /// How many listener places `engine` has free: each claimed, then all given back.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    fn free_places(engine: &Arc<Engine>) -> usize {
+        let claimed: crate::prelude::Vec<Slot<u64>> =
+            core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::MatchingListener))
+                .collect();
+        claimed.len()
+    }
+
+    /// A listener's place taken from `engine` and filled as a declare fills it, on no list.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    fn placed(engine: &Arc<Engine>) -> *mut MatchingListenerState {
+        Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener)
+            .expect("a listener's place")
+            .fill(Answering::keeping(
+                MatchingListenerState {
+                    shared: Arc::clone(engine),
+                    id: 0,
+                },
+                MatchingKept {
+                    closure: MatchingCClosure::uncounted(core::ptr::null_mut(), None, None),
+                    link: FilterLink::unlinked(),
+                },
+            ))
+            .cast::<MatchingListenerState>()
+    }
+
     /// A listener's place stands while its filter's list holds it: a background listener, whose
     /// owner goes at once, keeps its place until the filter retracts it; one undeclared by its
-    /// handle is taken off the list and gives its place back then, leaving the other on it.
-    /// Turned red by a list that holds no place (a place given back while the filter can still
-    /// reach it), or one an undeclared listener stays on (a place never given back).
+    /// handle is taken off the list and gives its place back then. One listener at a time, as the
+    /// session opens under the pico preset, whose `MAX_MATCHING_LISTENERS` admits one. Turned
+    /// red by a list that holds no place (a place given back while the filter can still reach
+    /// it), or one an undeclared listener stays on (a place never given back).
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
     fn a_listeners_place_stands_while_its_filter_holds_it() {
-        use crate::prelude::Vec;
         use crate::session::{
             engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
@@ -946,30 +973,97 @@ mod tests {
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
         let engine = engine_held(handle.expect("an open session has its handle")).clone();
-        // How many listener places `engine` has free: each claimed, then all given back.
-        let free = |engine: &Arc<Engine>| {
-            let claimed: Vec<Slot<u64>> =
-                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::MatchingListener))
-                    .collect();
-            claimed.len()
+        let places = free_places(&engine);
+        assert!(places >= 1, "the session's limit admits a listener");
+        let list = FilterListeners::default();
+
+        let background = placed(&engine);
+        // SAFETY: the place was filled just above and is on no list; `list` stays here while it
+        // is on it, and its owner lets go of it once.
+        unsafe {
+            list.link(background);
+            retire_entity::<MatchingListenerState, MatchingKept>(background);
+        }
+        assert_eq!(
+            free_places(&engine),
+            places - 1,
+            "the list holds the background one"
+        );
+        list.retract_all(Arc::as_ref(&engine));
+        assert_eq!(
+            free_places(&engine),
+            places,
+            "the filter's retraction gave the background listener's place back"
+        );
+        assert!(list.head.load(Ordering::Relaxed).is_null());
+
+        let handled = placed(&engine);
+        // SAFETY: as above, for a place whose owner keeps it.
+        unsafe { list.link(handled) };
+        assert_eq!(
+            free_places(&engine),
+            places - 1,
+            "the listener holds its place"
+        );
+        // SAFETY: `handled` is a live handle, let go of once, here.
+        unsafe { retract_listener(handled) };
+        assert_eq!(
+            free_places(&engine),
+            places,
+            "the undeclared listener's place went back"
+        );
+        assert!(
+            list.head.load(Ordering::Relaxed).is_null(),
+            "the undeclare took the listener off its filter's list"
+        );
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// Two listeners on one filter, under a session whose config states room for two: one
+    /// undeclared by its handle is taken off the list and gives its place back, leaving the
+    /// background one on it, whose place stands until the filter retracts it. Turned red by an
+    /// undeclare that takes the other listener off with it, or leaves its own on the list.
+    #[cfg(all(
+        not(feature = "engine-tokio"),
+        feature = "peer",
+        feature = "config-document"
+    ))]
+    #[test]
+    fn an_undeclared_listener_leaves_the_others_on_its_filter() {
+        use crate::config_policy::wz_ext_config_document;
+        use crate::session::{
+            engine_held, listening_on_loopback_with, session_handle, z_session_drop,
+            z_session_loan, z_session_move,
         };
-        let places = free(&engine);
-        assert!(places >= 2, "the session's limit admits two listeners");
-        let placed = |engine: &Arc<Engine>| {
-            Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener)
-                .expect("a listener's place")
-                .fill(Answering::keeping(
-                    MatchingListenerState {
-                        shared: Arc::clone(engine),
-                        id: 0,
-                    },
-                    MatchingKept {
-                        closure: MatchingCClosure::uncounted(core::ptr::null_mut(), None, None),
-                        link: FilterLink::unlinked(),
-                    },
-                ))
-                .cast::<MatchingListenerState>()
-        };
+        use wz_session_core::limit_binding::Quota;
+        use wz_session_core::limits::SessionLimits;
+
+        // A build whose domain keeps the limit to its own value refuses the statement this needs;
+        // that refusal is the document door's own test.
+        if SessionLimits::defaults()
+            .select_max_matching_listeners(Quota::at_most(2))
+            .is_err()
+        {
+            return;
+        }
+        let mut session = listening_on_loopback_with(|config| {
+            // SAFETY: the config is live and the document a NUL-terminated string.
+            let stated = unsafe {
+                wz_ext_config_document(
+                    config,
+                    c"{ wz: { limits: { MAX_MATCHING_LISTENERS: 2 } } }".as_ptr(),
+                )
+            };
+            assert_eq!(stated, Z_OK);
+        });
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
+        let places = free_places(&engine);
+        assert!(places >= 2, "the stated limit admits two listeners");
 
         let list = FilterListeners::default();
         let background = placed(&engine);
@@ -982,20 +1076,25 @@ mod tests {
             list.link(handled);
         }
         assert_eq!(
-            free(&engine),
+            free_places(&engine),
             places - 2,
             "the list holds the background one"
         );
         // SAFETY: `handled` is a live handle, let go of once, here.
         unsafe { retract_listener(handled) };
         assert_eq!(
-            free(&engine),
+            free_places(&engine),
             places - 1,
             "the undeclared listener's place went back; the background one's stands"
         );
+        assert_eq!(
+            list.head.load(Ordering::Relaxed),
+            background,
+            "the background listener is left on the list"
+        );
         list.retract_all(Arc::as_ref(&engine));
         assert_eq!(
-            free(&engine),
+            free_places(&engine),
             places,
             "the filter's retraction gave the background listener's place back"
         );
