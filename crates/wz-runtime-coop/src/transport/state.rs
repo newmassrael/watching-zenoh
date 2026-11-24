@@ -131,8 +131,9 @@ pub struct TransportState<T: TransportFaces> {
     #[cfg(feature = "shared-key-ids")]
     pub key_forms: LinkKeyForms,
     /// The one reassembly Router of the session, which its links share: its chains are keyed by
-    /// their peers, and staged in the session's buffers for them, each claimed by a chain while it
-    /// is open, lent from the arena (`ArenaPlan::reassembly`). The session sweeps it and ends a
+    /// their peers where the session has several (`SessionPeers`), and staged in the session's
+    /// buffers for them, each claimed by a chain while it is open, lent from the arena
+    /// (`ArenaPlan::reassembly`). The session sweeps it and ends a
     /// lost peer's chains; its links' receives reach it only while the session's pass of its tasks
     /// lends it ([`RouterLend::lend_for`]).
     pub router: SessionReassembly,
