@@ -62,8 +62,7 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     if ke.is_null() {
         return None;
     }
-    let bytes = view_bytes((*ke)._start, (*ke)._len)?;
-    core::str::from_utf8(bytes).ok()
+    crate::abi::text_of(view_bytes((*ke)._start, (*ke)._len)?)
 }
 
 /// The key a declaration or a get names, read where the caller holds it: `Z_ERR_INVALID` when it
@@ -724,7 +723,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
             return Z_ERR_NULL;
         }
         let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
-        let Ok(text) = core::str::from_utf8(bytes) else {
+        let Some(text) = crate::abi::text_of(bytes) else {
             return Z_ERR_INVALID;
         };
         if !is_pico_canon(text) {
@@ -758,7 +757,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
             return Z_ERR_INVALID;
         }
         let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
-        if core::str::from_utf8(bytes).is_err() {
+        if crate::abi::text_of(bytes).is_none() {
             z_view_keyexpr_empty(keyexpr);
             return Z_ERR_INVALID;
         }
@@ -1191,8 +1190,7 @@ unsafe fn owned_keyexpr_input<'a>(
     if name.is_null() {
         return None;
     }
-    let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
-    core::str::from_utf8(bytes).ok()
+    crate::abi::text_of(core::slice::from_raw_parts(name.cast::<u8>(), len))
 }
 
 /// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
@@ -1287,9 +1285,9 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         let tail: &str = if right.is_null() || len == 0 {
             ""
         } else {
-            match core::str::from_utf8(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
-                Ok(t) => t,
-                Err(_) => return Z_ERR_INVALID,
+            match crate::abi::text_of(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
+                Some(t) => t,
+                None => return Z_ERR_INVALID,
             }
         };
         store_canonized(
@@ -1357,10 +1355,7 @@ unsafe fn store_canonized(
         }
     };
     // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
-    let Some(canon) = form
-        .get(..written)
-        .and_then(|bytes| core::str::from_utf8(bytes).ok())
-    else {
+    let Some(canon) = form.get(..written).and_then(crate::abi::text_of) else {
         return Err(Z_ERR_INVALID);
     };
     store_owned_keyexpr(key, extended_from(left, canon)?);
@@ -1514,7 +1509,7 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start.cast::<u8>(), len))
+        let Some(text) = crate::abi::text_of(core::slice::from_raw_parts(start.cast::<u8>(), len))
         else {
             return Z_ERR_INVALID;
         };
@@ -1578,7 +1573,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
             return Z_ERR_NULL;
         }
         let text = core::slice::from_raw_parts_mut(start.cast::<u8>(), *len);
-        if core::str::from_utf8(text).is_err() {
+        if crate::abi::text_of(text).is_none() {
             return Z_ERR_INVALID;
         }
         // Over the caller's own bytes, as pico canonizes them, of any length: the form never
