@@ -59,7 +59,9 @@ use wz_session_core::json::escape_into;
 use crate::fields_json::RowCoordinates;
 use crate::payload::formats::FormatMap;
 use crate::payload::Encoding;
-use crate::payload_decode::{decode_payload_parts, Declarations, PayloadDecoding, PayloadParts};
+use crate::payload_decode::{
+    decode_payload_parts, ChosenBy, Declarations, PayloadDecoding, PayloadParts,
+};
 
 /// The longest path list a call takes, in paths. A plot draws a few fields;
 /// the bound keeps a mistaken list (a whole schema's paths) from making every
@@ -371,11 +373,21 @@ struct Picked {
 enum Outcome {
     Decoded {
         schema: Option<String>,
+        /// The field document's `type_hash`: the body schema's type hash
+        /// where the format computes one.
+        type_hash: Option<String>,
         typed: bool,
         values: Vec<Picked>,
+        /// How the format was chosen, and the declared encoding's schema
+        /// suffix: the field document's `chosen_by` and `encoding_schema`.
+        chosen_by: ChosenBy,
+        encoding_schema: Option<String>,
     },
     Refused {
         why: String,
+        /// As on [`Self::Decoded`].
+        chosen_by: ChosenBy,
+        encoding_schema: Option<String>,
     },
     EncodingMismatch {
         declared: String,
@@ -396,10 +408,17 @@ pub(crate) fn state_names() -> Vec<&'static str> {
     [
         Outcome::Decoded {
             schema: None,
+            type_hash: None,
             typed: false,
             values: Vec::new(),
+            chosen_by: ChosenBy::Rule,
+            encoding_schema: None,
         },
-        Outcome::Refused { why: String::new() },
+        Outcome::Refused {
+            why: String::new(),
+            chosen_by: ChosenBy::Rule,
+            encoding_schema: None,
+        },
         Outcome::EncodingMismatch {
             declared: String::new(),
         },
@@ -505,10 +524,16 @@ fn outcome_of(
             fields,
             typed,
             schema,
+            type_hash,
+            chosen_by,
+            encoding_schema,
             ..
         } => Outcome::Decoded {
             schema,
+            type_hash,
             typed,
+            chosen_by,
+            encoding_schema,
             values: fields
                 .into_iter()
                 .filter(|f| paths.contains(&f.path))
@@ -518,7 +543,16 @@ fn outcome_of(
                 })
                 .collect(),
         },
-        PayloadDecoding::Refused { why, .. } => Outcome::Refused { why },
+        PayloadDecoding::Refused {
+            why,
+            chosen_by,
+            encoding_schema,
+            ..
+        } => Outcome::Refused {
+            why,
+            chosen_by,
+            encoding_schema,
+        },
         PayloadDecoding::EncodingMismatch { declared, .. } => {
             Outcome::EncodingMismatch { declared }
         }
@@ -797,16 +831,20 @@ fn push_record(seq: u64, held: &Held, outcome: &Outcome, out: &mut String) {
     match outcome {
         Outcome::Decoded {
             schema,
+            type_hash,
             typed,
             values,
+            chosen_by,
+            encoding_schema,
         } => {
             out.push_str(",\"typed\":");
             out.push_str(if *typed { "true" } else { "false" });
             out.push_str(",\"schema\":");
-            match schema {
-                Some(s) => escape_into(s, out),
-                None => out.push_str("null"),
-            }
+            push_opt_text(schema.as_deref(), out);
+            // Revision 4: the schema's type hash beside it, as the field
+            // document writes it.
+            out.push_str(",\"type_hash\":");
+            push_opt_text(type_hash.as_deref(), out);
             out.push_str(",\"values\":[");
             for (i, v) in values.iter().enumerate() {
                 if i > 0 {
@@ -815,10 +853,16 @@ fn push_record(seq: u64, held: &Held, outcome: &Outcome, out: &mut String) {
                 push_value(v, out);
             }
             out.push(']');
+            push_choice(*chosen_by, encoding_schema.as_deref(), out);
         }
-        Outcome::Refused { why } => {
+        Outcome::Refused {
+            why,
+            chosen_by,
+            encoding_schema,
+        } => {
             out.push_str(",\"why\":");
             escape_into(why, out);
+            push_choice(*chosen_by, encoding_schema.as_deref(), out);
         }
         Outcome::EncodingMismatch { declared } => {
             out.push_str(",\"declared\":");
@@ -827,6 +871,26 @@ fn push_record(seq: u64, held: &Held, outcome: &Outcome, out: &mut String) {
         Outcome::NotOnTheWire | Outcome::KeyexprUnresolved | Outcome::SegmentPiece => {}
     }
     out.push('}');
+}
+
+/// A text, or `null`.
+fn push_opt_text(text: Option<&str>, out: &mut String) {
+    match text {
+        Some(text) => escape_into(text, out),
+        None => out.push_str("null"),
+    }
+}
+
+/// Revision 4: the two keys that close a record whose payload a format was
+/// applied to (`decoded`, `refused`), after its other keys, as they close the
+/// field document's decoding: `chosen_by`, whether a rule covering the key or
+/// the sample's declared encoding under an encoding rule chose the format, and
+/// `encoding_schema`, the declared encoding's schema suffix or `null`.
+fn push_choice(chosen_by: ChosenBy, encoding_schema: Option<&str>, out: &mut String) {
+    out.push_str(",\"chosen_by\":");
+    escape_into(chosen_by.word(), out);
+    out.push_str(",\"encoding_schema\":");
+    push_opt_text(encoding_schema, out);
 }
 
 /// A piece's `segment`: which message of its stream it belongs to, how big that

@@ -8734,13 +8734,15 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":3},
+ *     {"document":{"name":"field_values","revision":4},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
  *                  "keyexpr_source":"wire","segment":null,
  *                  "state":"decoded","typed":true,"schema":"pkg.Pose",
+ *                  "type_hash":null,
  *                  "values":[{"path":"1","type":"sint32","typed_value":-3,
- *                             "enum_number":null}]}]}
+ *                             "enum_number":null}],
+ *                  "chosen_by":"rule","encoding_schema":null}]}
  *
  * ONE ENTRY PER RECORD, and a row may batch several: `seq` is the row's number,
  * the one every document of the handle gives it, and `record` the record's place
@@ -8752,6 +8754,19 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * carries `why`, `encoding_mismatch` the encoding the sample `declared`, and
  * `not_on_the_wire` and `keyexpr_unresolved` nothing more. A record no rule
  * covers is not written.
+ *
+ * HOW ITS FORMAT WAS CHOSEN, at values-document revision 4. A `decoded` and a
+ * `refused` record close, after their other keys, on the field document's
+ * `chosen_by` (`rule` when a rule covering the key named the format,
+ * `encoding` when an encoding rule read the sample by its declared encoding)
+ * and `encoding_schema` (the schema suffix of the sample's declared encoding,
+ * `null` when it declared none or one that is not UTF-8), from the same
+ * reading the field document's `payload_decode` block is written from. A
+ * `decoded` record also carries `type_hash` after `schema`: the RIHS01 hash
+ * of a `cdr` rule's ROS type, `null` for every other reading.
+ *
+ * @values field_values chosen_by
+ * @carries field_values chosen_by passenger
  *
  * WHICH KEY, at values-document revision 2. `keyexpr_source` is the field
  * document's word (revision 61): `wire`, `fixed_id` for a key the declarations

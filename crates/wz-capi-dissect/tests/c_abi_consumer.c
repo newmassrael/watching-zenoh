@@ -1907,8 +1907,8 @@ static int check_follow_door(void) {
         rc = wz_dissect_live_field_values_since(h, "demo/**=protobuf", "", "1", 0, &doc);
         CHECK(rc == WZ_DISSECT_OK && doc != NULL, "field_values_since rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
                   0,
               "the values document opens with its revision: %s", doc);
         wz_dissect_string_free(doc);
@@ -1937,8 +1937,8 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && doc != NULL,
               "field_values_since_window rc=%d", rc);
         CHECK(strncmp(doc,
-                      "{\"document\":{\"name\":\"field_values\",\"revision\":3},",
-                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":3},")) ==
+                      "{\"document\":{\"name\":\"field_values\",\"revision\":4},",
+                      strlen("{\"document\":{\"name\":\"field_values\",\"revision\":4},")) ==
                   0,
               "the windowed door writes the same document: %s", doc);
         wz_dissect_string_free(doc);

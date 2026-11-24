@@ -4991,6 +4991,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELD_VALUES_R2_CARRIES,
     },
+    // Revision 4 ADDS, on a `decoded` record, `type_hash` after `schema` and,
+    // on a `decoded` and a `refused` record, `chosen_by` and `encoding_schema`
+    // after its other keys, and retires nothing: the field document's keys of the
+    // same names (its revisions 82 and 84), from the same reading. Three keys
+    // and one family arrive. A consumer pinned to revision 3 loses nothing.
+    DocumentShape {
+        document: FIELD_VALUES,
+        revision: 4,
+        keys: FIELD_VALUES_R4_KEYS,
+        retiring: &[],
+        families: FIELD_VALUES_R4_FAMILIES,
+        planes: &[],
+        carries: FIELD_VALUES_R4_CARRIES,
+    },
     // THE FIELD DOCUMENT'S ROWS WITHOUT THEIR TREES, in CBOR.
     //
     // A document of its own because it is the answer of a door of its own
@@ -13044,6 +13058,48 @@ pub const FIELD_VALUES_R2_KEYS: &[&str] = &[
     "window",
 ];
 
+/// The values document's key set at revision 4: revision 2's (3 moved no
+/// key) and `chosen_by`, `encoding_schema` and `type_hash` on a `decoded`
+/// record, the first two on a `refused` one.
+pub const FIELD_VALUES_R4_KEYS: &[&str] = &[
+    "after_seq",
+    "chosen_by",
+    "declared",
+    "document",
+    "encoding_schema",
+    "ended_transfers",
+    "enum_number",
+    "evicted",
+    "keyexpr",
+    "keyexpr_source",
+    "missing_ranges",
+    "name",
+    "path",
+    "paths",
+    "place",
+    "profile",
+    "received_bytes",
+    "record",
+    "records",
+    "revision",
+    "schema",
+    "segment",
+    "seq",
+    "state",
+    "through_seq",
+    "time_ns",
+    "transfer",
+    "type",
+    "type_hash",
+    "typed",
+    "typed_value",
+    "unjoined",
+    "values",
+    "whole_bytes",
+    "why",
+    "window",
+];
+
 /// What a record's `state` says at values-document revision 2: revision 1's
 /// words and `segment_piece`.
 pub const FIELD_VALUES_STATE_R2: &[&str] = &[
@@ -13058,6 +13114,31 @@ pub const FIELD_VALUES_STATE_R2: &[&str] = &[
 /// The values document's value families at revision 2: `state`, and the field
 /// document's `keyexpr_source`, `place` and `unjoined`, over the same words.
 pub const FIELD_VALUES_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "keyexpr_source",
+        values: KEYEXPR_SOURCE_R61,
+    },
+    ValueFamily {
+        key: "place",
+        values: SEGMENT_PLACE_R59,
+    },
+    ValueFamily {
+        key: "state",
+        values: FIELD_VALUES_STATE_R2,
+    },
+    ValueFamily {
+        key: "unjoined",
+        values: SEGMENT_UNJOINED_R59,
+    },
+];
+
+/// The values document's value families at revision 4: revision 2's and the
+/// field document's `chosen_by`, over the same words.
+pub const FIELD_VALUES_R4_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "chosen_by",
+        values: CHOSEN_BY_R82,
+    },
     ValueFamily {
         key: "keyexpr_source",
         values: KEYEXPR_SOURCE_R61,
@@ -13142,6 +13223,109 @@ pub const FIELD_VALUES_R2_CARRIES: &[KeyCarries] = &[
             WordCarries {
                 word: "refused",
                 shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                    "why",
+                ]],
+            },
+            WordCarries {
+                word: "segment_piece",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// What a record's words bring at revision 4: revision 2's, with `chosen_by`,
+/// a passenger, and `decoded` and `refused` records closing on `chosen_by` and
+/// `encoding_schema`, a `decoded` one carrying `type_hash` too.
+pub const FIELD_VALUES_R4_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "chosen_by",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "decoded",
+                shapes: &[&[
+                    "chosen_by",
+                    "encoding_schema",
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "schema",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                    "type_hash",
+                    "typed",
+                    "values",
+                ]],
+            },
+            WordCarries {
+                word: "encoding_mismatch",
+                shapes: &[&[
+                    "declared",
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "keyexpr_unresolved",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "not_on_the_wire",
+                shapes: &[&[
+                    "keyexpr",
+                    "keyexpr_source",
+                    "record",
+                    "segment",
+                    "seq",
+                    "time_ns",
+                ]],
+            },
+            WordCarries {
+                word: "refused",
+                shapes: &[&[
+                    "chosen_by",
+                    "encoding_schema",
                     "keyexpr",
                     "keyexpr_source",
                     "record",
@@ -53693,7 +53877,9 @@ mod tests {
             // The typed values of a few payload field paths.
             // To 3 when a reply's pieces were joined per query, apart from the
             // live ones, and a request's or an error's were joined no more.
-            (FIELD_VALUES, 3),
+            // To 4 when a record said how its format was chosen, the encoding's
+            // schema and the type hash.
+            (FIELD_VALUES, 4),
             // The field document's rows without their trees; to 5 with the
             // field document's 64, to 6 with its 65, to 7 with its 66, to 8
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its

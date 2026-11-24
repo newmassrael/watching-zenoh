@@ -12741,7 +12741,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 115] = [
+        let live: [(&str, &str, Vec<&'static str>); 116] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -13010,6 +13010,13 @@ mod tests {
                     .iter()
                     .map(|u| u.word())
                     .collect(),
+            ),
+            // How a record's format was chosen (values revision 4), the field
+            // document's walk.
+            (
+                rev::FIELD_VALUES,
+                "chosen_by",
+                crate::payload_decode::ChosenBy::names(),
             ),
             // R2706 — the session's verdict words. The walk is the successor
             // chain on `CarriedState`; what holds it to `Carried` itself is

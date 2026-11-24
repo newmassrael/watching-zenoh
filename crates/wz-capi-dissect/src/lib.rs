@@ -13177,8 +13177,9 @@ mod tests {
         let doc = call(0);
         assert!(
             doc.contains(
-                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"values\":[\
-                 {\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\"enum_number\":null}]}"
+                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"type_hash\":null,\
+                 \"values\":[{\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\
+                 \"enum_number\":null}],\"chosen_by\":\"rule\",\"encoding_schema\":null}"
             ),
             "{doc}"
         );
