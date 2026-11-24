@@ -180,6 +180,17 @@ impl<K> CellRc<K> {
         }
     }
 
+    /// The value `make` makes, written in a cell of `cells` when a table is lent and in one of
+    /// its own on the heap when none is ([`Self::in_cells`]): the cell is made first, so the value
+    /// is made where it stays and not in a frame moved into it. `None` when no cell of the table
+    /// takes it, `make` then not called and let go of with what it holds. A `make` that unwinds
+    /// keeps the cell, which is then never given back.
+    pub fn made_in(cells: Option<&LentByteCells>, make: impl FnOnce() -> K) -> Option<Self> {
+        let head = head_in(cells, Layout::new::<Slot<K>>())?;
+        // SAFETY: as in `Self::in_cells`.
+        Some(unsafe { Self::fill(head, make()) })
+    }
+
     /// `value` in a cell of its own on the heap: the handle of a link lent no table.
     pub fn boxed(value: K) -> Self {
         let head = heap_head(Layout::new::<Slot<K>>());
@@ -539,6 +550,43 @@ mod tests {
             .ok()
             .expect("the heap when no table is lent");
         assert_eq!(cells.in_use(), 2, "the heap's takes no cell");
+        drop((first, second, boxed));
+        assert_eq!((drops.get(), cells.in_use()), (4, 0));
+    }
+
+    /// A value made in a cell is made only once a cell is had for it: past the table's cells it is
+    /// not made and what its maker holds is let go of, and with no table it is made on the heap.
+    /// Turned red by a maker called before its cell is claimed, or one kept past a refusal.
+    #[test]
+    fn a_value_is_made_in_its_cell_and_not_made_when_no_cell_takes_it() {
+        let cells = table(CellRc::<Counted>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        fn make(made: &Cell<u32>, held: Counted) -> impl FnOnce() -> Counted + '_ {
+            move || {
+                made.set(made.get().saturating_add(1));
+                held
+            }
+        }
+        let made = Cell::new(0u32);
+        let first =
+            CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
+        let second =
+            CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
+        assert_eq!((made.get(), cells.in_use()), (2, 2));
+        let refused = CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone())));
+        assert!(refused.is_none(), "past the table's cells");
+        assert_eq!(
+            (made.get(), drops.get()),
+            (2, 1),
+            "the refused value was never made, and what its maker held is dropped"
+        );
+        let boxed = CellRc::made_in(None, make(&made, Counted(drops.clone()))).expect("the heap");
+        assert_eq!(
+            (made.get(), cells.in_use()),
+            (3, 2),
+            "the heap's takes no cell"
+        );
+        assert_eq!(first.name(), 7);
         drop((first, second, boxed));
         assert_eq!((drops.get(), cells.in_use()), (4, 0));
     }
