@@ -619,6 +619,11 @@ impl CensusFold {
 #[derive(Debug, Default)]
 struct SelectorPlanes {
     planes: Resumable<CensusFold>,
+    /// The selector as the planes judge it: the one asked, with its `row`
+    /// terms read against the places the rows had when the planes were last
+    /// brought up (`crate::filter::Filter::rows_numbered_by`). Another reading
+    /// is another selector for every record already folded.
+    read: Option<crate::filter::Filter>,
     /// What the planes kept after they last gave up the rows no list holds:
     /// the mark that says when to give them up again.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -812,8 +817,21 @@ impl CensusMemory {
     /// are continued, and a selector with none gets empty ones, taking the place of
     /// the least recently used selector's when every memory is in use. The node
     /// census is kept, since no selector narrows it.
-    pub(crate) fn for_filter(&mut self, filter: &crate::filter::Filter) {
-        self.planes.touch(filter, SelectorPlanes::default);
+    ///
+    /// `read` is `filter` as this call judges records by it, its `row` terms
+    /// read against the places the rows have now. The planes are kept under the
+    /// selector as typed, so a reading that moves does not take another selector's
+    /// slot; planes folded under another reading begin again.
+    pub(crate) fn for_filter(
+        &mut self,
+        filter: &crate::filter::Filter,
+        read: crate::filter::Filter,
+    ) {
+        let slot = self.planes.touch(filter, SelectorPlanes::default);
+        if slot.read.as_ref() != Some(&read) {
+            slot.planes = Resumable::default();
+            slot.read = Some(read);
+        }
     }
 
     /// The selector last asked under, its planes, the work counter and the node
@@ -840,7 +858,8 @@ impl CensusMemory {
         let (filter, planes) = planes
             .newest_mut()
             .expect("a plane was made above when there was none");
-        (filter.clone(), planes, stats, nodes)
+        let read = planes.read.clone().unwrap_or_else(|| filter.clone());
+        (read, planes, stats, nodes)
     }
 
     /// The node census and the selector-narrowed planes, brought up to

@@ -365,6 +365,7 @@ mod rendered {
             despite_encoding: None,
             typed: format.reads_types(),
             schema: format.body_schema().map(|s| s.message.to_string()),
+            type_hash: None,
             chosen_by: crate::payload_decode::ChosenBy::Rule,
             encoding_schema: None,
         };
@@ -406,6 +407,7 @@ mod rendered {
             despite_encoding: None,
             typed: format.reads_types(),
             schema: None,
+            type_hash: None,
             chosen_by: crate::payload_decode::ChosenBy::Rule,
             encoding_schema: None,
         };

@@ -78,7 +78,7 @@ fn the_options_layout_is_the_one_the_header_declares() {
     assert_eq!(
         size_of::<O>(),
         72,
-        "ABI 62 appended two fields, ABI 64 one, ABI 66 one"
+        "ABI 62 appended two fields, ABI 64 one, ABI 67 one"
     );
     assert_eq!(
         LIVE_OPTIONS_FIRST_SIZE, 40,

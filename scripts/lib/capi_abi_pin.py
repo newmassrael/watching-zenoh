@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 66
+EXPECTED_VERSION = 67
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -469,6 +469,12 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # a `char*` released by `wz_dissect_string_free`. The memory rule does not
     # move.
     "wz_dissect_selector_bind_in_zone": 60,
+    # (ABI 65) -- the binder with a POSIX TZ rule: the offset in force written
+    # onto each date and the rule onto each clock time. One string more in than
+    # `wz_dissect_selector_bind`; the document is that door's `selector_bind`
+    # (revision 2 for its three refusals), a `char*` released by
+    # `wz_dissect_string_free`. The memory rule does not move.
+    "wz_dissect_selector_bind_in_tz": 65,
     # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
     # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
     # comes out, and a null pointer clears the hook. A stopped call answers
@@ -547,7 +553,7 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # ceiling of each stream direction and the reassembly window), and a caller
     # compiled against 61 is read as having left them zero. ABI 64 brought none
     # either: the same struct grew `chain_bytes`, the bytes one fragment chain
-    # may join, read as zero (the preset's 65,536) from an older caller. ABI 66
+    # may join, read as zero (the preset's 65,536) from an older caller. ABI 67
     # brought none either: the same struct grew `stream_bytes_total`, the bytes
     # every TCP flow keeps together, read as zero (the preset's) from an older
     # caller.
@@ -559,14 +565,14 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # first packet written to a `uint64_t` the CALLER owns. The memory rule does
     # not move.
     "wz_dissect_live_follow_next": 63,
-    # (ABI 65) -- the same move over a next container the caller LENDS: the
+    # (ABI 66) -- the same move over a next container the caller LENDS: the
     # handle retains the caller's pointer, as the other lending doors do, until
     # it is closed or says it reads that container no more. One symbol, and
     # the memory rule moves with it.
-    "wz_dissect_live_follow_next_lent": 65,
-    # (ABI 65) -- which containers a handle still reads: two `uint64_t` the
+    "wz_dissect_live_follow_next_lent": 66,
+    # (ABI 66) -- which containers a handle still reads: two `uint64_t` the
     # CALLER owns out, nothing retained. One symbol.
-    "wz_dissect_live_oldest_container": 65,
+    "wz_dissect_live_oldest_container": 66,
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census": 3,

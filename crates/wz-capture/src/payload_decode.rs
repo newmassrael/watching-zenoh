@@ -1477,6 +1477,11 @@ pub enum PayloadDecoding {
         /// apart: no schema named, a schema named and read, and a schema named
         /// whose files the declarations do not carry.
         schema: Option<String>,
+        /// The body schema's type hash where the format computes one
+        /// ([`crate::payload::formats::PayloadFormat::type_hash`]): the
+        /// `RIHS01_<hex>` of a `cdr` rule's ROS type, and `None` for every
+        /// other reading.
+        type_hash: Option<String>,
         /// How the format was chosen: by the rule that covers the key, or by
         /// the sample's declared encoding under an encoding rule.
         chosen_by: ChosenBy,
@@ -1713,6 +1718,7 @@ impl PayloadDecoding {
                 despite_encoding: None,
                 typed: false,
                 schema: None,
+                type_hash: None,
                 chosen_by: ChosenBy::Rule,
                 encoding_schema: None,
             },
@@ -2845,6 +2851,7 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
                 schema: format
                     .body_schema()
                     .map(|schema| String::from(schema.message)),
+                type_hash: format.type_hash().map(String::from),
                 chosen_by,
                 encoding_schema,
             }
@@ -2987,6 +2994,7 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
             despite_encoding,
             typed,
             schema,
+            type_hash,
             chosen_by,
             encoding_schema,
         } => {
@@ -3001,6 +3009,10 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
             out.bool(*typed);
             out.key("schema");
             out.opt_text(schema.as_deref());
+            // The schema's type hash, `null` where none is computed, on the
+            // same rule.
+            out.key("type_hash");
+            out.opt_text(type_hash.as_deref());
             // R311y874 — present with a `null` rather than absent, R311y720's
             // rule: a consumer must never have to test for a key to learn that
             // a fact is unknown. Here the fact is "was this decoded over the
@@ -3435,10 +3447,12 @@ mod tests {
                 despite_encoding,
                 typed,
                 schema,
+                type_hash,
                 chosen_by,
                 encoding_schema,
             } => {
                 assert_eq!(keyexpr, "demo/a");
+                assert_eq!(type_hash, None, "JSON has no type hash");
                 assert_eq!(rule, demo_rule(), "the one rule declared won");
                 assert_eq!(format, "json");
                 assert!(typed, "JSON says each value's kind");

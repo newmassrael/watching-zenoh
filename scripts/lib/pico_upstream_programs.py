@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""zenoh-pico's own API tests and example programs, run against a built pico C ABI library.
+"""R4619 (no register item) -- zenoh-pico's own API tests and example programs, run against a built
+pico C ABI library.
 
     pico_upstream_programs.py --package ZIP --zenohd EXE [--sets SETS] [--only IDS] [--no-control]
     pico_upstream_programs.py --host-library PROFILE --zenohd EXE [--sets SETS] [--only IDS] [--no-control]
@@ -938,7 +939,7 @@ def reference_library(host, features: list[str], scratch: pathlib.Path) -> Libra
     label = "zenoh-pico (control)"
     if host.name == "windows":
         def one(pattern: str) -> pathlib.Path:
-            hits = [x for x in build.rglob(pattern) if "CMakeFiles" not in x.parts]
+            hits = [x for x in build.rglob(pattern) if "CMakeFiles" not in x.relative_to(build).parts]
             if len(hits) != 1:
                 raise Refusal(f"the reference build left {len(hits)} {pattern} under {build}, not one")
             return hits[0]

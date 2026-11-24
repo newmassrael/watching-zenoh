@@ -1635,6 +1635,11 @@ pub(crate) struct RereadResume {
     /// The walk standing before packet `chunk * REREAD_CHUNK`, for each chunk from
     /// `first_chunk` on that the walk has reached the start of.
     checkpoints: alloc::collections::VecDeque<crate::CaptureCursor>,
+    /// Every packet the walk has passed whose block carries a comment, in
+    /// container order. Kept whole, unlike the checkpoints: a comment on a
+    /// packet older than every held message is still a flow's, and the few
+    /// words it takes follow the commented packets, which are rare.
+    commented: Vec<CommentedPacket>,
 }
 
 impl RereadResume {
@@ -1646,6 +1651,7 @@ impl RereadResume {
             fingerprint: 0,
             first_chunk: 0,
             checkpoints: alloc::collections::VecDeque::from([start]),
+            commented: Vec::new(),
         }
     }
 
@@ -1663,8 +1669,10 @@ impl RereadResume {
     fn advance(&mut self, capture: &[u8]) -> bool {
         loop {
             let mut chunk_ended = false;
+            let commented = &mut self.commented;
             let walk = self.cursor.walk(capture, |event| {
                 if let crate::CaptureEvent::Frame(frame) = event {
+                    commented.extend(CommentedPacket::of(&frame));
                     if (frame.index + 1) % REREAD_CHUNK == 0 {
                         chunk_ended = true;
                         return core::ops::ControlFlow::Break(());
@@ -2824,6 +2832,7 @@ fn push_stream_flow<W: DocOut>(
     out.key("omitted");
     out.uint(omitted as u64);
     push_ended_chains(&flow.frames, spaces, out);
+    write_unrowed_comments(&flow.flow, reread, || stream_rowed_packets(flow), out);
     out.close_map();
 }
 
@@ -3208,6 +3217,7 @@ fn push_datagram_flow<W: DocOut>(
     out.close_array();
     out.close_map();
     push_ended_chains(&flow.frames, spaces, out);
+    write_unrowed_comments(&flow.flow, reread, || datagram_rowed_packets(flow), out);
     out.close_map();
 }
 
@@ -5516,6 +5526,89 @@ fn push_packet_comments<W: DocOut>(options: Option<crate::pcapng::OptionList<'_>
             out.close_array();
         }
     }
+}
+
+/// A flow's `unrowed_comments` key (revision 85): every packet of the flow whose
+/// pcapng block carries a comment and which carries the first byte of none of
+/// the flow's messages the dissection holds (a bare acknowledgement, a segment
+/// in the middle of a message, a datagram that decoded to nothing), in packet
+/// order, as `{"packet":N,"comments":[...]}`, each comment as
+/// [`crate::report::write_comment`] writes it. The comments of a packet that
+/// carries a row's first byte are that row's `packet_comments`, so between the
+/// two every comment on a packet of a flow is carried once.
+///
+/// `[]` when there is none, and `null` when the container could not be read
+/// a second time (`capture_reread` false), which is not known rather than none.
+/// Which packets carry a first byte is read off the messages the dissection
+/// holds, not off the rows a window or a cap writes, so the list is the same in
+/// every document of one dissection; a message a retention ceiling gave up no
+/// longer holds its packet.
+fn write_unrowed_comments<W: DocOut>(
+    flow: &crate::link::FlowKey,
+    reread: Option<&Reread>,
+    rowed: impl FnOnce() -> alloc::collections::BTreeSet<usize>,
+    out: &mut W,
+) {
+    out.key("unrowed_comments");
+    let Some(reread) = reread else {
+        out.null();
+        return;
+    };
+    let mut own = reread
+        .commented
+        .iter()
+        .filter(|packet| packet.flow.as_ref() == Some(flow))
+        .peekable();
+    out.open_array();
+    // The first-byte packets are gathered only for a flow that has a commented
+    // packet, which is few of them.
+    if own.peek().is_some() {
+        let rowed = rowed();
+        for packet in own {
+            let number = reread.first_packet + packet.index;
+            if rowed.contains(&number) {
+                continue;
+            }
+            out.open_map();
+            out.key("packet");
+            out.uint(number as u64);
+            out.key("comments");
+            out.open_array();
+            for comment in &packet.comments {
+                crate::report::write_comment(comment, out);
+            }
+            out.close_array();
+            out.close_map();
+        }
+    }
+    out.close_array();
+}
+
+/// The packets that carried the first byte of a message a stream flow holds,
+/// read off the rows' heads as the document's capture order reads them
+/// (`FlowDissection::capture_order_from`), so nothing is decoded.
+///
+/// A message read out of an lz4 batch has no byte of its own on the wire and
+/// its row names no packet, so it holds none here either: a comment on its
+/// batch's packet is then the flow's.
+fn stream_rowed_packets(flow: &crate::FlowDissection) -> alloc::collections::BTreeSet<usize> {
+    flow.frames()
+        .heads_from(0)
+        .filter(|head| !head.decompressed)
+        .filter_map(|head| {
+            flow.packet_for(head.direction, crate::FlowDissection::first_byte(&head))
+        })
+        .collect()
+}
+
+/// The packets a datagram flow's held messages and scouting messages came in:
+/// a datagram's row names its own packet.
+fn datagram_rowed_packets(flow: &crate::DatagramDissection) -> alloc::collections::BTreeSet<usize> {
+    flow.frames()
+        .heads_from(0)
+        .map(|head| head.stream_offset)
+        .chain(flow.scouting().iter().map(|datagram| datagram.packet_index))
+        .collect()
 }
 
 /// The row's `l2` key: the Ethernet II header's source, destination and place
@@ -8211,6 +8304,9 @@ fn walk_agrees(walked: &str, framed: &str) -> bool {
 /// well as the first one does.
 struct Reread<'a> {
     packets: RereadPackets<'a>,
+    /// Every packet of the container whose block carries a comment, in
+    /// container order.
+    commented: Vec<CommentedPacket>,
     /// The number the container's first packet takes in the rows' numbering:
     /// `0` but for a live handle that went on into a later container of its
     /// capture ([`RowCoordinates::container_first_packet`]). A packet before it is
@@ -8244,13 +8340,58 @@ struct RereadPacket<'a> {
     options: crate::pcapng::OptionList<'a>,
 }
 
+/// A packet of the container whose pcapng block carries a comment: its number
+/// in the container, the flow its bytes belong to, and its comments, read as
+/// the container is walked so a flow's `unrowed_comments` needs no second walk.
+#[derive(Clone, Debug)]
+struct CommentedPacket {
+    /// Its number in the container, from 0.
+    index: usize,
+    /// The flow it travelled on, decapsulated as the dissection decapsulates
+    /// it; `None` for a packet that is no flow's, which no flow then carries: a
+    /// piece of a fragmented IP datagram, and one decapsulation refuses.
+    flow: Option<crate::link::FlowKey>,
+    /// Its `opt_comment` values, in the order its block lists them.
+    comments: Vec<crate::pcapng::Comment>,
+}
+
+impl CommentedPacket {
+    /// The commented packet `frame` is, or `None` when its block carries no
+    /// comment.
+    fn of(frame: &crate::CapturedFrame<'_>) -> Option<Self> {
+        let comments: Vec<crate::pcapng::Comment> = frame
+            .options
+            .comments()
+            .map(crate::pcapng::Comment::of)
+            .collect();
+        if comments.is_empty() {
+            return None;
+        }
+        let flow = match crate::link::decapsulate(frame.link_type, frame.index, frame.data) {
+            Ok(crate::link::Transport::Tcp(segment)) => Some(segment.flow),
+            Ok(
+                crate::link::Transport::Udp(datagram) | crate::link::Transport::RawEth(datagram),
+            ) => Some(datagram.flow),
+            Ok(crate::link::Transport::Vsock(record)) => Some(record.flow),
+            Ok(crate::link::Transport::IpFragment(_)) | Err(_) => None,
+        };
+        Some(Self {
+            index: frame.index,
+            flow,
+            comments,
+        })
+    }
+}
+
 impl<'a> Reread<'a> {
     /// The whole container, read once.
     fn of(capture: &'a [u8], first_packet: usize) -> Option<Self> {
         let mut frames = Vec::new();
+        let mut commented = Vec::new();
         let mut cursor = crate::CaptureCursor::new();
         let walk = cursor.walk(capture, |event| {
             if let crate::CaptureEvent::Frame(frame) = event {
+                commented.extend(CommentedPacket::of(&frame));
                 frames.push(frame);
             }
             core::ops::ControlFlow::Continue(())
@@ -8267,6 +8408,7 @@ impl<'a> Reread<'a> {
             // parse always answered.
             Ok(crate::CaptureWalk::Halted { .. }) if cursor.consumed() > 0 => Some(Self {
                 packets: RereadPackets::All(frames),
+                commented,
                 first_packet,
             }),
             Ok(crate::CaptureWalk::Halted { .. }) => None,
@@ -8290,6 +8432,7 @@ impl<'a> Reread<'a> {
                 resume,
                 loaded: core::cell::RefCell::new(Vec::new()),
             },
+            commented: resume.commented.clone(),
             first_packet,
         }
     }
@@ -10491,6 +10634,7 @@ mod tests {
                 despite_encoding: None,
                 typed: true,
                 schema: None,
+                type_hash: None,
                 chosen_by,
                 encoding_schema: Some(String::from("pkg.Reading")),
             };
@@ -12116,6 +12260,103 @@ mod tests {
         assert_eq!(doc.matches("\"packet_comments\":[]").count(), 2, "{doc}");
     }
 
+    /// Revision 85 — A COMMENTED PACKET THAT CARRIES NO ROW'S FIRST BYTE IS
+    /// CARRIED ON ITS FLOW. A bare acknowledgement and the segment holding only
+    /// a message's length prefix are the flow's `unrowed_comments`, in packet
+    /// order; the packets that carry a first byte keep their comments on those
+    /// rows and are not listed again. A datagram flow whose commented packet is
+    /// a row's lists nothing, and a container that cannot be read again says
+    /// `null`.
+    #[test]
+    fn a_commented_packet_no_row_begins_in_is_carried_on_its_flow() {
+        use crate::datagram_tests::{
+            framed_keepalive, init_datagram, tcp_packet, tcp_packet_reverse, udp_packet,
+        };
+        use crate::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let first = tcp_packet(0, &framed_keepalive());
+        let ack = tcp_packet_reverse(0, &[]);
+        // The second KeepAlive split after its length prefix: the message's
+        // first byte, its MID, is in the second segment.
+        let prefix = tcp_packet(3, &[1, 0]);
+        let mid = tcp_packet(5, &[wz_session_core::wire_const::T_MID_KEEP_ALIVE]);
+        let packets = [
+            PacketSpec {
+                interface: 0,
+                ticks: 1_000_000,
+                data: &first,
+                options: &[(OPT_COMMENT, b"on a row")],
+            },
+            PacketSpec {
+                interface: 0,
+                ticks: 2_000_000,
+                data: &ack,
+                options: &[(OPT_COMMENT, b"bare ack")],
+            },
+            PacketSpec {
+                interface: 0,
+                ticks: 3_000_000,
+                data: &prefix,
+                options: &[(OPT_COMMENT, b"prefix")],
+            },
+            PacketSpec {
+                interface: 0,
+                ticks: 4_000_000,
+                data: &mid,
+                options: &[(OPT_COMMENT, b"first byte")],
+            },
+        ];
+        let ifaces = [(LINKTYPE_ETHERNET, 6u8)];
+        let capture = write_with_options(ByteOrder::Little, &ifaces, &packets);
+        let d = Dissection::from_capture(&capture).expect("the capture reads");
+        let doc = fields_json(&d, &capture, None, None);
+        assert_eq!(
+            doc.matches(
+                "\"unrowed_comments\":[{\"packet\":1,\"comments\":[{\"text\":\"bare ack\",\
+                 \"utf8\":true}]},{\"packet\":2,\"comments\":[{\"text\":\"prefix\",\
+                 \"utf8\":true}]}]"
+            )
+            .count(),
+            1,
+            "{doc}"
+        );
+        for on_a_row in ["on a row", "first byte"] {
+            let row =
+                alloc::format!("\"packet_comments\":[{{\"text\":\"{on_a_row}\",\"utf8\":true}}]");
+            assert_eq!(doc.matches(row.as_str()).count(), 1, "{on_a_row}: {doc}");
+        }
+
+        // A datagram flow whose one commented packet holds its Init's row.
+        let init = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &init_datagram(false, &[]),
+        );
+        let datagram = write_with_options(
+            ByteOrder::Little,
+            &ifaces,
+            &[PacketSpec {
+                interface: 0,
+                ticks: 1_000_000,
+                data: &init,
+                options: &[(OPT_COMMENT, b"init")],
+            }],
+        );
+        let d = Dissection::from_capture(&datagram).expect("the capture reads");
+        let doc = fields_json(&d, &datagram, None, None);
+        assert!(doc.contains("\"unrowed_comments\":[]"), "{doc}");
+        assert_eq!(
+            doc.matches("{\"text\":\"init\",\"utf8\":true}").count(),
+            1,
+            "{doc}"
+        );
+
+        // Nothing to read the container's packets from: not known.
+        let doc = fields_json(&d, &[], None, None);
+        assert!(doc.contains("\"unrowed_comments\":null"), "{doc}");
+    }
+
     #[test]
     fn the_field_documents_key_set_is_pinned() {
         use crate::payload::formats::FormatMap;
@@ -12318,6 +12559,7 @@ mod tests {
                     despite_encoding: None,
                     typed: false,
                     schema: None,
+                    type_hash: None,
                     chosen_by: crate::payload_decode::ChosenBy::Rule,
                     encoding_schema: None,
                 },
@@ -12499,7 +12741,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 115] = [
+        let live: [(&str, &str, Vec<&'static str>); 116] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -12768,6 +13010,13 @@ mod tests {
                     .iter()
                     .map(|u| u.word())
                     .collect(),
+            ),
+            // How a record's format was chosen (values revision 4), the field
+            // document's walk.
+            (
+                rev::FIELD_VALUES,
+                "chosen_by",
+                crate::payload_decode::ChosenBy::names(),
             ),
             // R2706 — the session's verdict words. The walk is the successor
             // chain on `CarriedState`; what holds it to `Carried` itself is
@@ -13762,9 +14011,12 @@ mod tests {
         .map(crate::filter::diagnose_json)
         .collect();
         // The binder verdict, over one selector per word of its `refusal` and a
-        // success that rewrites two terms: the four refusals carry different
-        // keys, so this is the population that shows a word and its shape agree.
+        // success that rewrites two terms: the refusals carry different keys,
+        // so this is the population that shows a word and its shape agree.
         let names = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        // The rule binder's three words, which only it writes: a rule that does
+        // not read, and a date its clock skips and one it shows twice.
+        let cet = "CET-1CEST,M3.5.0,M10.5.0/3";
         let bind_verdicts: Vec<String> = alloc::vec![
             crate::filter::bind_json("kind == put", None),
             crate::filter::bind_json(r#"node == cam or not node != lidar"#, Some(names)),
@@ -13772,6 +14024,10 @@ mod tests {
             crate::filter::bind_json(r#"node == twin"#, Some(r#"{"twin":"a1b2","twin":"c3d4"}"#),),
             crate::filter::bind_json("node ==", Some(names)),
             crate::filter::bind_json("node == cam", Some("[]")),
+            crate::filter::bind_json_in_tz("time > 12:04", None, cet),
+            crate::filter::bind_json_in_tz("time > 12:04", None, "CET-1CEST"),
+            crate::filter::bind_json_in_tz("time > 2026-03-29T02:30", None, cet),
+            crate::filter::bind_json_in_tz("time > 2026-10-25T02:30", None, cet),
         ];
         // The node sentence, over a success and one node per word of its
         // `refusal`, for the binder's reason.
@@ -13826,6 +14082,13 @@ mod tests {
             )),
             // Revision 5 — a key binding.
             crate::diagnose_json::declarations_diagnose_json("#%7=demo/fixed"),
+            // Revision 6 — ROS definition files of each kind, whose lines carry
+            // `types` beside `line`.
+            crate::diagnose_json::declarations_diagnose_json(
+                "#@demo/msg/Point.msg=\"float64 x\"\n\
+                 #@demo/srv/Add.srv=\"int64 a\\n---\\nint64 sum\"\n\
+                 #@demo/action/Fib.action=\"int32 order\\n---\\nint32[] seq\\n---\\nint32[] part\""
+            ),
         ];
         let mut keyexpr_verdicts: Vec<String> =
             alloc::vec![crate::diagnose_json::keyexpr_diagnose_json("demo/**")];
@@ -14813,7 +15076,7 @@ mod tests {
             block.starts_with(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\",\"fields\":["
             ),
             "the covering rule must DECODE, naming the topic and the decoder: {block}"
@@ -15970,7 +16233,7 @@ mod tests {
         for expected in [
             "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/json\",\
              \"matched_rule\":{\"index\":0,\"pattern\":\"**\"},\"typed\":true,\
-             \"schema\":null,\"despite_encoding\":null,\"format\":\"json\"",
+             \"schema\":null,\"type_hash\":null,\"despite_encoding\":null,\"format\":\"json\"",
             "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
              \"chosen_by\":\"encoding\",\"encoding_schema\":\"pkg.Reading\"}",
             "\"format\":\"text\",\"fields\":[{\"path\":\"$\",\"name\":null,\
