@@ -93,7 +93,7 @@ impl Miss {
 #[derive(Default)]
 pub struct MissHandlers {
     next_id: usize,
-    first: Option<(usize, Lent<unsafe fn(*mut c_void, Miss)>)>,
+    first: Option<FirstListener>,
     handlers: BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
 }
 
@@ -112,14 +112,14 @@ impl MissHandlers {
     ) -> Self {
         Self {
             next_id: 1,
-            first: Some((
-                0,
-                Lent {
+            first: Some(FirstListener {
+                id: 0,
+                lent: Lent {
                     call,
                     context,
                     drop,
                 },
-            )),
+            }),
             handlers: BTreeMap::new(),
         }
     }
@@ -134,7 +134,7 @@ impl MissHandlers {
 
     /// Let go of the handler registered as `id`; one already gone is left alone.
     pub fn unregister(&mut self, id: usize) {
-        if self.first.as_ref().is_some_and(|(first, _)| *first == id) {
+        if self.first.as_ref().is_some_and(|first| first.id == id) {
             self.first = None;
             return;
         }
@@ -145,10 +145,10 @@ impl MissHandlers {
     /// is dropped, which is upstream's behaviour: the sample stream never
     /// depends on anyone listening for its holes.
     fn fire(&mut self, miss: Miss) {
-        if let Some((_, first)) = self.first.as_ref() {
+        if let Some(FirstListener { lent, .. }) = self.first.as_ref() {
             // SAFETY: the maker of the listener lets it be called from any thread until its drop,
             // which runs only when this registry lets it go.
-            unsafe { (first.call)(first.context, miss) };
+            unsafe { (lent.call)(lent.context, miss) };
         }
         for handler in self.handlers.values_mut() {
             handler(miss);
@@ -159,6 +159,13 @@ impl MissHandlers {
 // SAFETY: the boxed listeners are `Send`, and a lent one's maker lets it be called and let go
 // of from any thread (`MissHandlers::lent`).
 unsafe impl Send for MissHandlers {}
+
+/// The listener a registry holds from the start ([`MissHandlers::lent`]), under the id it was
+/// registered with.
+struct FirstListener {
+    id: usize,
+    lent: Lent<unsafe fn(*mut c_void, Miss)>,
+}
 
 /// A callback in the raw form an engine's own callbacks take: a function, the context it reads,
 /// and what lets the context go after the last call, run when this is dropped. It holds no memory
