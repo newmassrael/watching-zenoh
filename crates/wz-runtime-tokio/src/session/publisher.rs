@@ -201,13 +201,10 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         if !self.stamps {
             return Err(StampedPutError::NotStamping);
         }
-        Ok(self
-            .options
-            .clone()
-            .with_timestamp(wz_session_core::sample::TimestampHint {
-                time,
-                zid: self.session.zid().to_vec(),
-            }))
+        Ok(self.options.clone().with_timestamp(
+            wz_session_core::sample::TimestampHint::new(time, &self.session.zid())
+                .expect("a session's zid is at most sixteen bytes"),
+        ))
     }
 
     /// R290 — pub-side mirror of [`Querier::get_matching_status`].

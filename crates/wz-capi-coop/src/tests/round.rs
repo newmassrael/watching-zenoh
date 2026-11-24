@@ -11,6 +11,7 @@ use core::num::NonZeroU32;
 use std::sync::Mutex;
 
 use wz_capi_port::{SubscriberSink, WireKey};
+use wz_session_core::byte_cells::{ByteCells, ByteSource, KeptBytes};
 use wz_session_core::caps;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
@@ -144,10 +145,7 @@ fn a_written_sample_is_handed_with_every_part_as_it_was_offered() {
             packed_id: 7,
             schema: Some(b"text".to_vec()),
         })
-        .with_timestamp(TimestampHint {
-            time: 42,
-            zid: vec![1, 2, 3],
-        })
+        .with_timestamp(TimestampHint::new(42, &[1, 2, 3]).unwrap())
         .with_qos(QosLevel::from_raw(5))
         .with_source_info(source.clone())
         .with_reliability(Reliability::BestEffort);
@@ -256,39 +254,118 @@ fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     );
 }
 
-/// A rejoined message's records are read where its chain lies while the round lends nothing else,
-/// and the datagram lent before the message is lent again after it; the round lends one source,
-/// so the datagram's record that follows is copied. The CONTROL is its payload's place.
+/// A rejoined message kept in a buffer of `cells`: its first `len` bytes, each `byte`.
+fn kept_in(cells: &'static ByteCells<8, 2>, byte: u8, len: usize) -> KeptBytes {
+    let mut buf = cells.claim().expect("a free buffer");
+    buf.as_mut_slice().fill(byte);
+    KeptBytes::of(buf, len)
+}
+
+/// A rejoined message's records are read where its chain's buffer lies, beside a datagram's read
+/// where it lies, each in its own place, and the round keeps the buffer while it reads it: past
+/// the delivery that empties the table, until the lock holder lets go of it, which the gate does
+/// before a link is read. Turned red by a round that copies the message's record, gives the buffer
+/// back while the table reads it, or keeps it once the table is emptied and a link is read.
 #[test]
-fn a_rejoined_message_is_read_where_its_chain_lies() {
+fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    static CHAINS: ByteCells<8, 2> = ByteCells::new();
     let round = round(1024, 4);
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
     let seen: Noted = Arc::default();
     let first = noting(1, &seen);
     let datagram = [1u8, 1];
-    let chain = [2u8, 2];
-    // SAFETY (each call): this thread is the round's one writer, and both buffers outlive it.
+    let kept = kept_in(&CHAINS, 2, 2);
+    let chain = kept.as_slice().as_ptr() as usize;
+    // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.lend_rejoined(Some(&chain[..])) };
-    unsafe { round.offer_sample(first.call(), &borrowed(&chain[..]), true) };
-    unsafe { round.lend_rejoined(None) };
+    unsafe { round.lend_rejoined(&kept) };
+    unsafe { round.offer_sample(first.call(), &borrowed(kept.as_slice()), true) };
+    unsafe { round.end_rejoined(kept) };
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..]), true) };
     unsafe { round.set_lending(None) };
     assert!(round.lends_a_datagram(), "the chain is held where it lies");
+    unsafe { round.let_go_of_kept() };
+    assert_eq!(
+        CHAINS.in_use(),
+        1,
+        "CONTROL: the table reads the message, so its buffer is kept"
+    );
     unsafe { round.seal() };
     assert!(round.deliver());
-    let places: Vec<usize> = seen.lock().unwrap().iter().map(|(_, _, at)| *at).collect();
-    assert_eq!(places.len(), 2);
     assert_eq!(
-        places[0],
-        chain.as_ptr() as usize,
-        "read where the chain lies"
+        *seen.lock().unwrap(),
+        [(1, 2, chain), (1, 1, datagram.as_ptr() as usize)],
+        "each read where it lies, in the order offered"
     );
-    assert_ne!(
-        places[1],
-        datagram.as_ptr() as usize,
-        "CONTROL: the round lent the chain, so the datagram's record was copied"
+    assert_eq!(round.samples_lent(), 2);
+    assert_eq!(
+        CHAINS.in_use(),
+        1,
+        "emptied with no lock held, the buffer waits for the lock holder"
     );
+    assert!(gate.try_recv().is_none(), "the quiet link gives nothing");
+    assert_eq!(
+        CHAINS.in_use(),
+        0,
+        "the gate let go of the buffer before it read the link"
+    );
+}
+
+/// A rejoined message whose records the table does not read is given back as its offer ends, and
+/// a second one in the same round, while the table reads the first, is copied and given back:
+/// the round keeps one buffer at most, the one its table reads. Turned red by a round that keeps
+/// a buffer it reads nothing in, or lets go of the first while the table still reads it.
+#[test]
+fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
+    static CHAINS: ByteCells<8, 2> = ByteCells::new();
+    let round = round(1024, 4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let unread = kept_in(&CHAINS, 3, 2);
+    // SAFETY (each call): this thread is the round's one writer.
+    unsafe { round.lend_rejoined(&unread) };
+    unsafe { round.end_rejoined(unread) };
+    assert_eq!(
+        CHAINS.in_use(),
+        0,
+        "nothing read in it, it went back at once"
+    );
+    let one = kept_in(&CHAINS, 4, 2);
+    let two = kept_in(&CHAINS, 5, 2);
+    let at_one = one.as_slice().as_ptr() as usize;
+    let at_two = two.as_slice().as_ptr() as usize;
+    unsafe { round.lend_rejoined(&one) };
+    unsafe { round.offer_sample(first.call(), &borrowed(one.as_slice()), true) };
+    unsafe { round.end_rejoined(one) };
+    unsafe { round.lend_rejoined(&two) };
+    unsafe { round.offer_sample(first.call(), &borrowed(two.as_slice()), true) };
+    unsafe { round.end_rejoined(two) };
+    assert_eq!(
+        CHAINS.in_use(),
+        1,
+        "the second, copied, went back; the first is kept"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    let places: Vec<(u8, usize)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, byte, at)| (*byte, *at))
+        .collect();
+    assert_eq!(places.len(), 2);
+    assert_eq!(places[0], (4, at_one), "the first read where it lies");
+    assert_eq!(places[1].0, 5, "the second handed whole");
+    assert_ne!(places[1].1, at_two, "CONTROL: the second was copied");
     assert_eq!(round.samples_lent(), 1);
+    unsafe { round.let_go_of_kept() };
+    assert_eq!(
+        CHAINS.in_use(),
+        0,
+        "emptied, the lock holder let go of the first"
+    );
 }
 
 /// A round let go of at its session's end ends the calls its records owe, before the arena that

@@ -334,6 +334,30 @@ pub const HELD_PAYLOAD_BYTES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HELD_ENCODINGS`] is bound.
+pub const HELD_ENCODINGS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ENCODING_SCHEMA_BYTES`] is bound.
+pub const MAX_ENCODING_SCHEMA_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: Some((0, 255)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::CONFIG_ENTRIES`] is bound.
 pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
@@ -1048,6 +1072,18 @@ pub const DECLARATION_SYNC_TX_NO_PROGRESS_MS: LimitBinding = LimitBinding {
     driven: None,
     range: Some((0, 4294967295)),
     storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::HANDED_LEG_BYTES`] is bound.
+pub const HANDED_LEG_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
     binding_fixed: Some(Binding::Open),

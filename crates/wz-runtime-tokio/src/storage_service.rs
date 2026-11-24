@@ -450,10 +450,7 @@ mod tests {
     use wz_storage::storage_backend::StorageInsertionResult;
 
     fn ts(time: u64, zid: u8) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![zid],
-        }
+        TimestampHint::new(time, &[zid]).unwrap()
     }
 
     fn fresh() -> StorageState<MemoryStorage> {

@@ -2454,10 +2454,9 @@ mod tests {
                 &[payload],
                 PublishOptions::put()
                     .with_locality(Locality::SessionLocal)
-                    .with_timestamp(wz_session_core::sample::TimestampHint {
-                        time,
-                        zid: zid.to_vec(),
-                    }),
+                    .with_timestamp(
+                        wz_session_core::sample::TimestampHint::new(time, &zid).unwrap(),
+                    ),
             )
             .expect("loopback timestamped publish")
     }
@@ -2812,10 +2811,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -2935,10 +2931,7 @@ mod tests {
                     vec![sn]
                 },
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 kind,
             ));
         }
@@ -3053,10 +3046,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3165,10 +3155,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3285,10 +3272,7 @@ mod tests {
                 "demo/data",
                 vec![i],
                 None,
-                TimestampHint {
-                    time: 100 + i as u64,
-                    zid: vec![0xEEu8],
-                },
+                TimestampHint::new(100 + i as u64, &[0xEEu8]).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3352,10 +3336,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3530,10 +3511,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3599,10 +3577,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3671,10 +3646,7 @@ mod tests {
                 "demo/data",
                 vec![sn as u8],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: t,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(t, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3782,10 +3754,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -3924,10 +3893,7 @@ mod tests {
                 "demo/data",
                 vec![i],
                 None,
-                TimestampHint {
-                    time: 100 + i as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + i as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }
@@ -4097,10 +4063,7 @@ mod tests {
             "demo/data",
             vec![0x11],
             Some(SourceInfo::new(&pub_zid, 4, 0)),
-            TimestampHint {
-                time: 100,
-                zid: pub_zid.clone(),
-            },
+            TimestampHint::new(100, &pub_zid).unwrap(),
             crate::sample::SampleKind::Put,
         ));
 
@@ -4855,10 +4818,7 @@ mod tests {
                 "demo/data",
                 vec![sn],
                 Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
-                TimestampHint {
-                    time: 100 + sn as u64,
-                    zid: pub_zid.clone(),
-                },
+                TimestampHint::new(100 + sn as u64, &pub_zid).unwrap(),
                 crate::sample::SampleKind::Put,
             ));
         }

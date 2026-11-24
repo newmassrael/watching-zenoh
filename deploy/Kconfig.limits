@@ -282,6 +282,35 @@ config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	  smallest that holds its bytes and a 16-byte head. A payload no free block
 	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
 
+config WZ_LIMIT_HELD_ENCODINGS
+	int "HELD_ENCODINGS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 16
+	help
+	  The encodings with a schema (z_owned_encoding_t) a program of the pico C ABI
+	  holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the slots
+	  of the pool of encodings the library reserves at its first object. An encoding
+	  takes one from the constructor, clone or schema setter that gives it a schema
+	  until it is dropped or moved into the call it describes, and a declared
+	  publisher's for as long as the publisher stands. An encoding of no schema is
+	  its well-known constant and takes none, and the schema of a sample, reply or
+	  query a program keeps lies in the payloads' area. One more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES
+	int "MAX_ENCODING_SCHEMA_BYTES"
+	range 0 255
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 255
+	help
+	  The longest schema, in bytes, an encoding a program of the pico C ABI builds
+	  may carry, and the room each place that keeps an encoding to send it later
+	  holds for one: a slot of the pool of encodings, and a publication handed on to
+	  the next holder of a session. A longer schema is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY, never cut short. A schema a peer sends is read
+	  where it lies and is not bound by this. At most 255, the longest schema a
+	  message carries.
+
 config WZ_LIMIT_CONFIG_ENTRIES
 	int "CONFIG_ENTRIES"
 	range 1 255
@@ -923,6 +952,21 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	  retries. Each declaration sent starts the stretch again. 0 gives up only when
 	  the link itself ends. The tokio engine, the cooperative engine and the
 	  fixed-memory slot client read it alike.
+
+config WZ_LIMIT_HANDED_LEG_BYTES
+	int "HANDED_LEG_BYTES"
+	range 1 4294967295
+	default 4096
+	help
+	  How many bytes a session holds of the droppable publishes it owes its other
+	  faces when a publish finds the session held by a send that waits on one face:
+	  the publish is dropped on that face and kept, in room the session took at open,
+	  until whoever holds the session next sends it to the others. The room is cut
+	  into places of the batch the session advertises, one publish to a place, its key,
+	  payload and attachment together; a publish longer than a place, or one that
+	  finds every place held, is dropped on every face. The room is reserved only
+	  when the held-publish-drop policy keeps such publishes for the other faces. At
+	  least 1; a session may lower it and never raise it.
 
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"

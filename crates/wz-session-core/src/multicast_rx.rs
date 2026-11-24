@@ -2540,6 +2540,19 @@ mod control_extent_tests {
         }
     }
 
+    /// A Close whose chain carries a byte-string extension is stepped over where it lies, as far as
+    /// its decode reads, and one whose extension is cut short ends the walk as its decode refuses.
+    /// Turned red by a step that reads the chain otherwise than the decode keeps it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_close_with_a_byte_string_extension_is_stepped_over_as_its_decode_reads_it() {
+        steps_as_decoded(&[T_MID_CLOSE | FLAG_T_Z, 0x00, 0x42, 0x02, 0xAB, 0xCD, NEXT]);
+        let cut = [T_MID_CLOSE | FLAG_T_Z, 0x00, 0x42, 0x05, 0xAB];
+        assert!(parse_inbound_consuming(&cut).is_err());
+        assert!(matches!(control_extent(&cut), Some(Err(_))));
+        assert_eq!(multicast_message_len(&cut), None);
+    }
+
     #[cfg(feature = "alloc")]
     #[test]
     fn an_oam_is_stepped_over_by_its_view_and_a_reserved_one_ends_the_walk() {

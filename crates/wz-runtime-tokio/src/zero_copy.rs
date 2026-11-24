@@ -979,7 +979,9 @@ mod tests {
             let outcome = router.ingest_lending(frag(peer, sn, more, part), MASK, 0, |chain| {
                 got = Some(match chain {
                     ChainBytes::Lent(bytes) => bytes,
-                    ChainBytes::Borrowed(_) => panic!("both arenas lend a completed chain"),
+                    ChainBytes::Borrowed(_) | ChainBytes::Kept(_) => {
+                        panic!("both arenas lend a completed chain")
+                    }
                 })
             });
             assert!(!matches!(
@@ -1159,7 +1161,7 @@ mod tests {
                 router.ingest_lending(frag(b"peer-a", sn as u64, more, part), MASK, 0, |chain| {
                     got = Some(match chain {
                         ChainBytes::Lent(bytes) => bytes,
-                        ChainBytes::Borrowed(_) => {
+                        ChainBytes::Borrowed(_) | ChainBytes::Kept(_) => {
                             panic!("a chain on the heap is lent as its buffer")
                         }
                     })

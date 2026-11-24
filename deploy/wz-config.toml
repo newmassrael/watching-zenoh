@@ -2841,6 +2841,72 @@ reason = "No key of upstream's configuration bounds the bytes a program's payloa
 value = 32768
 reason = "zenoh-pico bounds its payloads' bytes by no count. The largest payload a program or test of the preset builds is twice its FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the one the fragmentation test puts past the receiving ceiling (`crates/wz-capi-pico/tests/it/files/fragmentation_roundtrip.rs` @ `const TOO_BIG: usize = 2 * CEILING;`): 8,192 bytes and a 16-byte head take a block of 16,384. The other half holds what the held samples, replies, queries and strings of its examples carry, each a few tens of bytes. A program that builds a payload larger than a block of the area is refused where zenoh-pico would allocate it, as zenoh-pico is on a heap that small."
 
+# The pico preset is counted from zenoh-pico's own tests and examples: at most one encoding with a
+# schema is alive at once in any of them (z_api_encoding_test.c, z_api_alignment_test.c,
+# z_pub_attachment.c, z_get_attachment.c, z_queryable_attachment.c); the clones z_api_admin_space_test.c
+# keeps carry no schema. A declared publisher's is the second.
+[[limit]]
+id = "HELD_ENCODINGS"
+kconfig = "WZ_LIMIT_HELD_ENCODINGS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The encodings with a schema (z_owned_encoding_t) a program of the pico C ABI
+holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the slots
+of the pool of encodings the library reserves at its first object. An encoding
+takes one from the constructor, clone or schema setter that gives it a schema
+until it is dropped or moved into the call it describes, and a declared
+publisher's for as long as the publisher stands. An encoding of no schema is
+its well-known constant and takes none, and the schema of a sample, reply or
+query a program keeps lies in the payloads' area. One more is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the encodings a program holds, and zenoh-pico copies each schema onto the heap with no constant (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); sixteen is half of HELD_PAYLOADS's thirty-two, an encoding beside every other payload a host program builds."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico allocates only for an encoding's schema and bounds those by no count. Its examples and API tests hold one encoding with a schema at a time: each is made and moved into the put, the reply or the get it describes (`vendor/zenoh-pico/examples/unix/c11/z_pub_attachment.c` @ `z_encoding_from_str(&encoding, \"zenoh/string;utf8\");`), the encoding test drops each before it makes the next, and the alignment test's put spends its encoding before the publisher it declares next is given one (`vendor/zenoh-pico/tests/z_api_alignment_test.c` @ `_ret_pub_opt.encoding = z_move(encoding);`). The admin space test keeps a clone of each reply's encoding, which carries no schema and so takes no slot. Two hold the one in hand and the one a declared publisher keeps."
+
+[[limit]]
+id = "MAX_ENCODING_SCHEMA_BYTES"
+kconfig = "WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES"
+kind = "bound"
+driven = "local"
+# The protocol writes a schema's length in one byte, so no message carries a longer one.
+most = 255
+default = 255
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The longest schema, in bytes, an encoding a program of the pico C ABI builds
+may carry, and the room each place that keeps an encoding to send it later
+holds for one: a slot of the pool of encodings, and a publication handed on to
+the next holder of a session. A longer schema is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY, never cut short. A schema a peer sends is read
+where it lies and is not bound by this. At most 255, the longest schema a
+message carries.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the schema of an encoding, and zenoh-pico copies each onto the heap at its own length (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); 255 is the longest schema the protocol carries, its length written in one byte, so the default refuses no schema a message can send."
+
+[limit.pico_preset]
+value = 32
+reason = "zenoh-pico bounds a schema by no constant; the longest its API tests and examples build is the 23 bytes of a string whose prefix names no encoding, kept whole as the schema of the default one (`vendor/zenoh-pico/tests/z_api_encoding_test.c` @ `z_encoding_from_str(&e3, \"custom_id;custom_schema\");`). Thirty-two holds it."
+
 [[limit]]
 id = "CONFIG_ENTRIES"
 kconfig = "WZ_LIMIT_CONFIG_ENTRIES"
@@ -4456,6 +4522,37 @@ reason = "No key of upstream's configuration states it: the declaration-sync-pac
 # so a stated value past the build's is refused by name in such a build; the heap engine sizes them
 # from the session's value (`on_heap = "quota"`), anywhere in the range.
 [[limit]]
+id = "HANDED_LEG_BYTES"
+kconfig = "WZ_LIMIT_HANDED_LEG_BYTES"
+kind = "parameter"
+range = [1, 4294967295]
+on_heap = "quota"
+default = 4096
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a publish the session holds no room for is dropped on every face, a drop
+# the publish already counted, and nothing different reaches a peer.
+wire = "none"
+help = '''
+How many bytes a session holds of the droppable publishes it owes its other
+faces when a publish finds the session held by a send that waits on one face:
+the publish is dropped on that face and kept, in room the session took at open,
+until whoever holds the session next sends it to the others. The room is cut
+into places of the batch the session advertises, one publish to a place, its key,
+payload and attachment together; a publish longer than a place, or one that
+finds every place held, is dropped on every face. The room is reserved only
+when the held-publish-drop policy keeps such publishes for the other faces. At
+least 1; a session may lower it and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: each zenoh transport has a transmission queue of its own (`transport/link/tx/queue/size`), so a message that one transport's full queue drops is still queued on the others. The cooperative engine holds every face under one lock, and keeps what the other faces' queues would still take here. The default keeps two batches of the session's default size (PICO_UNICAST_BATCH_BYTES, 2,048), the publishes another thread makes while one send waits at most `congestion_control/drop/wait_before_drop`."
+
+[[limit]]
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
 kind = "parameter"
@@ -5469,6 +5566,30 @@ read no id of a dictionary, with any value but `declared`. Interests and
 liveliness interests name their keys as under `declared`.
 '''
 
+[[policy]]
+id = "held-publish-drop"
+kind = "choice"
+kconfig = "WZ_POLICY_HELD_PUBLISH_DROP"
+choices = ["held-faces", "every-face"]
+default = "held-faces"
+upstream = "Gives each transport a transmission queue of its own, so a droppable message that one transport's full queue drops is still queued on the session's other transports: `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a droppable message that finds it held is dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-face`."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the other faces' peers receive the publish under one value and not the other.
+wire = "visible"
+since = 2
+help = '''
+What a droppable publish is dropped on when it finds the session held by a send
+that waits on one of its faces, in an engine that holds every face under one
+lock. `held-faces` drops it on the faces the send waits on and keeps it, in
+HANDED_LEG_BYTES of room the session reserves when it opens, until whoever
+holds the session next sends it to the other faces, as each of upstream's
+transports drops only on its own queue. `every-face` drops it on every face at
+once and reserves no room, as zenoh-pico, whose peers share one transmit lock,
+does.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -5522,6 +5643,7 @@ zid-derivation = "random"
 handshake-stray-message = "fail"
 handshake-cookie = "stateless"
 key-wire-form = "declared"
+held-publish-drop = "held-faces"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

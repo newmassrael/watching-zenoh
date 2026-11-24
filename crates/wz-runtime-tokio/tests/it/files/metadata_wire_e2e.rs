@@ -164,10 +164,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
                         schema: None,
                     })
                     .with_attachment(ATTACHMENT)
-                    .with_timestamp(TimestampHint {
-                        time: TS_TIME,
-                        zid: vec![0xAB],
-                    }),
+                    .with_timestamp(TimestampHint::new(TS_TIME, &[0xAB]).unwrap()),
             )
             .expect("metadata publish builds and routes through the send seam");
         for _ in 0..100 {

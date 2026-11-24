@@ -531,7 +531,7 @@ fn gated_timestamp_field(
 /// serialised. The param keeps the builder's signature stable across
 /// the toggle.
 fn gated_encoding_field(
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
 ) -> Result<Option<crate::wire::parts::EncodingOwned>, CodecError> {
     #[cfg(feature = "pubsub-encoding")]
     {
@@ -662,7 +662,7 @@ pub fn set_publication_timestamp(
 fn build_msg_put_with_meta(
     payload: &[u8],
     timestamp: Option<&crate::sample::TimestampHint>,
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
@@ -766,7 +766,7 @@ pub fn build_push_literal_with_meta(
 pub(crate) fn build_msg_put_shm(
     descriptor: &crate::extshm::ShmDescriptor,
     timestamp: Option<&crate::sample::TimestampHint>,
-    encoding: Option<&crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'_>>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
@@ -983,13 +983,10 @@ mod tests {
     use super::*;
     // .wire() + Push::decode are named only by the two `_with_meta` round-trip
     // tests, which both construct every metadata field, so they gate on the
-    // full metadata feature set; vec! (timestamp tests' zid literal) gates on
-    // pubsub-timestamp.
+    // full metadata feature set.
     use crate::frame_encode::encode_frame_with_push;
     use crate::inbound::{parse_inbound, InboundFrame};
     use crate::network_message::{parse_frame_payload, NetworkMessage};
-    #[cfg(feature = "pubsub-timestamp")]
-    use alloc::vec;
     #[cfg(all(
         feature = "pubsub-attachment",
         feature = "pubsub-timestamp",
@@ -1126,10 +1123,7 @@ mod tests {
     #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]
     fn build_msg_put_with_meta_sets_timestamp_field_and_t_flag() {
-        let ts = TimestampHint {
-            time: 0xDEAD_BEEF_CAFE_BABE,
-            zid: vec![0xAA, 0xBB],
-        };
+        let ts = TimestampHint::new(0xDEAD_BEEF_CAFE_BABE, &[0xAA, 0xBB]).unwrap();
         let put = build_msg_put_with_meta(b"payload", Some(&ts), None, None, None).unwrap();
         assert!(put.timestamp.is_some(), "set_t routes through Option");
         assert_eq!(put.timestamp.as_ref().unwrap().time, 0xDEAD_BEEF_CAFE_BABE);
@@ -1149,7 +1143,7 @@ mod tests {
             packed_id: 13,
             schema: Some("application/json".into()),
         };
-        let put = build_msg_put_with_meta(b"payload", None, Some(&enc), None, None).unwrap();
+        let put = build_msg_put_with_meta(b"payload", None, Some(enc.view()), None, None).unwrap();
         assert!(put.encoding.is_some());
         assert_eq!(put.encoding.as_ref().unwrap().packed_id, 13);
         assert_eq!(
@@ -1237,10 +1231,7 @@ mod tests {
         // encoding slot — _z_msg_del_t has no encoding field on the
         // wire. This test pins that the API forbids a caller from
         // accidentally attaching encoding to a Del wire form.
-        let ts = TimestampHint {
-            time: 0x0102_0304_0506_0708,
-            zid: vec![0x99],
-        };
+        let ts = TimestampHint::new(0x0102_0304_0506_0708, &[0x99]).unwrap();
         let del = build_msg_del_with_meta(Some(&ts), None, None).unwrap();
         assert!(del.timestamp.is_some());
         assert!(del.t(), "T flag set when Del carries timestamp");
@@ -1804,17 +1795,14 @@ mod tests {
         // Validates that the wire form survives SCE's encode/decode
         // path with every metadata field set, not just that the
         // in-memory Push struct shape is correct.
-        let stamp = TimestampHint {
-            time: 0x1122_3344_5566_7788,
-            zid: vec![0xAA, 0xBB, 0xCC],
-        };
+        let stamp = TimestampHint::new(0x1122_3344_5566_7788, &[0xAA, 0xBB, 0xCC]).unwrap();
         let encoded = EncodingHint {
             packed_id: 5,
             schema: Some("text/plain".into()),
         };
         let meta = PushMetadata {
             timestamp: Some(&stamp),
-            encoding: Some(&encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
             attachment: Some(b"attach"),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
@@ -1893,17 +1881,14 @@ mod tests {
         // Del path: timestamp + source_info + attachment + qos must
         // round-trip; encoding has no parameter slot so the wire form
         // cannot carry it. Mirrors the loopback path's projection.
-        let stamp = TimestampHint {
-            time: 0xAABB_CCDD,
-            zid: vec![0x42],
-        };
+        let stamp = TimestampHint::new(0xAABB_CCDD, &[0x42]).unwrap();
         let encoded = EncodingHint {
             packed_id: 99,
             schema: Some("ignored".into()),
         };
         let meta = PushMetadata {
             timestamp: Some(&stamp),
-            encoding: Some(&encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
             attachment: Some(b"del-att"),
             qos: Some(QosLevel::from_raw(0x10)),

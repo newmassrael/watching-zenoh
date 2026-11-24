@@ -158,10 +158,7 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             Some(DATA_KEY),
             DATA_VALUE.to_vec(),
             None,
-            TimestampHint {
-                time: wall_clock_ntp64(),
-                zid: zid_a.to_vec(),
-            },
+            TimestampHint::new(wall_clock_ntp64(), &zid_a).unwrap(),
         )
         .expect("the in-memory backend commits");
     let observer_a = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(

@@ -22,7 +22,7 @@ use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link::RxBytes;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::reply::{InboundReply, InboundReplyBody};
 use wz_session_core::sample::{Sample, SourceInfo};
 use wz_session_core::serde_codec::z_serialize;
@@ -284,7 +284,7 @@ impl SessionEngine for Script {
         &self,
         keyexpr: &str,
         _wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
@@ -305,7 +305,7 @@ impl SessionEngine for Script {
         self.event(format!("get {keyexpr}"));
         self.gets.lock().unwrap().push(GetRecord {
             keyexpr: keyexpr.to_owned(),
-            parameters: String::from_utf8(opts.parameters.clone().unwrap_or_default())
+            parameters: String::from_utf8(opts.parameters.as_deref().unwrap_or_default().to_vec())
                 .expect("parameters are text"),
             destination: opts.allowed_destination,
             legs,

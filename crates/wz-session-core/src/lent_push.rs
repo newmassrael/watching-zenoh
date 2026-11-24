@@ -311,7 +311,7 @@ pub const LENT_PUBLICATION_MAY_DECLINE: bool = cfg!(any(
 struct BodyParts<'m> {
     timestamp: Option<&'m crate::sample::TimestampHint>,
     /// A Put's alone: a Del has no encoding.
-    encoding: Option<&'m crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'m>>,
     /// Absent where the info names no source, which the owned builder leaves out too.
     source_info: Option<&'m crate::sample::SourceInfo>,
     /// The extension's id, which a Put and a Del number apart, and the bytes.
@@ -399,11 +399,8 @@ impl<'m> BodyParts<'m> {
     /// with `LengthOutOfRange`: a timestamp's id past 16 bytes, a schema past 255 and an
     /// attachment past the protocol's `u32` length.
     fn refused(&self) -> bool {
-        let long_schema = |encoding: &crate::sample::EncodingHint| {
-            encoding
-                .schema
-                .as_ref()
-                .is_some_and(|schema| schema.len() > 255)
+        let long_schema = |encoding: crate::sample::EncodingRef<'_>| {
+            encoding.schema.is_some_and(|schema| schema.len() > 255)
         };
         self.timestamp.is_some_and(|stamp| stamp.zid.len() > 16)
             || self.encoding.is_some_and(long_schema)
@@ -539,7 +536,7 @@ where
     if let Some(encoding) = body.encoding {
         // The id's low bit says a schema follows.
         sink.write_vle_u32((encoding.packed_id & !1) | u32::from(encoding.schema.is_some()))?;
-        if let Some(schema) = &encoding.schema {
+        if let Some(schema) = encoding.schema {
             sink.write_vle_u64(schema.len() as u64)?;
             sink.write_bytes(schema)?;
         }
@@ -943,17 +940,14 @@ mod tests {
         let mut compared = 0usize;
         let (mut shortest, mut longest) = (usize::MAX, 0usize);
         for fields in 0u8..64 {
-            let stamp = TimestampHint {
-                time: 0x1234_5678_9abc,
-                zid: alloc::vec![7; 16],
-            };
+            let stamp = TimestampHint::new(0x1234_5678_9abc, &[7; 16]).unwrap();
             let encoded = EncodingHint {
                 packed_id: 42 << 1,
                 schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
             };
             let meta = PushMetadata {
                 timestamp: (fields & 1 != 0).then_some(&stamp),
-                encoding: (fields & 2 != 0).then_some(&encoded),
+                encoding: (fields & 2 != 0).then(|| encoded.view()),
                 source_info: (fields & 8 != 0)
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
                 attachment: (fields & 16 != 0).then_some(&[3u8; 200] as &[u8]),
@@ -1026,8 +1020,9 @@ mod tests {
     }
 
     /// What the owned builders refuse the writer refuses before it writes a byte, and what they
-    /// build it writes: a key past the protocol's `u16` length, a timestamp's id past 16 bytes and a
-    /// schema past 255, each refused only in a build that carries the field.
+    /// build it writes: a key past the protocol's `u16` length and a schema past 255, the schema
+    /// refused only in a build that carries the field. A timestamp's id past 16 bytes is no hint
+    /// at all: it cannot be made, so neither builder is handed one.
     #[test]
     fn a_publication_the_owned_builders_refuse_is_refused_with_nothing_written() {
         use crate::metadata::PushMetadata;
@@ -1035,15 +1030,15 @@ mod tests {
         use crate::sample::{EncodingHint, SampleKind, TimestampHint};
 
         let past = "k".repeat(usize::from(u16::MAX) + 1);
-        let stamp = |len: usize| TimestampHint {
-            time: 1,
-            zid: alloc::vec![1; len],
-        };
+        assert!(
+            TimestampHint::new(1, &[1; 17]).is_none(),
+            "an id past 16 bytes is no timestamp"
+        );
+        let stamp_at = TimestampHint::new(1, &[1; 16]).unwrap();
         let encoding = |len: usize| EncodingHint {
             packed_id: 2,
             schema: Some(alloc::vec![b's'; len]),
         };
-        let (stamp_past, stamp_at) = (stamp(17), stamp(16));
         let (encoding_past, encoding_at) = (encoding(256), encoding(255));
         let stamped = |hint| PushMetadata {
             timestamp: Some(hint),
@@ -1053,20 +1048,15 @@ mod tests {
             encoding: Some(hint),
             ..PushMetadata::default()
         };
-        let cases: [(Option<&str>, PushMetadata, bool); 5] = [
+        let cases: [(Option<&str>, PushMetadata, bool); 4] = [
             (Some(past.as_str()), PushMetadata::default(), true),
-            (
-                Some("k"),
-                stamped(&stamp_past),
-                cfg!(feature = "pubsub-timestamp"),
-            ),
             (Some("k"), stamped(&stamp_at), false),
             (
                 Some("k"),
-                encoded(&encoding_past),
+                encoded(encoding_past.view()),
                 cfg!(feature = "pubsub-encoding"),
             ),
-            (Some("k"), encoded(&encoding_at), false),
+            (Some("k"), encoded(encoding_at.view()), false),
         ];
         for (suffix, meta, refused) in cases {
             let owned = build_push_aliased_with_meta(3, suffix, b"x", &meta);

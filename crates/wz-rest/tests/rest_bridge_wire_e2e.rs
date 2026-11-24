@@ -201,10 +201,7 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
                     QUERY_KEY,
                     REPLY_PAYLOAD,
                     Some(&EncodingHint::TEXT_PLAIN),
-                    &TimestampHint {
-                        time: REPLY_TS_TIME,
-                        zid: REPLY_TS_ZID.to_vec(),
-                    },
+                    &TimestampHint::new(REPLY_TS_TIME, &REPLY_TS_ZID).unwrap(),
                 )
                 .unwrap();
             },

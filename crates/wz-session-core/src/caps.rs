@@ -281,6 +281,16 @@ pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 /// that holds its bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
 pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
 
+/// The encodings a program holds through the C ABI at once: the slots of the process's pool of
+/// encodings, each with room for a schema of [`MAX_ENCODING_SCHEMA_BYTES`], reserved as
+/// [`HELD_SESSIONS`]'s pool is.
+pub const HELD_ENCODINGS: usize = generated::HELD_ENCODINGS;
+
+/// The longest schema an encoding a program builds may carry, and the room every place that keeps
+/// an encoding to send it later holds for one. A longer one is refused where it is made, never cut
+/// short; one a peer sends is read where it lies.
+pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTES;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
@@ -585,6 +595,12 @@ const _: () = assert!(
     RX_POOL_BUFFERS >= 1,
     "a pool of no receive buffer reads nothing"
 );
+
+/// The bytes a session whose engine holds every face under one lock keeps of the droppable
+/// publishes it owes its other faces while one send holds it, in places of the batch it advertises,
+/// one publish to a place; a publish it has no place for is dropped on every face. Reserved only
+/// under the `held-faces` value of the `held-publish-drop` policy. At least `1`.
+pub const HANDED_LEG_BYTES: usize = generated::HANDED_LEG_BYTES;
 
 /// How many outbound slots the links of a session whose engine lends them from its arena share at
 /// most: a link holds one from a frame's encode to its write, a frame its stream took in part

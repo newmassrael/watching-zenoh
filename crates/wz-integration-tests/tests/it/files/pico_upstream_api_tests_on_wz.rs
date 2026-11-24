@@ -135,6 +135,10 @@ const ENCODING_CHECKS_E4: Build = Build {
 /// * an entity's id read off its private struct (`_entity_id`, `_id`; 194, 210, 220, 350, 360,
 ///   369) is dropped from the line that prints it: no public call of the integration arm names it,
 ///   and nothing reads it back.
+///
+/// `scripts/lib/pico_upstream_programs.py` reads this list from this file for its run of the same
+/// program on the release library, so each pair stays two raw strings (`lane_corrections` there
+/// refuses any other form).
 const CLIENT_TEST_PUBLIC_API: Build = Build {
     extra_sources: &[],
     defines: &[],

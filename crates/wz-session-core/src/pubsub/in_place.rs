@@ -601,10 +601,7 @@ mod tests {
     /// The timestamp and the encoding `meta` lends.
     fn hints() -> (TimestampHint, EncodingHint) {
         (
-            TimestampHint {
-                time: 0x0102_0304_0506_0708,
-                zid: alloc::vec![0xa1, 0xa2, 0xa3],
-            },
+            TimestampHint::new(0x0102_0304_0506_0708, &[0xa1, 0xa2, 0xa3]).unwrap(),
             EncodingHint {
                 packed_id: 0x0b,
                 schema: Some(b"schema/x".to_vec()),
@@ -615,7 +612,7 @@ mod tests {
     fn meta((stamp, encoded): &(TimestampHint, EncodingHint)) -> crate::metadata::PushMetadata<'_> {
         crate::metadata::PushMetadata {
             timestamp: Some(stamp),
-            encoding: Some(encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
             attachment: Some(&[1, 2, 3, 4, 5]),
             qos: Some(QosLevel::from_raw(0x05)),

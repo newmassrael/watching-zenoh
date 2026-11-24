@@ -1128,10 +1128,7 @@ impl QueryReply {
                     packed_id: e.packed_id,
                     schema: e.schema.map(<[u8]>::to_vec),
                 }),
-                timestamp: timestamp.map(|ts| TimestampHint {
-                    time: ts.time,
-                    zid: ts.zid.to_vec(),
-                }),
+                timestamp: timestamp.and_then(|ts| TimestampHint::new(ts.time, ts.zid)),
                 responder,
                 attachment: attachment.map(<[u8]>::to_vec),
                 source_info: source_info.cloned(),
@@ -1978,7 +1975,7 @@ impl<'a> QueryResponder<'a> {
             ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body,
-                encoding: meta.encoding.map(EncodingParts::of),
+                encoding: meta.encoding,
                 timestamp: meta.timestamp.map(TimestampParts::of),
                 attachment: meta.attachment,
                 source_info: meta.source_info,
@@ -5043,10 +5040,7 @@ mod tests {
             next: core::cell::Cell::new(100),
             stamps: true,
         };
-        let own = TimestampHint {
-            time: 0x1234,
-            zid: alloc::vec![0x07],
-        };
+        let own = TimestampHint::new(0x1234, &[0x07]).unwrap();
         let mut stage = ReplyStage::new();
         {
             let mut responder = responder_over(&mut stage);
@@ -5092,10 +5086,7 @@ mod tests {
         // timestamp ride the pushed QueryReply (timestamp Some).
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", |_q, responder| {
-            let ts = TimestampHint {
-                time: 0x1234,
-                zid: alloc::vec![0x07],
-            };
+            let ts = TimestampHint::new(0x1234, &[0x07]).unwrap();
             let enc = EncodingHint {
                 packed_id: 13,
                 schema: None,
@@ -5711,10 +5702,7 @@ mod tests {
     fn reply_keyed_sourced_emits_source_info_ext_through_responder() {
         let si = crate::sample::SourceInfo::new(&[0x09; 1], 3, 5);
         let si_cb = si.clone();
-        let ts = TimestampHint {
-            time: 1,
-            zid: vec![0x09],
-        };
+        let ts = TimestampHint::new(1, &[0x09]).unwrap();
         let ts_cb = ts.clone();
         let mut reg = QueryableRegistry::new();
         reg.register("demo/data", move |_q, responder| {
@@ -5904,10 +5892,7 @@ mod tests {
     fn reply_keyed_del_sourced_emits_key_timestamp_and_source_info() {
         let si = crate::sample::SourceInfo::new(&[0x09; 1], 3, 5);
         let si_cb = si.clone();
-        let ts = TimestampHint {
-            time: 0x1234,
-            zid: vec![0x09],
-        };
+        let ts = TimestampHint::new(0x1234, &[0x09]).unwrap();
         let ts_cb = ts.clone();
         // Bound to the WILDCARD; the reply must carry the concrete key.
         let mut reg = QueryableRegistry::new();
@@ -6800,10 +6785,7 @@ mod tests {
     /// each of them can name a key outside the query and each one reaches the
     /// wire.
     fn stage_keyed_arm(out: &mut dyn ReplyOut, key: &str, arm: usize) -> Result<(), ReplyError> {
-        let ts = TimestampHint {
-            time: 1,
-            zid: vec![0x0a],
-        };
+        let ts = TimestampHint::new(1, &[0x0a]).unwrap();
         match arm {
             0 => out.reply_keyed(key, b"p"),
             1 => out.reply_keyed_stamped(key, b"p", None, &ts),

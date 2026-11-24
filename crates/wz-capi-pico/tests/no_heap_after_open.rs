@@ -64,14 +64,18 @@ use std::time::Duration;
 
 use wz_capi_pico::abi::z_owned_keyexpr_t;
 use wz_capi_pico::{
-    z_bytes_copy_from_buf, z_declare_keyexpr, z_declare_publisher, z_keyexpr_move, z_owned_bytes_t,
-    z_owned_publisher_t, z_publisher_move, z_session_loan, z_undeclare_keyexpr,
-    z_undeclare_publisher, z_view_keyexpr_loan, Z_OK,
+    z_bytes_copy_from_buf, z_bytes_move, z_declare_keyexpr, z_declare_publisher,
+    z_encoding_from_str, z_encoding_move, z_keyexpr_move, z_owned_bytes_t, z_owned_encoding_t,
+    z_owned_publisher_t, z_publisher_move, z_put, z_put_options_default, z_put_options_t,
+    z_session_loan, z_timestamp_new, z_timestamp_t, z_undeclare_keyexpr, z_undeclare_publisher,
+    z_view_keyexpr_loan, Z_OK,
 };
 
 #[path = "support/pipe_pair.rs"]
 mod pipe_pair;
 
+#[cfg(feature = "multicast-transport")]
+use pipe_pair::GroupPair;
 use pipe_pair::{
     close_window, count_panics, get, mark_calling_thread, open_window, payload, put, reply_closure,
     view, wait_for, Injecting, Pair, Seen, DATA_KEY, PANICS, WAIT_BOUND,
@@ -234,6 +238,10 @@ const READING_VARIABLE: &str = "WZ_NO_HEAP_READING";
 /// A key a declaration under count names, and none of the pair's own entities matches. Synthetic.
 const DECLARED: &CStr = c"noheap/declared";
 
+/// The encoding a put of the `put-encoded` family carries: a known id and a schema, which the put
+/// carries on the wire. Synthetic.
+const ENCODED: &CStr = c"text/plain;utf8";
+
 /// One round of the `idle` family: this long with no call made.
 const IDLE_SLICE: Duration = Duration::from_millis(10);
 
@@ -264,11 +272,14 @@ enum Round {
     ConfigClone,
     PublisherPut,
     Delete,
+    GroupReceive,
+    PutEncoded,
+    PutTimestamped,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 20] = [
+    const ALL: [Round; 23] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -289,6 +300,9 @@ impl Round {
         Round::ConfigClone,
         Round::PublisherPut,
         Round::Delete,
+        Round::GroupReceive,
+        Round::PutEncoded,
+        Round::PutTimestamped,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -302,6 +316,7 @@ impl Round {
             Round::QueryableDeclare => cfg!(feature = "queryable"),
             Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
+            Round::GroupReceive => cfg!(feature = "multicast-transport"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -312,7 +327,9 @@ impl Round {
             | Round::MatchingListener
             | Round::ConfigClone
             | Round::PublisherPut
-            | Round::Delete => true,
+            | Round::Delete
+            | Round::PutEncoded
+            | Round::PutTimestamped => true,
         }
     }
 }
@@ -329,7 +346,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 23] = [
+const FAMILIES: [(&str, Round, Part); 26] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -357,6 +374,11 @@ const FAMILIES: [(&str, Round, Part); 23] = [
     ("config-clone", Round::ConfigClone, Part::All),
     ("publisher-put", Round::PublisherPut, Part::Calling),
     ("delete", Round::Delete, Part::Calling),
+    // What a group member's receive takes: the datagram read where it lies and handed to the
+    // subscriber, on the receiving member's threads.
+    ("group-receive", Round::GroupReceive, Part::Others),
+    ("put-encoded", Round::PutEncoded, Part::Calling),
+    ("put-timestamped", Round::PutTimestamped, Part::Calling),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -634,6 +656,9 @@ struct Bench {
     e2e: E2e,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
+    /// Two members of one group over the program's transport.
+    #[cfg(feature = "multicast-transport")]
+    group: GroupPair,
 }
 
 impl Bench {
@@ -705,6 +730,8 @@ impl Bench {
             e2e,
             #[cfg(feature = "replay-cache")]
             replay,
+            #[cfg(feature = "multicast-transport")]
+            group: GroupPair::open(),
         }
     }
 
@@ -726,6 +753,10 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
+            Round::GroupReceive => {
+                #[cfg(feature = "multicast-transport")]
+                self.group_put_and_hear();
+            }
             Round::KeyexprDeclare => self.keyexpr_declare(),
             Round::LivelinessToken => {
                 #[cfg(feature = "liveliness")]
@@ -768,6 +799,8 @@ impl Bench {
             Round::ConfigClone => config_clone(),
             Round::PublisherPut => self.publisher_put(),
             Round::Delete => self.delete(),
+            Round::PutEncoded => self.put_encoded(),
+            Round::PutTimestamped => self.put_timestamped(),
         }
     }
 
@@ -939,6 +972,71 @@ impl Bench {
         );
     }
 
+    /// Put from the dialler with an encoding that carries a schema, the encoding made for the put as
+    /// a program makes one, and wait for the listener to hear it.
+    unsafe fn put_encoded(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut encoding: z_owned_encoding_t = std::mem::zeroed();
+        assert_eq!(
+            z_encoding_from_str(&mut encoding, ENCODED.as_ptr()),
+            Z_OK,
+            "an encoding with a schema is made"
+        );
+        let mut options: z_put_options_t = std::mem::zeroed();
+        z_put_options_default(&mut options);
+        options.encoding = z_encoding_move(&mut encoding).cast();
+        let mut bytes = payload();
+        let ke = view(DATA_KEY);
+        assert_eq!(
+            z_put(
+                z_session_loan(self.pair.dialler()),
+                z_view_keyexpr_loan(&ke),
+                z_bytes_move(&mut bytes),
+                &options,
+            ),
+            Z_OK,
+            "a put with an encoding is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put with an encoding did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Put from the dialler with a timestamp the program minted from the session's clock, as a
+    /// program stamps its own samples, and wait for the listener to hear it.
+    unsafe fn put_timestamped(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let session = z_session_loan(self.pair.dialler());
+        let mut stamp: z_timestamp_t = std::mem::zeroed();
+        assert_eq!(
+            z_timestamp_new(&mut stamp, session),
+            Z_OK,
+            "a timestamp is minted from the session's clock"
+        );
+        let mut options: z_put_options_t = std::mem::zeroed();
+        z_put_options_default(&mut options);
+        options.timestamp = &mut stamp;
+        let mut bytes = payload();
+        let ke = view(DATA_KEY);
+        assert_eq!(
+            z_put(
+                session,
+                z_view_keyexpr_loan(&ke),
+                z_bytes_move(&mut bytes),
+                &options,
+            ),
+            Z_OK,
+            "a put with a timestamp is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put with a timestamp did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
     /// Delete on the key the listener hears and wait for it to hear the delete.
     unsafe fn delete(&self) {
         let counts = &self.pair.counts;
@@ -986,6 +1084,24 @@ impl Bench {
         assert!(
             wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
             "a put did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Put on the group from its sending member and wait until the receiving member's subscriber
+    /// hears it: the round's control, so a round that heard nothing fails whatever it allocated.
+    #[cfg(feature = "multicast-transport")]
+    unsafe fn group_put_and_hear(&self) {
+        let counts = &self.group.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            put(self.group.sender(), &mut bytes),
+            Z_OK,
+            "a put on the group is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put on the group was not heard within {WAIT_BOUND:?}"
         );
     }
 

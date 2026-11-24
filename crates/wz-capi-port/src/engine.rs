@@ -26,7 +26,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -38,8 +38,8 @@ use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink,
-    MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink,
-    Tick, TickerId, TokenId, WireKey,
+    MatchId, MatchingSink, QblId, QueryRowSink, QueryableSink, Refusal, ReplyCallback, SubId,
+    SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -451,6 +451,28 @@ pub trait SessionEngine: Send + Sync + 'static {
         Err(Refusal::NotBuilt)
     }
 
+    /// [`Self::declare_queryable_on_wire`] with the one callback the queryable's row keeps,
+    /// called with the holder of the face each query came in on. Provided as the minting form
+    /// ([`QueryRowSink::into_minted`]) for an engine that does not keep it in its row yet.
+    fn declare_queryable_row_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
+        sink: QueryRowSink,
+    ) -> Result<QblId, Refusal> {
+        self.declare_queryable_on_wire(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            retraction,
+            sink.into_minted(),
+        )
+    }
+
     /// Retract queryable `id`. Retracting one already retracted, or one never declared, does
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
@@ -535,7 +557,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
@@ -554,13 +576,12 @@ pub trait SessionEngine: Send + Sync + 'static {
         &self,
         keyexpr: &str,
         wire: &WireKey,
-        opts: &QueryOptions,
+        opts: &QueryOptionsOf<'_>,
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
-        let mut opts = opts.clone();
-        opts.payload = Some(value.bytes().to_vec());
+        let opts = opts.clone().with_payload_lent(value.bytes());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
     }
 
@@ -602,6 +623,30 @@ pub trait SessionEngine: Send + Sync + 'static {
     ) -> Result<QblId, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_queryable_on_wire(keyexpr, wire, complete, allowed_origin, retraction, sink)
+    }
+
+    /// [`Self::declare_queryable_row_on_wire`] limited to the links of `links`, as
+    /// [`Self::declare_queryable_on_link_set`] limits the minting form. Provided as that form.
+    #[allow(clippy::too_many_arguments)]
+    fn declare_queryable_row_on_link_set(
+        &self,
+        keyexpr: &str,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        links: LinkRestriction,
+        retraction: Option<RetractionKey>,
+        sink: QueryRowSink,
+    ) -> Result<QblId, Refusal> {
+        self.declare_queryable_on_link_set(
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            links,
+            retraction,
+            sink.into_minted(),
+        )
     }
 
     /// [`Self::declare_liveliness_token_on_wire`] limited to the links of `links`: announced to

@@ -636,7 +636,7 @@ impl State {
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
         let state = timestamped
-            .entry(ts.zid.clone())
+            .entry(ts.zid.to_vec())
             .or_insert_with(|| TimestampedState::new(now_ms));
         // R2621 — a sample IS being heard from, so the retention clock restarts.
         #[cfg(feature = "advanced-recovery")]
@@ -753,10 +753,8 @@ fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut d
         return;
     }
     for (time, sample) in core::mem::take(&mut state.pending_samples) {
-        let ts = wz_session_core::sample::TimestampHint {
-            time,
-            zid: zid.to_vec(),
-        };
+        let ts = wz_session_core::sample::TimestampHint::new(time, &zid)
+            .expect("a timestamp's zid is at most sixteen bytes");
         let newer = match &state.last_delivered {
             Some(last) => wz_session_core::sample::timestamp_strictly_newer(&ts, last),
             None => true,

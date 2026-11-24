@@ -673,9 +673,16 @@ where
     }
 
     /// The group `endpoint` names, joined by the host's joiner the links were given
-    /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported.
+    /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported. A group of links
+    /// whose session lent a table of group buffers ([`LinkTables::group_rx`]) receives into one of
+    /// them, and finding every one held is [`LinkOpenError::Exhausted`]; without the table the
+    /// transport makes its own.
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        self.groups.join(endpoint)
+        let rx = match self.shape.lent.and_then(|tables| tables.group_rx()) {
+            Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
+            None => None,
+        };
+        self.groups.join(endpoint, rx)
     }
 
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
@@ -1852,6 +1859,119 @@ mod tests {
         ));
     }
 
+    /// Links lent a table of group buffers hand each group they join one of them, and refuse a
+    /// group past the table as exhausted, before the joiner is asked; the buffer a group gives back
+    /// as it is left serves the next. The CONTROL is links lent no table, whose joiner is handed
+    /// none and makes its own.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn heap_links_lent_group_buffers_hand_one_to_each_group() {
+        use alloc::vec::Vec;
+        use core::cell::RefCell;
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        const GROUP: &str = "udp/239.1.2.3:7447#iface=lo";
+
+        /// A group holding the buffer it was handed, which it gives back once.
+        struct Held(Option<ByteBuf>);
+        impl GroupTransport for Held {
+            fn open(&mut self) -> bool {
+                true
+            }
+            fn close(&mut self) {}
+            fn service(&self) {}
+            fn carrier_up(&self) -> bool {
+                true
+            }
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+            fn give_back_rx(&mut self) -> Option<ByteBuf> {
+                self.0.take()
+            }
+        }
+
+        /// Joins every group, and records whether each was handed a buffer.
+        struct Joiner {
+            lent: RefCell<Vec<bool>>,
+        }
+        impl GroupJoiner for Joiner {
+            fn join(
+                &self,
+                _endpoint: &str,
+                rx: Option<ByteBuf>,
+            ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+                self.lent.borrow_mut().push(rx.is_some());
+                Ok(Box::new(Held(rx)))
+            }
+        }
+        let joiner = || Joiner {
+            lent: RefCell::new(Vec::new()),
+        };
+
+        let plain = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
+        let _own = plain
+            .open_group(GROUP)
+            .expect("CONTROL: a group with a buffer of its own");
+        assert_eq!(
+            *plain.groups.lent.borrow(),
+            [false],
+            "CONTROL: no buffer handed"
+        );
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let (rx_len, slot_len, group_len) = (66, 34, 48);
+        let bytes = Arena::byte_cells_bytes(rx_len, 1)
+            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+            .and_then(|both| Arena::byte_cells_bytes(group_len, 1).map(|group| both + group))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every buffer claimed from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
+        let tx = arena
+            .lend_byte_cells(2 * slot_len, 1)
+            .expect("the outbound table");
+        let groups = arena
+            .lend_byte_cells(group_len, 1)
+            .expect("the group table");
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
+        links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        let mut first = links
+            .open_group(GROUP)
+            .expect("a group in the table's buffer");
+        assert_eq!(groups.in_use(), 1, "the group took the table's buffer");
+        assert!(
+            matches!(links.open_group(GROUP), Err(LinkOpenError::Exhausted)),
+            "a second group finds the table held"
+        );
+        assert_eq!(
+            *links.groups.lent.borrow(),
+            [true],
+            "the refused group never reached the joiner"
+        );
+
+        first.close();
+        let buf = first
+            .give_back_rx()
+            .expect("the lent buffer, as the group is left");
+        assert!(first.give_back_rx().is_none(), "given back once");
+        drop(buf);
+        assert_eq!(groups.in_use(), 0, "the table has its buffer again");
+        let _next = links
+            .open_group(GROUP)
+            .expect("the buffer serves the next group");
+        assert_eq!(*links.groups.lent.borrow(), [true, true]);
+    }
+
     /// Links given a joiner hand it the group endpoint as the config states it and answer what it
     /// answers: the group it joined, or its refusal. The secure channel given after it keeps it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -1883,7 +2003,12 @@ mod tests {
             asked: RefCell<Vec<String>>,
         }
         impl GroupJoiner for Joiner {
-            fn join(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+            fn join(
+                &self,
+                endpoint: &str,
+                rx: Option<ByteBuf>,
+            ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+                assert!(rx.is_none(), "links lent no group table");
                 self.asked.borrow_mut().push(endpoint.into());
                 if endpoint.starts_with("udp/239.1.2.3:7447") {
                     Ok(Box::new(Quiet))

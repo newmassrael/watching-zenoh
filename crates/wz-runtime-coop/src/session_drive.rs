@@ -382,8 +382,12 @@ impl<L: SessionDatagramLink + ?Sized, F: EventSink + ?Sized> EventSink for LinkS
         self.link.keeps_input()
     }
 
-    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+    fn lend_rejoined(&mut self, message: &wz_session_core::byte_cells::KeptBytes) {
         self.sink.lend_rejoined(message)
+    }
+
+    fn end_rejoined(&mut self, message: wz_session_core::byte_cells::KeptBytes) {
+        self.sink.end_rejoined(message)
     }
 }
 

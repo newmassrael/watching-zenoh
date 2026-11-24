@@ -12325,9 +12325,10 @@ layer_c1g_cargo_test_observer() {
     # that runs it. An integration test and not `--lib`: the crate's unit-test modules
     # name the heap unconditionally and do not compile without `alloc`, while the
     # library does. The set is the file's own gate with `session-slot` as the storage
-    # profile. 1 = the file's one case, counted from the source, not printed.
+    # profile. 2 = the file's two cases (a restarted chain, a frame between two fragments),
+    # counted from the source, not printed.
     wz_test_args wz-session-core multicast_in_place_reassembly
-    _runci_guarded_test C1g 1 \
+    _runci_guarded_test C1g 2 \
         cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --no-default-features --features session-slot,session-multicast,codec-join,codec-frame,codec-close,reassembly,transport-fragmentation --quiet || return 1
     # Every combination the selector touches must compile and be clean WITH and
     # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
@@ -13300,7 +13301,7 @@ _c1p32_pico_profile_tests() {
 layer_c1nh_no_heap_after_open() {
     local features="engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness"
     features+=",liveliness-get,unstable-api,app-transport,e2e-sender,e2e-receiver"
-    features+=",replay-cache,config-document"
+    features+=",replay-cache,config-document,multicast-transport"
     local reading="$WZ_ARTIFACTS/target/no-heap/reading.txt"
     mkdir -p "${reading%/*}" || return 1
     rm -f "$reading"
