@@ -393,3 +393,28 @@ fn an_insert_writes_its_row_once_into_a_freed_or_an_added_slot() {
     drop(map);
     assert_eq!(drops.get(), 3);
 }
+
+/// A row's rank and the row at a rank are read off the slots, in the order the table's walk hands
+/// its rows: a freed slot and a row removed while pinned hold no rank. Turned red by a rank that
+/// counts a slot that holds no live row, or a walk to a rank that skips none.
+#[test]
+fn a_rows_rank_is_its_place_in_the_tables_walk() {
+    let mut map = Map::<5>::new();
+    let first = map.insert(10).unwrap();
+    let freed = map.insert(20).unwrap();
+    let retired = map.insert(30).unwrap();
+    let last = map.insert(40).unwrap();
+    assert!(matches!(map.remove(freed), Some(Removal::Taken(20))));
+    let _pinned = map.pin(retired).unwrap();
+    assert!(matches!(map.remove(retired), Some(Removal::AfterCalls)));
+    let walked: std::vec::Vec<Handle<Test>> = map.iter().map(|(handle, _)| handle).collect();
+    assert_eq!(walked, [first, last]);
+    for (rank, handle) in walked.iter().enumerate() {
+        assert_eq!(map.rank_of(*handle), Some(rank));
+        assert_eq!(map.nth_live(rank).map(|(at, _)| at), Some(*handle));
+    }
+    assert_eq!(map.nth_live(1).map(|(_, row)| *row), Some(40));
+    assert_eq!(map.rank_of(freed), None);
+    assert_eq!(map.rank_of(retired), None);
+    assert!(map.nth_live(2).is_none());
+}

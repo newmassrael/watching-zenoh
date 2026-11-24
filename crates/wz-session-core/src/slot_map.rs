@@ -318,6 +318,26 @@ impl Core {
         }
     }
 
+    /// How many slots before `place` hold a live row: the rank of a live row at `place` in slot
+    /// order, the order every table walks its rows in.
+    #[inline(never)]
+    fn rank(meta: &[Meta], place: usize) -> usize {
+        meta.iter()
+            .take(place)
+            .filter(|slot| slot.state == State::Live)
+            .count()
+    }
+
+    /// The place and the generation of the live row at `rank` in slot order.
+    #[inline(never)]
+    fn nth_live(meta: &[Meta], rank: usize) -> Option<(usize, u16)> {
+        meta.iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.state == State::Live)
+            .nth(rank)
+            .map(|(at, slot)| (at, slot.generation))
+    }
+
     /// The next slot at or after `cursor` whose state is `state`, the cursor moved past it.
     #[inline(never)]
     fn next_in(meta: &[Meta], cursor: &mut usize, state: State) -> Option<(usize, u16)> {
@@ -519,6 +539,21 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// that ended last says the row may go.
     pub fn release(&mut self, handle: Handle<K>) -> Option<T> {
         self.unpin(Pinned { handle })
+    }
+
+    /// The rank of the live row `handle` names among the live rows, in slot order, the order
+    /// [`Self::iter`] hands them in; `None` when it names none. Read off the slots alone, so
+    /// every table answers it with one body whatever its rows are.
+    pub fn rank_of(&self, handle: Handle<K>) -> Option<usize> {
+        let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
+        Some(Core::rank(&self.meta, at))
+    }
+
+    /// The live row at `rank` in slot order, with its handle: the one [`Self::iter`] hands
+    /// `rank`-th, found off the slots alone as [`Self::rank_of`] is.
+    pub fn nth_live(&self, rank: usize) -> Option<(Handle<K>, &T)> {
+        let (at, generation) = Core::nth_live(&self.meta, rank)?;
+        Some((Handle::at(at, generation)?, self.rows.get(at)?.as_ref()?))
     }
 
     /// The next live row at or after `cursor`, the cursor moved past it, so a caller can walk the

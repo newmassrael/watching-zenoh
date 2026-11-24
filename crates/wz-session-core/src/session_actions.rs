@@ -10853,10 +10853,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `body.zid`), so this mirrors the `is_ack: false` capture below
                 // into `remote_peer_zid`, giving the routing layer the remote
                 // peer's identity for BOTH handshake directions.
-                // The parser refused an INIT whose zid is no zid (`parse_init`), so the
-                // conversion holds for every frame it produced; a frame built by hand
-                // that names none records none.
-                let zid = SessionZid::new(init.zid).ok();
+                // The zid the read made (`InitFacts::zid`): both reads refuse an INIT whose
+                // zid is no zid, and a frame built by hand that names none records none.
+                let zid = init.zid;
                 // R311kb — capture the InitAck's sizing caps too: the
                 // initiator adopts the acceptor's (already-capped) final
                 // values, mirroring zenoh-pico's client arm
@@ -10897,8 +10896,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R86 — Accepting-side InitSyn arrival: capture the
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
-                // As the InitAck arm's: `parse_init` refused a zid that is none.
-                let zid = SessionZid::new(init.zid).ok();
+                // As the InitAck arm's: the zid the read made.
+                let zid = init.zid;
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
                 // `InitAck.size <= InitSyn.size` rule on the

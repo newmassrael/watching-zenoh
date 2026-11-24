@@ -2189,11 +2189,7 @@ fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
 /// Where the Interest `handle` names lies among the Interests the replay tells, in the table's slot
 /// order: read while it stands, for its Final's place once it is let go of.
 fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<usize> {
-    let handle = handle?;
-    tables
-        .interests()
-        .iter()
-        .position(|(held, _)| held == handle)
+    tables.interests().rank_of(handle?)
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
