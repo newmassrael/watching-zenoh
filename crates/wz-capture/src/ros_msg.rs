@@ -157,7 +157,7 @@ pub(crate) enum Base {
     Primitive(Primitive),
     /// `string`, with the bound `string<=N` writes.
     String(Option<u32>),
-    /// `wstring`, with its bound. Declared and not read.
+    /// `wstring`, with its bound, which counts UTF-16 code units.
     WString(Option<u32>),
     /// A message, by its full name (`<package>/msg/<Type>`).
     Message(String),

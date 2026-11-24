@@ -4352,8 +4352,15 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * longer than its bound, a count the bytes left cannot hold, a `bool` other
  * than 0 or 1, more bytes after the message than the three of padding a
  * serializer may append, and a representation other than plain CDR (at byte
- * 0). A `wstring` field is refused by name: its character width differs
- * between serializers, and this library does not guess it.
+ * 0).
+ *
+ * A `wstring` is read as rmw_zenoh's Fast-CDR type support writes it: a
+ * 4-byte count of UTF-16 code units, then each code unit as a 4-byte unsigned
+ * integer, with no terminator; its `typed_value` is the text. A bounded
+ * `wstring<=N` holds at most N code units. A code unit above 0xFFFF and a
+ * surrogate that is not half of a pair are refused, `why` naming the field
+ * and the code unit's byte, as is a wide string longer than its bound or one
+ * whose count the bytes left cannot hold.
  *
  * THE TYPE HASH (field-document revision 84, row_facts 24). A `cdr` rule's
  * `decoded` block carries `type_hash`, the type's RIHS01 hash as rosidl

@@ -38,11 +38,15 @@
 //! accounts for. A representation other than plain CDR (a parameter list,
 //! XCDR version 2) is refused at byte 0, naming it.
 //!
-//! # What is not read
+//! # A wide string
 //!
-//! `wstring`: the width of its characters on the wire differs between
-//! serializers, and a guess would be a confident misread. A field of that type
-//! is refused by its path when the reading reaches it.
+//! A `wstring` is written as rmw_zenoh writes it, through the Fast-CDR type
+//! support (`rosidl_typesupport_fastrtps_cpp`'s `serialization_helpers.hpp`):
+//! a 4-byte count of UTF-16 code units, then each code unit as a 4-byte
+//! unsigned integer, with no terminator. It is read so and decoded as UTF-16:
+//! a code unit above 0xFFFF, a high surrogate not followed by a low one and a
+//! low surrogate not preceded by a high one are each refused at the byte of
+//! the code unit, and a bounded `wstring<=N` holds at most N code units.
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -353,13 +357,7 @@ impl<'p> Reader<'p> {
         match base {
             Base::Primitive(p) => self.primitive(*p, path, name, ty),
             Base::String(bound) => self.string(*bound, path, name, ty),
-            Base::WString(_) => Err(PayloadFormatError::Malformed {
-                at: self.at,
-                why: format!(
-                    "{path}: a wstring is not read, because the width of its characters on \
-                     the wire differs between serializers"
-                ),
-            }),
+            Base::WString(bound) => self.wstring(*bound, path, name, ty),
             Base::Message(inner) => {
                 let Some(def) = set.message(inner) else {
                     return Err(PayloadFormatError::Malformed {
@@ -470,6 +468,97 @@ impl<'p> Reader<'p> {
         });
         Ok(())
     }
+}
+
+impl Reader<'_> {
+    /// A `wstring`: a count of UTF-16 code units, each then a 4-byte unsigned
+    /// integer (the module doc's "A wide string").
+    fn wstring(
+        &mut self,
+        bound: Option<u32>,
+        path: &str,
+        name: Option<&str>,
+        ty: String,
+    ) -> Result<(), PayloadFormatError> {
+        let count = self.count(path, "wstring length")?;
+        let start = self.at - 4;
+        if let Some(bound) = bound.filter(|bound| count > *bound) {
+            return Err(PayloadFormatError::Malformed {
+                at: start,
+                why: format!(
+                    "{path}: a wstring of {count} code unit(s) is longer than its bound {bound}"
+                ),
+            });
+        }
+        // Each code unit takes four bytes, so a count the bytes left cannot hold
+        // is refused before anything is kept for it.
+        let left = self.bytes.len().saturating_sub(self.at);
+        if count as usize > left / 4 {
+            return Err(PayloadFormatError::Malformed {
+                at: self.at,
+                why: format!(
+                    "{path}: {count} code unit(s) of four bytes cannot fit in the {left} byte(s) \
+                     left"
+                ),
+            });
+        }
+        let mut units: Vec<(usize, u16)> = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let at = self.at;
+            let raw = self.take(4, path, "wstring code unit")?;
+            let unit = u32::from_le_bytes(self.le(raw));
+            let Ok(unit) = u16::try_from(unit) else {
+                return Err(PayloadFormatError::Malformed {
+                    at,
+                    why: format!(
+                        "{path}: a wstring holds UTF-16 code units, and 0x{unit:x} is above 0xffff"
+                    ),
+                });
+            };
+            units.push((at, unit));
+        }
+        let text = utf16(&units, path)?;
+        self.rows.push(PayloadField {
+            path: String::from(path),
+            name: name.map(String::from),
+            value: format!("{text:?}"),
+            start,
+            end: self.at,
+            typed: typed(ty, Some(text_json(&text))),
+        });
+        Ok(())
+    }
+}
+
+/// The text a run of UTF-16 code units spells, each with the byte it was read
+/// at, or a refusal at the byte of the first surrogate that is not half of a
+/// pair.
+fn utf16(units: &[(usize, u16)], path: &str) -> Result<String, PayloadFormatError> {
+    let unpaired = |at: usize, unit: u16| PayloadFormatError::Malformed {
+        at,
+        why: format!("{path}: the wstring's code unit 0x{unit:04x} is an unpaired surrogate"),
+    };
+    let mut text = String::with_capacity(units.len());
+    let mut rest = units.iter();
+    while let Some(&(at, unit)) = rest.next() {
+        let code = match unit {
+            0xd800..=0xdbff => match rest.clone().next() {
+                Some(&(_, low @ 0xdc00..=0xdfff)) => {
+                    rest.next();
+                    0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00)
+                }
+                _ => return Err(unpaired(at, unit)),
+            },
+            0xdc00..=0xdfff => return Err(unpaired(at, unit)),
+            _ => u32::from(unit),
+        };
+        // Every value above is a scalar value: a surrogate is never left in it.
+        let Some(c) = char::from_u32(code) else {
+            return Err(unpaired(at, unit));
+        };
+        text.push(c);
+    }
+    Ok(text)
 }
 
 /// The typed reading of a row: its type, and its value as JSON text where it
@@ -624,6 +713,88 @@ mod tests {
                 Some("0"),
                 4,
                 5
+            )
+        );
+    }
+
+    /// A `wstring` as rmw_zenoh's Fast-CDR type support writes it: a count of
+    /// UTF-16 code units, then each as a 4-byte integer, in either byte order;
+    /// a surrogate pair is one character and an empty one holds nothing.
+    #[test]
+    fn a_wide_string_reads_its_utf16_code_units() {
+        let set = set_of(&[("demo/msg/Wide.msg", "wstring w\nwstring<=2 b\nuint8 after")]);
+        // "h" and U+10400, a character past the basic plane: three code units.
+        let little: &[u8] = &[
+            0, 1, 0, 0, // header
+            3, 0, 0, 0, // w's count
+            0x68, 0, 0, 0, // 'h'
+            0x01, 0xd8, 0, 0, // the high surrogate
+            0x00, 0xdc, 0, 0, // the low surrogate
+            0, 0, 0, 0, // b, empty
+            7, // after
+        ];
+        let big: &[u8] = &[
+            0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0x68, 0, 0, 0xd8, 0x01, 0, 0, 0xdc, 0x00, 0, 0, 0, 0,
+            7,
+        ];
+        let wide = text_json("h\u{10400}");
+        let empty = text_json("");
+        let expected = vec![
+            ("$", None, "demo/msg/Wide", None, 4, 25),
+            ("$.w", Some("w"), "wstring", Some(wide.as_str()), 4, 20),
+            ("$.b", Some("b"), "wstring<=2", Some(empty.as_str()), 20, 24),
+            ("$.after", Some("after"), "uint8", Some("7"), 24, 25),
+        ];
+        for bytes in [little, big] {
+            let fields = read(&set, "demo/msg/Wide", bytes).expect("a Wide");
+            assert_eq!(rows(&fields), expected);
+            assert_eq!(fields[1].value, format!("{:?}", "h\u{10400}"));
+        }
+    }
+
+    /// A code unit above 0xFFFF, an unpaired surrogate either way round, a
+    /// wide string longer than its bound and a count the bytes cannot hold are
+    /// each refused at their byte, naming the field.
+    #[test]
+    fn a_wide_string_that_is_not_utf16_is_refused_at_its_code_unit() {
+        let set = set_of(&[("demo/msg/Wide.msg", "wstring<=2 w")]);
+        let refused = |bytes: &[u8]| match read(&set, "demo/msg/Wide", bytes) {
+            Err(PayloadFormatError::Malformed { at, why }) => (at, why),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]),
+            (
+                8,
+                String::from("$.w: a wstring holds UTF-16 code units, and 0x10000 is above 0xffff")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x01, 0xd8, 0, 0, 0x61, 0, 0, 0]),
+            (
+                8,
+                String::from("$.w: the wstring's code unit 0xd801 is an unpaired surrogate")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x61, 0, 0, 0, 0x00, 0xdc, 0, 0]),
+            (
+                12,
+                String::from("$.w: the wstring's code unit 0xdc00 is an unpaired surrogate")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 3, 0, 0, 0]),
+            (
+                4,
+                String::from("$.w: a wstring of 3 code unit(s) is longer than its bound 2")
+            )
+        );
+        assert_eq!(
+            refused(&[0, 1, 0, 0, 2, 0, 0, 0, 0x61, 0, 0, 0]),
+            (
+                8,
+                String::from("$.w: 2 code unit(s) of four bytes cannot fit in the 4 byte(s) left")
             )
         );
     }
