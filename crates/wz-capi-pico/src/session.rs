@@ -1273,26 +1273,28 @@ pub(crate) fn stated_zid(text: Option<&str>) -> Result<Option<SessionZid>, ZResu
 /// reader was written for and refuses the rest, and an id of sixteen zero bytes, which zenoh
 /// refuses.
 fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if digits.len() != 36 {
+        return None;
+    }
     let mut bytes = [0u8; 16];
     let mut out = bytes.iter_mut();
-    // The five groups the dashes part, of 8, 4, 4, 4 and 12 hex digits: two digits to a byte.
-    let mut groups = text.split('-');
-    for digits in [8, 4, 4, 4, 12] {
-        let group = groups.next()?.as_bytes();
-        if group.len() != digits {
-            return None;
-        }
-        for pair in group.chunks_exact(2) {
-            let [hi, lo] = pair else {
+    // The high digit of the byte being read, held until its low digit comes. Walked byte by byte
+    // at fixed places: a `str` pattern search would pull its searcher into a no_std build.
+    let mut high = None;
+    for (at, digit) in digits.iter().enumerate() {
+        // The dashes part the digits into groups of 8, 4, 4, 4 and 12.
+        if matches!(at, 8 | 13 | 18 | 23) {
+            if *digit != b'-' {
                 return None;
-            };
-            let hi = char::from(*hi).to_digit(16)?;
-            let lo = char::from(*lo).to_digit(16)?;
-            *out.next()? = ((hi << 4) | lo) as u8;
+            }
+            continue;
         }
-    }
-    if groups.next().is_some() {
-        return None;
+        let nibble = char::from(*digit).to_digit(16)?;
+        match high.take() {
+            None => high = Some(nibble),
+            Some(hi) => *out.next()? = ((hi << 4) | nibble) as u8,
+        }
     }
     // Written up to the last non-zero byte, as zenoh writes an id.
     let last = bytes.iter().rposition(|byte| *byte != 0)?;
