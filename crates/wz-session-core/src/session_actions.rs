@@ -13016,14 +13016,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // at the SN the abandoned fragment would have had, reserved first unless the fragment
         // reserved it already, and the answer the abandon gives.
         let (stop_sn, reserve_stop, abandoned) = loop {
-            if plan.remaining_fragments() == 0 {
-                return Ok(UnicastPush::Pushed);
-            }
-            // Read the SN BEFORE drawing, so it names the fragment
+            // The span is taken before the draw, so its SN names the fragment
             // this iteration is about to send — which is also the SN
             // the stop fragment takes if the draw fails, keeping the
-            // conduit's ring gapless across the abandon.
-            let this_sn = plan.next_sn();
+            // conduit's ring gapless across the abandon. The plan is not read
+            // again once a draw fails.
+            let Some(span) = plan.next_span() else {
+                return Ok(UnicastPush::Pushed);
+            };
+            let this_sn = span.sn;
             // R2926 — each further fragment waits for room against the
             // message's ONE deadline, as upstream's chain waits for a
             // batch per fragment (`io/zenoh-transport/src/common/pipeline.rs`
@@ -13069,12 +13070,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // requires of every accepted transport message.
                 break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
             }
-            // `remaining_fragments() > 0` and `next_span() == None` are the same predicate
-            // negated, so the `None` arm is unreachable; answering rather than panicking keeps
-            // the no_std profiles free of a formatter.
-            let Some(span) = plan.next_span() else {
-                return Ok(UnicastPush::Pushed);
-            };
             if emitted > 0 {
                 self.outbound_frame_sn.reserve_next(priority, reliable);
             }
