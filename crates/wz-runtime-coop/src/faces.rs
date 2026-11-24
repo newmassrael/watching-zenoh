@@ -28,6 +28,7 @@ use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
+use crate::face_life::Phase;
 use crate::link_cells::CellRc;
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
@@ -204,6 +205,31 @@ impl<S, D> Link<S, D> {
         match self {
             Link::Up(wire) | Link::Opening { wire, .. } => Some(wire),
             _ => None,
+        }
+    }
+
+    /// Where the link stands, without the wire and the dial it holds: what the face's value
+    /// decides on (`face_life`).
+    pub fn phase(&self) -> Phase {
+        match self {
+            Link::Up(_) => Phase::Up,
+            Link::Opening {
+                next, deadline_us, ..
+            } => Phase::Opening {
+                next: *next,
+                deadline_us: *deadline_us,
+            },
+            Link::Dialing {
+                dial,
+                next,
+                deadline_us,
+            } => Phase::Dialing {
+                endpoint: dial.endpoint().clone(),
+                next: *next,
+                deadline_us: *deadline_us,
+            },
+            Link::Waiting { at_us } => Phase::Waiting { at_us: *at_us },
+            Link::Held { zid } => Phase::Held { node: *zid },
         }
     }
 }
@@ -609,11 +635,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// holds none already and gives a wait, a connection on every port that gives one, and
     /// `others` after them; no wait at all when a link holds input. A link that owes its stack the
     /// rest of a frame is waited on for room as well. A link that waits in its own loop, or a port
-    /// that gives no wait, bounds the wait at a look; a dial under way or waiting bounds it at its
-    /// next look. `beside`, a wake of the stack's (the program's word that the session's clock moved
-    /// on), ends whatever wait the links make, a sleep to the next dial among them; it makes no
-    /// wait where they make none. `now_us` reads the clock, which only a face waiting to be
-    /// dialled asks.
+    /// that gives no wait, bounds the wait at a look; a face bounds it at the time its link stands
+    /// to be looked at again (`face_life::Phase::wake_at`): a dial under way or waiting at its
+    /// next look, a handshake at its deadline. `beside`, a wake of the stack's (the program's word
+    /// that the session's clock moved on), ends whatever wait the links make, a sleep to the next
+    /// dial among them; it makes no wait where they make none. `now_us` reads the clock, which
+    /// only a face with such a time asks, once.
     pub fn idle_wait(
         &mut self,
         most: u32,
@@ -624,8 +651,15 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         let mut holds = false;
         let mut waits = core::mem::take(&mut self.waits);
         let mut own_loop = false;
-        let mut dial_left_ms = None;
+        let mut dial_left_ms: Option<u64> = None;
+        let mut now = None;
+        let mut read_now = || *now.get_or_insert_with(&mut *now_us);
         for face in &self.faces {
+            // The soonest a face's link is to be looked at again bounds the wait.
+            if let Some(wake_us) = face.link().phase().wake_at(&mut read_now) {
+                let left_ms = wake_us.saturating_sub(read_now()).saturating_div(1000);
+                dial_left_ms = Some(dial_left_ms.map_or(left_ms, |held| held.min(left_ms)));
+            }
             match face.link() {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
@@ -643,14 +677,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                         own_loop = true;
                     }
                 }
-                Link::Waiting { at_us } => {
-                    dial_left_ms = Some(at_us.saturating_sub(now_us()).saturating_div(1000));
-                }
-                // A dial under way gives no wait of its own here: it is asked again after a look.
-                Link::Dialing { .. } => dial_left_ms = Some(DIAL_LOOK_MS),
-                // Nothing to wait for until the face that holds the node is lost, which is
-                // another face's link.
-                Link::Held { .. } => {}
+                // A face waiting, dialling or standing by brings no input of its own: its time,
+                // read above, is what wakes the read for it.
+                Link::Waiting { .. } | Link::Dialing { .. } | Link::Held { .. } => {}
             }
         }
         if holds {
