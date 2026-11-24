@@ -739,22 +739,22 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
         // The most this link may wait: what its session has due, and what its image allows. At
         // or below the tick it is the tick, which is every link that has not been given more.
         let want = max_wait_ms.min(u64::from(self.idle_wait_ms));
-        if want <= SERVICE_WAIT_MS as u64 || !self.socket.times_out() {
-            self.service();
-            return;
+        if want > SERVICE_WAIT_MS as u64 && self.socket.times_out() {
+            // The timeout is armed at the largest power of two not above `want`, so a wait never
+            // ends after the deadline it was computed from, and re-arming (a system call) happens
+            // only when the deadline moves to another power of two: a link whose deadlines are
+            // seconds away arms once, and the approach to a deadline costs one wake per halving,
+            // not one per tick.
+            let armed = power_of_two_within(want);
+            // `idle_wait_ms` is at most half of `c_int`'s range, so the power of two is inside it.
+            if self.arm(armed as c_int) {
+                self.wait_for_datagram();
+                return;
+            }
         }
-        // The timeout is armed at the largest power of two not above `want`, so a wait never ends
-        // after the deadline it was computed from, and re-arming (a system call) happens only
-        // when the deadline moves to another power of two: a link whose deadlines are seconds
-        // away arms once, and the approach to a deadline costs one wake per halving, not one per
-        // tick.
-        let armed = power_of_two_within(want);
-        // `idle_wait_ms` is at most half of `c_int`'s range, so the power of two is inside it.
-        if !self.arm(armed as c_int) {
-            self.service();
-            return;
-        }
-        self.wait_for_datagram();
+        // A wait of the tick, and the fallback of a socket that would not be armed for longer:
+        // one call of the tick's wait serves both.
+        self.service();
     }
 
     // The datagram the lending receive hands over, copied out: one body reads the socket and the

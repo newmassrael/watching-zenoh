@@ -929,3 +929,42 @@ fn every_due_timer_is_woken_earliest_first_past_one_batch() {
         "the entry not yet due stays"
     );
 }
+
+/// A waker that writes, when it is woken, how many entries its queue still holds.
+struct Counter {
+    queue: std::sync::Arc<crate::timer::TimerQueue>,
+    seen: std::sync::Arc<std::sync::Mutex<std::vec::Vec<usize>>>,
+}
+
+impl std::task::Wake for Counter {
+    fn wake(self: std::sync::Arc<Self>) {
+        let left = self.queue.pending_count();
+        self.seen.lock().expect("not poisoned").push(left);
+    }
+}
+
+/// The due entries leave the table four to a section, and are woken after it: each waker of the
+/// first four finds the other two due entries still in the table, and each of the last two finds
+/// only the one not yet due. Turned red by a pass that takes one entry a section (each waker would
+/// find one fewer than the last) or every due entry in one.
+#[test]
+fn due_timers_leave_the_table_four_to_a_section() {
+    let queue = std::sync::Arc::new(crate::timer::TimerQueue::growing());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::vec::Vec::new()));
+    for deadline_us in [10u64, 20, 30, 40, 50, 60, 500] {
+        let waker = Waker::from(std::sync::Arc::new(Counter {
+            queue: std::sync::Arc::clone(&queue),
+            seen: std::sync::Arc::clone(&seen),
+        }));
+        assert!(queue.register(deadline_us, waker));
+    }
+    queue.pop_expired(100);
+    assert_eq!(
+        *seen.lock().expect("not poisoned"),
+        [3usize, 3, 3, 3, 1, 1],
+        "four taken in the first section, the other two in the next"
+    );
+    // The entry not yet due holds the queue in its waker: woken, it lets the queue go.
+    queue.pop_expired(u64::MAX);
+    assert_eq!(queue.pending_count(), 0);
+}
