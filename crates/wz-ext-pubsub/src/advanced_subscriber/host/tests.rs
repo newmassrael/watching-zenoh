@@ -7,11 +7,13 @@
 //! host does with it: the entities and the order they are declared and retracted in, the get each
 //! trigger issues, what ends a get, and what a teardown stops.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey};
+use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey, TokenRef};
 use wz_capi_port::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
     MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
@@ -22,7 +24,7 @@ use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link::RxBytes;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
-use wz_session_core::query_options::QueryOptionsOf;
+use wz_session_core::query_options::{QueryOptions, QueryOptionsOf};
 use wz_session_core::reply::{InboundReply, InboundReplyBody};
 use wz_session_core::sample::{Sample, SourceInfo};
 use wz_session_core::serde_codec::z_serialize;
@@ -33,7 +35,7 @@ use super::super::options::{
     AdvancedSubscriberOptions, DeclarationForms, EntityForm, HistoryConfig, RecoveryConfig,
     SubscriberDetection,
 };
-use super::super::state::Delivery;
+use super::super::state::{Delivery, MissHandlers, State};
 use super::{EngineSubscriber, HostError};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
@@ -933,4 +935,181 @@ fn a_subscriber_is_named_by_its_engines_session_zid() {
     )
     .expect("the scripted engine declares");
     assert_eq!(declared.id().zid(), &ZID[..]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// What asking a get and subscribing take of the heap: counted on the calling thread, so libtest's
+// other threads move no number.
+
+/// Counts the allocations made BY THE CURRENT THREAD.
+struct CountingAllocator;
+
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+// SAFETY: every call forwards to `System` unchanged; the only addition is a bump of a thread-local
+// cell without a destructor, which neither allocates nor unwinds.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: the caller's contract, forwarded.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: the caller's contract, forwarded.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: the caller's contract, forwarded.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: the caller's contract, forwarded.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: CountingAllocator = CountingAllocator;
+
+fn allocations() -> usize {
+    ALLOCATIONS.with(Cell::get)
+}
+
+/// A subscriber's shared part on the scripted engine with its startup get counted in flight,
+/// recording what it delivers into `delivered`.
+fn shared_on(
+    script: &Arc<Script>,
+    delivered: &Arc<Mutex<Vec<u8>>>,
+) -> Arc<super::Shared<dyn SessionEngine>> {
+    let d = Arc::clone(delivered);
+    let state = State::new(
+        Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
+        MissHandlers::default(),
+    )
+    .with_retransmission(true)
+    .with_history(1, usize::MAX);
+    Arc::new(super::Shared::new(
+        Arc::downgrade(&engine(script)),
+        state,
+        "demo/data".into(),
+        Locality::SessionLocal,
+        1_000,
+    ))
+}
+
+/// A get's slot, its fan's registration, its legs, a reply keyed outside the subscription and
+/// the get's end take no memory: the end frees the slot, drops the fan from the token and lets go
+/// of every count of the subscriber the legs held.
+#[test]
+fn a_get_its_legs_and_its_end_take_no_memory() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let shared = shared_on(&script, &delivered);
+    let outside = InboundReply {
+        keyexpr_literal: "other/data".into(),
+        ..reply(0, 10)
+    };
+
+    let before = allocations();
+    let slot = shared
+        .claim()
+        .expect("a subscriber with no get has a free slot");
+    // SAFETY: the slot was taken just above, in `shared`'s table, and no leg of it is out.
+    let fan = unsafe { slot.open(&shared, super::Finish::History) };
+    // SAFETY: the token lies in `shared`, which outlives the get; the fan lies in its slot.
+    let registered = unsafe { fan.register(TokenRef::placed(&shared.token)) };
+    // SAFETY: this test is the issuer and holds the get until its release below.
+    let legs = unsafe { [slot.leg(&shared), slot.leg(&shared)] };
+    legs[0].call(&outside);
+    let active = shared.token.active();
+    // SAFETY: the issuer lets go of its hold once, here.
+    unsafe { slot.release() };
+    drop(legs);
+    let during = allocations() - before;
+
+    assert!(registered, "a token not cancelling takes the fan");
+    assert_eq!(active, 1, "the fan stands on the token while the get does");
+    assert_eq!(during, 0, "asking and ending a get allocates nothing");
+    assert_eq!(shared.token.active(), 0, "the get's end dropped its fan");
+    assert_eq!(
+        Arc::strong_count(&shared),
+        1,
+        "every leg let go of the subscriber"
+    );
+    assert!(
+        shared
+            .gets
+            .iter()
+            .all(|slot| !slot.taken.load(Ordering::SeqCst)),
+        "the slot is free for the next get"
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "a reply keyed outside is dropped"
+    );
+}
+
+/// The subscriber's own subscription callback is made over a count of it and takes no memory;
+/// the engine letting the callback go lets the count go.
+#[test]
+fn the_subscribers_own_callback_takes_no_memory_and_holds_it() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let shared = shared_on(&script, &delivered);
+
+    let before = allocations();
+    let sink = super::own_sink(&shared, super::on_live::<dyn SessionEngine>);
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "the callback allocates nothing");
+    assert_eq!(
+        Arc::strong_count(&shared),
+        2,
+        "the callback holds the subscriber"
+    );
+    drop(sink);
+    assert_eq!(
+        Arc::strong_count(&shared),
+        1,
+        "its drop let the subscriber go"
+    );
+}
+
+/// With every slot holding a get, a get asked is over before it starts: nothing is asked of the
+/// engine and its end runs at once, which hands on what the history held back.
+#[test]
+fn a_get_past_the_sessions_bound_ends_at_once() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let shared = shared_on(&script, &delivered);
+    assert!(
+        shared.lock().handle_live(&sample(0, 10), 1).is_none(),
+        "a live sample during the history asks nothing"
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "a live sample is held while the history is in flight"
+    );
+    while shared.claim().is_some() {}
+
+    super::issue_get(
+        &shared,
+        "demo/data/@adv/**",
+        QueryOptions::get(),
+        super::Finish::History,
+    );
+
+    assert_eq!(script.get_count(), 0, "no get is asked of the engine");
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [10],
+        "the history's end handed on what it held"
+    );
 }

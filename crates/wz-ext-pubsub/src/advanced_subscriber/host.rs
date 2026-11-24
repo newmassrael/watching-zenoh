@@ -18,11 +18,13 @@
 //! # How a get ends
 //!
 //! The port ends a leg by dropping its callback. A get is over when the LAST leg's callback is, so
-//! every callback of one get holds the same `GetEnd`, and what the machine does when a get ends
-//! (close its slot, flush what it buffered) is that value's `Drop`. The host holds one more
-//! reference while it issues the get, which is what makes a get that no leg was issued for, or
-//! that every leg ended while it was still being issued, end exactly once and after the call
-//! returned, with no lock of the engine held.
+//! every callback of one get holds the same slot of the subscriber's table of gets in flight, and
+//! what the machine does when a get ends (close its slot, flush what it buffered) runs when the
+//! last holder of the slot lets it go. The host holds the slot once more while it issues the get,
+//! which is what makes a get that no leg was issued for, or that every leg ended while it was
+//! still being issued, end exactly once and after the call returned, with no lock of the engine
+//! held. The table has a slot for each get the session holds pending at once, and a callback is
+//! the engine's raw form over a count of the subscriber, so asking a get takes no memory.
 //!
 //! # How a subscriber is taken down
 //!
@@ -37,13 +39,17 @@
 //! asks for. A build that wants less links the machine and the plans alone.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::UnsafeCell;
+use core::ffi::c_void;
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{
     LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId,
     WireKey,
 };
+use wz_session_core::caps;
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::locality::Locality;
@@ -62,7 +68,9 @@ use super::plans::{
     history_selector, parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource,
     RecoveredView,
 };
-use super::state::{Delivery, Miss, MissHandlers, RecoveryRequest, SampleMissListener, State};
+use super::state::{
+    Delivery, Miss, MissHandlers, RecoveryRequest, SampleMissListener, State, StateCell,
+};
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
@@ -117,13 +125,20 @@ impl core::fmt::Display for HostError {
 
 impl core::error::Error for HostError {}
 
+/// How many gets a subscriber holds in flight at once: as many as its session holds pending, since
+/// the session refuses a get past them anyway.
+const GETS_IN_FLIGHT: usize = caps::MAX_PENDING_QUERIES;
+
 /// What every callback and job of one subscriber shares.
 struct Shared<E: SessionEngine + ?Sized> {
     /// Held weakly: the engine holds the callbacks that hold this.
     engine: Weak<E>,
-    state: Arc<Mutex<State>>,
+    /// The gets in flight. Before the token, so a fan is never dropped after the token it is
+    /// registered on.
+    gets: [GetSlot<E>; GETS_IN_FLIGHT],
+    state: Mutex<State>,
     /// The cancellation of the gets in flight, and what teardown cancels through.
-    token: Arc<CancellationToken>,
+    token: CancellationToken,
     /// Set before the gets are cancelled, and never cleared: from then on nothing reaches the
     /// application's callback.
     closing: AtomicBool,
@@ -136,6 +151,26 @@ struct Shared<E: SessionEngine + ?Sized> {
 }
 
 impl<E: SessionEngine + ?Sized> Shared<E> {
+    /// A subscriber of `engine` on `base_keyexpr` with no get in flight.
+    fn new(
+        engine: Weak<E>,
+        state: State,
+        base_keyexpr: String,
+        dest: Locality,
+        timeout_ms: u32,
+    ) -> Self {
+        Self {
+            engine,
+            gets: core::array::from_fn(|_| GetSlot::new()),
+            state: Mutex::new(state),
+            token: CancellationToken::default(),
+            closing: AtomicBool::new(false),
+            base_keyexpr,
+            dest,
+            timeout_ms,
+        }
+    }
+
     fn is_closing(&self) -> bool {
         self.closing.load(Ordering::Acquire)
     }
@@ -148,24 +183,261 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
     fn lock(&self) -> MutexGuard<'_, State> {
         lock_or_panic(&self.state, super::state::STATE_POISONED)
     }
+
+    /// A free slot of the table of gets, taken; none when every one holds a get.
+    fn claim(&self) -> Option<&GetSlot<E>> {
+        self.gets.iter().find(|slot| {
+            slot.taken
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        })
+    }
 }
 
-/// The end of one get: runs what the machine does when it is over, once, when the last holder is
-/// dropped. See the module doc.
-struct GetEnd<E: SessionEngine + ?Sized> {
-    shared: Arc<Shared<E>>,
-    finish: Box<dyn Fn(&mut State) + Send + Sync>,
+/// A miss listener reaches the state through the subscriber, which holds it.
+impl<E: SessionEngine + ?Sized> StateCell for Shared<E> {
+    fn state_cell(&self) -> &Mutex<State> {
+        &self.state
+    }
+}
+
+/// What the machine does when a get is over.
+enum Finish {
+    /// The startup get, or a late publisher's whose source is not identified.
+    History,
+    /// A sequenced source's recovery or late-publisher get.
+    Recovery((Vec<u8>, u32)),
+    /// A timestamped late publisher's get, by its zid.
+    Timestamped(Vec<u8>),
+}
+
+impl Finish {
+    fn run(self, state: &mut State) {
+        match self {
+            Self::History => state.finish_history(),
+            Self::Recovery(key) => state.finish_recovery(&key),
+            Self::Timestamped(zid) => state.finish_timestamped_recovery(&zid),
+        }
+    }
+}
+
+/// One get in flight, in its subscriber's table. Taken by the issuer of a get, held by the issuer
+/// while it issues and by each leg's callback, and given back by the last of them, which ends the
+/// get. See the module doc.
+struct GetSlot<E: SessionEngine + ?Sized> {
+    /// The slot holds a get.
+    taken: AtomicBool,
+    /// The holders of the get: its issuer while it issues, and each leg not yet ended.
+    holders: AtomicUsize,
+    /// The subscriber whose table the slot is in, as a leg reaches it.
+    owner: UnsafeCell<*const Shared<E>>,
+    /// What ends the get; taken by its end.
+    finish: UnsafeCell<Option<Finish>>,
     /// The get's legs as one thing to cancel, and its registration on the teardown's token: held
-    /// to the end of the get, after `finish` has run, so a teardown waits for it.
-    fan: CancellableFan,
+    /// to the end of the get, after its finish has run, so a teardown waits for it. Dropped where
+    /// it lies, since the token's list names it by its address.
+    fan: UnsafeCell<Option<CancellableFan>>,
 }
 
-impl<E: SessionEngine + ?Sized> Drop for GetEnd<E> {
-    fn drop(&mut self) {
-        if self.shared.is_closing() {
+// SAFETY: `owner`, `finish` and `fan` are written only by the one that took the slot, before it
+// hands out a leg, and by the last holder as it ends the get; in between they are read through
+// shared borrows only, and the fan is `Sync`. The subscriber `owner` names is `Sync`.
+unsafe impl<E: SessionEngine + ?Sized> Send for GetSlot<E> {}
+// SAFETY: as `Send`.
+unsafe impl<E: SessionEngine + ?Sized> Sync for GetSlot<E> {}
+
+impl<E: SessionEngine + ?Sized> GetSlot<E> {
+    fn new() -> Self {
+        Self {
+            taken: AtomicBool::new(false),
+            holders: AtomicUsize::new(0),
+            owner: UnsafeCell::new(core::ptr::null()),
+            finish: UnsafeCell::new(None),
+            fan: UnsafeCell::new(None),
+        }
+    }
+
+    /// Fill the slot with a get of `owner` that `finish` ends, held by its issuer, and answer the
+    /// get's fan, registered on no token yet.
+    ///
+    /// # Safety
+    /// The caller took the slot ([`Shared::claim`]) for `owner`, whose table it is in, and has
+    /// handed out no leg of it.
+    unsafe fn open(&self, owner: &Arc<Shared<E>>, finish: Finish) -> &CancellableFan {
+        // SAFETY: the caller's: nothing else reaches the slot yet.
+        unsafe {
+            *self.owner.get() = Arc::as_ptr(owner);
+            *self.finish.get() = Some(finish);
+            self.holders.store(1, Ordering::Release);
+            (*self.fan.get()).insert(CancellableFan::new())
+        }
+    }
+
+    /// The subscriber the slot is in.
+    ///
+    /// # Safety
+    /// The caller holds the slot's get, which holds the subscriber.
+    unsafe fn owner(&self) -> &Shared<E> {
+        // SAFETY: the caller's: `owner` was written before the get had a holder but its issuer,
+        // and the subscriber stands while the get does.
+        unsafe { &**self.owner.get() }
+    }
+
+    /// One leg's callback, holding the get and the subscriber until the engine lets it go
+    /// ([`end_leg`]).
+    ///
+    /// # Safety
+    /// The caller is the issuer of the slot's get and still holds it; `owner` is the subscriber
+    /// the slot is in.
+    unsafe fn leg(&self, owner: &Arc<Shared<E>>) -> ReplyCallback {
+        self.holders.fetch_add(1, Ordering::AcqRel);
+        // The count of the subscriber the leg holds, let go of by `end_leg`.
+        let _ = Arc::into_raw(Arc::clone(owner));
+        let context = core::ptr::from_ref(self).cast_mut().cast::<c_void>();
+        // SAFETY: the context is this slot, which the leg holds until `end_leg` runs, once, after
+        // its last call; a call reads the subscriber through a shared borrow, which it admits from
+        // any thread.
+        unsafe { ReplyCallback::raw(on_reply::<E>, context, Some(end_leg::<E>)) }
+    }
+
+    /// Let go of one hold of the get. The last ends it: its finish runs unless the subscriber is
+    /// closing, its fan is dropped where it lies, and the slot is free for the next get.
+    ///
+    /// # Safety
+    /// The caller holds the get (its issuer, or a leg) and lets go of it once; the subscriber the
+    /// slot is in stands for the call.
+    unsafe fn release(&self) {
+        if self.holders.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
         }
-        (self.finish)(&mut self.shared.lock());
+        // SAFETY: the last holder has the slot to itself, and the caller keeps the subscriber.
+        unsafe {
+            let shared = self.owner();
+            if let Some(finish) = (*self.finish.get()).take() {
+                if !shared.is_closing() {
+                    finish.run(&mut shared.lock());
+                }
+            }
+            *self.fan.get() = None;
+        }
+        self.taken.store(false, Ordering::Release);
+    }
+}
+
+/// A reply of one leg of a get: fed to the machine as a recovered sample.
+///
+/// # Safety
+/// `context` is a slot whose get the leg holds ([`GetSlot::leg`]).
+unsafe fn on_reply<E: SessionEngine + ?Sized>(context: *mut c_void, reply: &dyn ReplyView) {
+    // SAFETY: the caller's: the leg holds the get, which holds the subscriber.
+    let shared = unsafe { (*context.cast_const().cast::<GetSlot<E>>()).owner() };
+    if shared.is_closing() {
+        return;
+    }
+    // `_anyke` opts out of the responder's reply-keyexpr guard, and this is the local half upstream
+    // pairs it with.
+    if !wz_session_core::keyexpr_match::keyexpr_intersects(&shared.base_keyexpr, reply.keyexpr()) {
+        return;
+    }
+    // Recovered, not live: the get that produced this reply is the one in flight, so a gap here
+    // must not fan another.
+    if let Some(view) = RecoveredView::of(reply) {
+        let now = shared.now_ms();
+        let _ = shared.lock().handle_recovered(&view, now);
+    }
+}
+
+/// A leg's end: it lets go of the get, which the last holder ends, and then of the subscriber.
+///
+/// # Safety
+/// `context` is a slot whose get the leg holds ([`GetSlot::leg`]), let go of once, here.
+unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
+    // SAFETY: the caller's. The subscriber is read before the get is let go of, since the slot may
+    // hold the next get right after, and the leg's count of it is let go of last, so it stands
+    // while the get ends.
+    unsafe {
+        let slot = &*context.cast_const().cast::<GetSlot<E>>();
+        let owner = *slot.owner.get();
+        slot.release();
+        drop(Arc::from_raw(owner));
+    }
+}
+
+/// A subscription callback of the subscriber's own, in the engine's raw form over a count of the
+/// subscriber, which the engine lets go of with the callback: no memory is taken for it.
+fn own_sink<E: SessionEngine + ?Sized>(
+    shared: &Arc<Shared<E>>,
+    call: unsafe fn(context: *mut c_void, sample: &dyn SampleView),
+) -> SubscriberSink {
+    let context = Arc::into_raw(Arc::clone(shared))
+        .cast_mut()
+        .cast::<c_void>();
+    // SAFETY: the context is a count of the subscriber, let go of once by `let_go` after the last
+    // call; a call reads the subscriber through a shared borrow, which it admits from any thread.
+    unsafe { SubscriberSink::raw(call, context, Some(let_go::<E>)) }
+}
+
+/// The subscriber a callback's context holds a count of, as the `Arc` it is, the count left held.
+///
+/// # Safety
+/// `context` is a count of a subscriber ([`own_sink`]) not yet let go of.
+unsafe fn held<E: SessionEngine + ?Sized>(context: *mut c_void) -> ManuallyDrop<Arc<Shared<E>>> {
+    // SAFETY: the caller's; the count is not let go of here, as the value is never dropped.
+    ManuallyDrop::new(unsafe { Arc::from_raw(context.cast_const().cast::<Shared<E>>()) })
+}
+
+/// Let go of the count of the subscriber a callback held.
+///
+/// # Safety
+/// As [`held`]'s, called once, after the callback's last call.
+unsafe fn let_go<E: SessionEngine + ?Sized>(context: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(ManuallyDrop::into_inner(unsafe { held::<E>(context) }));
+}
+
+/// The live subscription's callback: a sample in order goes to the application, and a gap asks
+/// for recovery.
+///
+/// # Safety
+/// As [`held`]'s.
+unsafe fn on_live<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+    // SAFETY: the caller's.
+    let shared = unsafe { held::<E>(context) };
+    if shared.is_closing() {
+        return;
+    }
+    let now = shared.now_ms();
+    let request = shared.lock().handle_live(view, now);
+    // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback answer re-enters
+    // the state.
+    if let Some(request) = request {
+        issue_recovery_query(&shared, request);
+    }
+}
+
+/// The heartbeat subscription's callback: a publisher's last sequence number, which asks for what
+/// the subscriber has not seen of it.
+///
+/// # Safety
+/// As [`held`]'s.
+unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &dyn SampleView) {
+    // SAFETY: the caller's.
+    let shared = unsafe { held::<E>(context) };
+    if shared.is_closing() || view.kind() != SampleKind::Put {
+        return;
+    }
+    // Sequenced only: a heartbeat's payload IS a sequence number.
+    let Some(AdvPublisherSource::Sequenced { zid, eid }) = parse_heartbeat_source(view.keyexpr())
+    else {
+        return;
+    };
+    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
+        return;
+    };
+    let now = shared.now_ms();
+    let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
+    if let Some(request) = request {
+        issue_recovery_query(&shared, request);
     }
 }
 
@@ -238,7 +510,6 @@ pub struct EngineSubscriber<E: SessionEngine + ?Sized = dyn SessionEngine> {
     detection_token: Option<Held<Token<E>>>,
     shared: Arc<Shared<E>>,
     id: EntityGlobalId,
-    keyexpr: String,
     /// Kept for [`Self::background`], which hands the names back to the host that made them.
     forms: Option<FormsHandle>,
 }
@@ -318,7 +589,6 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         let recovery = options.recovery;
         let retransmission = recovery.is_some();
         let history = options.history;
-        let base_keyexpr: String = keyexpr.into();
         let dest = options.get_locality;
         let timeout_ms = recovery_query_timeout_ms(options.query_timeout);
         let forms = options.forms.clone();
@@ -332,38 +602,23 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
                     .and_then(|h| h.sample_depth)
                     .unwrap_or(usize::MAX),
             );
-        let shared = Arc::new(Shared {
-            engine: Arc::downgrade(engine),
-            state: Arc::new(Mutex::new(state)),
-            token: CancellationToken::new(),
-            closing: AtomicBool::new(false),
-            base_keyexpr: base_keyexpr.clone(),
+        let shared = Arc::new(Shared::new(
+            Arc::downgrade(engine),
+            state,
+            keyexpr.into(),
             dest,
             timeout_ms,
-        });
+        ));
+        let base = shared.base_keyexpr.as_str();
 
         // The live subscription.
-        let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(&base_keyexpr));
-        let live_shared = Arc::clone(&shared);
-        let live_sink = SubscriberSink::shared(move |view: &dyn SampleView| {
-            let shared = &live_shared;
-            if shared.is_closing() {
-                return;
-            }
-            let now = shared.now_ms();
-            let request = shared.lock().handle_live(view, now);
-            // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback answer
-            // re-enters the state.
-            if let Some(request) = request {
-                issue_recovery_query(shared, request);
-            }
-        });
+        let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(base));
         let subscriber = declare_subscription(
             engine,
-            &base_keyexpr,
+            base,
             &subscriber_form,
             options.allowed_origin,
-            live_sink,
+            own_sink(&shared, on_live::<E>),
         )?;
         let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
 
@@ -427,7 +682,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         // The late-publisher subscription, declared to replay the tokens already alive: the
         // startup get is a snapshot, and a publisher whose cache filled after it is met here.
         let late_publishers = if history.is_some_and(|h| h.detect_late_publishers) {
-            let keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
+            let keyexpr = crate::advanced_ke::publisher_detection_ke(base);
             let form = form_of(forms.as_ref(), |f| f.late_publishers(&keyexpr));
             let (depth, age) = history
                 .map(|h| (h.sample_depth, h.max_age))
@@ -450,40 +705,19 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         // The heartbeat subscription, in the place pico declares it, and degraded rather than
         // failing when its derived key is one the outbound gate refuses.
         let heartbeat = if recovery.is_some_and(|c| c.heartbeat()) {
-            let keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
+            let keyexpr = crate::advanced_ke::publisher_detection_ke(base);
             if crate::advanced_ke::adv_ke_is_outbound_safe(&keyexpr) {
                 let form = form_of(forms.as_ref(), |f| f.heartbeat(&keyexpr));
-                let hb_shared = Arc::clone(&shared);
-                let sink = SubscriberSink::shared(move |view: &dyn SampleView| {
-                    let shared = &hb_shared;
-                    if shared.is_closing() || view.kind() != SampleKind::Put {
-                        return;
-                    }
-                    // Sequenced only: a heartbeat's payload IS a sequence number.
-                    let Some(AdvPublisherSource::Sequenced { zid, eid }) =
-                        parse_heartbeat_source(view.keyexpr())
-                    else {
-                        return;
-                    };
-                    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
-                        return;
-                    };
-                    let now = shared.now_ms();
-                    let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
-                    if let Some(request) = request {
-                        issue_recovery_query(shared, request);
-                    }
-                });
                 Some(declare_subscription(
                     engine,
                     &keyexpr,
                     &form,
                     options.allowed_origin,
-                    sink,
+                    own_sink(&shared, on_heartbeat::<E>),
                 )?)
             } else {
                 log::warn!(
-                    "advanced subscriber on '{base_keyexpr}': heartbeat recovery was REQUESTED \
+                    "advanced subscriber on '{base}': heartbeat recovery was REQUESTED \
                      but its derived keyexpr '{keyexpr}' is refused by the outbound pico-safety \
                      gate, so the channel is DEGRADED; the live subscription is unaffected"
                 );
@@ -494,7 +728,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         };
 
         // The detection token, last: a subscriber advertises itself once it can receive.
-        let detection_token = declare_detection_token(engine, &base_keyexpr, &options, id)?;
+        let detection_token = declare_detection_token(engine, base, &options, id)?;
 
         Ok(Self {
             subscriber,
@@ -509,7 +743,6 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             detection_token,
             shared,
             id,
-            keyexpr: base_keyexpr,
             forms,
         })
     }
@@ -521,7 +754,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
 
     /// The key expression this subscriber subscribes to.
     pub fn keyexpr(&self) -> &str {
-        &self.keyexpr
+        &self.shared.base_keyexpr
     }
 
     /// Whether the heartbeat channel is actually live: a request that the derived key made
@@ -541,7 +774,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             .lock()
             .miss_handlers()
             .register(Box::new(callback));
-        SampleMissListener::new(id, Arc::downgrade(&self.shared.state))
+        SampleMissListener::new(id, Arc::downgrade(&self.shared))
     }
 
     /// Undeclare this subscriber. Consuming and infallible: everything it holds retracts on drop.
@@ -564,7 +797,6 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             detection_token,
             shared: _,
             id: _,
-            keyexpr: _,
             forms,
         } = self;
         cancel.armed = false;
@@ -708,61 +940,43 @@ fn get_options<E: SessionEngine + ?Sized>(shared: &Shared<E>, parameters: String
 /// Issue one get on `keyexpr` with `opts`, feeding each reply to the machine and running `finish`
 /// when the get is over. MUST be called with the state lock released.
 ///
-/// A reply keyed outside the subscription is dropped here: `_anyke` opts out of the responder's
-/// reply-keyexpr guard, and this is the local half upstream pairs it with.
+/// The get takes a slot of the subscriber's table of gets in flight; with every slot taken the
+/// session holds as many gets pending as it can, and the get is over before it starts, as one no
+/// leg was issued for.
 fn issue_get<E: SessionEngine + ?Sized>(
     shared: &Arc<Shared<E>>,
     keyexpr: &str,
     opts: QueryOptions,
-    finish: impl Fn(&mut State) + Send + Sync + 'static,
+    finish: Finish,
 ) {
     let Some(engine) = shared.engine.upgrade() else {
         return;
     };
-    let end = Arc::new(GetEnd {
-        shared: Arc::clone(shared),
-        finish: Box::new(finish),
-        fan: CancellableFan::new(),
-    });
-    // Registered before the first leg is issued, as upstream orders it, so a teardown that
-    // starts now stops the issuing. A refusal is a teardown already under way, which marks the
-    // subscriber closing first, so the end dropped here runs no `finish`.
-    // SAFETY: the fan lies in the end's allocation, which does not move, and no engine has it yet.
-    let token = TokenRef::shared(Arc::clone(&shared.token));
-    if !unsafe { end.fan.register(token) } {
+    let Some(slot) = shared.claim() else {
+        if !shared.is_closing() {
+            finish.run(&mut shared.lock());
+        }
         return;
-    }
-    let mut leg = || -> ReplyCallback {
-        let end = Arc::clone(&end);
-        ReplyCallback::shared(move |reply: &dyn ReplyView| {
-            let shared = &end.shared;
-            if shared.is_closing() {
-                return;
-            }
-            if !wz_session_core::keyexpr_match::keyexpr_intersects(
-                &shared.base_keyexpr,
-                reply.keyexpr(),
-            ) {
-                return;
-            }
-            // Recovered, not live: the get that produced this reply is the one in flight, so a
-            // gap here must not fan another.
-            if let Some(view) = RecoveredView::of(reply) {
-                let now = shared.now_ms();
-                let _ = shared.lock().handle_recovered(&view, now);
-            }
-        })
     };
-    let _ = engine.get_on_wire(
-        keyexpr,
-        &WireKey::literal(),
-        &opts,
-        Some(&end.fan),
-        &mut leg,
-    );
-    // The reference held while issuing goes last: a get with no leg ends here, and one whose legs
-    // all ended during the call ends here too, after the call returned.
-    drop(end);
+    // SAFETY: the slot was taken just above, in `shared`'s table, and no leg of it is out.
+    let fan = unsafe { slot.open(shared, finish) };
+    // Registered before the first leg is issued, as upstream orders it, so a teardown that starts
+    // now stops the issuing. A refusal is a teardown already under way, which marks the subscriber
+    // closing first, so the end below runs no finish.
+    // SAFETY: the token lies in the subscriber, which every get holds, so it stands until the last
+    // fan is dropped; the fan lies in its slot, where it is dropped, and no engine has it yet.
+    let registered = unsafe { fan.register(TokenRef::placed(&shared.token)) };
+    if registered {
+        let mut leg = || -> ReplyCallback {
+            // SAFETY: this issuer holds the get until the release below.
+            unsafe { slot.leg(shared) }
+        };
+        let _ = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, Some(fan), &mut leg);
+    }
+    // The hold of the issuer goes last: a get with no leg ends here, and one whose legs all ended
+    // during the call ends here too, after the call returned.
+    // SAFETY: the issuer lets go of its hold once, here, and holds the subscriber.
+    unsafe { slot.release() };
 }
 
 /// Issue a `_sn` recovery get against the gapped source's `@adv` cache: the open range from the
@@ -781,10 +995,12 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
         shared,
         wz_session_core::selector_params::anyke_params(&[range]),
     );
-    let key = (request.zid, request.eid);
-    issue_get(shared, &keyexpr, opts, move |state| {
-        state.finish_recovery(&key)
-    });
+    issue_get(
+        shared,
+        &keyexpr,
+        opts,
+        Finish::Recovery((request.zid, request.eid)),
+    );
 }
 
 /// Issue the startup get over `<base>/@adv/**`, capped and bounded as the history config says.
@@ -795,7 +1011,7 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
 ) {
     let keyexpr = crate::advanced_ke::history_get_ke(&shared.base_keyexpr);
     let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, &keyexpr, opts, |state| state.finish_history());
+    issue_get(shared, &keyexpr, opts, Finish::History);
 }
 
 /// Issue the history get of one detected late publisher `(zid, eid)`.
@@ -809,10 +1025,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
     let zid_hex = zid_to_zenoh_hex(&zid);
     let keyexpr = crate::advanced_ke::recovery_get_ke(&shared.base_keyexpr, &zid_hex, eid);
     let opts = get_options(shared, history_selector(depth, age));
-    let key = (zid, eid);
-    issue_get(shared, &keyexpr, opts, move |state| {
-        state.finish_recovery(&key)
-    });
+    issue_get(shared, &keyexpr, opts, Finish::Recovery((zid, eid)));
 }
 
 /// The timestamped twin: the target is the token's own key expression, which is the one the
@@ -825,9 +1038,7 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
     age: Option<f64>,
 ) {
     let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, token_keyexpr, opts, move |state| {
-        state.finish_timestamped_recovery(&zid)
-    });
+    issue_get(shared, token_keyexpr, opts, Finish::Timestamped(zid));
 }
 
 /// The get for a publisher whose token's zid does not decode: counted globally, since there is no
@@ -839,7 +1050,7 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
     age: Option<f64>,
 ) {
     let opts = get_options(shared, history_selector(depth, age));
-    issue_get(shared, token_keyexpr, opts, |state| state.finish_history());
+    issue_get(shared, token_keyexpr, opts, Finish::History);
 }
 
 /// The late-publisher liveliness callback: on a `Put`, open a slot for the detected publisher and

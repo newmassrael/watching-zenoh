@@ -112,6 +112,19 @@ impl MissHandlers {
     }
 }
 
+/// What a miss listener reaches its subscriber's state through: the state's own lock, or what
+/// holds the lock with the rest of the subscriber.
+pub trait StateCell: Send + Sync {
+    /// The subscriber's state, under its lock.
+    fn state_cell(&self) -> &Mutex<State>;
+}
+
+impl StateCell for Mutex<State> {
+    fn state_cell(&self) -> &Mutex<State> {
+        self
+    }
+}
+
 /// R2814 — a declared sample-miss listener: upstream's
 /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct SampleMissListener<Handler> {`.
 ///
@@ -129,13 +142,13 @@ impl MissHandlers {
 /// undeclare a listener on the same subscriber from inside its own callback.
 pub struct SampleMissListener {
     id: usize,
-    statesref: Weak<Mutex<State>>,
+    statesref: Weak<dyn StateCell>,
     undeclare_on_drop: bool,
 }
 
 impl SampleMissListener {
     /// The listener registered as `id` in the state `statesref` names.
-    pub fn new(id: usize, statesref: Weak<Mutex<State>>) -> Self {
+    pub fn new(id: usize, statesref: Weak<impl StateCell + 'static>) -> Self {
         Self {
             id,
             statesref,
@@ -160,8 +173,8 @@ impl SampleMissListener {
         // Cleared first, as upstream does, so a panic in here cannot make the
         // `Drop` below try again.
         self.undeclare_on_drop = false;
-        if let Some(state) = self.statesref.upgrade() {
-            lock_or_panic(&state, STATE_POISONED)
+        if let Some(cell) = self.statesref.upgrade() {
+            lock_or_panic(cell.state_cell(), STATE_POISONED)
                 .miss_handlers
                 .unregister(self.id);
         }
