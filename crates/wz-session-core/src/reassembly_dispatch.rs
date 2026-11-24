@@ -714,10 +714,14 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
     fn init_in(cell: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
         use core::ptr::addr_of_mut;
         let at = cell.as_mut_ptr();
+        // Names every field of the slot with no `..`, so a field added to the struct stops this from
+        // compiling until it is written below too.
+        let _every_field_is_written = |slot: &Self| {
+            let Self { engine: _, open: _ } = slot;
+        };
         // SAFETY: `at` points at storage for one slot that holds no value. The machine is written
-        // in its field by `start_slot_engine` and the chain state beside it;
-        // `fields_are_written_by_init_in` names each field, so one added to the struct stops that
-        // from compiling until it is written here too. With both written the slot is whole.
+        // in its field by `start_slot_engine` and the chain state beside it, every field the list
+        // above names. With both written the slot is whole.
         unsafe {
             start_slot_engine(
                 &mut *addr_of_mut!((*at).engine).cast::<core::mem::MaybeUninit<SlotEngine>>(),
@@ -725,13 +729,6 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
             addr_of_mut!((*at).open).write(None);
             &mut *at
         }
-    }
-
-    /// Names every field of the slot, so that [`Self::init_in`], which writes each by its address,
-    /// cannot miss one that is added.
-    #[allow(dead_code)]
-    fn fields_are_written_by_init_in(self) {
-        let Self { engine: _, open: _ } = self;
     }
 
     /// A free slot as a value, for the tests that drive one slot without its Router.
