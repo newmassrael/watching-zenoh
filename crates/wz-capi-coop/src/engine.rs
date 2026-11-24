@@ -11,10 +11,10 @@
 //! called from any thread, as zenoh-pico's multi-threaded arm allows.
 //!
 //! A C callback never runs under that lock. What the session delivers while it is stepped (a
-//! sample for a subscriber, a change of a matching status) is queued as an owned value, and the
-//! queue is handed out after the lock is released, so a callback may call back into its session:
-//! publish, declare, undeclare itself. zenoh-pico does the same, copying what it delivers out of
-//! its session mutex before it calls (`vendor/zenoh-pico/src/session/subscription.c` @
+//! sample for a subscriber, a change of a matching status) is queued as an owned value, or owed
+//! in its row, and handed out after the lock is released, so a callback may call back into its
+//! session: publish, declare, undeclare itself. zenoh-pico does the same, copying what it delivers
+//! out of its session mutex before it calls (`vendor/zenoh-pico/src/session/subscription.c` @
 //! `_z_trigger_subscriptions_impl`). The C program's `drop(context)` is reached the same way: an
 //! undeclaration takes the callback out under the lock and drops it after.
 //!
@@ -65,8 +65,8 @@ use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, Plane, RowCallbacks,
-    SessionTables, SubscriberHandle, WriteFilterHandle,
+    InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, MatchingListenerHandle,
+    Plane, RowCallbacks, SessionTables, SubscriberHandle, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -186,8 +186,8 @@ use {
 
 mod deliveries;
 use deliveries::Deliveries;
+#[cfg(feature = "query")]
 mod queued;
-use queued::{MatchFlips, Queued};
 
 mod registry;
 #[cfg(feature = "local-queryable")]
@@ -963,10 +963,13 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     unsent_drops: AtomicU64,
     /// What the session delivered under the lock, handed out after it: the records for its
     /// callbacks, in the order they arrived, in the session's round of deliveries
-    /// (`crate::round`), and the changes of its matching statuses. Apart, so a matching flip does
-    /// not take a record's room.
+    /// (`crate::round`). A change of a matching status takes no record's room: it is owed in the
+    /// listener's row (`SessionTables::take_owed_matching`).
     samples: Arc<Round>,
-    matching: Arc<Queued<MatchFlips>>,
+    /// Whether a read of the matching listeners found a change since a walk of their rows last
+    /// found none owed, written under the session's lock: a delivery that reads it clear takes no
+    /// lock to look for one.
+    matching_owed: AtomicBool,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -1440,7 +1443,7 @@ impl RowCallbacks for CoopRows {
 }
 
 /// A matching listener's callback as its row holds it. A change of the listener's status is found
-/// under the session's lock and queued by the listener's id (`MatchFlips`); the delivery after the
+/// under the session's lock and owed in the row; the delivery after the
 /// lock takes the callback out of the row, calls it and puts it back, so no call reads the row and
 /// the row is let go of as soon as it is undeclared, its callback by the thread that called it when
 /// it was out. `None` while it is out for a call.
@@ -3923,7 +3926,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(feature = "transport-stats")]
                 unsent_drops: AtomicU64::new(0),
                 samples,
-                matching: Arc::new(Queued::new(MatchFlips::new())),
+                matching_owed: AtomicBool::new(false),
                 #[cfg(feature = "queryable")]
                 plane,
                 #[cfg(feature = "query")]
@@ -4531,43 +4534,47 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 drop(gone);
             }
         }
-        // One thread hands the changes out at a time; another that finds it doing so leaves what
-        // it queued to it.
-        if let Some(mut turn) = self.matching.begin_handing() {
-            while let Some((id, matching)) = turn.next() {
-                handed = true;
-                // The callback is taken out of the listener's row under the session's lock and
-                // called after it; a listener undeclared since the change was found is handed
-                // nothing.
-                let sink = self.live().and_then(|core| {
-                    let mut tables = tables_mut(&core.0.session.registry);
-                    tables
-                        .matching_listener_callback_mut(row_of(id)?)?
-                        .sink
-                        .take()
-                });
-                let Some(sink) = sink else {
-                    continue;
-                };
-                sink.call(matching);
-                // Put back in its row, or let go of here, with no lock held, when the row went
-                // during the call (an undeclare from inside it, or the session's close): the
-                // handle's generation tells a row that took the slot since from the listener's.
-                let gone = match self.live() {
+        // Each listener owed its verdict, one at a time: its callback is taken out of its row
+        // under the session's lock and called after it, and put back under the lock that looks
+        // for the next. A callback out for a call is not taken again, so two calls of one never
+        // overlap, and the thread that put it back finds the verdict it is owed since. A listener
+        // undeclared since its verdict changed is handed nothing.
+        if self.matching_owed.load(Ordering::Acquire) {
+            let mut called: Option<(MatchingListenerHandle, MatchingSink)> = None;
+            loop {
+                let (gone, next) = match self.live() {
                     Some(core) => {
                         let mut tables = tables_mut(&core.0.session.registry);
-                        match row_of(id).and_then(|row| tables.matching_listener_callback_mut(row))
-                        {
-                            Some(call) => {
-                                call.sink = Some(sink);
-                                None
+                        // Put back in its row, or let go of below, with no lock held, when the row
+                        // went during the call (an undeclare from inside it): the handle's
+                        // generation tells a row that took the slot since from the listener's.
+                        let gone = called.take().and_then(|(handle, sink)| {
+                            match tables.matching_listener_callback_mut(handle) {
+                                Some(call) => {
+                                    call.sink = Some(sink);
+                                    None
+                                }
+                                None => Some(sink),
                             }
-                            None => Some(sink),
+                        });
+                        let next = tables.take_owed_matching(&mut 0, |call| call.sink.take());
+                        // Cleared under the lock a read sets it under, so a change found after
+                        // this walk keeps its word.
+                        if next.is_none() {
+                            self.matching_owed.store(false, Ordering::Release);
                         }
+                        (gone, next)
                     }
-                    None => Some(sink),
+                    // The session closed during the call: the callback goes with no row to go to.
+                    None => (called.take().map(|(_, sink)| sink), None),
                 };
                 drop(gone);
+                let Some((handle, matching, sink)) = next else {
+                    break;
+                };
+                handed = true;
+                sink.call(matching);
+                called = Some((handle, sink));
             }
         }
         handed
@@ -5551,19 +5558,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Read the verdict of every matching listener off what the peers and the session itself
-    /// declare now, and queue each one that changed for its callback, which the delivery after the
-    /// lock hands it: after a step that wrote the faces' tables, and after each declaration of the
-    /// session's own that may move a verdict.
+    /// declare now, each one that changed owed to its callback in its row, which the delivery
+    /// after the lock hands it: after a step that wrote the faces' tables, and after each
+    /// declaration of the session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
         let registry = core.session.registry.borrow();
         core.session.matching.read_at(registry.faces_written());
         let mut cursor = 0;
-        while let Some((handle, matching)) = registry
+        while registry
             .app
             .tables
             .next_matching_change(&mut cursor, &*registry)
+            .is_some()
         {
-            self.matching.lock().flip(row_id(handle), matching);
+            self.matching_owed.store(true, Ordering::Release);
         }
     }
 
@@ -6420,8 +6428,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             unwatched.row
         });
-        // Nothing it was owed is handed; its row's callback is let go of here, with no lock held.
-        self.matching.lock().forget(id);
+        // Nothing it was owed is handed, its row being gone; its callback is let go of here, with
+        // no lock held.
         drop(gone);
     }
 
