@@ -43,6 +43,10 @@ pub(crate) const PARAM_SEPARATOR: u8 = b';';
 /// than a substring search: `_anyke` must start the list or follow a `;`, and
 /// must end the list or precede a `;`. Without them a parameter such as
 /// `no_anyke` or `_anykey=1` would be read as the flag.
+///
+/// Out of line: a get reads it twice and a query once, and each inlined copy of the split loop
+/// cost more than a call.
+#[inline(never)]
 pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
     // The flag stands alone between separators or the ends: one whole parameter.
     parameters

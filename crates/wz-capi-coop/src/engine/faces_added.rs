@@ -31,11 +31,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let id = self.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step. A link past
         // the sets the open lent is closed unread, as one past `max_faces` is.
-        let Ok(held) = self.session.registry.borrow_mut().add_face(id) else {
+        let Ok(held) = self.session.registry.add_face(id) else {
             return;
         };
         let Ok(wire) = self.open_wire(id, opened, SessionRole::Acceptor, endpoint.as_ref()) else {
-            self.session.registry.borrow_mut().remove_face(held);
+            self.session.registry.remove_face(held);
             return;
         };
         self.transport.links.advance_face_id();
@@ -84,7 +84,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if let Some(wire) = face.link.wire() {
                 wire.abort();
             }
-            self.session.registry.borrow_mut().remove_face(held);
+            self.session.registry.remove_face(held);
         }
     }
 }
@@ -124,7 +124,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let id = core.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step.
-        let Ok(held) = core.session.registry.borrow_mut().add_face(id) else {
+        let Ok(held) = core.session.registry.add_face(id) else {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
                 endpoint,
                 Refusal::FacesFull,
@@ -135,7 +135,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let pending = match core.transport.begin_dial(endpoint) {
             Ok(pending) => pending,
             Err(refused) => {
-                core.session.registry.borrow_mut().remove_face(held);
+                core.session.registry.remove_face(held);
                 return Err(refused.into());
             }
         };

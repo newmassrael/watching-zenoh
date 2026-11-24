@@ -1,7 +1,8 @@
 //! The declarations of a link told in turns (`declaration-sync-pacing`): a paced replay
 //! sends a burst a turn and waits the interval between turns, a declaration made while it goes on
 //! is told once, in its turn, a retraction is sent only if the peer was told of the entry, a
-//! replay is not resumed on another link, and an unpaced one is a single turn.
+//! replay is not resumed on another link, and an unpaced one is a single turn. Both forms tell a
+//! new peer the same declarations in the same order, in a build of either domain of the policy.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,10 +33,25 @@ fn told(router: &Router) -> usize {
     router.seen(|seen| seen.declares)
 }
 
+/// The ids of the subscribers `router` was declared, in the order the declarations arrived.
+fn told_subscribers(router: &Router) -> Vec<u64> {
+    router.seen(|seen| seen.subscribers.clone())
+}
+
 /// A session that holds `keys` as subscribers, whose link is lost and dialled again with the
 /// declarations paced as `pacing` says: the new router, the session, and the subscribers' ids, as
 /// soon as the new link is established and its first turn is sent.
 fn reconnected(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Arc<Engine>, Vec<SubId>) {
+    let (router, engine, ids, _) = reconnected_after(keys, pacing);
+    (router, engine, ids)
+}
+
+/// [`reconnected`], and the ids of the subscribers the first router was declared as the session
+/// made them, in the order it made them.
+fn reconnected_after(
+    keys: &[&str],
+    pacing: Option<ReplayPacing>,
+) -> (Router, Arc<Engine>, Vec<SubId>, Vec<u64>) {
     let first = Router::start(CatchAll::None);
     let port = first.port;
     let engine = open_with(CoopConfig {
@@ -47,17 +63,20 @@ fn reconnected(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Arc<Engi
     until(&engine, "the router to be told every subscriber", || {
         told(&first) == keys.len()
     });
+    let live = told_subscribers(&first);
     first.send(Command::Close);
     drop(first);
     until(&engine, "the link to be lost", || {
         engine.peer_identities().is_empty()
     });
-    engine.set_replay_pacing(pacing);
+    engine
+        .set_replay_pacing(pacing)
+        .expect("a test states a pace only where the build reaches one");
     let second = Router::start_on(port, CatchAll::None);
     until(&engine, "the first turn of the replay", || {
         told(&second) >= 1
     });
-    (second, engine, ids)
+    (second, engine, ids, live)
 }
 
 /// Step `engine` for `span`, so what the router is going to be told by then has been sent.
@@ -73,6 +92,10 @@ fn step_for(engine: &Engine, span: Duration) {
 /// that every declaration did arrive, once.
 #[test]
 fn a_paced_replay_tells_a_burst_a_turn_and_waits_between_turns() {
+    // A build that reaches no pace replays in one lap whatever is stated.
+    if !ReplayPacing::REACHABLE {
+        return;
+    }
     let interval_ms = 400;
     let pace = ReplayPacing::new(2, interval_ms);
     let (router, engine, _) = reconnected(&["a/1", "a/2", "a/3", "a/4", "a/5"], pace);
@@ -110,6 +133,10 @@ fn a_paced_replay_tells_a_burst_a_turn_and_waits_between_turns() {
 /// cursor and the replay reaches it, so it is not sent at once and not sent twice.
 #[test]
 fn a_declaration_made_during_the_replay_is_told_once_in_its_turn() {
+    // A build that reaches no pace replays in one lap whatever is stated.
+    if !ReplayPacing::REACHABLE {
+        return;
+    }
     let pace = ReplayPacing::new(1, 300);
     let (router, engine, _) = reconnected(&["b/1", "b/2", "b/3"], pace);
     assert_eq!(told(&router), 1, "one declaration a turn");
@@ -135,6 +162,10 @@ fn a_declaration_made_during_the_replay_is_told_once_in_its_turn() {
 /// dropped and the peer never hears of it.
 #[test]
 fn a_retraction_during_the_replay_is_sent_only_if_the_peer_was_told() {
+    // A build that reaches no pace replays in one lap whatever is stated.
+    if !ReplayPacing::REACHABLE {
+        return;
+    }
     let pace = ReplayPacing::new(1, 300);
     let (router, engine, ids) = reconnected(&["c/1", "c/2", "c/3", "c/4"], pace);
     assert_eq!(told(&router), 1, "only c/1 was told");
@@ -160,6 +191,10 @@ fn a_retraction_during_the_replay_is_sent_only_if_the_peer_was_told() {
 /// first entry on the next, whose peer holds nothing.
 #[test]
 fn a_replay_cut_short_by_a_lost_link_begins_again_on_the_next() {
+    // A build that reaches no pace replays in one lap whatever is stated.
+    if !ReplayPacing::REACHABLE {
+        return;
+    }
     let pace = ReplayPacing::new(1, 500);
     let (router, engine, _) = reconnected(&["d/1", "d/2", "d/3"], pace);
     let port = router.port;
@@ -272,4 +307,75 @@ fn an_unpaced_replay_is_one_turn() {
         told(&router) == 4
     });
     assert!(engine.declarations_synced());
+}
+
+/// Each form of the replay tells the new peer the declarations the first peer was told as the
+/// session made them, every one and in the same order: the one turn of an unpaced session, which
+/// a build that reaches no pace makes as one lap when the link comes up, and the turns of a paced
+/// one, which a build that reaches no pace holds no code of. The CONTROL is that the first peer
+/// was told every subscriber, so the order compared is a whole one.
+#[test]
+fn every_form_of_the_replay_tells_the_new_peer_the_same_declarations_in_the_same_order() {
+    let keys = ["f/1", "f/2", "f/3", "f/4", "f/5"];
+    let mut forms = vec![None];
+    if ReplayPacing::REACHABLE {
+        forms.push(ReplayPacing::new(2, 50));
+    }
+    for pacing in forms {
+        let (router, engine, ids, live) = reconnected_after(&keys, pacing);
+        assert_eq!(
+            live.len(),
+            keys.len(),
+            "{pacing:?}: the first peer was told each"
+        );
+        until(&engine, "the replay to finish", || {
+            engine.declarations_synced() && told(&router) == keys.len()
+        });
+        assert_eq!(
+            told_subscribers(&router),
+            live,
+            "{pacing:?}: the new peer is told what the first was, in its order"
+        );
+        let held: Vec<u64> = ids.iter().map(|&id| u64::from(id)).collect();
+        assert_eq!(live, held, "{pacing:?}: the order the session made them in");
+        SessionDrive::close(&*engine);
+    }
+}
+
+/// A pace the build cannot reach is refused as a snapshot that selects the policy's `on` is
+/// refused there, and the session keeps the pace it had; a build that reaches one takes it, and
+/// no pace is taken by every build. The CONTROL is the build's own selection of the policy: the
+/// refusal holds exactly where that selection is refused.
+#[test]
+fn a_pace_the_build_cannot_reach_is_refused_and_changes_nothing() {
+    use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy};
+    use wz_session_core::policy_binding::OutsideDomain;
+    let mut policy = SessionPolicy::defaults();
+    let selectable = policy
+        .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+        .is_ok();
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(config(&router));
+    let (before, _) = engine.policy_in_force().expect("the session is open");
+    let pace = ReplayPacing::new(2, 50);
+    let stated = engine.set_replay_pacing(pace);
+    let (after, _) = engine.policy_in_force().expect("the session is open");
+    if selectable {
+        assert_eq!(stated, Ok(()));
+        assert_eq!(after, pace, "the stated pace is the session's");
+    } else {
+        assert_eq!(
+            stated,
+            Err(OutsideDomain {
+                value: DeclarationSyncPacing::On
+            })
+        );
+        assert_eq!(after, before, "a refused pace changes nothing");
+    }
+    assert_eq!(
+        engine.set_replay_pacing(None),
+        Ok(()),
+        "every build sends the declarations in one turn"
+    );
+    SessionDrive::close(&*engine);
 }

@@ -1009,6 +1009,37 @@ pub fn multicast_tx_interest<R>(
     }))
 }
 
+/// `f` handed the answer to a member's interest in liveliness tokens for one held token, written
+/// from the borrowed reply ([`crate::declare::local_token::build_token_reply`]) as a message lent
+/// for the call: framed as the owned reply is, which carries no `ext_qos`. `None` when its encoder
+/// refuses it (a keyexpr past the protocol's bound), with `f` not called.
+///
+/// The reply is built again inside its encoder, as the session with no allocator writes it to its
+/// link, so the borrowed message is on the stack only while it is counted or written.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "liveliness-token"
+))]
+pub fn multicast_tx_token_reply<R>(
+    token_id: u64,
+    keyexpr: &str,
+    interest_id: u64,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
+        crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)
+    };
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::Control {
+            qos: crate::sample::QosLevel::DEFAULT,
+        },
+        size,
+        body: &body,
+    }))
+}
+
 /// `f` handed the get `writer` writes from its borrowed parts
 /// ([`crate::lent_request::RequestWriter`]), as a message lent for the call: framed as the owned
 /// `Request` is, on the band its own `ext_qos` (`qos`) names, reliable. `None` when its writer
@@ -4158,6 +4189,48 @@ mod group_declarations_written_from_parts {
             }
         }
         assert_eq!(compared, kinds().len() * keys().len());
+    }
+
+    /// The answer to a member's interest in tokens, written from the borrowed reply, is the bytes
+    /// of the owned reply a backing that queues owned items builds, counted as long as it is and
+    /// framed as that one is; a keyexpr past the protocol's bound is refused with `f` not called.
+    /// Turned red by a writer that answers with another header, id or key than the owned reply, a
+    /// size that is not its length, or a framing that reads another QoS than the owned reply's.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_written_from_the_borrowed_reply_is_the_owned_replys_bytes() {
+        let long = "k".repeat(300);
+        let cases: [(u64, &str, u64); 3] = [
+            (0, "demo/token", 0),
+            (9, "demo/**", 42),
+            (300, long.as_str(), 70_000),
+        ];
+        for (token_id, keyexpr, interest_id) in cases {
+            let owned =
+                crate::declare::local_token::build_token_reply(token_id, keyexpr, interest_id)
+                    .and_then(|reply| {
+                        reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                    })
+                    .expect("an owned reply");
+            let expected = written(&|sink: &mut crate::tx_buf::TxSink<'_>| owned.encode(sink));
+            let (bytes, size, framing) =
+                multicast_tx_token_reply(token_id, keyexpr, interest_id, |m| {
+                    (written(m.body), m.size, m.framing)
+                })
+                .expect("a reply written from the borrowed one");
+            assert_eq!(bytes, expected, "token {token_id} on {keyexpr}");
+            assert_eq!(size, expected.len());
+            assert_eq!(
+                framing,
+                MulticastTxFraming::Control {
+                    qos: crate::declare_ext_qos::read_declare_qos(&owned),
+                }
+            );
+        }
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let mut called = false;
+        assert!(multicast_tx_token_reply(1, &past, 2, |_| called = true).is_none());
+        assert!(!called, "a refused reply is handed to nobody");
     }
 }
 

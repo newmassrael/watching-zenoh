@@ -1795,6 +1795,7 @@ mod tests {
             by_bytes: Default::default(),
         });
         let session = new_session_actions(doors.clone(), params(), TokioTime::new());
+        session.enter_established();
         session
             .send_push_literal("home/lent", b"payload", true)
             .expect("push over the stream driver");
@@ -1810,6 +1811,7 @@ mod tests {
 
         let control = Arc::new(Collect(Mutex::new(Vec::new())));
         let control_session = new_session_actions(control.clone(), params(), TokioTime::new());
+        control_session.enter_established();
         control_session
             .send_push_literal("home/lent", b"payload", true)
             .expect("push over the control");
@@ -1914,6 +1916,7 @@ mod tests {
             by_bytes: Default::default(),
         });
         let session = new_session_actions(doors.clone(), params(), TokioTime::new());
+        session.enter_established();
         window(&session);
         let wire = rx.recv().await.expect("the batch reached the writer");
         assert_eq!(
@@ -1928,11 +1931,9 @@ mod tests {
         assert!(rx.try_recv().is_none(), "the whole window is one frame");
 
         let control = Arc::new(Collect(Mutex::new(Vec::new())));
-        window(&new_session_actions(
-            control.clone(),
-            params(),
-            TokioTime::new(),
-        ));
+        let control_session = new_session_actions(control.clone(), params(), TokioTime::new());
+        control_session.enter_established();
+        window(&control_session);
         let frames = control.0.lock().expect("collect").clone();
         assert_eq!(
             frames.len(),
@@ -2129,6 +2130,7 @@ mod tests {
         let (driver, mut rx, _flag) = pooled_driver(false);
         let driver = Arc::new(driver);
         let session = new_session_actions(driver.clone(), params(), TokioTime::new());
+        session.enter_established();
         session
             .send_push_literal("home/lent", b"payload", true)
             .expect("push over the pooled driver");
@@ -2143,6 +2145,7 @@ mod tests {
 
         let control = Arc::new(Collect(Mutex::new(Vec::new())));
         let control_session = new_session_actions(control.clone(), params(), TokioTime::new());
+        control_session.enter_established();
         control_session
             .send_push_literal("home/lent", b"payload", true)
             .expect("push over the control");

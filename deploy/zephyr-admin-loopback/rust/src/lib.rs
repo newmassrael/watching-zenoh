@@ -353,7 +353,9 @@ impl SessionFactory<Clock, Driver> for ServerFactory {
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             policy: self.policy,
             limits: self.limits,
-            cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
+            cookie_signing_key: SigningKey::from_slice(&self.key)
+                .expect("32-byte key")
+                .into(),
         }
     }
 

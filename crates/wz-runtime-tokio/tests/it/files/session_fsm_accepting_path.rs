@@ -399,8 +399,13 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let nonce = actions
         .cookie_nonce()
         .expect("the InitAck drew a cookie nonce through the binding's source");
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies under the deploy key");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies under the deploy key");
     assert_eq!(
         carried.peer_zid, FIXTURE_PEER_ZID,
         "R86: the InitAck cookie MUST bind the peer zid captured on InitSyn \
@@ -425,9 +430,13 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // implementation back.
     let mut next = carried.clone();
     next.nonce = nonce.wrapping_add(1);
-    let cookie_under_another_nonce =
-        encode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &next)
-            .expect("a re-mint of a cookie this acceptor already emitted encodes");
+    let cookie_under_another_nonce = encode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &next,
+    )
+    .expect("a re-mint of a cookie this acceptor already emitted encodes");
     assert_ne!(
         cookie.as_slice(),
         cookie_under_another_nonce.as_slice(),
@@ -705,8 +714,13 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
     // it the ONLY place the level can be read here: the acceptor lets go of
     // its slots once the InitAck is out.
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let negotiated = carried
         .negotiated
         .patch
@@ -777,8 +791,13 @@ async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() 
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let agreed = carried
         .negotiated
         .patch
@@ -852,8 +871,13 @@ async fn the_peer_region_rides_the_cookie_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.region.name(),
         Some(region.clone()),
@@ -939,8 +963,13 @@ async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.peer_zid,
         announced.zid.as_slice(),
@@ -1152,8 +1181,13 @@ async fn the_qos_band_rides_the_cookie_between_init_ack_and_open_syn() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     assert_eq!(
         carried.negotiated.qos,
         narrow.qos_accept_state(),
@@ -1227,7 +1261,9 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
     // `AcceptCookieState` would be a value that means nothing, and offering
     // one invites a caller to mint a cookie it never thought about.
     let unbound = encode_accept_cookie(
-        &fixture_session_init_params().cookie_signing_key,
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
         &AcceptCookieState {
             peer_zid: FIXTURE_PEER_ZID.into(),
             peer_whatami: 0,
@@ -1375,14 +1411,13 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
 }
 
-/// The send limits a send reads without a lock are, after every write of the peer's
-/// capabilities, what the accessors that read the slot under its mutex say: the first
-/// call after a write recomputes, the second is the kept value, and a write in between
-/// is seen by the very next call. The writes include a reset to `None` (a reconnect) and
-/// the same capabilities twice.
+/// The send limits a send reads without a lock are, at every establishment, what the
+/// accessors that read the peer's capabilities under their mutex say, and a write of the
+/// capabilities after establishment reaches them only at the next one. The writes include a
+/// reset to `None` (a reconnect) and the same capabilities twice.
 #[cfg(feature = "codec-push")]
 #[test]
-fn the_send_limits_follow_every_write_of_the_peers_capabilities() {
+fn the_send_limits_are_the_capabilities_of_each_establishment() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.seq_num_res = 3;
@@ -1405,16 +1440,22 @@ fn the_send_limits_follow_every_write_of_the_peers_capabilities() {
         Some(caps(1, 1400)),
     ];
     let mut seen = std::collections::BTreeSet::new();
+    let mut settled = actions.negotiated_tx_limits();
     for write in writes {
         actions.set_peer_init_caps(write);
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            settled,
+            "writing {write:?} after establishment moves nothing yet"
+        );
+        actions.enter_established();
         let want = (actions.negotiated_batch_mtu(), actions.negotiated_sn_mask());
-        for call in ["recomputed", "kept"] {
-            assert_eq!(
-                actions.negotiated_tx_limits(),
-                want,
-                "after writing {write:?}, the {call} limits"
-            );
-        }
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            want,
+            "established with {write:?}"
+        );
+        settled = want;
         seen.insert(want);
     }
     assert!(

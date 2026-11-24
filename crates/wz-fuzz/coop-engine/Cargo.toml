@@ -16,7 +16,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.10"
-wz-capi-coop = { path = "../../wz-capi-coop", features = ["queryable"] }
+wz-capi-coop = { path = "../../wz-capi-coop", features = ["queryable", "runtime-plan"] }
 wz-capi-port = { path = "../../wz-capi-port", default-features = false }
 wz-fuzz-ingress-common = { path = "../ingress-common" }
 wz-runtime-coop = { path = "../../wz-runtime-coop", default-features = false }

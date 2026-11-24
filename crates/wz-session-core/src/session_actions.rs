@@ -494,8 +494,8 @@ impl FrameLendCounts {
     }
 }
 
-/// The frame a lent slot is written with (`SessionLinkActions::lend_frame`): its SN, its
-/// reliability and its `ext_qos`, and the budget the frame must fit.
+/// The frame a lent slot is written with (`SessionLinkActions::lend_frame`): its reliability and
+/// its `ext_qos`, and the budget the frame must fit. Its SN is taken where it is written.
 #[cfg(all(
     feature = "transport-tx-lend",
     any(
@@ -513,7 +513,6 @@ impl FrameLendCounts {
 ))]
 #[derive(Clone, Copy)]
 struct LentFrameHead {
-    sn: u64,
     reliable: bool,
     ext_qos: Option<Priority>,
     mtu: usize,
@@ -690,7 +689,9 @@ impl BatchLendCounts {
 /// The waker is a `core::task::Waker`, so the same slot wakes a tokio task on
 /// the AP profile and a cooperative task on the MCU one.
 pub struct OutOfBand<R: SessionRuntime> {
-    state: R::Mutex<OutOfBandState>,
+    /// Behind the runtime's local: a lock where the session's holders are threads, a cell where
+    /// they are one task, whose drive loop and senders take turns.
+    state: R::Local<OutOfBandState>,
     /// A close for congestion has been ORDERED of this session, ever: the sticky half of
     /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
     /// the transport's pipelines disabled at the moment it decides to close an unresponsive
@@ -698,7 +699,7 @@ pub struct OutOfBand<R: SessionRuntime> {
     /// `wait_before_close` (`io/zenoh-transport/src/unicast/universal/tx.rs` @
     /// `tl.pipeline.mark_disabled();`); this is what the send gate reads for it. Outside
     /// `state`, because every data send reads it and none needs the requests with it.
-    congestion_close_ordered: crate::send_gate::Latch,
+    congestion_close_ordered: crate::send_gate::Latch<R::Flag>,
 }
 
 /// The requests an [`OutOfBand`] can hold, and the waker of the loop parked on
@@ -785,14 +786,14 @@ impl ParkedLoops {
 impl<R: SessionRuntime> OutOfBand<R> {
     fn new() -> Self {
         Self {
-            state: R::new_mutex(OutOfBandState::default()),
+            state: R::new_local(OutOfBandState::default()),
             congestion_close_ordered: crate::send_gate::Latch::new(),
         }
     }
 
     /// Stage a request (`set` marks it) and wake the loops parked on it.
     fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
-        let parked = R::with_mutex_mut(&self.state, |s| {
+        let parked = R::with_local(&self.state, |s| {
             set(s);
             core::mem::take(&mut s.parked)
         });
@@ -804,12 +805,12 @@ impl<R: SessionRuntime> OutOfBand<R> {
     /// stay, so the wakers of loops that have ended do not pile up in the set.
     #[cfg(feature = "transport-multilink")]
     fn wake_parked(&self) {
-        R::with_mutex_mut(&self.state, |s| core::mem::take(&mut s.parked)).wake();
+        R::with_local(&self.state, |s| core::mem::take(&mut s.parked)).wake();
     }
 
     /// Take a request (`take` reads and clears it).
     fn take<U>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
-        R::with_mutex_mut(&self.state, take)
+        R::with_local(&self.state, take)
     }
 
     /// Resolves once any request is staged — the branch a parked drive loop
@@ -846,7 +847,7 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
     ) -> core::task::Poll<()> {
         #[cfg(feature = "transport-multilink")]
         let deletion_owed = self.deletion_owed;
-        R::with_mutex_mut(&self.slot.state, |s| {
+        R::with_local(&self.slot.state, |s| {
             #[cfg(feature = "transport-multilink")]
             if deletion_owed && s.transport_deleted {
                 return core::task::Poll::Ready(());
@@ -866,18 +867,18 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
 /// window flag they share.
 pub struct TxConduits<R: SessionRuntime> {
     /// `zp_batch_start` .. `zp_batch_stop` window flag
-    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). An atomic rather than a
-    /// field of a conduit, because the window spans every conduit and no
+    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). The runtime's flag rather
+    /// than a field of a conduit, because the window spans every conduit and no
     /// conduit's lock may stand for the others.
     #[cfg(feature = "transport-batching")]
-    active: core::sync::atomic::AtomicBool,
+    active: R::Flag,
     /// The link's writer pulls what the conduits stage (see
     /// [`BoxedLinkDriver::set_idle_flush`]), so the window is open for as long as
     /// the session lives and no caller opens or closes it. Its own flag rather than
     /// `active`: `zp_batch_stop` closes the window the caller opened and must not
     /// close this one, which is the link's and not the caller's.
     #[cfg(feature = "transport-batching")]
-    auto: core::sync::atomic::AtomicBool,
+    auto: R::Flag,
     /// A control message was left in the Control conduit's open frame, for the control messages
     /// after it to join, and a message staged on another conduit is to follow that frame out.
     /// Raised by the sender of the control message once it has staged it, lowered under the
@@ -885,7 +886,7 @@ pub struct TxConduits<R: SessionRuntime> {
     /// sender one flush of an empty conduit, while lowered with a frame open would let data pass
     /// a declaration staged before it, which is the order this is kept for.
     #[cfg(feature = "transport-batching")]
-    control_open: core::sync::atomic::AtomicBool,
+    control_open: R::Flag,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
     /// Per conduit, whether a SENDER holds it: one staging its message, writing its frame or
     /// waiting for room for it ([`SenderInside`]). A conduit is also held by what is not a
@@ -906,7 +907,7 @@ pub struct TxConduits<R: SessionRuntime> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    sending: [core::sync::atomic::AtomicBool; TX_CONDUITS],
+    sending: [R::Flag; TX_CONDUITS],
 }
 
 /// A sender inside its conduit, marked for as long as this lives: set when the sender has taken
@@ -920,7 +921,8 @@ pub struct TxConduits<R: SessionRuntime> {
 /// lock's acquire keeps the mark after the previous holder's clear, and its release keeps the
 /// clear before the next holder's mark. A reader that sees the flag late spins once more, or drops
 /// the message as zenoh-pico's try-lock does when it loses to a sender that is just leaving, and
-/// a stronger ordering would change neither: no ordering makes a store visible sooner.
+/// a stronger ordering would change neither: no ordering makes a store visible sooner. The flag
+/// is the runtime's (`R::Flag`): a cell where the senders are one task, which orders nothing.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -933,7 +935,7 @@ pub struct TxConduits<R: SessionRuntime> {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
+struct SenderInside<'a, F: crate::runtime_cell::FlagCell>(&'a F);
 
 #[cfg(any(
     feature = "codec-push",
@@ -947,8 +949,8 @@ struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-impl<'a> SenderInside<'a> {
-    fn mark(flag: &'a core::sync::atomic::AtomicBool) -> Self {
+impl<'a, F: crate::runtime_cell::FlagCell> SenderInside<'a, F> {
+    fn mark(flag: &'a F) -> Self {
         flag.store(true, core::sync::atomic::Ordering::Relaxed);
         Self(flag)
     }
@@ -966,7 +968,7 @@ impl<'a> SenderInside<'a> {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-impl Drop for SenderInside<'_> {
+impl<F: crate::runtime_cell::FlagCell> Drop for SenderInside<'_, F> {
     fn drop(&mut self) {
         self.0.store(false, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1197,11 +1199,11 @@ impl<R: SessionRuntime> TxConduits<R> {
     fn new() -> Self {
         Self {
             #[cfg(feature = "transport-batching")]
-            active: core::sync::atomic::AtomicBool::new(false),
+            active: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             #[cfg(feature = "transport-batching")]
-            auto: core::sync::atomic::AtomicBool::new(false),
+            auto: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             #[cfg(feature = "transport-batching")]
-            control_open: core::sync::atomic::AtomicBool::new(false),
+            control_open: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             // A blocking sender keeps its conduit while it waits for room (a chain's fragments
             // keep their sequence numbers), and a probe takes it without waiting
             // (`DispatchStage::Probe`): the lock is one held across a wait for an event.
@@ -1218,7 +1220,9 @@ impl<R: SessionRuntime> TxConduits<R> {
                 feature = "declare-interest",
                 feature = "liveliness-token",
             ))]
-            sending: core::array::from_fn(|_| core::sync::atomic::AtomicBool::new(false)),
+            sending: core::array::from_fn(|_| {
+                <R::Flag as crate::runtime_cell::FlagCell>::new(false)
+            }),
         }
     }
 
@@ -1235,7 +1239,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn sender_flag(&self, priority: Priority) -> &core::sync::atomic::AtomicBool {
+    fn sender_flag(&self, priority: Priority) -> &R::Flag {
         conduit_row(&self.sending, priority)
     }
 
@@ -1327,13 +1331,17 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn is_active(&self) -> bool {
-        self.active.load(core::sync::atomic::Ordering::SeqCst) || self.is_auto()
+        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
+            || self.is_auto()
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_active(&self, active: bool) {
-        self.active
-            .store(active, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.active,
+            active,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// The link pulls the staged frames itself (the `auto` field). Read where
@@ -1341,12 +1349,16 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// ([`SessionLinkActions::batch_stop`]), which asks such a link for the flush.
     #[cfg(feature = "transport-batching")]
     fn is_auto(&self) -> bool {
-        self.auto.load(core::sync::atomic::Ordering::Relaxed)
+        crate::runtime_cell::FlagCell::load(&self.auto, core::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_auto(&self, auto: bool) {
-        self.auto.store(auto, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.auto,
+            auto,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// The caller's window alone (`zp_batch_start` .. `zp_batch_stop`), without the link's.
@@ -1357,7 +1369,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// not one of them, so the writer reads this to know when to stay its hand.
     #[cfg(feature = "transport-batching")]
     fn caller_window_open(&self) -> bool {
-        self.active.load(core::sync::atomic::Ordering::SeqCst)
+        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
     }
 
     /// Raise the `control_open` mark: read and raised where [`Self::is_auto`] is read, by the
@@ -1378,8 +1390,11 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn leave_control_open(&self) {
-        self.control_open
-            .store(true, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.control_open,
+            true,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Whether a control message may still be in the Control conduit's open frame (the
@@ -1400,15 +1415,21 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn control_left_open(&self) -> bool {
-        self.control_open.load(core::sync::atomic::Ordering::SeqCst)
+        crate::runtime_cell::FlagCell::load(
+            &self.control_open,
+            core::sync::atomic::Ordering::SeqCst,
+        )
     }
 
     /// Lower the `control_open` mark: called with the Control conduit's lock held, as its open
     /// frame is taken.
     #[cfg(feature = "transport-batching")]
     fn control_taken(&self) {
-        self.control_open
-            .store(false, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.control_open,
+            false,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Every conduit back to its initial state, the window closed. The
@@ -1554,9 +1575,11 @@ impl BatchLendCounts {
 }
 
 /// R311y214 — the unicast outbound Frame SN generator, SPLIT per
-/// reliability channel: the atomic twin of the plain-`u64` multicast
+/// reliability channel: the shared twin of the plain-`u64` multicast
 /// [`crate::sn::TxSn`] (which the single-task multicast drive loop mints
-/// under no lock). Both zenoh and zenoh-pico split the TX SN by
+/// under no lock), over the runtime's word (`W`, `SessionRuntime::Word`):
+/// atomic where the senders are threads, a cell where they are one task.
+/// Both zenoh and zenoh-pico split the TX SN by
 /// reliability even at one priority conduit: zenoh's non-QoS
 /// `TransportPriorityTx { reliable, best_effort }` still holds two
 /// generators (`io/zenoh-transport/src/common/priority.rs`), and pico's
@@ -1574,26 +1597,26 @@ impl BatchLendCounts {
 /// pairs with). R311y215 arrays this per `Priority` conduit behind
 /// `transport-qos`.
 #[derive(Debug)]
-pub struct AtomicTxSn {
+pub struct ConduitTxSn<W: crate::runtime_cell::WordCell> {
     /// Next SN for the reliable channel (pico `_sn_tx_reliable`).
-    reliable: AtomicU64,
+    reliable: W,
     /// Next SN for the best-effort channel (pico `_sn_tx_best_effort`).
-    best_effort: AtomicU64,
+    best_effort: W,
 }
 
-impl AtomicTxSn {
+impl<W: crate::runtime_cell::WordCell> ConduitTxSn<W> {
     /// Seed both channels at `initial_sn` (the OpenSyn/OpenAck origin) so
     /// the first Frame on either channel is exactly `initial_sn` — the peer
     /// seeds its per-channel RX gate one before this ([`crate::sn::RxSn::seed`]).
     pub fn new(initial_sn: u64) -> Self {
         Self {
-            reliable: AtomicU64::new(initial_sn),
-            best_effort: AtomicU64::new(initial_sn),
+            reliable: W::new(initial_sn),
+            best_effort: W::new(initial_sn),
         }
     }
 
     /// Mint the next SN on `reliable`'s channel as a ring position of
-    /// `mask`, advancing that channel one step (the atomic twin of
+    /// `mask`, advancing that channel one step (the shared twin of
     /// [`crate::sn::TxSn::mint`]). Masking a raw monotonic `fetch_add` IS
     /// the ring walk — `(n + 1) & mask` is the ring successor of `n & mask`
     /// across the `u64` boundary too.
@@ -1646,7 +1669,7 @@ impl AtomicTxSn {
 }
 
 /// R311y215 (transport-qos) — the outbound Frame SN generators: ONE
-/// [`AtomicTxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh
+/// [`ConduitTxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh
 /// `priority_tx: Arc<[TransportPriorityTx]>`, `universal/transport.rs`), else the
 /// single R311y214 conduit. The array SHAPE is compile-time behind the feature
 /// so an MCU no-alloc build never sizes a heap array by the runtime `is_qos`
@@ -1660,28 +1683,28 @@ impl AtomicTxSn {
 /// so a reliable+high and a reliable+low Frame ride SEPARATE SN rings gated on
 /// SEPARATE RX conduits — no cross-link stale-drop. Splitting ONE conduit across
 /// links (a load-balancer) would reintroduce the hazard and is forbidden.
-pub struct FrameTxConduits {
+pub struct FrameTxConduits<W: crate::runtime_cell::WordCell> {
     #[cfg(feature = "transport-qos")]
-    conduits: [AtomicTxSn; Priority::NUM],
+    conduits: [ConduitTxSn<W>; Priority::NUM],
     #[cfg(not(feature = "transport-qos"))]
-    conduit: AtomicTxSn,
+    conduit: ConduitTxSn<W>,
 }
 
-impl FrameTxConduits {
+impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
     /// Seed every conduit at `initial_sn` (the OpenSyn/OpenAck origin).
     pub fn new(initial_sn: u64) -> Self {
         Self {
             #[cfg(feature = "transport-qos")]
-            conduits: core::array::from_fn(|_| AtomicTxSn::new(initial_sn)),
+            conduits: core::array::from_fn(|_| ConduitTxSn::new(initial_sn)),
             #[cfg(not(feature = "transport-qos"))]
-            conduit: AtomicTxSn::new(initial_sn),
+            conduit: ConduitTxSn::new(initial_sn),
         }
     }
 
     /// The `(priority)` conduit — `conduits[priority]` under `transport-qos`,
     /// the single conduit otherwise (priority ignored, no cfg-skew).
     #[inline]
-    fn select(&self, _priority: Priority) -> &AtomicTxSn {
+    fn select(&self, _priority: Priority) -> &ConduitTxSn<W> {
         #[cfg(feature = "transport-qos")]
         {
             _priority.of(&self.conduits)
@@ -1692,7 +1715,7 @@ impl FrameTxConduits {
         }
     }
 
-    /// Mint the next SN for `(priority, reliable)` — see [`AtomicTxSn::mint`].
+    /// Mint the next SN for `(priority, reliable)` — see [`ConduitTxSn::mint`].
     pub fn mint(&self, priority: Priority, reliable: bool, mask: u64) -> u64 {
         self.select(priority).mint(reliable, mask)
     }
@@ -1703,7 +1726,7 @@ impl FrameTxConduits {
     }
 
     /// Give back the SN the last mint on `(priority, reliable)` handed out, for a
-    /// send refused before any byte of it left — see [`AtomicTxSn::unmint`].
+    /// send refused before any byte of it left — see [`ConduitTxSn::unmint`].
     pub fn unmint(&self, priority: Priority, reliable: bool) {
         self.select(priority).unmint(reliable);
     }
@@ -1719,134 +1742,72 @@ impl FrameTxConduits {
     }
 }
 
-/// What every send reads before it takes its conduit's lock, kept where it can be read
-/// without a lock: the negotiated frame budget and SN ring (`SessionLinkActions::negotiated_tx_limits`).
-/// They change when a handshake sets the peer's capabilities and when a reconnect clears
-/// them, and at no other time, so a send that paid a mutex pair to read them paid it for a
-/// value that was the same as the send before it.
+/// The frame budget and SN ring this link's sends are held to, one word for each reliability
+/// class, settled when the link is established ([`SessionLinkActions::enter_established`]) and
+/// read by every send without a lock. Nothing reads them before: the data-send gate opens after
+/// they are settled. What they are computed from does not move while the link is established
+/// (the peer's capabilities and the lowlatency and compression outcomes are the handshake's),
+/// and a reconnect establishes the link again, which settles them again.
 ///
-/// The value is kept with a TAG: the number of times the peer's capabilities have been
-/// written, plus one, taken in the same hold of the capabilities' mutex as the value was
-/// computed from. A reader trusts the kept value only when its tag is the current number, so
-/// a value that a writer has since replaced is never used, whatever order the two interleave
-/// in: the worst a race costs is one more trip through the mutex. Writers move the number
-/// while they hold the mutex (`peer_caps_changed`).
-///
-/// Packed in one word, bits 0-7 the negotiated sequence-number resolution, 8-23 the batch
-/// budget (at most 65535: both advertisements are `u16`), 24-55 the tag; zero is empty.
-pub struct TxLimitsCache {
-    writes: AtomicU32,
-    // Read and written by the sends alone, as `current_tag` says.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    packed: AtomicU64,
+/// A word holds the ring resolution in bits 0-7 and the budget in bits 8-23 (at most 65535: the
+/// batch advertisements are `u16`).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Debug)]
+pub struct TxLimits {
+    reliable: AtomicU32,
+    best_effort: AtomicU32,
 }
 
-impl TxLimitsCache {
-    pub(crate) fn new() -> Self {
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl TxLimits {
+    const fn new() -> Self {
         Self {
-            writes: AtomicU32::new(0),
-            #[cfg(any(
-                test,
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            ))]
-            packed: AtomicU64::new(0),
+            reliable: AtomicU32::new(0),
+            best_effort: AtomicU32::new(0),
         }
     }
 
-    /// The peer's capabilities were just written (or cleared). Called under their mutex.
-    pub(crate) fn peer_caps_changed(&self) {
-        self.writes.fetch_add(1, Ordering::Release);
+    fn word(&self, class: Reliability) -> &AtomicU32 {
+        match class {
+            Reliability::Reliable => &self.reliable,
+            Reliability::BestEffort => &self.best_effort,
+        }
     }
 
-    /// The number a value computed NOW would be tagged with. Read under the capabilities'
-    /// mutex, together with the capabilities.
-    // Read by `negotiated_tx_limits`, which exists in a build with a sending codec only.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    pub(crate) fn current_tag(&self) -> u32 {
-        self.writes.load(Ordering::Acquire).wrapping_add(1)
+    /// Settle the limits of `class`.
+    fn settle(&self, class: Reliability, budget: usize, ring: u8) {
+        let budget = u32::from(u16::try_from(budget).unwrap_or(u16::MAX));
+        self.word(class)
+            .store((budget << 8) | u32::from(ring), Ordering::Release);
     }
 
-    /// The kept `(batch budget, ring resolution)`, when it is for the current capabilities.
-    // See `current_tag`.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
+    /// The settled `(budget, ring resolution)` of `class`.
     #[inline]
-    pub(crate) fn get(&self) -> Option<(usize, u8)> {
-        let packed = self.packed.load(Ordering::Acquire);
-        if packed == 0 {
-            return None;
-        }
-        let tag = ((packed >> 24) & 0xFFFF_FFFF) as u32;
-        if tag != self.current_tag() {
-            return None;
-        }
-        Some((((packed >> 8) & 0xFFFF) as usize, (packed & 0xFF) as u8))
-    }
-
-    /// Keep `(mtu, ring)` as computed from the capabilities the tag was read with. `mtu` over
-    /// what 16 bits hold is not kept: the reader then asks the mutex every time, as it did.
-    // See `current_tag`.
-    #[cfg(any(
-        test,
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    pub(crate) fn keep(&self, tag: u32, mtu: usize, ring: u8) {
-        let Ok(mtu) = u16::try_from(mtu) else { return };
-        let packed = (u64::from(tag) << 24) | (u64::from(mtu) << 8) | u64::from(ring);
-        self.packed.store(packed, Ordering::Release);
+    fn get(&self, class: Reliability) -> (usize, u8) {
+        let word = self.word(class).load(Ordering::Acquire);
+        (((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8)
     }
 }
 
@@ -1898,9 +1859,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`LinkState::pending_batch`](LinkState): a close ends the session, and
     /// an aggregated session's second link must not be able to survive it.
     ///
-    /// Behind `R::Mutex` rather than an atomic for the reason the whole struct
-    /// gives: ARMv6-M has no `target_has_atomic = "ptr"` and every other
-    /// set-once slot here uses the same seam.
+    /// Behind the runtime's local (`R::Local`) rather than an atomic: ARMv6-M has
+    /// no `target_has_atomic = "ptr"`, and the requests are read and cleared
+    /// together with the waker of the loop parked on them.
     ///
     /// R2922 — the request now lives in [`OutOfBand`], which also WAKES the
     /// drive loop. It used to be a bare flag that no production loop read:
@@ -2047,14 +2008,6 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
     #[cfg(feature = "session-extshm")]
     pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
-    /// What the slot above makes of the negotiated send limits, kept so a send reads them
-    /// without its mutex ([`TxLimitsCache`]). Every write of the slot moves it. The limits of
-    /// the reliable frames; the best-effort ones are kept beside them.
-    pub tx_limits_cache: TxLimitsCache,
-    /// [`Self::tx_limits_cache`] for the best-effort frames, whose budget is their own on a
-    /// link that carries them apart ([`BoxedLinkDriver::link_mtu_for`]). Every write of the
-    /// slot moves it too.
-    pub best_effort_tx_limits_cache: TxLimitsCache,
     /// R121e — outbound Frame sequence-number generator. The
     /// session-FSM Established-side path emits one `Frame`
     /// transport-message per outbound application-layer batch
@@ -2074,11 +2027,11 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// fragment walk (`frame_encode::fragment_body`). R311kb
     /// realized the R121e explicit-modulo carry via zenoh-pico
     /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
-    /// [`AtomicTxSn`], split per reliability channel (pico/zenoh parity).
+    /// [`ConduitTxSn`], split per reliability channel (pico/zenoh parity).
     /// R311y215 — [`FrameTxConduits`]: one such pair per `Priority` conduit
     /// under `transport-qos` (else the single R311y214 pair); the
     /// `(priority, reliable)` of each mint selects the conduit + channel.
-    pub outbound_frame_sn: FrameTxConduits,
+    pub outbound_frame_sn: FrameTxConduits<R::Word>,
     /// Whether the peer's `DeclareFinal` of the initial interest has arrived on
     /// this session: the one fact the RX SN gate needs from the declaration
     /// plane, which sits after the gate and cannot be asked from it. Read by the
@@ -2975,13 +2928,16 @@ pub struct LinkState<R: SessionRuntime> {
     /// read two of them at once, and a transport replaced for a re-dial clears all three. Reached
     /// through [`Self::stamps()`], [`Self::with_stamps`] and the `fact_*` doors.
     stamps: R::Mutex<LinkStamps>,
-    /// F2 — is the transport currently accepting data sends? `true` at
-    /// construction (the bundle is built over a live link sink; the
-    /// pre-handshake window keeps today's emit semantics), `false` when
+    /// F2 — is the transport currently accepting data sends? `false` at
+    /// construction: data leaves only over an established link, as upstream's
+    /// transport exists only once the Open exchange is over
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `let oack_out = step!(fsm.recv_open_ack((&mut link_unicast, &mut state)).await);`
+    /// precedes `.init_transport_unicast(`), `false` again when
     /// the FSM releases the link (`release_link`, Closing/Closed entry)
     /// or the reconnect supervisor tears the transport down for re-dial
     /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
-    /// (re-)enters (`record_established_at`). The
+    /// (re-)enters ([`SessionLinkActions::enter_established`]). The
     /// `SessionLinkActions::dispatch_network_message_at` chokepoint gates on it
     /// so a data send inside the RECONNECTING window rejects typed
     /// ([`SendWireError::TransportUnavailable`]) instead of silently
@@ -2993,6 +2949,20 @@ pub struct LinkState<R: SessionRuntime> {
     /// A [`crate::send_gate::SendGate`] and not a lock: every data send reads it, and nothing
     /// reads and writes it in one step.
     pub transport_available: crate::send_gate::SendGate,
+    /// The send limits this link was established with.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    tx_limits: TxLimits,
     /// Whether this link's keepalive worker runs: set by the FSM's
     /// `start_keepalive_worker` on `Established` entry and cleared by
     /// `stop_keepalive_worker` on its exit (and by
@@ -3094,7 +3064,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// an aggregated session does meanwhile; and when the link itself goes, its
     /// drop gives back whatever it still holds, so no path leaks a slot.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-    pub(crate) batch_slots: [LentRecord; TX_CONDUITS],
+    pub(crate) batch_slots: [LentRecord<R::Word>; TX_CONDUITS],
     /// This link's place in its node's [`crate::link_admission::LinkAdmission`], which the node
     /// installs before the handshake ([`SessionLinkActions::install_link_admission`]) and asks while
     /// the link is still being established. `None` for a node that decides the question after the
@@ -3123,25 +3093,26 @@ impl<R: SessionRuntime> Drop for LinkState<R> {
 /// batch frame, as the link records it (`LinkState::batch_slots`): the slot's
 /// name, and whether the link holds one for that conduit.
 ///
-/// Atomics only so that a shared `&LinkState` can be written: every read and
-/// write of a conduit's record is made under that conduit's lock (the open, the
-/// appends, the flush, the abort of a reopen and the move off a leaving link all
-/// hold it), or by the link's drop, which has the link alone. The lock orders
-/// them, so they are `Relaxed`: no record is read by a thread that did not take
-/// that lock after the last write to it.
+/// One word of the runtime's (`W`, `SessionRuntime::Word`): the slot's name plus one, and
+/// zero while the link holds none. The runtime's word only so that a shared `&LinkState` can be
+/// written: every write of a conduit's record is made under that conduit's lock (the open, the
+/// appends, the flush, the abort of a reopen and the move off a leaving link all hold it), or by
+/// the link's drop, which has the link alone. The lock orders them, so they are `Relaxed`: no
+/// record is read by a thread that did not take that lock after the last write to it.
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-pub(crate) struct LentRecord {
-    held: core::sync::atomic::AtomicBool,
-    slot: core::sync::atomic::AtomicU32,
+pub(crate) struct LentRecord<W: crate::runtime_cell::WordCell> {
+    slot: W,
 }
 
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-impl LentRecord {
-    const fn new() -> Self {
-        Self {
-            held: core::sync::atomic::AtomicBool::new(false),
-            slot: core::sync::atomic::AtomicU32::new(0),
-        }
+impl<W: crate::runtime_cell::WordCell> LentRecord<W> {
+    fn new() -> Self {
+        Self { slot: W::new(0) }
+    }
+
+    /// The word that names `slot` as held.
+    fn word_of(slot: crate::link::TxSlot) -> u64 {
+        u64::from(slot.0) + 1
     }
 
     /// Record `slot` as held for the conduit: the open of a batch frame in a lent slot, which
@@ -3160,30 +3131,41 @@ impl LentRecord {
     ))]
     fn hold(&self, slot: crate::link::TxSlot) {
         self.slot
-            .store(slot.0, core::sync::atomic::Ordering::Relaxed);
-        self.held.store(true, core::sync::atomic::Ordering::Relaxed);
+            .store(Self::word_of(slot), core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Whether the link holds a slot for the conduit.
+    /// Whether the link holds a slot for the conduit. Read by the send of a link's open batches
+    /// alone, which exists where a data send does.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     fn is_held(&self) -> bool {
-        self.held.load(core::sync::atomic::Ordering::Relaxed)
+        self.slot.load(core::sync::atomic::Ordering::Relaxed) != 0
     }
 
     /// Whether the link holds exactly `slot` for the conduit.
     fn holds(&self, slot: crate::link::TxSlot) -> bool {
-        self.is_held() && self.slot.load(core::sync::atomic::Ordering::Relaxed) == slot.0
+        self.slot.load(core::sync::atomic::Ordering::Relaxed) == Self::word_of(slot)
     }
 
     /// Clear the record, with the slot it held.
     fn take(&self) -> Option<crate::link::TxSlot> {
-        if !self.is_held() {
-            return None;
-        }
-        self.held
-            .store(false, core::sync::atomic::Ordering::Relaxed);
-        Some(crate::link::TxSlot(
-            self.slot.load(core::sync::atomic::Ordering::Relaxed),
-        ))
+        // The word is a `u32` name plus one (`Self::word_of`), so the name fits.
+        let held = self
+            .slot
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1)?;
+        self.slot.store(0, core::sync::atomic::Ordering::Relaxed);
+        Some(crate::link::TxSlot(held as u32))
     }
 }
 
@@ -4185,6 +4167,116 @@ struct FrameEmit {
     deadline: PushDeadline,
 }
 
+/// What a send tells its dispatch of the bytes its message encodes to: a heap frame is reserved
+/// by it, and a link that sizes its slot by the ask is asked for it. A lend-only build has neither:
+/// each of its frames asks for the whole batch budget, as zenoh-pico's batch is the budget whatever
+/// it carries, so its sends measure nothing and the hint is nothing.
+#[cfg(all(
+    not(feature = "tx-lend-only"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+type SizeHint = usize;
+
+/// [`SizeHint`] of a lend-only build: nothing.
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Clone, Copy)]
+struct SizeHint;
+
+/// The hint of a message `measure` sizes, measured only where a frame is sized by it.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[inline(always)]
+fn size_hint(measure: impl FnOnce() -> usize) -> SizeHint {
+    #[cfg(not(feature = "tx-lend-only"))]
+    {
+        measure()
+    }
+    #[cfg(feature = "tx-lend-only")]
+    {
+        let _ = measure;
+        SizeHint
+    }
+}
+
+/// The SN of the frame `SessionLinkActions::lend_frame` writes, asked for once the frame has a
+/// slot to be written in. A trait of its own and not `dyn Fn`, as `AdmitFrame` is not, so the
+/// table holds no second copy of the closure's body.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+trait FrameSn {
+    /// The frame's SN.
+    fn take_sn(&self) -> u64;
+}
+
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+impl<F: Fn() -> u64> FrameSn for F {
+    fn take_sn(&self) -> u64 {
+        self()
+    }
+}
+
 /// The room check and SN mint a frame opened under `tx-lend-only` starts with
 /// (`SessionLinkActions::open_frame_lent`), as a trait object so that the staged and the fresh
 /// dispatch, whose admissions are closures of different types, share one body. A trait of its
@@ -4206,8 +4298,8 @@ struct FrameEmit {
     )
 ))]
 trait AdmitFrame {
-    /// The frame's emit once its link has room and its SN is minted; `None` when the link
-    /// is congested.
+    /// The frame's emit once its link has room, its SN not yet taken (`sn` is zero until the
+    /// frame is written into a slot); `None` when the link is congested.
     fn admit(&self) -> Option<FrameEmit>;
 }
 
@@ -4407,7 +4499,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         // The reply's own size: a Response has no size constant (its payload's bound is a u32
         // length), and the link lends a slot of this size. A reply the writer refuses is refused
         // by the encode below too.
-        let size = writer.encoded_len().unwrap_or(0);
+        let size = size_hint(|| writer.encoded_len().unwrap_or(0));
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
@@ -4529,7 +4621,9 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                     reliable: true,
                 },
                 crate::sample::QosLevel::DEFAULT,
-                crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id),
+                size_hint(|| {
+                    crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
+                }),
                 crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
                 as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)),
             )
@@ -4570,7 +4664,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                         reliable: true,
                     },
                     crate::sample::QosLevel::DEFAULT,
-                    crate::tx_buf::encoded_len(as_encoder(&reply)),
+                    size_hint(|| crate::tx_buf::encoded_len(as_encoder(&reply))),
                     crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
                     as_encoder(&reply),
                 );
@@ -5066,7 +5160,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 datagram_resume: R::new_mutex(None::<DatagramResume>),
                 stamps: R::new_mutex(LinkStamps::default()),
-                transport_available: crate::send_gate::SendGate::new(true),
+                transport_available: crate::send_gate::SendGate::new(false),
+                #[cfg(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                ))]
+                tx_limits: TxLimits::new(),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
                 lease_armed: core::sync::atomic::AtomicBool::new(false),
@@ -5084,7 +5191,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "session-extshm")]
                 shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
                 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-                batch_slots: [const { LentRecord::new() }; TX_CONDUITS],
+                batch_slots: core::array::from_fn(|_| LentRecord::new()),
                 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
                 link_lease: R::new_mutex(None),
             } in_place {}
@@ -5233,8 +5340,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // session-extshm — no authenticator until the AP installs one.
                 #[cfg(feature = "session-extshm")]
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
-                tx_limits_cache: TxLimitsCache::new(),
-                best_effort_tx_limits_cache: TxLimitsCache::new(),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "alloc")]
@@ -5941,7 +6046,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // reserves for the same frame.
         let want = worst_case_payload.saturating_add(1 + 10 + 2);
         let head = LentFrameHead {
-            sn: emit.sn,
             reliable: emit.reliable,
             ext_qos: emit.ext_qos,
             mtu: emit.mtu,
@@ -5952,6 +6056,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-batching")]
             None,
             head,
+            &|| emit.sn,
             priority,
             want,
             encode_body,
@@ -5994,6 +6099,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         #[cfg(feature = "transport-batching")] window: Option<&mut BatchTx>,
         head: LentFrameHead,
+        sn: &dyn FrameSn,
         priority: Priority,
         want: usize,
         encode_body: &P,
@@ -6002,7 +6108,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         let LentFrameHead {
-            sn,
             reliable,
             ext_qos,
             mtu,
@@ -6017,7 +6122,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if window.is_some() && slot.capacity() < mtu {
                 return Some(LentFill::ShortSlot);
             }
-            let filled = fill_lent_frame(slot, mtu, sn, reliable, ext_qos, encode_body);
+            // The SN is taken once the frame has a slot to be written in: a link that lent none
+            // leaves the conduit's next SN untaken.
+            let filled = fill_lent_frame(slot, mtu, sn.take_sn(), reliable, ext_qos, encode_body);
             if filled != LentFill::Fits {
                 return Some(filled);
             }
@@ -6228,12 +6335,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         priority: Priority,
         head: LentFrameHead,
+        sn: u64,
         encode_body: &P,
     ) -> LentBatchOpen
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        match self.lend_frame(Some(batch), head, priority, head.mtu, encode_body) {
+        match self.lend_frame(Some(batch), head, &|| sn, priority, head.mtu, encode_body) {
             Some(LentFill::Fits) => LentBatchOpen::Opened,
             None => LentBatchOpen::Heap(HeapStage::NoSlot),
             Some(LentFill::ShortSlot) => LentBatchOpen::Heap(HeapStage::ShortSlot),
@@ -7834,11 +7942,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// envelope the link and the compression wrap put around the frame, and a frame that
     /// filled the whole batch would reach the peer as a batch past what it negotiated.
     ///
-    /// Answered from the kept value when its inputs have not changed since it was computed, so
-    /// a send pays no mutex for it. A value is kept only once the session is established: the
-    /// envelope depends on the lowlatency and compression outcomes, which the Init exchange
-    /// settles AFTER it writes the peer's capabilities, and are final only then. A reconnect
-    /// clears the capabilities, which moves the tag and drops the kept value.
+    /// Settled when this link was established ([`TxLimits`]): before that no data send is let
+    /// through, and the answer is `(0, 0)`.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -7873,31 +7978,80 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
     ))]
     pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, u64) {
-        let cache = match class {
-            Reliability::Reliable => &self.tx_limits_cache,
-            Reliability::BestEffort => &self.best_effort_tx_limits_cache,
-        };
-        // The common case, a session whose handshake is long done: the kept answer, read
-        // without the capabilities' mutex ([`TxLimitsCache`]).
-        if let Some((mtu, ring)) = cache.get() {
-            return (mtu, crate::sn::mask_from_res(ring));
-        }
-        // The capabilities and the tag they are the capabilities OF, read in one hold: a
-        // writer moves the tag in the hold that writes them.
-        let (peer, tag) = self.fact_inbound_peer_init_caps(|slot| (*slot, cache.current_tag()));
-        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
-        // Read BEFORE the envelope: a session seen established had settled the outcomes the
-        // envelope reads before it became established, so they are final here.
-        let established = self.is_established();
-        let budget = self
-            .batch_mtu_for(peer, class)
-            .saturating_sub(self.batch_envelope_bytes_for(class));
-        // Before the peer's capabilities arrive the own advertisement applies, and before
-        // establishment the envelope can still change: neither answer is kept.
-        if peer.is_some() && established {
-            cache.keep(tag, budget, ring);
-        }
+        let (budget, ring) = self.link.tx_limits.get(class);
         (budget, crate::sn::mask_from_res(ring))
+    }
+
+    /// Settle this link's send limits ([`TxLimits`]) from what the handshake negotiated, once
+    /// the link is established: the envelope reads the lowlatency outcome of an established
+    /// link, and the compression outcome, both final by then.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn settle_tx_limits(&self) {
+        let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
+        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
+        for class in [Reliability::Reliable, Reliability::BestEffort] {
+            let budget = self
+                .batch_mtu_for(peer, class)
+                .saturating_sub(self.batch_envelope_bytes_for(class));
+            self.link.tx_limits.settle(class, budget, ring);
+        }
+    }
+
+    /// Enter the established state on this bundle's link: what the session machine's
+    /// `Established` entry does to the bundle, and the one door a test takes to stand a bundle
+    /// where a session that completed its handshake stands. Stamps the establishment, settles
+    /// the link's send limits ([`TxLimits`]) from what the handshake negotiated, lets go of
+    /// the held handshake answer, opens the data-send gate and shapes the link's outbound
+    /// queue. Entered again, after a reconnect, it does all of it again.
+    pub fn enter_established(&self) {
+        // The shared monotonic clock, the scale the lease comparator reads its stamps on.
+        let now = self.clock.now_monotonic_ms();
+        self.link.fact_established_at(|slot| *slot = Some(now));
+        // After the stamp: the envelope of an established lowlatency link is its own.
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))]
+        self.settle_tx_limits();
+        #[cfg(all(
+            any(feature = "codec-init-body", feature = "codec-open-body"),
+            any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        ))]
+        self.release_handshake_answer();
+        // Data sends are let through only now, with the limits above in place: upstream's
+        // transport exists only once the Open exchange is over.
+        self.link.transport_available.open();
+        // R2924 — the link's outbound queue takes the established session's shape: its
+        // configured sizes, one queue per priority if it negotiated QoS and one queue
+        // otherwise, as zenoh builds a link's pipeline when the link joins an established
+        // transport. R2925 — its batches are the link's negotiated batch MTU; what a lane is
+        // bounded by is counted in the session's CONFIGURED batch size
+        // (`TxQueueShape::queue_unit_bytes` says why).
+        self.link_driver()
+            .shape_tx_queue(self.params.tx_queue.shape(
+                self.negotiated_qos(),
+                self.negotiated_batch_mtu(),
+                self.params.effective_batch_size() as usize,
+            ));
     }
 
     /// The bytes of a batch that are not its frame: the length a streamed link writes in
@@ -7944,21 +8098,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         length.saturating_add(header)
     }
 
-    /// Write the peer's capabilities ([`HandshakeFacts::inbound_peer_init_caps`]), and tell the
-    /// kept send limits ([`TxLimitsCache`]) that what they were computed from is gone. THE way
-    /// to write the slot: a write that bypassed it would leave a send using limits the slot no
-    /// longer says.
+    /// Write the peer's capabilities ([`HandshakeFacts::inbound_peer_init_caps`]). The send
+    /// limits are settled from them when the link is established ([`TxLimits`]), so a write
+    /// after establishment reaches the sends at the next establishment.
     pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
-        self.fact_inbound_peer_init_caps(|slot| self.write_peer_init_caps(slot, caps));
+        self.fact_inbound_peer_init_caps(|slot| Self::write_peer_init_caps(slot, caps));
     }
 
     /// [`Self::set_peer_init_caps`] for a step that holds the facts' lock already, writing
-    /// the capabilities beside other facts of the same handshake message: the kept limits
-    /// are told in the same hold, as the setter tells them.
-    fn write_peer_init_caps(&self, slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
+    /// the capabilities beside other facts of the same handshake message.
+    fn write_peer_init_caps(slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
         *slot = caps;
-        self.tx_limits_cache.peer_caps_changed();
-        self.best_effort_tx_limits_cache.peer_caps_changed();
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -8645,7 +8795,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
             self.accept_cookie_members();
         crate::accept_cookie::encode_accept_cookie_into(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &crate::accept_cookie::AcceptCookieView {
                 peer_zid,
                 peer_whatami,
@@ -8883,7 +9033,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => return false,
         };
         let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
+            self.params.cookie_signing_key.signing_key(),
             &echoed,
         ) {
             Ok(c) => c,
@@ -8933,7 +9083,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             f.handshake.inbound_peer_zid = zid;
             f.handshake.remote_peer_zid = zid;
             f.handshake.peer_whatami = whatami;
-            self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
+            Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
         });
     }
 
@@ -11506,7 +11656,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             cookie,
                         );
                     }
-                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             // A peer's InitSyn and OpenSyn are recorded only by a build with the accepting
@@ -11543,7 +11693,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // alongside its zid; see the InitAck arm above for why both
                     // directions capture it (the gossip-policy "F1" prerequisite).
                     f.handshake.peer_whatami = Some(init.whatami);
-                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                    Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
                 });
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
@@ -12119,7 +12269,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and advances THAT channel's counter by one — zenoh-pico
     /// `_z_sn_increment` parity, closing the R121e explicit-modulo carry.
     /// R311y214 — the reliable and best-effort channels are independent
-    /// rings ([`AtomicTxSn`]); `reliable` picks which.
+    /// rings ([`ConduitTxSn`]); `reliable` picks which.
     ///
     /// The first call on each channel returns `params.initial_sn & sn_mask`
     /// (both channels are seeded by `new_session_actions`; a conforming
@@ -12193,7 +12343,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         stage: DispatchStage,
         conduit: Conduit,
         qos: crate::sample::QosLevel,
-        worst_case_payload: usize,
+        worst_case_payload: SizeHint,
         stats_class: crate::stats::NetworkStatsClass,
         encode_body: &P,
     ) -> Result<Dispatched, SendWireError>
@@ -12286,7 +12436,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R2952 — the whole `ext_qos`, not only its congestion control: a
         // `BlockFirst` message's slot is keyed by its own priority.
         qos: crate::sample::QosLevel,
-        worst_case_payload: usize,
+        worst_case_payload: SizeHint,
         _stats_class: crate::stats::NetworkStatsClass,
         encode_body: &P,
     ) -> Result<Dispatched, SendWireError>
@@ -12294,6 +12444,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // Nothing of a lend-only build reads it: every frame asks for the batch budget.
+        #[cfg(feature = "tx-lend-only")]
+        let SizeHint = worst_case_payload;
         let Conduit { priority, reliable } = conduit;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
@@ -12379,10 +12532,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-qos"))]
         let ext_qos: Option<Priority> = None;
         // F2 — transport-availability gate (pico
-        // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): inside the
-        // RECONNECTING window (link released / reset for re-dial, not yet
-        // re-Established) a data send must reject typed rather than
-        // vanish into a dead writer channel. Single gate — every
+        // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): before the link is first
+        // established, and inside the RECONNECTING window (link released / reset
+        // for re-dial, not yet re-Established), a data send must reject typed
+        // rather than vanish into a dead writer channel. Single gate — every
         // network-message send routes through this chokepoint.
         // R311y205 (transport-multilink) — for an AGGREGATING session the gate is
         // the OR over the link set's `transport_available`: the session accepts
@@ -12437,9 +12590,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // path wraps). This precedes the MTU / SN / batch-lock machinery below,
         // which lowlatency deletes by design (zenoh's lowlatency transport tracks
         // no SN and never fragments — defrag and the half-window gate do not
-        // exist on this path). Data sends only fire post-Established, by when the
-        // capability is finalized (negotiated at the Init exchange), so reading
-        // `is_lowlatency()` here needs no establishment guard.
+        // exist on this path). The gate above lets a data send through only once the
+        // link is established, by when the capability is final (negotiated at the
+        // Init exchange), so reading `is_lowlatency()` here needs no guard of its own.
         #[cfg(feature = "transport-lowlatency")]
         if self.is_lowlatency() {
             // ARCHITECTURE section 9.1 — the bare message straight into a slot the
@@ -12448,7 +12601,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // hold. Nothing is sent when `fill` says no.
             #[cfg(feature = "transport-tx-lend")]
             {
-                let lent = self.send_lent(wire_reliability, priority, worst_case_payload, |slot| {
+                #[cfg(not(feature = "tx-lend-only"))]
+                let want = worst_case_payload;
+                // A lend-only build asks for the whole batch budget, as each of its frames does.
+                #[cfg(feature = "tx-lend-only")]
+                let want = self.negotiated_tx_limits_for(wire_reliability).0;
+                let lent = self.send_lent(wire_reliability, priority, want, |slot| {
                     let mut sink = crate::tx_buf::TxSink::new(slot);
                     encode_body(&mut sink)
                 });
@@ -12655,9 +12813,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link.link_driver().tx_fence()
             });
         }
-        // The room check and the mint that open a frame under `tx-lend-only`
-        // ([`Self::open_frame_lent`]): `None` when the conduit's link has no room, and the SN
-        // is minted only once it has. The deadline is read after the check spent from it.
+        // The room check that opens a frame under `tx-lend-only` ([`Self::open_frame_lent`]):
+        // `None` when the conduit's link has no room. The SN is not taken here but where the
+        // frame is written into a slot, so `sn` stays zero until then. The deadline is read
+        // after the check spent from it.
         #[cfg(feature = "tx-lend-only")]
         let admit = || {
             if congested() {
@@ -12665,7 +12824,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             Some(FrameEmit {
                 ext_qos,
-                sn: self.next_outbound_frame_sn(priority, reliable, sn_mask),
+                sn: 0,
                 reliable,
                 mtu,
                 sn_mask,
@@ -12721,14 +12880,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // the budget leaves as a chain of lent fragments (with
                     // fragmentation) or is refused as oversize (without it).
                     #[cfg(feature = "tx-lend-only")]
-                    return self.open_frame_lent(
-                        batch,
-                        true,
-                        priority,
-                        &admit,
-                        worst_case_payload,
-                        encode_body,
-                    );
+                    return self.open_frame_lent(batch, true, priority, &admit, encode_body);
                     #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
@@ -12746,11 +12898,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             batch,
                             priority,
                             LentFrameHead {
-                                sn,
                                 reliable,
                                 ext_qos,
                                 mtu,
                             },
+                            sn,
                             &encode_body,
                         ) {
                             LentBatchOpen::Opened => return Ok(UnicastPush::Pushed),
@@ -12830,7 +12982,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // conduit. The PRIORITY half is now the stage index, so only
                     // the RELIABILITY half can still mismatch here: a non-QoS
                     // session has two reliability conduits, each its own Frame-SN
-                    // ring (`AtomicTxSn { reliable, best_effort }`), so a
+                    // ring (`ConduitTxSn { reliable, best_effort }`), so a
                     // best-effort message must not ride a reliable frame (or vice
                     // versa) even without transport-qos — read the open frame's own
                     // R flag so no stage field is needed. A mismatch flushes. This
@@ -12959,14 +13111,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             #[cfg(feature = "tx-lend-only")]
             {
-                self.open_frame_lent(
-                    batch,
-                    false,
-                    priority,
-                    &admit,
-                    worst_case_payload,
-                    encode_body,
-                )
+                self.open_frame_lent(batch, false, priority, &admit, encode_body)
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -13018,11 +13163,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // Dropped only behind another SENDER, as pico's try-lock fails only on a
                     // lock another send holds; a holder that is not one (the writer's flush of
                     // what is staged) lets go once it has written, and is waited for.
-                    if self
-                        .tx_conduits
-                        .sender_flag(priority)
-                        .load(core::sync::atomic::Ordering::Relaxed)
-                    {
+                    if crate::runtime_cell::FlagCell::load(
+                        self.tx_conduits.sender_flag(priority),
+                        core::sync::atomic::Ordering::Relaxed,
+                    ) {
                         held_dropped = true;
                         break Ok(UnicastPush::Congested);
                     }
@@ -13156,14 +13300,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         in_window: bool,
         priority: Priority,
         admit: &dyn AdmitFrame,
-        worst_case_payload: usize,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
-        let Some(emit) = admit.admit() else {
+        let Some(mut emit) = admit.admit() else {
             return Ok(UnicastPush::Congested);
         };
         // A build without batching opens no window.
@@ -13172,31 +13315,40 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = in_window;
             false
         };
-        // A window asks for the whole budget, in its conduit's band; a frame sent whole asks for
-        // room for the widest prefix and a possible ext_qos, as the heap path reserves for the
-        // same frame, on the conduit its ext_qos names, as the heap path's send does.
-        let (lend_priority, want) = if in_window {
-            (priority, emit.mtu)
+        // Every frame asks for the whole budget, as zenoh-pico's batch is the budget whatever it
+        // carries, so nothing measures a message before it is written: a window in its conduit's
+        // band, a frame sent whole on the conduit its ext_qos names, as the heap path's send does.
+        let lend_priority = if in_window {
+            priority
         } else {
-            (
-                emit.ext_qos.unwrap_or(Priority::DEFAULT),
-                worst_case_payload.saturating_add(1 + 10 + 2),
-            )
+            emit.ext_qos.unwrap_or(Priority::DEFAULT)
+        };
+        // The SN is taken where the frame is written, once a slot was lent: a link that lent none
+        // leaves it untaken, and only a frame whose write failed gives it back.
+        let minted = core::cell::Cell::new(None);
+        let (reliable, sn_mask) = (emit.reliable, emit.sn_mask);
+        let mint = || {
+            let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+            minted.set(Some(sn));
+            sn
         };
         // One lend for the window's opening and for the frame sent whole.
         let filled = self.lend_frame(
             #[cfg(feature = "transport-batching")]
             in_window.then_some(&mut *batch),
             LentFrameHead {
-                sn: emit.sn,
                 reliable: emit.reliable,
                 ext_qos: emit.ext_qos,
                 mtu: emit.mtu,
             },
+            &mint,
             lend_priority,
-            want,
+            emit.mtu,
             &encode_body,
         );
+        if let Some(sn) = minted.get() {
+            emit.sn = sn;
+        }
         let lent = match filled {
             Some(LentFill::Fits) => FrameLend::Sent,
             Some(LentFill::PastBudget) => FrameLend::PastMtu,
@@ -13220,16 +13372,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             FrameLend::PastMtu => {
                 // What only a fragment chain reads is unread here, as in
                 // `emit_frame_or_fragments` without fragmentation.
-                let _ = (emit.sn_mask, emit.max_reassembly_bytes, emit.deadline);
+                let _ = (
+                    emit.sn,
+                    emit.sn_mask,
+                    emit.max_reassembly_bytes,
+                    emit.deadline,
+                );
                 Err(SendWireError::LinkRefused(
                     self.refuse_tx(crate::link::LinkDropCause::Oversize),
                 ))
             }
-            // No slot, or one short of the frame: nothing of it was written, so the SN minted for
-            // it is given back, as a refused encode's is, and the conduit's next frame carries it.
-            // Kept, it would be a gap in a reliable channel that no frame fills.
+            // No slot, or one short of the frame. A slot that was lent and then found short took
+            // the SN its frame was written with, which is given back, as a refused encode's is,
+            // so the conduit's next frame carries it: kept, it would be a gap in a reliable
+            // channel that no frame fills. A link that lent none took no SN.
             FrameLend::Heap => {
-                self.outbound_frame_sn.unmint(priority, emit.reliable);
+                if minted.get().is_some() {
+                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                }
                 Err(SendWireError::LinkRefused(
                     self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
                 ))
@@ -13970,7 +14130,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
             crate::declare_ext_qos::read_push_qos(&push),
             // What THIS message can encode to, and not the codec's reserve hint for any message.
-            crate::frame_encode::push_capacity_hint(&push),
+            size_hint(|| crate::frame_encode::push_capacity_hint(&push)),
             class,
             as_encoder(&crate::frame_encode::push_body(&push)),
         )
@@ -13996,7 +14156,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::declare_ext_qos::read_push_qos(push),
             // What THIS message can encode to, and not the codec's reserve hint for any message
             // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
-            crate::frame_encode::push_capacity_hint(push),
+            size_hint(|| crate::frame_encode::push_capacity_hint(push)),
             class,
             as_encoder(&encode_body),
         )
@@ -14411,7 +14571,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Probe,
             Conduit { priority, reliable },
             encoded.qos(),
-            push.encoded_len(),
+            size_hint(|| push.encoded_len()),
             class,
             as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| push.write(sink)),
         );
@@ -14984,12 +15144,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::declare::DeclareWire::measure(declare).len();
+        let len = size_hint(|| wz_codecs::declare::DeclareWire::measure(declare).len());
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
@@ -15038,7 +15197,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 reliable: true,
             },
             crate::declare_ext_qos::QOS_DECLARE,
-            what.encoded_len(),
+            size_hint(|| what.encoded_len()),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
             as_encoder(&|sink| what.encode(sink)),
         )
@@ -15079,12 +15238,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = crate::frame_encode::oam_body(oam);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::oam::OamWire::measure(oam).len();
+        let len = size_hint(|| wz_codecs::oam::OamWire::measure(oam).len());
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
@@ -15131,12 +15289,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
         let qos = crate::declare_ext_qos::read_request_qos(request);
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::request::RequestWire::measure(request).len();
+        let len = size_hint(|| wz_codecs::request::RequestWire::measure(request).len());
         let ended = self.dispatch_network_message_at(
             stage,
             Conduit {
@@ -15193,12 +15350,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // downstream.
         let qos = crate::declare_ext_qos::read_response_qos(response);
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::response::ResponseWire::measure(response).len();
+        let len = size_hint(|| wz_codecs::response::ResponseWire::measure(response).len());
         let ended = self.dispatch_network_message_at(
             stage,
             Conduit {
@@ -15248,12 +15404,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // DEFAULT band exactly as before.
         let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::response_final::ResponseFinalWire::measure(response_final).len();
+        let len = size_hint(|| {
+            wz_codecs::response_final::ResponseFinalWire::measure(response_final).len()
+        });
         self.dispatch_network_message_at(
             stage,
             Conduit {
@@ -15303,12 +15460,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
-        // The lend-only build counts with the encoder it sends with
-        // (`frame_encode::push_capacity_hint` says why).
+        // Measured only where a frame is sized by it: a lend-only frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
-        let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
+        let len = size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body)));
         #[cfg(not(feature = "tx-lend-only"))]
-        let len = wz_codecs::interest::InterestWire::measure(interest).len();
+        let len = size_hint(|| wz_codecs::interest::InterestWire::measure(interest).len());
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
@@ -15346,7 +15502,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 reliable: true,
             },
             qos,
-            crate::tx_buf::encoded_len(as_encoder(&encode_body)),
+            size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body))),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             as_encoder(&encode_body),
         )
@@ -15602,7 +15758,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // payload's bound is a u32 length), and the link lends a slot of this size, which the
         // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
         // below refuses it with the same error, which the dispatch reports.
-        let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
+        let size = size_hint(|| crate::lent_push::plain_put_len(mapping_id, suffix, value, qos));
         let sent = self.dispatch_network_message_at(
             stage,
             Conduit { priority, reliable },
@@ -15715,7 +15871,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             };
             // A publication the writer refuses counts as zero, and the dispatch's own run of the
             // writer refuses it with the same error, which it reports.
-            let size = crate::tx_buf::encoded_len(encode);
+            let size = size_hint(|| crate::tx_buf::encoded_len(encode));
             let sent = self.dispatch_network_message_at(
                 stage,
                 Conduit { priority, reliable },
@@ -15823,7 +15979,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // A Put built here carries no extension, so no `ext_qos`: the
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
-                crate::lent_push::literal_put_len(keyexpr_suffix, value),
+                size_hint(|| crate::lent_push::literal_put_len(keyexpr_suffix, value)),
                 class,
                 as_encoder(
                     // The borrowed composition the multicast TX of a build with no
@@ -16048,7 +16204,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     reliable,
                 },
                 crate::sample::QosLevel::DEFAULT,
-                crate::lent_push::literal_del_len(keyexpr_suffix),
+                size_hint(|| crate::lent_push::literal_del_len(keyexpr_suffix)),
                 crate::stats::NetworkStatsClass::unread(),
                 as_encoder(&|sink| crate::lent_push::literal_del(keyexpr_suffix)?.encode(sink)),
             )
@@ -18140,10 +18296,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
         // Request has no size constant, and the link lends a slot of this size. A query the
         // writer refuses counts as zero and is refused by the encode below with its own error.
-        let size = {
+        let size = size_hint(|| {
             let mut count = sce_forge_runtime::codec::CountSink::new();
             writer.encode(&mut count).map_or(0, |()| count.len())
-        };
+        });
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
             Conduit {
@@ -18248,12 +18404,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let encode = |sink: &mut crate::tx_buf::TxSink<'_>| {
                 crate::lent_control::response_final(request_id, qos).encode(sink)
             };
-            // The lend-only build counts with the encoder it sends with
-            // (`frame_encode::push_capacity_hint` says why).
-            #[cfg(all(feature = "alloc", feature = "tx-lend-only"))]
-            let len = crate::tx_buf::encoded_len(as_encoder(&encode));
-            #[cfg(not(all(feature = "alloc", feature = "tx-lend-only")))]
-            let len = crate::lent_control::response_final_len(request_id, qos);
+            // A lend-only build measures nothing: every frame of it asks for the whole batch budget.
+            let len = size_hint(|| crate::lent_control::response_final_len(request_id, qos));
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
@@ -18925,7 +19077,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // that clear is `return_to_offer` below: the region joined the
                 // cookie's group, whose one writer puts back the offer, and the offer
                 // holds no peer's region. A second write here would be a second writer.
-                self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
+                Self::write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
                 // R2566 — the authenticated principal is HANDSHAKE-scoped and must
                 // not survive into the re-dial window. The `auth` dispatch itself
                 // persists here (its methods keep their configured credentials), so
@@ -20059,7 +20211,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
                     (Some(zid), Some(n)) => encode_accept_cookie(
-                        &a.params.cookie_signing_key,
+                        a.params.cookie_signing_key.signing_key(),
                         &a.accept_cookie_state(zid, n),
                     ),
                     _ => None,
@@ -20236,38 +20388,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn record_established_at(&mut self) {
         let a = &self.inner;
         a.note_action(|t| t.record_established_at = t.record_established_at.saturating_add(1));
-        // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
-        // clock (same epoch as last_inbound_at +
-        // drive_session_until_terminal) so the lease comparator's u64
-        // subtract stays on one scale. Read outside the slot closure.
-        let now = a.clock.now_monotonic_ms();
-        // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
-        self.link().fact_established_at(|slot| *slot = Some(now));
-        // The establishment is over, so no step of it is answered again.
-        #[cfg(all(
-            any(feature = "codec-init-body", feature = "codec-open-body"),
-            any(feature = "session-unicast-open", feature = "session-unicast-accept")
-        ))]
-        a.release_handshake_answer();
-        // F2 — Established (re-)entry re-opens the data-send gate (the
-        // supervisor replays cached declarations right after this fires).
-        self.link().transport_available.open();
-        // R2924 — the link's outbound queue takes the established session's
-        // shape: its configured sizes, one queue per priority if it negotiated
-        // QoS and one queue otherwise, as zenoh builds a link's pipeline when
-        // the link joins an established transport.
-        //
-        // R2925 — its batches are the link's negotiated batch MTU, as
-        // upstream's pipeline batches are the link's `batch.mtu`. What a lane
-        // is bounded by is counted in the session's CONFIGURED batch size, not
-        // in that MTU (`TxQueueShape::queue_unit_bytes` says why).
-        self.link()
-            .link_driver()
-            .shape_tx_queue(a.params.tx_queue.shape(
-                a.negotiated_qos(),
-                a.negotiated_batch_mtu(),
-                a.params.effective_batch_size() as usize,
-            ));
+        // The supervisor replays cached declarations right after this fires, through the gate
+        // it opens.
+        a.enter_established();
     }
 
     #[inline(never)]
@@ -20448,12 +20571,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // while a decode takes the state OFF the wire. `decode_accept_cookie`
         // verifies the MAC over the whole payload before it parses a field,
         // so anything past this point is bytes this node minted.
-        let carried = match crate::accept_cookie::decode_accept_cookie(
-            &self.params.cookie_signing_key,
-            &echoed,
-        ) {
-            Ok(c) => c,
-            Err(_) => return false,
+        let Some(carried) = self.params.cookie_signing_key.decode(&echoed) else {
+            return false;
         };
         // Upstream's rule, and the reason ONE value still crosses the
         // InitAck/OpenSyn boundary in memory: the MAC says "this node minted
@@ -20497,133 +20616,6 @@ mod held_answer_tests {
         assert_eq!(holds_answer(ExtChainRole::OpenSyn), replays);
         assert!(!holds_answer(ExtChainRole::InitSyn));
         assert!(!holds_answer(ExtChainRole::OpenAck));
-    }
-}
-
-#[cfg(test)]
-mod tx_limits_cache_tests {
-    use super::TxLimitsCache;
-
-    /// The protocol, one step at a time: empty until something is kept, kept only for the tag
-    /// it was computed under, gone the moment the capabilities are written, and never revived
-    /// by a value computed before that write.
-    #[test]
-    fn a_kept_value_serves_only_the_capabilities_it_was_computed_from() {
-        let cache = TxLimitsCache::new();
-        assert_eq!(cache.get(), None, "nothing is kept at the start");
-
-        let first = cache.current_tag();
-        cache.keep(first, 2048, 2);
-        assert_eq!(
-            cache.get(),
-            Some((2048, 2)),
-            "kept for the current capabilities"
-        );
-        assert_eq!(cache.get(), Some((2048, 2)), "and served again");
-
-        // A writer replaces the capabilities.
-        cache.peer_caps_changed();
-        assert_eq!(cache.get(), None, "a write ends what was kept");
-
-        // A reader that computed under the OLD tag and stores after the write: harmless.
-        cache.keep(first, 2048, 2);
-        assert_eq!(
-            cache.get(),
-            None,
-            "a value computed before a write is never served after it"
-        );
-
-        // A value computed under the new tag is served.
-        let second = cache.current_tag();
-        assert_ne!(first, second);
-        cache.keep(second, 65_535, 3);
-        assert_eq!(cache.get(), Some((65_535, 3)));
-
-        // Every write ends the value, however many.
-        for _ in 0..5 {
-            cache.peer_caps_changed();
-            assert_eq!(cache.get(), None);
-            cache.keep(cache.current_tag(), 512, 1);
-            assert_eq!(cache.get(), Some((512, 1)));
-        }
-    }
-
-    /// The edges of the packing: a budget over what 16 bits hold is not kept, the largest one
-    /// and a ring resolution of every value survive the round trip.
-    #[test]
-    fn the_packing_round_trips_and_refuses_what_does_not_fit() {
-        let cache = TxLimitsCache::new();
-        for ring in [0u8, 1, 2, 3, 255] {
-            for mtu in [0usize, 1, 2048, 65_535] {
-                cache.keep(cache.current_tag(), mtu, ring);
-                assert_eq!(cache.get(), Some((mtu, ring)), "mtu {mtu}, ring {ring}");
-                cache.peer_caps_changed();
-            }
-        }
-        cache.keep(cache.current_tag(), 65_536, 1);
-        assert_eq!(cache.get(), None, "a budget that does not fit is not kept");
-        cache.keep(cache.current_tag(), usize::MAX, 1);
-        assert_eq!(cache.get(), None, "nor the largest");
-    }
-
-    /// The writer and many readers at once: whatever a reader is handed is a value some
-    /// writer wrote under the tag it was written with, never a mix of two.
-    #[test]
-    fn concurrent_readers_never_see_a_mixed_value() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        let cache = Arc::new(TxLimitsCache::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        // The writer alternates two capabilities, each kept under its own tag; the pair
-        // (mtu, ring) is always one of (1000, 1) or (2000, 2).
-        let writer = {
-            let (cache, stop) = (cache.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let mut flip = false;
-                while !stop.load(Ordering::Relaxed) {
-                    cache.peer_caps_changed();
-                    let (mtu, ring) = if flip { (2000, 2) } else { (1000, 1) };
-                    cache.keep(cache.current_tag(), mtu, ring);
-                    flip = !flip;
-                }
-            })
-        };
-        let readers: std::vec::Vec<_> = (0..4)
-            .map(|_| {
-                let cache = cache.clone();
-                std::thread::spawn(move || {
-                    // A fixed number of reads can all finish before the writer is first
-                    // scheduled, or all land in its invalidated window, and then nothing
-                    // was compared. So the reader goes on past the fixed count until it
-                    // has been handed a value, and a deadline turns a writer that never
-                    // keeps one into a failure instead of a hang.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                    let mut seen = 0u32;
-                    let mut reads = 0u64;
-                    while reads < 200_000 || seen == 0 {
-                        reads += 1;
-                        if reads >= 200_000 {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "no value was handed to this reader in 60 s"
-                            );
-                        }
-                        if let Some(pair) = cache.get() {
-                            assert!(
-                                pair == (1000, 1) || pair == (2000, 2),
-                                "a mixed value: {pair:?}"
-                            );
-                            seen += 1;
-                        }
-                    }
-                    seen
-                })
-            })
-            .collect();
-        let seen: u32 = readers.into_iter().map(|r| r.join().unwrap()).sum();
-        stop.store(true, Ordering::Relaxed);
-        writer.join().unwrap();
-        assert!(seen > 0, "the readers saw the value at least once");
     }
 }
 
@@ -20726,6 +20718,17 @@ mod sender_inside_tests {
         }));
         assert!(unwound.is_err(), "CONTROL: the staging did unwind");
         assert!(!flag.load(Ordering::Relaxed), "lowered on the unwind");
+    }
+
+    /// The flag of a runtime of one task, a cell, is raised and lowered as the atomic one is.
+    #[test]
+    fn a_cell_flag_is_raised_while_a_sender_is_inside_and_lowered_when_it_leaves() {
+        let flag = core::cell::Cell::new(false);
+        {
+            let _inside = SenderInside::mark(&flag);
+            assert!(flag.get(), "raised inside");
+        }
+        assert!(!flag.get(), "lowered once it leaves");
     }
 }
 

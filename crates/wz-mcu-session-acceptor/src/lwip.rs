@@ -56,8 +56,11 @@ impl LwipTopology {
         let acceptor_sock: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, SESSION_PORT).expect("bind acceptor session rx"),
         ));
-        let driver =
-            wz_runtime_coop::link_cells::CellRc::boxed(LwipUdpDriver::accepting(acceptor_sock));
+        // Made in its cell: the driver carries its link's outbound slot, which made here
+        // and moved there would be a datagram's width of this frame.
+        let driver = wz_runtime_coop::link_cells::CellRc::<LwipUdpDriver>::claim(None)
+            .and_then(|cell| cell.made(|place| LwipUdpDriver::accepting_in(place, acceptor_sock)))
+            .expect("a cell of the heap for the acceptor's driver");
 
         // ── The reactive crafted peer: a second real loopback endpoint. Sized
         //    off the ACTIVE session-rx slot size (SESSION_RX_SLOT_SIZE: 1536

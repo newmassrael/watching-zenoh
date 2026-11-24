@@ -39,6 +39,7 @@ use core::sync::atomic::AtomicU32;
 use portable_atomic::AtomicU32;
 
 use crate::bounded::{BoundedVec, Lent};
+use crate::placed::PlacedRef;
 use crate::plane_lock::{LockFamily, Pending, Queued};
 use crate::reply::InboundReply;
 use crate::reply_hold::{HeldReplies, HeldReply, HoldRefused, ReplyHold};
@@ -477,27 +478,29 @@ impl<C: GetCalls> Drop for LegEnd<C> {
 /// entry ([`Ended`]), so the entry's drop, under the session's lock, never lets the callback go.
 pub struct LegSink<C: GetCalls> {
     leg: u64,
-    round: Arc<Round<C>>,
+    round: PlacedRef<Round<C>>,
     end: LegEnd<C>,
 }
 
 impl<C: GetCalls> LegSink<C> {
     /// The sink of leg `leg`, handing what it is handed to the callback in `row`, of which it
-    /// takes over the count [`GetPlane::open_leg`] took.
+    /// takes over the count [`GetPlane::open_leg`] took, and the replies the round holds for it
+    /// to the session's round `round`.
     ///
     /// # Safety
     /// The sink is handed its replies by the holder of the session's lock alone, as
     /// [`Round::offer_reply`] asks of its caller: the engine registers it in the session's tables
-    /// of pending gets, which it reaches under that lock.
+    /// of pending gets, which it reaches under that lock. The round's owner outlives the sink, as
+    /// [`crate::placed::Placed::share`] asks of every handle.
     pub unsafe fn new(
         leg: u64,
         row: LegId,
         plane: &Arc<GetPlane<C>>,
-        round: &Arc<Round<C>>,
+        round: PlacedRef<Round<C>>,
     ) -> Self {
         Self {
             leg,
-            round: Arc::clone(round),
+            round,
             end: LegEnd {
                 leg,
                 timed_out: None,

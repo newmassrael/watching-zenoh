@@ -42,7 +42,6 @@
 use alloc::sync::{Arc, Weak};
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
-use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
@@ -57,6 +56,7 @@ use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use crate::key_arena::{KeyRef, KeySpace};
+use crate::placed::Placed;
 use crate::plane_lock::LockFamily;
 use crate::qos::CongestionControl;
 use crate::query_sink::QueryView;
@@ -65,7 +65,7 @@ use crate::reply_sink::{ReplyKind, ReplyView};
 use crate::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo};
 use crate::session_tables::Presence;
 use crate::session_zid::ZID_MAX;
-use crate::sink::SampleView;
+use crate::sink::{SampleRef, SampleView};
 
 /// A call a record of the round owes, begun on a row of the session's tables under its lock and
 /// ended once, with no lock held, after the record was handed to it or refused.
@@ -78,7 +78,7 @@ pub trait RoundCall: Sized {
 /// A call of a subscriber's callback, which a sample is handed to.
 pub trait SampleCall: RoundCall {
     /// Hand `sample` to the row's callback.
-    fn hand(&self, sample: &dyn SampleView);
+    fn hand(&self, sample: &SampleRef<'_>);
 }
 
 /// A call of a liveliness subscriber's callback, which a token's appearance or retraction is
@@ -201,7 +201,7 @@ impl RoundCall for Infallible {
 }
 
 impl SampleCall for Infallible {
-    fn hand(&self, _sample: &dyn SampleView) {
+    fn hand(&self, _sample: &SampleRef<'_>) {
         match *self {}
     }
 }
@@ -366,60 +366,6 @@ impl Word {
 
     const fn get(self) -> u64 {
         u64::from_ne_bytes(self.0)
-    }
-}
-
-/// A sample as its view hands it, read once: what an offer that writes a record of its own places.
-struct Offered<'s> {
-    kind: SampleKind,
-    reliability: Reliability,
-    qos: Option<QosLevel>,
-    key: &'s [u8],
-    /// The key of the session's key arena `key` is the whole text of, when the view read it there.
-    held: Option<&'s KeyRef>,
-    payload: &'s [u8],
-    rest: Parts<'s>,
-}
-
-impl<'s> Offered<'s> {
-    fn of(sample: &'s dyn SampleView) -> Self {
-        Self {
-            kind: sample.kind(),
-            reliability: sample.reliability(),
-            qos: sample.qos(),
-            key: sample.keyexpr().as_bytes(),
-            held: sample.keyexpr_held(),
-            payload: sample.payload(),
-            rest: Parts::of(sample),
-        }
-    }
-}
-
-/// The parts of a sample, as a view hands them or as the table holds them.
-struct Parts<'s> {
-    attachment: Option<&'s [u8]>,
-    encoding: Option<(u32, Option<&'s [u8]>)>,
-    timestamp: Option<(u64, &'s [u8])>,
-    source_info: Option<&'s SourceInfo>,
-}
-
-impl<'s> Parts<'s> {
-    /// The parts `sample` carries beyond its key and its payload.
-    fn of(sample: &'s dyn SampleView) -> Self {
-        Self {
-            attachment: sample.attachment(),
-            encoding: crate::sink::encoding_carried(sample),
-            timestamp: crate::sink::timestamp_carried(sample),
-            source_info: sample.source_info(),
-        }
-    }
-
-    /// Whether it carries any part.
-    fn carries(&self) -> bool {
-        self.attachment.is_some()
-            || self.encoding.is_some()
-            || self.timestamp.is_some()
-            || self.source_info.is_some()
     }
 }
 
@@ -856,21 +802,30 @@ impl<C: RoundCalls> Table<C> {
         }
     }
 
-    /// `parts` placed for the table.
-    fn place_parts(&mut self, parts: &Parts<'_>, lending: Option<Lending>) -> Option<Option<Rest>> {
-        if !parts.carries() {
+    /// The parts of `sample` beyond its key and its payload placed for the table: none held when
+    /// it carries none.
+    fn place_parts(
+        &mut self,
+        sample: &SampleRef<'_>,
+        lending: Option<Lending>,
+    ) -> Option<Option<Rest>> {
+        if sample.attachment.is_none()
+            && sample.encoding.is_none()
+            && sample.timestamp.is_none()
+            && sample.source_info.is_none()
+        {
             return Some(None);
         }
-        let attachment = match parts.attachment {
+        let attachment = match sample.attachment {
             Some(part) => Some(self.place(part, lending)?),
             None => None,
         };
-        let encoding = match parts.encoding {
+        let encoding = match sample.encoding {
             Some((id, Some(schema))) => Some((id, Some(self.place(schema, lending)?))),
             Some((id, None)) => Some((id, None)),
             None => None,
         };
-        let timestamp = match parts.timestamp {
+        let timestamp = match sample.timestamp {
             Some((time, zid)) => Some((Word::of(time), self.place(zid, lending)?)),
             None => None,
         };
@@ -878,8 +833,32 @@ impl<C: RoundCalls> Table<C> {
             attachment,
             encoding,
             timestamp,
-            source_info: parts.source_info.cloned(),
+            source_info: sample.source_info.cloned(),
         }))
+    }
+
+    /// The sample a record of `head` and `rest` holds, read where its parts lie: what each of its
+    /// subscribers' callbacks is handed. It answers no hint: nothing is built on the heap for a
+    /// record of the round.
+    fn sample<'a>(&'a self, head: &Head, rest: Option<&'a Rest>) -> SampleRef<'a> {
+        let mut sample = SampleRef::new(
+            self.text(head.key),
+            self.bytes(head.payload),
+            head.kind,
+            head.reliability,
+        );
+        sample.qos = head.qos;
+        if let Some(rest) = rest {
+            sample.attachment = rest.attachment.map(|span| self.bytes(span));
+            sample.encoding = rest
+                .encoding
+                .map(|(id, schema)| (id, schema.map(|span| self.bytes(span))));
+            sample.timestamp = rest
+                .timestamp
+                .map(|(time, zid)| (time.get(), self.bytes(zid)));
+            sample.source_info = rest.source_info.as_ref();
+        }
+        sample
     }
 
     /// The callbacks `entry` owes.
@@ -1158,20 +1137,13 @@ unsafe impl<C: RoundCalls> Send for Round<C> {}
 unsafe impl<C: RoundCalls> Sync for Round<C> {}
 
 impl<C: RoundCalls> Round<C> {
-    /// The session's round over `rows`, built where the allocation that shares it keeps it: its
-    /// table's rows are kilobytes, which a value of the whole would lay in the frame of the
-    /// session's open once for each move.
-    #[inline(never)]
-    pub fn shared_over(rows: RoundRows<C>) -> Arc<Self> {
-        // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
-        // an `Arc` is the same allocation, and the optimiser writes nothing into it.
-        let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
-        // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
-        // is valid and nothing else reads or writes it while it is written.
-        unsafe { Self::write_in((*raw).as_mut_ptr(), rows) };
-        // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
-        // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
-        unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
+    /// The session's round over `rows`, built where `arena` places it ([`Arena::place_with`]): in
+    /// the session's own memory, owned by one owner and reached by handles that count nothing.
+    /// Refused, taking nothing, past what the arena has left.
+    pub fn placed_over(arena: &mut Arena, rows: RoundRows<C>) -> Result<Placed<Self>, LendRefused> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which
+        // `place_with` gives aligned and valid for writes of one.
+        unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
     }
 
     /// An empty round written where `at` points, field by field.
@@ -1436,6 +1408,16 @@ impl<C: RoundCalls> Round<C> {
             .unwrap_or_else(BoundedVec::new_static)
     }
 
+    /// [`Self::offer_sample_ref`] for a sample a view hands, read into the session's sample first
+    /// ([`SampleRef::of`]): what a dispatch that holds its sample as a view offers.
+    ///
+    /// # Safety
+    /// As [`Self::offer_sample_ref`]'s.
+    pub unsafe fn offer_sample(&self, call: C::Subscriber, sample: &dyn SampleView, first: bool) {
+        // SAFETY: the caller's contract.
+        unsafe { self.offer_sample_ref(call, &SampleRef::of(sample), first) };
+    }
+
     /// Hold `sample` for `call`, a call of a subscriber's callback begun on its row, read where it
     /// lies when it lies in the datagram a link lends the step; `first` when `call` is the first
     /// row of the sample's fan-out. The first row reads the sample once and writes its record, or
@@ -1447,7 +1429,12 @@ impl<C: RoundCalls> Round<C> {
     /// # Safety
     /// The caller holds the session's lock, and offers a later row of a fan-out in the same hold of
     /// it as the fan-out's first row.
-    pub unsafe fn offer_sample(&self, call: C::Subscriber, sample: &dyn SampleView, first: bool) {
+    pub unsafe fn offer_sample_ref(
+        &self,
+        call: C::Subscriber,
+        sample: &SampleRef<'_>,
+        first: bool,
+    ) {
         // The session's own put is handed the calls and holds nothing.
         // SAFETY: the caller's contract: written under the session's lock, which is held.
         let capturing = unsafe { &mut *self.capturing.get() };
@@ -1469,7 +1456,7 @@ impl<C: RoundCalls> Round<C> {
         let (holds_sender, unplaced) = 'refused: {
             // SAFETY: the caller's contract.
             let Some(table) = (unsafe { self.writable() }) else {
-                break 'refused (holds_its_sender(sample.reliability(), sample.qos()), false);
+                break 'refused (holds_its_sender(sample.reliability, sample.qos), false);
             };
             if !first {
                 let fan = table.fan;
@@ -1500,13 +1487,12 @@ impl<C: RoundCalls> Round<C> {
                     _ => {}
                 }
             }
-            let sample = Offered::of(sample);
             let holds_sender = holds_its_sender(sample.reliability, sample.qos);
             // SAFETY: the caller's contract.
             let lending = unsafe { self.lending() };
             // No room is refused as a part that found no place is, and counted apart from it.
             let placed = if Self::takes(table, 1) {
-                Self::place_sample(table, &sample, lending).ok_or(true)
+                Self::place_sample(table, sample, lending).ok_or(true)
             } else {
                 Err(false)
             };
@@ -1575,15 +1561,15 @@ impl<C: RoundCalls> Round<C> {
     /// room.
     fn place_sample(
         table: &mut Table<C>,
-        sample: &Offered<'_>,
+        sample: &SampleRef<'_>,
         lending: Option<Lending>,
     ) -> Option<(Span, Span, Option<Rest>)> {
         let key = match sample.held.and_then(|held| table.held_key(held)) {
             Some(key) => key,
-            None => table.place_key(sample.key, lending)?,
+            None => table.place_key(sample.keyexpr.as_bytes(), lending)?,
         };
         let payload = table.place(sample.payload, lending)?;
-        let rest = table.place_parts(&sample.rest, lending)?;
+        let rest = table.place_parts(sample, lending)?;
         Some((key, payload, rest))
     }
 
@@ -2294,11 +2280,7 @@ impl<C: RoundCalls> Round<C> {
             let owed = table.owed(entry);
             match &entry.what {
                 Held::Sample { head, rest } => {
-                    let sample = RoundSample {
-                        head: *head,
-                        rest: rest.as_ref(),
-                        table,
-                    };
+                    let sample = table.sample(head, rest.as_ref());
                     for call in owed.iter().filter_map(Owed::subscriber) {
                         call.hand(&sample);
                     }
@@ -2452,55 +2434,6 @@ impl<C: RoundCalls> Drop for Emptied<'_, C> {
         unsafe { (*self.0.table.get()).end_calls(&self.0.released) };
         self.0.lends.store(false, Ordering::Release);
         self.0.state.store(EMPTY, Ordering::Release);
-    }
-}
-
-/// A sample of the round, read where its parts lie: what each of its subscribers' callbacks is
-/// handed.
-struct RoundSample<'t, C: RoundCalls> {
-    head: Head,
-    rest: Option<&'t Rest>,
-    table: &'t Table<C>,
-}
-
-impl<C: RoundCalls> SampleView for RoundSample<'_, C> {
-    fn keyexpr(&self) -> &str {
-        self.table.text(self.head.key)
-    }
-
-    fn payload(&self) -> &[u8] {
-        self.table.bytes(self.head.payload)
-    }
-
-    fn kind(&self) -> SampleKind {
-        self.head.kind
-    }
-
-    fn reliability(&self) -> Reliability {
-        self.head.reliability
-    }
-
-    fn qos(&self) -> Option<QosLevel> {
-        self.head.qos
-    }
-
-    fn attachment(&self) -> Option<&[u8]> {
-        let span = self.rest?.attachment?;
-        Some(self.table.bytes(span))
-    }
-
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.rest?.source_info.as_ref()
-    }
-
-    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
-        let (time, zid) = self.rest?.timestamp?;
-        Some((time.get(), self.table.bytes(zid)))
-    }
-
-    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
-        let (id, schema) = self.rest?.encoding?;
-        Some((id, schema.map(|span| self.table.bytes(span))))
     }
 }
 
