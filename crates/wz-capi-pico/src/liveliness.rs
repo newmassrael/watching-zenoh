@@ -222,7 +222,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let state = match TokenState::declare(&PicoSession::of(handle), ke, declared_of(keyexpr)) {
+        let state = match TokenState::declare(PicoSession::of(handle), ke, declared_of(keyexpr)) {
             Ok(token) => slot.fill(token),
             Err(rc) => return rc,
         };

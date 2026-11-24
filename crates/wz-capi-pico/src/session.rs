@@ -607,13 +607,19 @@ pub(crate) struct PicoSessionHandle {
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
+    /// What an entity declared on the session needs of it, made once by the open and lent to each
+    /// declaring door (`crate::write_filter::PicoSession::of`), so no door makes its own copy and
+    /// lets it go on each of its ways out.
+    pub(crate) pico: crate::write_filter::PicoSession,
 }
 
 impl PicoSessionHandle {
     pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
+        let pico = crate::write_filter::PicoSession::over(drive.engine(), &ext);
         Self {
             drive,
             ext,
+            pico,
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }

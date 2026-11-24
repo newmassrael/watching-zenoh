@@ -599,7 +599,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session, declared)),
+            Arc::new(PicoPlane::new(session.clone(), declared)),
             ke,
             advanced_publisher_options(options),
             engine.session_zid(),
@@ -1504,7 +1504,7 @@ unsafe fn declare_subscriber_state(
     };
     // SAFETY: as above; the forms are asked only while the subscriber's entities are declared,
     // below, while the owner holds the place.
-    let forms = unsafe { lodge_forms(state, &PicoSession::of(handle), base) };
+    let forms = unsafe { lodge_forms(state, PicoSession::of(handle), base) };
     let opts =
         advanced_subscriber_options(options).with_declaration_forms(FormsHandle::lodged(forms));
     // SAFETY: as above.

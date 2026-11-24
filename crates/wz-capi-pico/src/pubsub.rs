@@ -3151,7 +3151,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let entity =
-            match PlainPublisher::declare_entity(&session, ke, declared_of(keyexpr), &declared) {
+            match PlainPublisher::declare_entity(session, ke, declared_of(keyexpr), &declared) {
                 Ok(entity) => entity,
                 Err(rc) => return rc,
             };

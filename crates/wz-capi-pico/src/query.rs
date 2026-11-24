@@ -1482,7 +1482,7 @@ unsafe fn declare_queryable_in(
         &mut (*kept).closure,
     );
     match declare_queryable_on(
-        &session,
+        session,
         ke,
         declared_of(keyexpr),
         complete,
