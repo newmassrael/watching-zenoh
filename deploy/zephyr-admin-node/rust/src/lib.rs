@@ -34,19 +34,23 @@ extern crate alloc;
 use alloc::format;
 #[cfg(not(storage_fixed))]
 use alloc::rc::Rc;
-#[cfg(not(storage_fixed))]
+#[cfg(all(role_admin, not(storage_fixed)))]
 use alloc::string::String;
 #[cfg(not(storage_fixed))]
 use alloc::vec::Vec;
 
 #[cfg(not(storage_fixed))]
 use wz::runtime_coop::session_drive::SessionLinks;
-#[cfg(not(storage_fixed))]
+#[cfg(all(role_admin, not(storage_fixed)))]
 use wz::runtime_coop::session_runtime::new_session_actions;
+#[cfg(not(storage_fixed))]
+use wz::runtime_coop::session_runtime::SessionEntropy;
 #[cfg(any(not(storage_fixed), feature = "mac-cyt4bf"))]
 use wz::runtime_coop::ClockSource;
+#[cfg(all(role_admin, not(storage_fixed)))]
+use wz::runtime_coop::CoopTime;
 #[cfg(not(storage_fixed))]
-use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
+use wz::runtime_coop::{CoopLocalSet, CoopRuntime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
 #[cfg(not(any(all(role_client, storage_fixed), feature = "fixed-admin")))]
 use wz::runtime_zephyr::glue::log;
@@ -341,6 +345,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let accept_runtime = runtime.clone();
     let policy = resolve_policy();
     let limits = resolve_limits();
+    // The node's one source, the board's: every session it accepts or dials draws its
+    // handshake's secrets from it, each through a handle on it.
+    let entropy = SessionEntropy::new(ZephyrEntropy);
+    let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,
         net.links(),
@@ -356,13 +364,16 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         SessionTimeouts::from_build(),
         move || params(WhatAmI::Peer, zid, &key, &policy, &limits),
         move |sink| {
-            new_session_actions(
-                sink,
-                params(WhatAmI::Peer, zid, &key, &policy, &limits),
-                CoopTime::new(&accept_runtime),
-                ZephyrEntropy,
+            (
+                new_session_actions(
+                    sink,
+                    params(WhatAmI::Peer, zid, &key, &policy, &limits),
+                    CoopTime::new(&accept_runtime),
+                ),
+                accept_entropy.clone(),
             )
         },
+        entropy,
     );
     // A node whose observer refused its admin keys would run without its admin
     // space: stop instead, with the reason.
@@ -501,6 +512,9 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         &ENDPOINTS,
         SessionTimeouts::from_build(),
         move || params(WhatAmI::Client, zid, &key, &policy, &limits),
+        // The board's source, which every session the node dials draws its handshake's
+        // secrets from.
+        SessionEntropy::new(ZephyrEntropy),
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

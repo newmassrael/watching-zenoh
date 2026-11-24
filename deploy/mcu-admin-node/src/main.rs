@@ -46,7 +46,7 @@ use wz::link_lwip::ethernet::{EthernetIf, Ipv4Config};
 #[cfg(not(feature = "fixed-memory"))]
 use wz::link_lwip::LwipLink;
 #[cfg(not(feature = "fixed-memory"))]
-use wz::runtime_coop::session_runtime::new_session_actions;
+use wz::runtime_coop::session_runtime::{new_session_actions, SessionEntropy};
 use wz::runtime_coop::ClockSource;
 #[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
@@ -123,9 +123,10 @@ static CONTROL: ConnectControl = ConnectControl::new(true);
 #[cfg(not(feature = "fixed-memory"))]
 static STATUS: NodeStatus = NodeStatus::new(true);
 
-/// NOT a TRNG. QEMU's mps2 machines have none, so the acceptor's cookie
-/// nonces come from a xorshift stream seeded from the SysTick clock at each
-/// construction. Enough to make each handshake's cookie distinct in the
+/// NOT a TRNG. QEMU's mps2 machines have none, so the handshakes' cookie
+/// nonces and challenges come from a xorshift stream seeded from the SysTick
+/// clock: the signing key's stream, and the node's one session source, each
+/// seeded once at boot. Enough to make each handshake's cookie distinct in the
 /// lane; a board with a TRNG hands that in here instead.
 struct ClockSeededXorshift(u64);
 
@@ -255,6 +256,10 @@ fn run_heap() -> ! {
     let local = CoopLocalSet::new(&runtime);
     let zid_hex = zid_to_zenoh_hex(&ZID);
     let accept_runtime = runtime.clone();
+    // The node's one source: every session it accepts or dials draws its handshake's secrets
+    // from it, each through a handle on it.
+    let entropy = SessionEntropy::new(ClockSeededXorshift::seeded());
+    let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,
         Rc::new(LwipLinks::new(link.clone())),
@@ -270,13 +275,16 @@ fn run_heap() -> ! {
         SessionTimeouts::from_build(),
         move || params(&key, &policy, &limits),
         move |sink| {
-            new_session_actions(
-                sink,
-                params(&key, &policy, &limits),
-                CoopTime::new(&accept_runtime),
-                ClockSeededXorshift::seeded(),
+            (
+                new_session_actions(
+                    sink,
+                    params(&key, &policy, &limits),
+                    CoopTime::new(&accept_runtime),
+                ),
+                accept_entropy.clone(),
             )
         },
+        entropy,
     );
     let mut node = match node {
         Ok(node) => node,
