@@ -3560,7 +3560,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // datagram is stepped again at once, its task taking one a step, so its own time is not
         // asked.
         #[cfg(feature = "group")]
-        let group_took = self.transport.groups.iter().any(GroupFace::took_input);
+        let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
             self.next_get_deadline_ms(),
@@ -3576,12 +3576,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if group_took {
                 None
             } else {
-                self.transport
-                    .groups
-                    .iter()
-                    .filter_map(GroupFace::due_us)
-                    .min()
-                    .map(|due_us| due_us.div_ceil(1_000))
+                self.transport.groups_due_ms()
             },
         ]
         .into_iter()
@@ -3602,7 +3597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         let most = if group_took {
             0
-        } else if self.transport.groups.iter().any(GroupFace::unwaited) {
+        } else if self.transport.group_unwaited() {
             most.min(group::GROUP_TICK_MS)
         } else {
             most
@@ -3623,10 +3618,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 clock.now_us()
             })
         };
-        #[cfg(feature = "group")]
-        let others = self.transport.groups.iter().filter_map(GroupFace::input);
-        #[cfg(not(feature = "group"))]
-        let others = core::iter::empty();
         // The bounds above are the clock's time read as the wall's, which a clock the program
         // moves is not: its word that the time moved on ends the wait as well.
         #[cfg(feature = "time-base")]
@@ -3637,9 +3628,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "time-base"))]
         let beside = None;
-        self.transport
-            .links
-            .idle_wait(most, &mut now_us, others, beside)
+        self.transport.idle_wait(most, &mut now_us, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
@@ -3666,10 +3655,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
         // leaves and lets the group's link go; its tables go with it.
         #[cfg(feature = "group")]
-        if !self.transport.groups.is_empty() {
-            for group in &self.transport.groups {
-                group.stop();
-            }
+        if self.transport.stop_groups() {
             self.run_tasks();
             let mut registry = self.session.registry.borrow_mut();
             for group in self.transport.groups.drain(..) {

@@ -11,7 +11,7 @@ use wz_runtime_coop::face_life::{FaceRole, Turn};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::FaceRead;
-use wz_runtime_coop::session_drive::PendingDial;
+use wz_runtime_coop::session_drive::{LinkWait, PendingDial};
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 use wz_session_mcu::dial::parse_locator;
@@ -360,7 +360,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     /// took a datagram its next step reads: what makes a read's wait none ([`Self::idle_wait`]).
     pub(super) fn holds_input(&self) -> bool {
         #[cfg(feature = "group")]
-        if self.groups.iter().any(GroupFace::took_input) {
+        if self.group_took_input() {
             return true;
         }
         self.links.holds_input()
@@ -498,5 +498,58 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
             }
         }
         None
+    }
+
+    /// Whether a group took a datagram its next step reads (`group`): it is stepped again at
+    /// once, its task taking one a step.
+    #[cfg(feature = "group")]
+    pub(super) fn group_took_input(&self) -> bool {
+        self.groups.iter().any(GroupFace::took_input)
+    }
+
+    /// When a group's session is next due with nothing arriving, in whole milliseconds of the
+    /// session's clock rounded up (`group`): its beacon, its sweep, what the session pushed onto
+    /// it, its join again.
+    #[cfg(feature = "group")]
+    pub(super) fn groups_due_ms(&self) -> Option<u64> {
+        self.groups
+            .iter()
+            .filter_map(GroupFace::due_us)
+            .min()
+            .map(|due_us| due_us.div_ceil(1_000))
+    }
+
+    /// Whether a group's stack gives no wait for its input, so the group is looked at on its tick
+    /// (`group`).
+    #[cfg(feature = "group")]
+    pub(super) fn group_unwaited(&self) -> bool {
+        self.groups.iter().any(GroupFace::unwaited)
+    }
+
+    /// What a read waits on for at most `most` milliseconds: the input of every link and port, and
+    /// each group's after them, since a wait over several is made by the first and a link's names a
+    /// group's socket to the platform beside its own; `beside` ends it as well. `now_us` reads the
+    /// session's clock, once, and only for a face with a time to be looked at again.
+    pub(super) fn idle_wait(
+        &mut self,
+        most: u32,
+        now_us: &mut dyn FnMut() -> u64,
+        beside: Option<LinkWait>,
+    ) -> IdleWait {
+        #[cfg(feature = "group")]
+        let others = self.groups.iter().filter_map(GroupFace::input);
+        #[cfg(not(feature = "group"))]
+        let others = core::iter::empty();
+        self.links.idle_wait(most, now_us, others, beside)
+    }
+
+    /// Ask each group's session to stop, so that its next step tells the group it leaves and lets
+    /// the group's link go; whether the session joined any (`group`).
+    #[cfg(feature = "group")]
+    pub(super) fn stop_groups(&self) -> bool {
+        for group in &self.groups {
+            group.stop();
+        }
+        !self.groups.is_empty()
     }
 }
