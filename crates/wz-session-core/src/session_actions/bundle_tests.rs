@@ -59,6 +59,7 @@ impl Runtime for PlainRuntime {
     where
         T: Send + 'static,
     {
+        HOLDS.with(|holds| holds.set(holds.get().wrapping_add(1)));
         // A test that panicked under the lock leaves its value as the panic left it, as the
         // runtimes' own locks do.
         f(&mut *mutex
@@ -79,6 +80,19 @@ impl Runtime for PlainRuntime {
     {
         std::sync::RwLock::new(value)
     }
+}
+
+std::thread_local! {
+    /// The holds of a lock this thread has taken through the test runtime. A test runs on a
+    /// thread of its own, so it reads only its own.
+    static HOLDS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// How many holds of the bundle's locks `f` takes, whichever lock each one is.
+fn holds_in(f: impl FnOnce()) -> usize {
+    let before = HOLDS.with(core::cell::Cell::get);
+    f();
+    HOLDS.with(core::cell::Cell::get).wrapping_sub(before)
 }
 
 /// The test runtime's entropy: none, so a handshake these tests drive mints no cookie (the
@@ -698,6 +712,44 @@ mod lent_handshake {
         assert!(link.sent.lock().expect("the sends").is_empty());
         assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
     }
+
+    /// A lend-only Open stages the bound the session decided where it writes the Open, so the
+    /// peer reads it off the OpenSyn, and an OpenSyn sent once the decision went to none carries
+    /// none. Turned red by a lend-only Open that leaves the bound unstaged, which no other step of
+    /// a lend-only session stages.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-frame",
+        feature = "session-unicast"
+    ))]
+    #[test]
+    fn a_lent_open_syn_carries_the_bound_the_session_decided() {
+        use crate::extbound::{peer_remote_bound_in, Bound};
+        use crate::inbound::{read_control, ExtChainRead};
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        actions.fact_local_remote_bound(|slot| *slot = Some(Bound::South));
+        binding.send_open_syn();
+        actions.fact_local_remote_bound(|slot| *slot = None);
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "both OpenSyns were sent");
+        let bound_of = |bytes: &[u8]| {
+            let (read, _) = read_control(bytes).expect("an Open the reader reads");
+            peer_remote_bound_in(read.chain().entries()).ok()
+        };
+        assert_eq!(
+            bound_of(sent[0].as_slice()),
+            Some(Some(Bound::South)),
+            "the bound the session decided"
+        );
+        assert_eq!(
+            bound_of(sent[1].as_slice()),
+            Some(None),
+            "a bound decided away is taken off the chain"
+        );
+    }
 }
 
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
@@ -735,7 +787,7 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {
-    use super::bundle;
+    use super::{bundle, holds_in};
 
     #[test]
     fn a_fact_written_through_its_door_is_read_in_the_one_row() {
@@ -800,21 +852,171 @@ mod facts_lock {
         );
     }
 
-    /// An admitted OpenAck ends the wait and takes the peer's lease in one hold.
+    /// An awaited OpenAck is admitted, ends the wait and takes the peer's lease and bound in one
+    /// hold. Turned red by an admission that asks whether one is awaited, or writes the bound, in
+    /// a hold of its own.
     #[cfg(feature = "codec-open-body")]
     #[test]
     fn an_admitted_open_ack_ends_the_wait_and_takes_the_lease() {
+        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::session_actions::OpenAckAdmission;
         let (actions, _link) = bundle();
         actions.fact_awaiting_open_ack(|slot| *slot = true);
-        actions.admit_open_ack(5, 10);
-        let (awaiting, lease) = actions.with_facts(|facts| {
+        let chain = [encode_remote_bound_ext(Bound::South)];
+        let mut admitted = None;
+        let holds = holds_in(|| admitted = Some(actions.admit_open_ack_in(5, 10, &chain)));
+        assert_eq!(admitted, Some(OpenAckAdmission::Taken));
+        assert_eq!(
+            holds, 1,
+            "the OpenAck is judged and taken in one hold of the facts"
+        );
+        let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
                 facts.handshake.peer_open_lease_ms,
+                facts.handshake.peer_remote_bound,
             )
         });
         assert!(!awaiting, "the one awaited OpenAck has been taken");
         assert_eq!(lease, Some(5), "the lease the OpenAck advertised");
+        assert_eq!(bound, Some(Bound::South), "the bound the OpenAck announced");
+    }
+
+    /// An OpenAck no one awaits is dropped and takes nothing, whatever it carries: the wait, the
+    /// lease and the bound stay as they were.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_open_ack_no_one_awaits_takes_nothing() {
+        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::session_actions::OpenAckAdmission;
+        let (actions, _link) = bundle();
+        let chain = [encode_remote_bound_ext(Bound::South)];
+        assert_eq!(
+            actions.admit_open_ack_in(5, 10, &chain),
+            OpenAckAdmission::NotAwaited
+        );
+        let (awaiting, lease, bound) = actions.with_facts(|facts| {
+            (
+                facts.handshake.awaiting_open_ack,
+                facts.handshake.peer_open_lease_ms,
+                facts.handshake.peer_remote_bound,
+            )
+        });
+        assert!(!awaiting, "nothing was awaited, and nothing is now");
+        assert_eq!(lease, None, "an OpenAck not awaited adopts no lease");
+        assert_eq!(bound, None, "an OpenAck not awaited writes no bound");
+    }
+
+    /// An awaited OpenAck whose remote bound is present and invalid refuses the handshake and
+    /// takes nothing: it is still awaited, and neither its lease nor a bound is written.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_awaited_open_ack_with_an_invalid_bound_takes_nothing() {
+        use crate::extbound::REMOTE_BOUND_EXT_HEADER;
+        use crate::session_actions::OpenAckAdmission;
+        use crate::transport_profile::{ExtEntryOwned, ExtEntryOwnedVariant};
+        let (actions, _link) = bundle();
+        actions.fact_awaiting_open_ack(|slot| *slot = true);
+        let invalid = [ExtEntryOwned {
+            header: REMOTE_BOUND_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
+                value: 2,
+            }),
+        }];
+        assert_eq!(
+            actions.admit_open_ack_in(5, 10, &invalid),
+            OpenAckAdmission::BoundRefused
+        );
+        let (awaiting, lease, bound) = actions.with_facts(|facts| {
+            (
+                facts.handshake.awaiting_open_ack,
+                facts.handshake.peer_open_lease_ms,
+                facts.handshake.peer_remote_bound,
+            )
+        });
+        assert!(awaiting, "a refused OpenAck ends no wait");
+        assert_eq!(lease, None, "a refused OpenAck adopts no lease");
+        assert_eq!(bound, None, "a refused bound is not written");
+    }
+
+    /// The RX SN gate reads the ring the peer's capabilities give and moves the conduit's
+    /// baseline in one hold of the facts. Turned red by a gate that reads the capabilities in a
+    /// hold of their own.
+    #[test]
+    fn the_rx_sn_gate_judges_in_one_hold_of_the_facts() {
+        use crate::qos::Priority;
+        use crate::sn::RxAdmit;
+        let (actions, _link) = bundle();
+        let mut first = None;
+        let holds = holds_in(|| {
+            first = Some(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5));
+        });
+        assert_eq!(
+            first,
+            Some(RxAdmit::Accept),
+            "a channel's first frame is taken"
+        );
+        assert_eq!(holds, 1, "the gate takes the facts once");
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5),
+            RxAdmit::Stale,
+            "a duplicate is dropped"
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 7),
+            RxAdmit::Gap { missing: 1 },
+            "a forward jump is taken and reports the frame it skipped"
+        );
+        assert_eq!(
+            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 5),
+            RxAdmit::Accept,
+            "the best-effort channel keeps a baseline of its own"
+        );
+    }
+
+    /// The chain-boundary markers are read off the negotiated patch level: none before an Init
+    /// set one, and the level that has them once it is negotiated.
+    #[test]
+    fn the_fragment_markers_follow_the_negotiated_patch() {
+        let (actions, _link) = bundle();
+        assert!(
+            !actions.fragmentation_markers_negotiated(),
+            "no level negotiated reads as no markers"
+        );
+        actions.fact_negotiated_patch(|slot| *slot = Some(crate::extpatch::NO_PATCH));
+        assert!(
+            !actions.with_facts(|facts| facts.handshake.fragmentation_markers()),
+            "a peer at no patch level marks no chain"
+        );
+        actions.fact_negotiated_patch(|slot| *slot = Some(u8::MAX));
+        assert!(
+            actions.with_facts(|facts| facts.handshake.fragmentation_markers()),
+            "a level past the markers' marks its chains"
+        );
+        assert!(actions.fragmentation_markers_negotiated());
+    }
+
+    /// The Open's origin is derived from the ring and the peer's zid read in one hold of the facts,
+    /// and is none before the peer's zid is known.
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
+    #[test]
+    fn the_open_origin_reads_the_ring_and_the_zid_in_one_hold() {
+        let (actions, _link) = bundle();
+        assert_eq!(actions.open_initial_sn(), None, "no peer zid, no origin");
+        let peer = [0x0C; 4];
+        actions.fact_remote_peer_zid(|slot| *slot = Some(peer.into()));
+        let mut origin = None;
+        let holds = holds_in(|| origin = actions.open_initial_sn());
+        assert_eq!(holds, 1, "the ring and the zid are read in one hold");
+        let mask = actions.negotiated_sn_mask();
+        assert_eq!(
+            origin,
+            Some(crate::initial_sn::derive_initial_sn(
+                &actions.params.zid,
+                &peer,
+                mask
+            ))
+        );
     }
 
     /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease in one

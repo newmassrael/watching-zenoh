@@ -1123,6 +1123,11 @@ pub(crate) unsafe fn store_owned_slice(
 
 /// Put a string holding a copy of `bytes` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst`
 /// null, when there was no room for its bytes.
+///
+/// Out of line: a door that renders a string of a fixed length into a buffer of its own would
+/// otherwise inline a copy of the string's construction specialised to that length, and hold its
+/// rendering in registers only to copy it into the block byte by byte.
+#[inline(never)]
 pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]) -> ZResult {
     store_string(dst, StringState::boxed(bytes))
 }

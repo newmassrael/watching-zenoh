@@ -291,12 +291,14 @@ pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
             .all(|at| Locator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
 }
 
-/// A link whose two ends are known from the addresses it was opened over, asked before it is
-/// admitted whether the rows of the build name them ([`ends_fit`]).
-pub trait EndsFit {
-    /// Whether both ends fit; `true` while one end is not known yet (an accepting datagram link,
-    /// which takes a peer only when its ends fit).
-    fn ends_fit(&self) -> bool;
+/// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
+/// ([`ends_fit`]), asked of what the link is made of before it is made; `true` while the peer is
+/// not known yet (an accepting link, which takes a peer only when its ends fit).
+pub fn datagram_ends_fit<S: DatagramSocket>(socket: &S, peer: Option<SocketAddr>) -> bool {
+    match peer {
+        Some(peer) => ends_fit(LinkProto::Udp, socket.local(), peer),
+        None => true,
+    }
 }
 
 /// The session's link over one socket `S`, with its receive buffer in `B` and its outbound frames
@@ -435,8 +437,15 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.input_wait().is_some();
+        self.wait_by_owner();
         self
+    }
+
+    /// [`Self::waited_by_owner`] where the link lies: a stack that makes a link sets it there,
+    /// so the link is not moved through a second value of its whole size.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub fn wait_by_owner(&mut self) {
+        self.owner_waits = self.socket.input_wait().is_some();
     }
 
     /// Let this link wait up to `ms` milliseconds for a datagram when its session has nothing due
@@ -467,6 +476,9 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     /// stranger's datagram, another source's `InitSyn`, anything before an accepting link's first
     /// `InitSyn`) is counted ([`Self::foreign`]) and the caller discards it; the socket is this
     /// link's alone, so nothing it discards is anyone else's.
+    // Out of line: the one body of both reads that take a datagram, the receive's
+    // (`Self::next_admitted`) and the wait's that reads as it waits (`Self::wait_for_datagram`).
+    #[inline(never)]
     fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
         // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator no
         // row of the build holds is not taken, so no session stands on a link it cannot name.
@@ -560,15 +572,6 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
         match self.socket.send_to(peer, bytes) {
             Ok(()) => LinkSendOutcome::Sent,
             Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
-        }
-    }
-}
-
-impl<S: DatagramSocket, B: RxStore, T: TxStore> EndsFit for UdpDriver<S, B, T> {
-    fn ends_fit(&self) -> bool {
-        match self.binding.peer() {
-            Some(peer) => ends_fit(LinkProto::Udp, self.socket.local(), peer),
-            None => true,
         }
     }
 }

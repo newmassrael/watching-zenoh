@@ -152,7 +152,8 @@ pub struct TransportState<T: TransportFaces> {
 }
 
 /// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
-/// value, what the session does about its link, and the answer of its dial when one was asked.
+/// value, what the session does about its link, the answer of its dial when one was asked, and
+/// the endpoint of a dial that is over.
 pub struct FaceStep<P> {
     /// The face's value, read at the step.
     pub life: FaceLife,
@@ -160,6 +161,9 @@ pub struct FaceStep<P> {
     pub effect: FaceEffect,
     /// The answer of the face's dial, when one was asked.
     pub answer: DialAnswer<P>,
+    /// The endpoint the face's dial reached, when the dial is over at this step: moved out of
+    /// the dial as it is let go of, the one place its text is held.
+    pub endpoint: Option<DialEndpoint>,
 }
 
 /// A dial of one of the session's endpoints, asked once as it is begun
@@ -622,7 +626,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// the face's role, and what the face does about it (`FaceLife`), `redials` when the session
     /// dials its endpoints again: the session carries it out, with the answer of the dial when one
     /// was asked. A dial that is over is let go of here, with what it held for its link (a socket,
-    /// the link's buffers), before the face is dialled anew.
+    /// the link's buffers), before the face is dialled anew; its endpoint is moved out to the step.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn face_step(
@@ -640,15 +644,17 @@ impl<T: TransportFaces> TransportState<T> {
         } = self.links.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
-        if matches!(turn, Turn::DialOver { .. }) {
-            self.links.put_link(at, Link::Waiting { at_us: now_us });
-        }
+        let endpoint = match turn {
+            Turn::DialOver { .. } => self.links.end_dial(at, now_us),
+            _ => None,
+        };
         let stood_by = self.stood_by(at, id, &turn);
         let effect = life.effect(turn, redials, stood_by);
         FaceStep {
             life,
             effect,
             answer,
+            endpoint,
         }
     }
 

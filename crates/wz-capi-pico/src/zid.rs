@@ -462,6 +462,32 @@ mod tests {
         assert_eq!(zid_hex(&[0; Z_ID_SIZE]), [b'0'; Z_ID_SIZE * 2]);
     }
 
+    /// The export hands the rendering back as an owned, NUL-terminated string, and refuses a null
+    /// id or a null place for the string.
+    #[test]
+    fn z_id_to_string_hands_back_the_rendering_and_refuses_a_null() {
+        let mut id = z_id_t::empty();
+        id.id[0] = 0xAB;
+        id.id[15] = 0x01;
+        // SAFETY: live locals; the string is dropped by the ABI's own drop.
+        unsafe {
+            let mut out: z_owned_string_t = core::mem::zeroed();
+            assert_eq!(z_id_to_string(&id, &mut out), Z_OK);
+            let loaned = crate::bytes::z_string_loan(&out);
+            let len = crate::bytes::z_string_len(loaned);
+            let data = crate::bytes::z_string_data(loaned).cast::<u8>();
+            assert_eq!(
+                core::slice::from_raw_parts(data, len),
+                b"010000000000000000000000000000ab".as_slice()
+            );
+            assert_eq!(*data.add(len), 0, "NUL-terminated");
+            crate::bytes::z_string_drop(crate::bytes::z_string_move(&mut out));
+
+            assert_eq!(z_id_to_string(core::ptr::null(), &mut out), Z_ERR_NULL);
+            assert_eq!(z_id_to_string(&id, core::ptr::null_mut()), Z_ERR_NULL);
+        }
+    }
+
     /// A short wire zid is zero-padded to 16, LEFT-aligned — zenoh strips
     /// trailing zeros on the wire, so re-padding must put them back at the end.
     #[test]

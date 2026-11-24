@@ -227,11 +227,8 @@ impl<S, D> Link<S, D> {
                 deadline_us: *deadline_us,
             },
             Link::Dialing {
-                dial,
-                next,
-                deadline_us,
+                next, deadline_us, ..
             } => Phase::Dialing {
-                endpoint: dial.endpoint().clone(),
                 next: *next,
                 deadline_us: *deadline_us,
             },
@@ -393,6 +390,11 @@ impl<D> Dial<D> {
     /// The endpoint dialled.
     pub fn endpoint(&self) -> &DialEndpoint {
         &self.endpoint
+    }
+
+    /// Let go of the dial, with what it held for its link, keeping the endpoint it dialled.
+    pub fn into_endpoint(self) -> DialEndpoint {
+        self.endpoint
     }
 
     /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
@@ -626,6 +628,17 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial>) {
         if let Some(face) = self.faces.get_mut(at) {
             *face.link_mut() = link;
+        }
+    }
+
+    /// Let go of the dial of the face at `at`, which is over, the face waiting from `at_us`: the
+    /// endpoint it dialled, moved out of the dial, which the refusal or the link's session names.
+    /// `None` for a face that held no dial, which waits all the same, and for one past the table.
+    pub fn end_dial(&mut self, at: usize, at_us: u64) -> Option<DialEndpoint> {
+        let link = self.faces.get_mut(at)?.link_mut();
+        match core::mem::replace(link, Link::Waiting { at_us }) {
+            Link::Dialing { dial, .. } => Some(dial.into_endpoint()),
+            _ => None,
         }
     }
 
@@ -1268,6 +1281,24 @@ mod tests {
         assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
         assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
         assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+    }
+
+    /// A dial that is over is let go of and hands over the endpoint it dialled, its own text
+    /// whole, the face waiting from then; a face that held no dial waits all the same and hands
+    /// none, and a face past the table is left as it is.
+    #[test]
+    fn an_ended_dial_hands_over_its_endpoint_and_its_face_waits() {
+        let named = DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"));
+        let mut faces = supervisor(dialing(named.clone(), None, 1, 50), 2);
+        assert_eq!(faces.end_dial(0, 7), Some(named));
+        assert!(matches!(faces.faces()[0].link, Link::Waiting { at_us: 7 }));
+
+        faces.put_link(0, Link::Held { zid: held_node() });
+        assert_eq!(faces.end_dial(0, 9), None, "no dial, no endpoint");
+        assert!(matches!(faces.faces()[0].link, Link::Waiting { at_us: 9 }));
+
+        assert_eq!(faces.end_dial(5, 11), None, "past the table");
+        assert!(matches!(faces.faces()[0].link, Link::Waiting { at_us: 9 }));
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face
