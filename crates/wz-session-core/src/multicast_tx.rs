@@ -715,6 +715,17 @@ impl MulticastTxMeta {
         Self(frame_meta(item, params))
     }
 
+    /// How a reply that goes out with `qos` is framed onto a group of `params`: on the reliable
+    /// channel, on the band its QoS names. The one reading of a reply's framing, of its owned
+    /// record ([`MulticastTxReply::meta`]) and of its parts.
+    #[cfg(feature = "codec-response")]
+    pub fn of_reply(
+        qos: crate::sample::QosLevel,
+        params: &crate::multicast_params::MulticastParams,
+    ) -> Self {
+        Self(qos_frame_meta(qos, true, params))
+    }
+
     /// The conduit the message mints on: the lane its datagrams take.
     pub fn conduit(self) -> Priority {
         self.0.priority
@@ -783,11 +794,10 @@ impl MulticastTxReply<'_> {
     pub fn meta(self, params: &crate::multicast_params::MulticastParams) -> MulticastTxMeta {
         match self {
             #[cfg(feature = "codec-response")]
-            Self::Response(response) => MulticastTxMeta(qos_frame_meta(
+            Self::Response(response) => MulticastTxMeta::of_reply(
                 crate::declare_ext_qos::read_response_qos(response),
-                true,
                 params,
-            )),
+            ),
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::DeclareReply(declare) => {
                 let _ = params;

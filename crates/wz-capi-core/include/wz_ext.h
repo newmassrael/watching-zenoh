@@ -35,8 +35,9 @@
  * may_require is the rest a run may ask for, null when part of it has no
  * facility name, and unknown says why. The words are the manifest's
  * facility vocabulary. The config is read as z_open reads it, and is not
- * consumed. Part of the unstable surface: a library built without its
- * unstable API does not have it.
+ * consumed. Part of the unstable surface, in a library built with the
+ * device-requires capability (on in a build that names nothing, off in
+ * the zenoh-pico preset), which implies the unstable API.
  *
  * Z_OK with the object, or the code z_open would refuse the config with,
  * the string then naming the reason. */

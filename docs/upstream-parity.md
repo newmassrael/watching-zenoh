@@ -292,7 +292,15 @@ derived from the declaration and never chosen by hand:
   one row per cell with its figures, the boots, the host, the date and the tree. A change
   that moves a cell moves its row in the same commit. Hosted CI grades the host size cells.
   The MCU and the host time cells are lab rows: a person or the loop runs the lane, and the
-  row records when.
+  row records when. A run's rows hold every image of the run against its reference, the
+  reference's other arm included, so not every row is a cell of wz: the rows of
+  `zephyr-pico-queryable` against `zephyr-pico-queryable-st` (run 20261031T063515) are
+  zenoh-pico's multi-threaded arm against its single-threaded arm, which is how the stronger
+  arm was chosen as the reference. Their gaps are pico's own, not debts of D5: the
+  multi-threaded arm's static task stacks and its read task,
+  `vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`.
+  wz's pico C ABI under the same program is `zephyr-wz-pico-queryable` and `-st` (section
+  5a), which no run of the matrix holds yet.
 
 - **D7. Every capability is a switch, from Kconfig down to the generated state machine (owner,
   2026-10-26: "kconfig와 sce code gen으로 기능을 껐다 켰다 자유롭게 조작할 수 있어야 해").**
@@ -761,6 +769,7 @@ stops holding.
 | preset | behaviour | the original | wz | rule | held by |
 |---|---|---|---|---|---|
 | pico, on a host with a heap | how many members a group holds | no cap: the member list grows while the allocator gives (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `ztm->_peers = _z_transport_peer_multicast_slist_push_empty(ztm->_peers);`) | the rows of the group face's table, `GROUP_FACE_ROWS` (32) in `crates/wz-runtime-tokio/src/multicast_glue.rs`; the Join of a member past them is refused and counted | a group grows only to a cap a configuration states | `a_face_with_no_stated_cap_holds_its_rows_where_pico_would_grow` (`multicast_glue.rs`), `the_pico_group_states_no_member_cap` (`crates/wz-capi-pico/src/session.rs`) |
+| pico | a key not in canon form, at a door that makes, declares or sends a key | the view constructor refuses it with `Z_EINVAL` (`vendor/zenoh-pico/src/api/api.c` @ `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`); the owned constructor copies it unjudged (`vendor/zenoh-pico/src/api/api.c` @ `return _z_declared_keyexpr_from_substr(&key->_val, name, len);`), the concatenation keeps a result not in canon form, and a declaration, a put, a get and a reply send whatever text the key holds | refused with `Z_EINVAL` at every such door: the owned constructors, the concatenation, `z_declare_keyexpr`, the declarations of a publisher, subscriber, queryable, querier, liveliness token and liveliness subscriber, `z_put`, `z_delete`, `z_get`, `z_query_reply` and `z_query_reply_del`, all through one judgement (`canon_key` in `crates/wz-capi-pico/src/keyexpr.rs`); a text that needs rewriting goes through an `_autocanonize` door or the join, which rewrite it as pico's do | a key is made of text only when the text is in canon form, as upstream zenoh makes one (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `fn try_from(value: &'a str) -> Result<Self, Self::Error> {`), its concatenation included (`zenoh/src/api/key_expr.rs` @ `key_expr: OwnedKeyExpr::try_from(format!("{self}{s}"))?,`) | `the_owned_constructors_refuse_a_text_not_in_canon_form`, `a_concatenation_is_taken_only_as_it_is`, `the_outbound_gate_reads_a_canon_key_and_refuses_the_rest` (`crates/wz-capi-pico/src/keyexpr.rs`); `crates/wz-capi-pico/tests/it/files/noncanon_keys_refused.rs` |
 
 The rule, and why it is the pico preset's alone. A group admits a member on an unauthenticated
 Join, keyed by the source address of the datagram, and a single host on the segment can send
@@ -777,6 +786,21 @@ What the row costs, stated: a pico group past 32 members is a group whose 33rd m
 by a wz host, where a pico host would hear it. An MCU image is not in the row: its table is the
 one the image declares, as pico's is bounded by the heap the image gives it, and pico on the same
 image would refuse the member it had no memory for.
+
+Why the key row does not follow pico (owner, 2026-11-25). pico judges a key's text at one door,
+its view constructor, and at no other: the same text that view refuses is taken by the owned
+constructor, kept by the concatenation and put on the wire by every door that names a key. That is
+an inconsistency of pico's, not a contract a program can rely on, and upstream zenoh, the original
+of the zenoh and zenoh-c presets, refuses the text wherever a key is made of one. The pico
+preset takes upstream's rule at every door, with the code pico's own view answers. Only an
+unchecked view can still hold such a text, and every door that declares or sends it refuses it
+there. The concatenation also refuses a `*` meeting a `*` at the seam, as pico's and upstream's
+both do (`vendor/zenoh-pico/src/session/keyexpr.c` @
+`if (left_data[left_len - 1] == '*' && len > 0 && right[0] == '*') {`).
+
+What the row costs, stated: a pico program that builds an owned key or a concatenation of a text
+not in canon form, or sends one through an unchecked view, gets `Z_EINVAL` where pico went on,
+and nothing is made or sent; the program asks an `_autocanonize` door for the canon form instead.
 
 ## 8. Limits of an original, measured on wz
 

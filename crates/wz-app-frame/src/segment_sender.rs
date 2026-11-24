@@ -11,7 +11,7 @@
 //! module takes the profile the reader takes, as the same text, and writes
 //! each piece with the reader's own field layout and CRC rule
 //! ([`crate::segment_profile::Field::write`],
-//! [`crate::segment_profile::SegmentProfile`]'s one CRC feeder): a piece this
+//! [`crate::segment_profile::crc_over`], the one CRC feeder): a piece this
 //! module writes is one the reader joins, and the tests hold it to that.
 //!
 //! # Who writes which field
@@ -68,7 +68,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::e2e_profile::{read_json, DocError, Pointer};
-use crate::segment_profile::SegmentProfile;
+use crate::segment_profile::{crc_over, SegmentProfile};
 
 /// What a sender does after the message that carried the largest transfer
 /// number its field holds.
@@ -308,7 +308,7 @@ impl SegmentSender {
             piece.extend_from_slice(chunk);
             if let Some(spec) = self.profile.crc() {
                 let (header, body) = piece.split_at(header_bytes);
-                let crc = self.profile.crc_over(spec, header, body);
+                let crc = crc_over(&self.profile, spec, header, body);
                 fields[spec.field].write(&mut piece, crc);
             }
             if !emit(&piece) {

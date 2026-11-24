@@ -10,7 +10,7 @@
 //! parses and links the text a program hands over; the compiled-descriptor
 //! reader of `wz_app_frame::proto_descriptor` reads the `FileDescriptorSet`
 //! `protoc` wrote when the program was built. The tables are the same either
-//! way, so this module is in every build and the text reader is not.
+//! way, so this module is in every build with `alloc` and the text reader is not.
 
 use alloc::string::String;
 use alloc::vec::Vec;

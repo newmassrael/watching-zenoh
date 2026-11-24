@@ -482,6 +482,14 @@ config WZ_CAP_CONFIG_DOCUMENT
 	  wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
 	  Exported by: pico.
 
+config WZ_CAP_DEVICE_REQUIRES
+	bool "device-requires"
+	default y
+	select WZ_CAP_UNSTABLE_API
+	help
+	  wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own).
+	  Exported by: pico.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

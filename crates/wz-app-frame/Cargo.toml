@@ -33,9 +33,10 @@ default = ["alloc"]
 
 # The profile, frame, segment-profile, segment-chain and segment-sender modules. Each reads a
 # profile from the workspace's JSON reader (`wz_session_core::json5`, behind the core's own
-# `alloc`) and holds its fields in a `Vec`. Off, the crate is `e2e_crc` and `e2e_judge`, which link
-# no allocator.
-alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
+# `alloc`) and holds its fields in a `Vec`; the reader of such documents and the message catalog's
+# reader are `wz-app-schema`'s, behind its own `alloc`. Off, the crate is `e2e_crc`, `e2e_judge` and
+# the catalog's static tables, which link no allocator.
+alloc = ["dep:wz-session-core", "wz-session-core/alloc", "wz-app-schema/alloc"]
 
 # The type tables of a payload's schema and their two readers' common part (`proto_types`), the
 # reader of the `FileDescriptorSet` `protoc` compiles a schema into (`proto_descriptor`), the typed
@@ -46,7 +47,7 @@ alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 # node that only frames its payloads links none of it. The tables are `wz-app-schema`'s,
 # re-exported here; the readers and the writer of every sample are this crate's. The `.proto` text
 # reader is `proto-text`'s.
-proto = ["alloc", "dep:wz-app-schema"]
+proto = ["alloc"]
 
 # The `.proto` text reader (`proto_lex`, `proto_parse`, `proto_schema`), and what reads a schema
 # from text through it (`SchemaSet::read`, `LinkedSchema`, `decode_message`, `Keyer::new`). Off, a
@@ -84,7 +85,9 @@ replay = ["alloc"]
 sce-generated-codec = ["alloc"]
 
 [dependencies]
-wz-app-schema = { path = "../wz-app-schema", default-features = false, optional = true }
+# Every build links it: the message catalog's static tables, which an image with no allocator links,
+# are its, and its readers come in with `alloc`.
+wz-app-schema = { path = "../wz-app-schema", default-features = false }
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 
 [lints]

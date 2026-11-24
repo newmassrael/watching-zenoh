@@ -535,7 +535,7 @@ fn a_profile_builds_the_judge_its_counter_rules_describe() {
         r#""counter": {"field": "counter", "max_gap": 10, "timeout_ms": 1000}"#,
         r#""counter": {"field": "counter", "max_gap": 3, "timeout_ms": 50}"#,
     ));
-    let mut judge = profile.judge();
+    let mut judge = Judge::for_profile(&profile);
     let feed = |judge: &mut Judge, counter: u64, now: u64| {
         judge.receive(true, counter, now).expect("fits two bytes")
     };
@@ -556,7 +556,7 @@ fn a_profile_builds_the_judge_its_counter_rules_describe() {
 fn the_judge_reads_the_counter_an_open_frame_carries() {
     let profile = profile_of(DEMO_A);
     let gold = &GOLDS[0];
-    let mut judge = profile.judge();
+    let mut judge = Judge::for_profile(&profile);
     let mut now = 0u64;
     let mut send = |counter: u64, damage: bool, judge: &mut Judge| {
         let values = values_of(&gold.values.replace("258", &counter.to_string()));

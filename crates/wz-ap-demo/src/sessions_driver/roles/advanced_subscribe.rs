@@ -100,7 +100,7 @@ fn options_of(
             config = config.max_samples(usize::try_from(n).unwrap_or(usize::MAX));
         }
         if let Some(ms) = history_age_ms {
-            config = config.max_age(Duration::from_millis(ms).as_secs_f64());
+            config.max_age = Some(Duration::from_millis(ms));
         }
         options = options.with_history(config);
     }
@@ -390,7 +390,7 @@ mod tests {
             .history
             .expect("an age asks for history");
         assert_eq!(aged.sample_depth, None);
-        assert_eq!(aged.max_age, Some(1.5));
+        assert_eq!(aged.max_age, Some(Duration::from_millis(1_500)));
     }
 
     #[cfg(feature = "advanced")]

@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::e2e_profile::DocError;
-use crate::segment_profile::{synthetic, Misplaced, SegmentProfile};
+use crate::segment_profile::{place, recognise, synthetic, Misplaced, SegmentProfile};
 
 /// The synthetic profile ([`synthetic::PROFILE`]), under the name the tests
 /// here use for it.
@@ -61,7 +61,7 @@ fn the_profile_reads_its_fields_roles_and_header_width() {
 fn a_piece_is_read_in_each_fields_own_byte_order_and_its_crc_matches() {
     let p = demo_profile();
     let bytes = demo_piece(0x1234, 7, 0x0A0B0C, 0x000102, b"chunk");
-    let piece = p.recognise(&bytes).expect("a piece");
+    let piece = recognise(&p, &bytes).expect("a piece");
     assert_eq!(piece.values[..5], [0xA5C3, 0x1234, 7, 0x0A0B0C, 0x000102]);
     assert_eq!(piece.chunk, b"chunk");
     let crc = piece.crc.expect("the profile has a CRC");
@@ -76,15 +76,15 @@ fn a_payload_without_the_marks_or_shorter_than_the_header_is_not_a_piece() {
     let p = demo_profile();
     let mut bytes = demo_piece(1, 1, 5, 0, b"abcde");
     bytes[0] ^= 0xFF;
-    assert!(p.recognise(&bytes).is_none(), "a wrong mark");
+    assert!(recognise(&p, &bytes).is_none(), "a wrong mark");
     let bytes = demo_piece(1, 1, 5, 0, b"abcde");
     assert!(
-        p.recognise(&bytes[..DEMO_HEADER - 1]).is_none(),
+        recognise(&p, &bytes[..DEMO_HEADER - 1]).is_none(),
         "too short"
     );
     // Exactly the header is a piece with an empty chunk, which `place` refuses.
-    let piece = p.recognise(&bytes[..DEMO_HEADER]).expect("a header alone");
-    assert_eq!(p.place(&piece), Err(Misplaced::EmptyChunk));
+    let piece = recognise(&p, &bytes[..DEMO_HEADER]).expect("a header alone");
+    assert_eq!(place(&p, &piece), Err(Misplaced::EmptyChunk));
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn a_damaged_piece_with_its_marks_is_still_a_piece_and_says_its_crc_is_wrong() {
     let p = demo_profile();
     let mut bytes = demo_piece(1, 1, 5, 0, b"abcde");
     *bytes.last_mut().expect("a chunk") ^= 0x01;
-    let piece = p.recognise(&bytes).expect("still a piece");
+    let piece = recognise(&p, &bytes).expect("still a piece");
     let crc = piece.crc.expect("a CRC");
     assert!(!crc.matches(), "{crc:?}");
 }
@@ -102,10 +102,10 @@ fn without_marks_the_crc_is_what_makes_a_payload_a_piece() {
     let text = demo_with(r#","equals":"0xA5C3""#, "");
     let p = SegmentProfile::parse(&text).expect("valid without marks");
     let good = demo_piece(1, 1, 5, 0, b"abcde");
-    assert!(p.recognise(&good).is_some());
+    assert!(recognise(&p, &good).is_some());
     let mut bad = good.clone();
     *bad.last_mut().expect("a chunk") ^= 0x01;
-    assert!(p.recognise(&bad).is_none(), "no mark and no matching CRC");
+    assert!(recognise(&p, &bad).is_none(), "no mark and no matching CRC");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn place_refuses_a_whole_that_cannot_hold_the_chunk() {
     let p = demo_profile();
     let place = |size, at, chunk: &[u8]| {
         let bytes = demo_piece(1, 1, size, at, chunk);
-        p.place(&p.recognise(&bytes).expect("a piece"))
+        place(&p, &recognise(&p, &bytes).expect("a piece"))
     };
     assert_eq!(place(10, 4, b"abc"), Ok((10, 4)));
     assert_eq!(

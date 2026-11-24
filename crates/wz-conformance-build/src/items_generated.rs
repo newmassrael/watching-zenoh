@@ -81,6 +81,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("config-policy", &["core", "pico"]),
     ("conformance-digest", &["core", "pico"]),
     ("config-document", &["core", "pico"]),
+    ("device-requires", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),

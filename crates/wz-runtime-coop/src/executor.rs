@@ -205,6 +205,19 @@ impl TaskCell {
         }
     }
 
+    /// Write at `place` the free cell [`Self::owned`] makes. Out of line: a store's cells are
+    /// written by one loop, and a loop of stores alone is laid out twice over and once more for
+    /// the cells left over, where one that calls is laid out once.
+    ///
+    /// # Safety
+    /// `place` is valid for a write of a cell and aligned for one.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[inline(never)]
+    unsafe fn write_owned(place: *mut Self, buf: *mut u8, cap: usize, owner: *const TaskStore) {
+        // SAFETY: the caller's contract.
+        unsafe { place.write(Self::owned(buf, cap, owner)) };
+    }
+
     /// Run `f` on the cell's bookkeeping, inside a critical section.
     ///
     /// The section is what keeps another context off the bookkeeping: a join handle is `Send`, so
@@ -409,7 +422,7 @@ impl TaskStore {
             let buf = base.wrapping_add(at.wrapping_mul(stride));
             // SAFETY: `at` is below `count`, so the place is one of the block's cells, aligned for
             // one, written once here and read by nothing before.
-            unsafe { first.add(at).write(TaskCell::owned(buf, cap, owner)) };
+            unsafe { TaskCell::write_owned(first.add(at), buf, cap, owner) };
         }
         store
     }
@@ -944,8 +957,19 @@ impl ExecutorState {
 
     /// Every cell of the table, in its order: the cells it reserved, then those it took memory for.
     fn each_cell(&self) -> impl Iterator<Item = &'static TaskCell> + '_ {
-        let taken = (0..usize::MAX).map_while(move |index| self.taken_at(index));
-        self.fixed_cells().iter().chain(taken)
+        (0..usize::MAX).map_while(move |index| self.cell_at(index))
+    }
+
+    /// The cell at `index` in the table's order ([`Self::each_cell`]), `None` past the last. A walk
+    /// by place and not a chain of the two kinds of cell: one cursor, which a pass that stops at
+    /// each cell keeps in a register instead of the state of two iterators and of their join.
+    fn cell_at(&self, index: usize) -> Option<&'static TaskCell> {
+        let fixed = self.fixed_cells();
+        match fixed.get(index) {
+            Some(cell) => Some(cell),
+            // At or past the reserved cells' count, so the difference does not wrap.
+            None => self.taken_at(index.wrapping_sub(fixed.len())),
+        }
     }
 
     /// The cells the table was made with.
@@ -1087,27 +1111,32 @@ impl ExecutorState {
         // task a taken cell fits waits for one to come free; one no cell fits never will, which is
         // the cause named.
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        if let Some(taking) = self.taking.as_deref() {
-            let why = match taking.take(set, need, align) {
-                Ok(Taken::Cell(cell, buf)) => return Ok((cell, buf)),
-                Ok(Taken::Full { any, room }) => {
-                    let room = room || (fits && !fixed.is_empty());
-                    let any = any || !fixed.is_empty();
-                    if room || !any {
-                        SpawnRefusal::NoTaskCell
-                    } else {
-                        SpawnRefusal::TooLarge
-                    }
-                }
-                Err(why) => why,
-            };
-            self.refuse(why);
-            return Err(why);
-        }
-        let why = if fits {
-            SpawnRefusal::NoTaskCell
-        } else {
-            SpawnRefusal::TooLarge
+        let taken_why = match self
+            .taking
+            .as_deref()
+            .map(|taking| taking.take(set, need, align))
+        {
+            Some(Ok(Taken::Cell(cell, buf))) => return Ok((cell, buf)),
+            Some(Ok(Taken::Full { any, room })) => {
+                let room = room || (fits && !fixed.is_empty());
+                let any = any || !fixed.is_empty();
+                Some(if room || !any {
+                    SpawnRefusal::NoTaskCell
+                } else {
+                    SpawnRefusal::TooLarge
+                })
+            }
+            Some(Err(why)) => Some(why),
+            None => None,
+        };
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        let taken_why: Option<SpawnRefusal> = None;
+        // One count of every refusal, whichever cause it names: each count written where its cause
+        // is found was a copy of the section that counts it.
+        let why = match taken_why {
+            Some(why) => why,
+            None if fits => SpawnRefusal::NoTaskCell,
+            None => SpawnRefusal::TooLarge,
         };
         self.refuse(why);
         Err(why)
@@ -1221,8 +1250,12 @@ impl ExecutorState {
         // section.
         let mut owed: Option<(&'static TaskCell, Left)> = None;
         // Every cell in the table's order, then the end of the table, whose section settles the
-        // cell polled last.
-        for next in self.each_cell().map(Some).chain(core::iter::once(None)) {
+        // cell polled last and after which the pass returns.
+        let mut index = 0usize;
+        loop {
+            let next = self.cell_at(index);
+            // Below the count of cells the table holds, so the next place does not wrap.
+            index = index.wrapping_add(1);
             // A cell nothing woke and nothing aborted is left out of the pass's sections when no
             // cell is owed its settling: a pass over a table at rest takes no section. A flag
             // raised after this look is seen by the next pass, as one raised after the section is.
@@ -1808,6 +1841,14 @@ mod tests {
             state.claim_bytes(0, 8, 8).map(|_| ()),
             Err(SpawnRefusal::NoTaskCell),
             "both cells are taken and no third is added"
+        );
+        assert_eq!(
+            state.refusals(),
+            Refusals {
+                no_task_cell: 1,
+                too_large: 0,
+            },
+            "a refusal the added cells answer is counted once, by its cause"
         );
         assert_eq!(state.capacity(), 2);
         ExecutorState::release(first);

@@ -657,6 +657,7 @@ mod lent_handshake {
     use crate::reliability::Reliability;
     use crate::session_actions::{SessionActionsBinding, SessionLinkActions};
     use crate::session_fsm_unicast::SessionFsmUnicastActions;
+    use crate::session_init_params::SessionInitParams;
 
     /// A link that lends one slot of a fixed width, whatever it is asked for, and records each
     /// ask and each send.
@@ -721,9 +722,20 @@ mod lent_handshake {
         Arc<SessionLinkActions<PlainRuntime, StillClock>>,
         SessionActionsBinding<PlainRuntime, StillClock>,
     ) {
+        opener_of(link, params())
+    }
+
+    /// [`opener`] over the parameters `params`.
+    fn opener_of(
+        link: &Arc<LendingLink>,
+        params: SessionInitParams,
+    ) -> (
+        Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+        SessionActionsBinding<PlainRuntime, StillClock>,
+    ) {
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
-            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock);
         let binding =
             SessionActionsBinding::<PlainRuntime, StillClock>::new(Arc::clone(&actions), NoEntropy);
         (actions, binding)
@@ -795,6 +807,77 @@ mod lent_handshake {
             Some(None),
             "a bound decided away is taken off the chain"
         );
+    }
+
+    /// Every lend-only control message is written by one writer, which holds the initiator's
+    /// OpenSyn as it went out, and nothing of the InitSyn before it, for a replay that sends those
+    /// very bytes again. A build whose domain of `handshake-stray-message` leaves the replay out
+    /// holds nothing. Turned red by a writer that holds by a role other than the message's own
+    /// (`write_control`'s `answer`), or that holds from where the message does not start.
+    #[test]
+    fn a_lent_open_syn_is_sent_again_as_written_and_the_init_syn_is_not_held() {
+        use crate::policy::HandshakeStrayMessage;
+        let mut replaying = params();
+        let replays = replaying
+            .policy
+            .select_handshake_stray_message(HandshakeStrayMessage::IgnoreAndReplay)
+            .is_ok();
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener_of(&link, replaying);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        assert_eq!(actions.held_answer_len(), 0, "an InitSyn is never held");
+        assert!(
+            !actions.resend_held_answer(),
+            "and so nothing is sent again"
+        );
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends").clone();
+        assert_eq!(sent.len(), 2, "the InitSyn and the OpenSyn");
+        if !replays {
+            assert_eq!(actions.held_answer_len(), 0, "no hold without the replay");
+            assert!(!actions.resend_held_answer());
+            return;
+        }
+        assert_eq!(
+            actions.held_answer_len(),
+            sent[1].len(),
+            "the OpenSyn, whole"
+        );
+        assert!(
+            actions.resend_held_answer(),
+            "the held OpenSyn is sent again"
+        );
+        let again = link.sent.lock().expect("the sends");
+        assert_eq!(again.len(), 3);
+        assert_eq!(again[2], sent[1], "as the very bytes that went out");
+    }
+
+    /// The lend-only Close goes through the same writer as the handshake: its header and
+    /// reason in a lent slot, and a slot too short for it refused and counted, with nothing
+    /// sent. Turned red by a Close written without its reason, or sent from a short slot.
+    #[cfg(feature = "codec-close")]
+    #[test]
+    fn a_lent_close_carries_its_reason_and_a_short_slot_refuses_it() {
+        let link = LendingLink::of_width(512);
+        let (actions, _binding) = opener(&link);
+        assert!(actions.send_close_lent(0x02).is_ok());
+        {
+            let sent = link.sent.lock().expect("the sends");
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0][0] & 0x1F, wz_codecs::wire_const::T_MID_CLOSE);
+            assert_eq!(&sent[0][1..], &[0x02], "the reason, and nothing after it");
+        }
+        assert_eq!(actions.tx_refusals().no_slot, 0);
+
+        let short = LendingLink::of_width(1);
+        let (actions, _binding) = opener(&short);
+        assert_eq!(
+            actions.send_close_lent(0x02),
+            Err(crate::link::LinkDropCause::NoTxSlot)
+        );
+        assert!(short.sent.lock().expect("the sends").is_empty());
+        assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
     }
 }
 
@@ -935,6 +1018,63 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
         0,
         "nothing was written"
     );
+}
+
+/// A staged reply leaves through the writer of its parts in a build that reads no owned reply (no
+/// statistics; no policy or namespace is installed here): one the writer takes is written, and one
+/// it refuses is skipped with nothing built. The responder identity of no bytes is the case the
+/// owned builder asserts against, so a refused reply that fell back to the owned record would panic
+/// here.
+///
+/// Turned red by a `send_reply_parts` that sends a reply the writer refuses as an owned one.
+#[cfg(all(
+    feature = "codec-response",
+    not(feature = "transport-stats"),
+    not(feature = "tx-lend-only")
+))]
+mod staged_replies {
+    use core::sync::atomic::Ordering;
+
+    use super::bundle;
+    use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
+    use crate::response_sink::ResponseSink as _;
+    use crate::sample::QosLevel;
+
+    fn staged<'a>(keyexpr: &'a str, responder: Option<(&'a [u8], u32)>) -> ReplyParts<'a> {
+        ReplyParts {
+            rid: 5,
+            keyexpr,
+            responder,
+            qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(b"answer"),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_staged_reply_the_writer_refuses_is_skipped_and_one_it_takes_is_written() {
+        let (actions, link) = bundle();
+        actions.send_reply_parts(staged("demo/asked", Some((&[], 1))));
+        actions.send_reply_parts(staged("", None));
+        assert_eq!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "nothing of a refused reply reaches the link"
+        );
+        actions.send_reply_parts(staged("demo/asked", Some((&[1, 2, 3, 4], 5))));
+        assert_ne!(
+            link.written.load(Ordering::SeqCst),
+            0,
+            "CONTROL: a reply the writer takes is written"
+        );
+    }
 }
 
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,

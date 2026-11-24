@@ -44,7 +44,7 @@ use wz_session_core::session_slot::SlotDriver;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellClaim, CellRc};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
@@ -115,34 +115,54 @@ pub enum IpDriver<
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub type HeapLink = crate::link_cells::CellRc<dyn SessionDatagramLink>;
 
-/// The driver `make` writes in the place it is handed, opened as the session shell holds a link:
-/// the session's actions send through it and its loop pumps it, the one object behind both. `fits`
-/// says whether the rows of the build name both its ends, read off what the driver is made of
-/// ([`stream_ends_fit`](crate::stream_link::stream_ends_fit), [`datagram_ends_fit`]). The driver
-/// is made in its cell, once the cell is had, and set there for its owner's wait; a link refused is
-/// never made, and what `make` holds for it (its socket, its buffers) is let go of with the
-/// refusal.
+/// The cell a link that opens now is made in (`LinkCell::open`), had once what the link is made
+/// of is: refused [`LinkOpenError::Unsupported`] when `fits` says the rows of the build do not name
+/// both its ends, read off what the driver is made of
+/// ([`stream_ends_fit`](crate::stream_link::stream_ends_fit), [`datagram_ends_fit`]), so a
+/// session never stands on a link its faces' rows would have to hold on the heap. A session that
+/// lent its links cells places each in one: past them the link is refused
+/// [`LinkOpenError::Exhausted`], as one past the session's buffers is, and none is placed on the
+/// heap. A link refused is never made, and what it would have been made of (its socket, its
+/// buffers) is let go of where it lies.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) fn heap_link<K>(
     cells: Option<&LentByteCells>,
     fits: bool,
-    make: impl FnOnce(&mut core::mem::MaybeUninit<K>) -> &mut K,
-) -> Result<OpenedLink<HeapLink>, LinkOpenError>
-where
-    K: BoxedLinkDriver + SessionDatagramLink + 'static,
-{
-    // A link whose ends no row of the build names is refused before it is placed, so a session
-    // never stands on a link its faces' rows would have to hold on the heap.
+) -> Result<LinkCell<K>, LinkOpenError> {
     if !fits {
         return Err(LinkOpenError::Unsupported);
     }
-    // A session that lent its links cells places each in one: past them the link is refused, as
-    // one past the session's buffers is, and none is placed on the heap.
-    let driver = crate::link_cells::CellRc::made_in(cells, make).ok_or(LinkOpenError::Exhausted)?;
-    Ok(OpenedLink {
-        sink: driver.clone().into_sink(),
-        pump: driver.into_link(),
-    })
+    CellRc::claim(cells)
+        .map(LinkCell)
+        .ok_or(LinkOpenError::Exhausted)
+}
+
+/// The cell of a link that opens, had and not yet written (`heap_link`); let go of unwritten,
+/// it goes back.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub(crate) struct LinkCell<K>(CellClaim<K>);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<K> LinkCell<K>
+where
+    K: BoxedLinkDriver + SessionDatagramLink + 'static,
+{
+    /// The driver `make` writes in the cell's place, which it is handed, opened as the session
+    /// shell holds a link: the session's actions send through it and its loop pumps it, the one
+    /// object behind both, set there for its owner's wait when `make` sets it so.
+    /// Inlined: what `make` captures is then written into the cell from where it lies, not first
+    /// gathered into the maker on the stack.
+    #[inline]
+    pub(crate) fn open(
+        self,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<K>) -> &mut K,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        let driver = self.0.made(make).ok_or(LinkOpenError::Exhausted)?;
+        Ok(OpenedLink {
+            sink: driver.clone().into_sink(),
+            pump: driver.into_link(),
+        })
+    }
 }
 
 /// Every method of the three links, answered by the one this driver is.
@@ -403,7 +423,7 @@ impl LinkPlace {
         rx: RxBuffer,
         tx: TxBuffer,
     ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
-        heap_link(self.cells.as_ref(), stream_ends_fit(&socket), |place| {
+        heap_link(self.cells.as_ref(), stream_ends_fit(&socket))?.open(|place| {
             let link = place.write(link_over(socket, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
@@ -425,17 +445,13 @@ impl LinkPlace {
         rx: RxBuffer,
         tx: TxBuffer,
     ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
-        heap_link(
-            self.cells.as_ref(),
-            datagram_ends_fit(&socket, peer),
-            |place| {
-                let link = place.write(UdpDriver::with_peer(socket, peer, rx, tx));
-                if self.owner_waits {
-                    link.wait_by_owner();
-                }
-                link
-            },
-        )
+        heap_link(self.cells.as_ref(), datagram_ends_fit(&socket, peer))?.open(|place| {
+            let link = place.write(UdpDriver::with_peer(socket, peer, rx, tx));
+            if self.owner_waits {
+                link.wait_by_owner();
+            }
+            link
+        })
     }
 }
 

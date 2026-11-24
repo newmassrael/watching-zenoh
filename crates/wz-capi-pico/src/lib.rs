@@ -498,8 +498,6 @@ pub mod config;
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
-// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
-// unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
@@ -513,7 +511,9 @@ pub mod clock_source;
     feature = "declarations-synced-event"
 ))]
 pub mod decl_watch;
-#[cfg(feature = "unstable-api")]
+// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
+// unstable surface (docs/target-build-contract.md T9), in a build with `device-requires`.
+#[cfg(feature = "device-requires")]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
 // share, and the instance keys' and the message payloads' doors with them, in a build with any of

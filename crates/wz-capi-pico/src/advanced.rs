@@ -579,11 +579,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         } else {
             &(*options).publisher_options
         });
-        // The same outbound canon gate every declare in this crate hoists, so a
-        // key no peer could take is refused with the code a plain publisher
-        // gives it before anything is declared.
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
+        // The same outbound gate every declare in this crate hoists, so a key
+        // no peer could take is refused with the code a plain publisher gives
+        // it before anything is declared.
+        if let Err(code) = crate::keyexpr::outbound_key(&ke) {
+            return code;
         }
         let session = PicoSession::of(handle);
         // The publisher's source identity is the session's own zid, the one its
@@ -1366,10 +1366,10 @@ unsafe fn advanced_subscriber_options(
         // field, which is exactly why it carries the attribute.
         let mut cfg = HistoryConfig::default();
         cfg.sample_depth = (history.max_samples > 0).then_some(history.max_samples);
-        // pico carries an age in MILLISECONDS; wz's `_time=` selector bound is
-        // in SECONDS. Converting rather than passing the number through is the
-        // whole reason this is not a field copy.
-        cfg.max_age = (history.max_age_ms > 0).then(|| history.max_age_ms as f64 / 1000.0);
+        // pico carries an age in MILLISECONDS, built into the `Duration` the
+        // selector is written from without passing through seconds as `f64`.
+        cfg.max_age =
+            (history.max_age_ms > 0).then(|| core::time::Duration::from_millis(history.max_age_ms));
         cfg.detect_late_publishers = history.detect_late_publishers;
         out.history = Some(cfg);
     }
