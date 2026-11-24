@@ -7139,7 +7139,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The SN ring mask [`Self::negotiated_sn_mask`] answers, for the peer's capabilities
     /// `peer` as read by the caller.
-    fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
+    pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
             self.params.seq_num_res,
             peer,
