@@ -93,6 +93,8 @@ use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, Publis
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::faces::OwingWaits;
 use wz_runtime_coop::faces::{
     DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
     LinkSupervisor,
@@ -101,7 +103,7 @@ use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
-#[cfg(any(feature = "listen", feature = "time-base"))]
+#[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
@@ -4699,7 +4701,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "listen")]
         let waits = match fanned.then {
             Then::WaitForSlots { .. } => core.0.transport.links.owing_waits(),
-            Then::Done => Vec::new(),
+            Then::Done => OwingWaits::new_static(),
         };
         #[cfg(any(feature = "listen", feature = "group"))]
         if fanned.hand_after {
@@ -4733,7 +4735,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         put: &Publication<'_>,
         mut run: PublishRun,
-        mut waits: Vec<LinkWait>,
+        mut waits: OwingWaits,
         mut left_us: u64,
         mut outcome: Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
@@ -4745,7 +4747,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     u32::try_from(left_us.div_ceil(1_000)).unwrap_or(u32::MAX),
                 );
             }
-            drop(waits);
             let Some(core) = self.live() else {
                 return outcome;
             };
@@ -4760,7 +4761,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let fanned = run.fanned(again, || now_us);
             waits = match fanned.then {
                 Then::WaitForSlots { .. } => core.0.transport.links.owing_waits(),
-                Then::Done => Vec::new(),
+                Then::Done => OwingWaits::new_static(),
             };
             if fanned.hand_after {
                 self.send_handed(&core.0);
