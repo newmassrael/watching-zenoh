@@ -230,9 +230,24 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
-    assert_eq!(count("write filters"), Some(7));
-    assert_eq!(count("matching listeners"), Some(5));
-    assert_eq!(count("interests"), Some(12));
+    assert_eq!(
+        plan.tables().write_filters,
+        7,
+        "a write filter is a row of the session's one table set, a publisher's or a querier's"
+    );
+    assert_eq!(plan.tables().matching_listeners, 5);
+    assert_eq!(
+        plan.tables().interests(),
+        12,
+        "an Interest is a row of the session's one table set, one for each filter and listener"
+    );
+    assert_eq!(
+        count("write filters"),
+        None,
+        "the engine keeps no table of write filters beside the session's"
+    );
+    assert_eq!(count("matching listeners"), None);
+    assert_eq!(count("interests"), None);
 }
 
 /// The subscribers' table at its limit refuses one more: no id, its callback let go of with the
@@ -727,5 +742,74 @@ fn a_key_expression_the_link_refuses_is_not_declared() {
         .expect("CONTROL: a key the link takes");
     until(&engine, "the router to see the declaration", || {
         router.seen(|s| s.declares) > seen
+    });
+}
+
+/// A write filter's id names its row and no row that takes the slot after it: once undeclared,
+/// the id holds nothing back and undeclares nothing, while the filter declared after it holds its
+/// writes back until a peer declares. Turned red by an id that names a slot without its generation.
+#[test]
+fn an_undeclared_write_filters_id_names_no_later_filter() {
+    let limits = lowered(|l| l.select_max_publishers(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let first = filter(&engine, FilterPlane::Subscribers, "demo/g/1").expect("a row is free");
+    assert!(
+        engine.write_filter_active(first),
+        "CONTROL: a filter no peer answers holds its writes back"
+    );
+    engine.undeclare_write_filter(first);
+    let second =
+        filter(&engine, FilterPlane::Subscribers, "demo/g/2").expect("the row was given back");
+    assert_ne!(first, second, "the later filter is named apart");
+    assert!(engine.write_filter_active(second));
+    assert!(
+        !engine.write_filter_active(first),
+        "the undeclared filter's id holds nothing back"
+    );
+    engine.undeclare_write_filter(first);
+    assert!(
+        engine.write_filter_active(second),
+        "the undeclared filter's id left the later filter standing"
+    );
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, "demo/g/3"),
+        Err(Refusal::TableFull),
+        "the later filter still holds the publishers' one row"
+    );
+}
+
+/// A write filter and a matching listener on one key of one plane hold one Interest: the second
+/// asks nothing, and the Interest's Final goes once the last of them goes, not before.
+#[test]
+fn a_filter_and_a_listener_on_one_key_hold_one_interest_until_both_go() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/one/key").expect("a row is free");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    let asked = router.seen(|s| s.interests);
+    let sink: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener = engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/one/key", sink, false)
+        .expect("a row is free");
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked,
+        "the listener holds the filter's Interest and asks nothing"
+    );
+    engine.undeclare_write_filter(publisher);
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked,
+        "the listener still holds the Interest: no Final"
+    );
+    engine.undeclare_matching_listener(listener);
+    until(&engine, "the Final of the Interest's last holder", || {
+        router.seen(|s| s.interests) == asked + 1
     });
 }
