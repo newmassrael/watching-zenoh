@@ -422,6 +422,47 @@ fn two_memories_let_two_selectors_alternate_without_beginning_again() {
     );
 }
 
+/// TWO SELECTORS ASKED IN TURN, FROM THE SECOND ROUND ON, EACH FOLD ONLY WHAT
+/// ARRIVED since that selector was last asked: a call's cost follows the new
+/// traffic whichever selector it is under, not the capture.
+#[test]
+fn two_selectors_in_turn_fold_only_what_arrived_since_each_was_asked() {
+    let mut g = Growing::new(Dissection::new(), "key == demo/temp");
+    assert_eq!(g.memory.set_selector_memories(2), 2);
+    let selectors = [
+        Filter::parse("key == demo/temp").expect("the selector parses"),
+        Filter::parse("kind == query").expect("the selector parses"),
+    ];
+    g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
+    g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
+    let mut continued = 0u64;
+    for (i, record) in session_records().iter().enumerate() {
+        let held = g.messages();
+        g.udp(i % 2 == 0, 40000, 7447, record);
+        let arrived = g.messages() - held;
+        for filter in &selectors {
+            g.filter = filter.clone();
+            let (before, after) = g.ask(&alloc::format!("record {i}"));
+            if i == 0 {
+                continue;
+            }
+            let work = delta(before, after);
+            assert_eq!(work.restarts, 0, "record {i}: {work:?}");
+            assert_eq!(
+                work.messages_folded,
+                PLANES * arrived,
+                "record {i}: {arrived} message(s) arrived since this selector was \
+                 last asked, {work:?}"
+            );
+            continued += 1;
+        }
+    }
+    assert!(
+        continued >= 40,
+        "too few steps to say two selectors continued: {continued}"
+    );
+}
+
 /// A third selector takes the place of the least recently used one, and that one
 /// begins again when it is next asked; the one asked more recently is kept.
 #[test]

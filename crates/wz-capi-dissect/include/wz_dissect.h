@@ -7901,21 +7901,39 @@ int wz_dissect_pcap_local_options_of_link_type(
  * either calls more often or opens the handle with a larger ceiling; U counts
  * from the planes' last beginning, so it is 0 again after they begin.
  *
- * WHAT A CALL COSTS. The planes are kept between calls, for the selector of
- * the last call, so a census drawn again folds the messages that arrived,
- * whether or not a list was trimmed at its front since: a beat costs what
- * arrived in it. The planes begin again, over what is held (T back to 0), only
- * where a fold cannot go on at all: a flow that appeared in front of the
- * datagram flows or left a flow table, a message decoded after a packet that
- * followed it, a session grouping that changes (a message that names a node),
- * another selector, a call the progress callback stopped, and exchanges still
- * open that alone outgrow four times the messages held. The node plane begins
- * again with the others and they with it, so every plane of one document
- * covers the messages its "observed" names. What the planes keep
- * per row is given up for the rows no list holds as it doubles, so it stays
- * near what the lists hold. Two costs remain: the scouting lists are folded
- * on every call, and every exchange still open is judged on every call, so a
- * capture whose queries never close pays for each.
+ * WHAT A CALL COSTS. The planes are kept between calls for every selector the
+ * handle keeps a memory for: one unless wz_dissect_live_set_selector_memories
+ * says more, and at most 64. A census drawn again under a selector folds the
+ * messages that arrived since that selector was last asked, whether or not a
+ * list was trimmed at its front since: a beat costs what arrived in it, and a
+ * caller that asks in turn under no more selectors than the handle keeps
+ * memories for pays that for each of them from its second call on. The planes
+ * begin again, over what is held (T back to 0), only where a fold cannot go on
+ * at all: a flow that appeared in front of the datagram flows or left a flow
+ * table, a message decoded after a packet that followed it, a session grouping
+ * that changes (a message that names a node), a selector whose memory was given
+ * up to make room for another (with the default of one memory, every change of
+ * selector), a call the progress callback stopped, and exchanges still open
+ * that alone outgrow four times the messages held. The node plane begins again
+ * with the others and they with it, so every plane of one document covers the
+ * messages its "observed" names. What the planes keep per row is given up for
+ * the rows no list holds as it doubles, so it stays near what the lists hold.
+ *
+ * WHAT STILL FOLDS AGAIN, AND WHY. Three costs remain in this revision:
+ *
+ *   - an INIT or a JOIN that names a node begins every plane again: which node
+ *     a direction belongs to is settled by its handshake, and what the planes
+ *     credited to that direction before the handshake arrived is credited
+ *     anew, so a capture whose sessions open one after another pays one fold of
+ *     what is held per opening;
+ *   - the scouting lists are folded into a copy on every call: a node first
+ *     named by a HELLO is numbered after every node the transport named, an
+ *     order a continued fold cannot keep, and the lists are small;
+ *   - every exchange still open is judged on every call, so a capture whose
+ *     queries never close pays for each of them.
+ *
+ * None of the three changes a document: each is the cost of the answer the
+ * container doors give for the same bytes.
  *
  * The document is the one the census doors emit, so a consumer keeps one
  * reader and one schema across both halves. A selector that does not compile
@@ -9090,8 +9108,14 @@ int wz_dissect_live_selected_packets(wz_dissect_live *h, const char *selector,
  * the walk is done again, not what it says.
  *
  * WHAT `n` COSTS. A memory is the folded tables of one selector, not a copy of
- * the capture. How large that is depends on the capture, and no figure is
- * claimed here.
+ * the capture: tables that grow with the distinct key expressions,
+ * declarations and exchanges still open that the capture holds under that
+ * selector, and a verdict per row the payload and exchange planes judged,
+ * which is given up for the rows no list holds as it doubles, so it stays near
+ * what the lists hold. Memory therefore grows with `n` times one selector's
+ * tables, and the per-row part is reported, summed over every selector, as the
+ * memory document's `census` group (wz_dissect_live_memory). The node census
+ * is one for every selector, since no selector narrows it.
  *
  * `n` is held to 1..=64 and the number in effect is written to `*out`, so a
  * caller that asked for 0 or 1000 reads what it got. Lowering it gives up the
