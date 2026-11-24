@@ -1343,11 +1343,10 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         self.socket.room_wait()
     }
 
+    // The batch the lending receive hands over, copied out.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        let mut frame = None;
-        self.receive(&mut |batch| frame = Some(RxFrame::new(batch.to_vec())));
-        frame
+        crate::link_storage::copied_receive(self)
     }
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
@@ -1916,6 +1915,27 @@ mod tests {
         assert_eq!(link.socket.waits.get(), 1, "part of a batch is not one");
         queue(&link, &batch(b"three")[3..]);
         assert_eq!(received(&link).as_deref(), Some(&b"three"[..]));
+    }
+
+    /// The copying receive hands over the batch the lending one would, past an empty batch, and
+    /// nothing while only part of the next is held. Turned red by a copy that takes the length
+    /// with the batch, or hands a batch over twice.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_copying_receive_hands_over_what_the_lending_one_would() {
+        let link = link();
+        let mut wire = batch(b"");
+        wire.extend(batch(b"one"));
+        wire.extend(batch(b"two"));
+        wire.extend(&batch(b"three")[..3]);
+        queue(&link, &wire);
+        let one = link.try_recv().expect("the first batch");
+        assert_eq!(&one.bytes[..], b"one");
+        assert_eq!(received(&link).as_deref(), Some(&b"two"[..]));
+        assert!(link.try_recv().is_none(), "part of a batch is not one");
+        queue(&link, &batch(b"three")[3..]);
+        let three = link.try_recv().expect("the rest of the batch");
+        assert_eq!(&three.bytes[..], b"three");
     }
 
     #[test]

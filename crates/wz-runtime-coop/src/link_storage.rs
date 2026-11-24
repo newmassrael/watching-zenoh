@@ -24,6 +24,11 @@ use alloc::vec::Vec;
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
 use wz_session_core::link::{TxSlot, TxSlotGrant};
 
+#[cfg(feature = "alloc")]
+use crate::session_drive::SessionDatagramLink;
+#[cfg(feature = "alloc")]
+use wz_session_core::link::RxFrame;
+
 /// Where a driver receives into: its own buffer, which it holds for its life, or a buffer of its
 /// session's pool ([`PooledRx`]), which it holds only while the buffer holds something of the
 /// link's own.
@@ -849,6 +854,20 @@ impl<T: TxStore> TxLender<T> {
     }
 }
 
+/// The next datagram `link` lends ([`SessionDatagramLink::recv_with`]) from where it holds it,
+/// copied out as a frame ([`SessionDatagramLink::try_recv`]): the copying receive of both links of
+/// this crate, written once over the link's table, so each kind of link carries a call here and
+/// not a second copy of its whole receive.
+// Out of line: inlined into a link's own entry, the call through the table below would be made
+// directly and that link's receive copied in with it.
+#[cfg(feature = "alloc")]
+#[inline(never)]
+pub fn copied_receive(link: &dyn SessionDatagramLink) -> Option<RxFrame> {
+    let mut frame = None;
+    link.recv_with(&mut |datagram| frame = Some(RxFrame::new(datagram.to_vec())));
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -1080,5 +1099,61 @@ mod tests {
             table.claim().is_some(),
             "the buffer given back is claimed again"
         );
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod copied_receive_tests {
+    use super::copied_receive;
+    use crate::session_drive::SessionDatagramLink;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::cell::{Cell, RefCell};
+    use wz_session_core::link::RxFrame;
+
+    /// A link that lends what it was given, oldest first, and counts its lends.
+    struct Lending {
+        queued: RefCell<Vec<Vec<u8>>>,
+        lends: Cell<u32>,
+    }
+
+    impl SessionDatagramLink for Lending {
+        fn service(&self) {}
+
+        fn try_recv(&self) -> Option<RxFrame> {
+            copied_receive(self)
+        }
+
+        fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+            let mut queued = self.queued.borrow_mut();
+            if queued.is_empty() {
+                return false;
+            }
+            let datagram = queued.remove(0);
+            self.lends.set(self.lends.get() + 1);
+            f(&datagram);
+            true
+        }
+    }
+
+    /// The copying receive is the lending one, copied: each datagram once, in order, through one
+    /// lend each, and nothing once none is queued. Turned red by a copy that reads the link
+    /// another way than its lend, or keeps the frame it was lent.
+    #[test]
+    fn a_copied_receive_is_each_lent_datagram_once_and_nothing_once_none_is_queued() {
+        let link = Lending {
+            queued: RefCell::new(vec![b"first".to_vec(), b"second".to_vec()]),
+            lends: Cell::new(0),
+        };
+        let first = link.try_recv().expect("the first datagram");
+        assert_eq!(&first.bytes[..], b"first");
+        assert!(
+            first.src.is_none(),
+            "a unicast link's frame names no source"
+        );
+        let second = link.try_recv().expect("the second datagram");
+        assert_eq!(&second.bytes[..], b"second");
+        assert!(link.try_recv().is_none(), "nothing is queued");
+        assert_eq!(link.lends.get(), 2, "one lend for each datagram");
     }
 }
