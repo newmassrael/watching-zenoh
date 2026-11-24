@@ -25,6 +25,7 @@ use crate::query_parts::{GetParts, QueryParts};
 use crate::reply_stage::EncodingParts;
 use crate::request_routing_context::TIMEOUT_EXT_ID;
 use crate::sample::{QosLevel, SourceInfo};
+use crate::tx_buf::vle_len;
 use crate::wireexpr_build::NAMED_FLAG;
 
 /// `_Z_MID_N_REQUEST` with `M`: the key's id is in the sender's mapping, as the owned builder's
@@ -339,17 +340,6 @@ fn source_zid(info: &SourceInfo) -> Result<&[u8], CodecError> {
         return Err(CodecError::LengthOutOfRange);
     }
     Ok(zid)
-}
-
-/// The bytes the codec's `vle_u64` writes `value` in: seven bits a byte, at most nine.
-fn vle_len(value: u64) -> usize {
-    let mut len = 1usize;
-    let mut rest = value;
-    while rest >= 0x80 && len < 9 {
-        rest = rest.checked_shr(7).unwrap_or(0);
-        len = len.saturating_add(1);
-    }
-    len
 }
 
 /// A length as the wire's integer.
