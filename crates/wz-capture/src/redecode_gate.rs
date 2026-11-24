@@ -36,8 +36,6 @@ use crate::{DatagramLink, Dissection};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-#[allow(unused_imports)] // `Carried` is read by the feature-gated tests only.
-use wz_session_core::passive::Carried;
 use wz_session_core::passive::{
     redecode_unit, Anchor, Direction, FlowContext, LinkHandshake, OffsetSpace, PassiveFrame,
     UnitFacts, UnitInput,
@@ -1615,6 +1613,7 @@ fn stream_shapes_capture() -> Vec<u8> {
 #[test]
 fn every_unit_of_a_compressed_session_reads_again_the_same() {
     use crate::datagram_tests::{compressed_session_with_unit, frame_datagram, push, sender_space};
+    use wz_session_core::passive::Carried;
     let record = push(sender_space(0, Some("zip/again")), &[3u8; 8]);
     let mut clear = alloc::vec![0x00u8];
     clear.extend_from_slice(&frame_datagram(&record));
@@ -1722,6 +1721,7 @@ fn the_fragment_chain_captures_reach_every_fate_a_fragment_comes_to() {
         marked_fragment_dissection_with_file, midsession_fragment_dissection_with_file,
         reassembled_record_dissection_with_file,
     };
+    use wz_session_core::passive::Carried;
     let record = crate::datagram_tests::push(
         crate::datagram_tests::sender_space(0, Some("chain/again")),
         &[5u8; 24],

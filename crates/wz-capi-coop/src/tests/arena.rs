@@ -117,7 +117,6 @@ fn pooled(pool: usize, links: usize) -> usize {
 /// transmit rows, one for each link, in a build that only dials.
 fn link_places(plan: &ArenaPlan) -> usize {
     plan.rows()
-        .iter()
         .find(|row| row.part == "link places")
         .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
 }
@@ -126,7 +125,6 @@ fn link_places(plan: &ArenaPlan) -> usize {
 fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
     *plan
         .rows()
-        .iter()
         .find(|row| row.part == part)
         .expect("the plan has the row")
 }
@@ -146,9 +144,7 @@ fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
     .expect("the build's limits lay an arena out");
     let reserved = plan.reserved_bytes().expect("within the address space");
     assert!(
-        plan.rows()
-            .iter()
-            .all(|row| row.bytes().is_some_and(|b| b > 0)),
+        plan.rows().all(|row| row.bytes().is_some_and(|b| b > 0)),
         "every row holds something: {plan:?}"
     );
     let mut session =
@@ -567,7 +563,6 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
     assert!(
         none.rows()
-            .iter()
             .all(|row| !row.part.starts_with("link group receive")),
         "a config that names no group plans no table of them: {none:?}"
     );
@@ -612,7 +607,7 @@ fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
     );
     assert_eq!(one.peers().owed_tokens(), 0);
     assert!(
-        one.rows().iter().all(|row| row.part != "owed tokens"),
+        one.rows().all(|row| row.part != "owed tokens"),
         "a session of one face is lent no table of tokens owed"
     );
 }
@@ -661,7 +656,7 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
 fn the_plan_lays_out_no_delivery_lane() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    let parts: Vec<&str> = built.rows().iter().map(|row| row.part).collect();
+    let parts: Vec<&str> = built.rows().map(|row| row.part).collect();
     assert!(!parts.contains(&"delivery lane"));
     assert!(!parts.contains(&"delivery lane flag"));
     let records = parts
@@ -797,7 +792,7 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     }
     #[cfg(not(feature = "query"))]
     assert!(
-        dial.rows().iter().all(|row| row.part != "pending gets"),
+        dial.rows().all(|row| row.part != "pending gets"),
         "a build that asks no query lays out no table of gets"
     );
     // What a face's peer writes is held once for each face, as its gets are, and never for the
@@ -1181,7 +1176,6 @@ fn the_plan_lends_a_row_of_held_and_refused_finals_for_each_query_held() {
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     let finals: Vec<_> = plan
         .rows()
-        .iter()
         .filter(|row| row.part.ends_with(" finals"))
         .map(|row| (row.part, row.count, row.entry_bytes))
         .collect();
@@ -1208,7 +1202,7 @@ fn the_plan_lends_a_row_of_held_and_refused_finals_for_each_query_held() {
 fn a_build_without_queryables_lays_out_no_row_of_finals() {
     let plan =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    assert!(plan.rows().iter().all(|row| !row.part.ends_with(" finals")));
+    assert!(plan.rows().all(|row| !row.part.ends_with(" finals")));
 }
 
 /// A config that states more faces than the session's `MAX_FACES`, or a listener more handshakes
@@ -1320,7 +1314,6 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     );
     let links: usize = plan
         .rows()
-        .iter()
         .filter(|row| row.part.starts_with("link "))
         .map(|row| row.span().expect("within the address space"))
         .sum();
@@ -1330,11 +1323,7 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     let tables = plan.transport().links_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert_eq!(session.arena_mut().high_water(), links);
-    for row in plan
-        .rows()
-        .iter()
-        .filter(|row| !row.part.starts_with("link "))
-    {
+    for row in plan.rows().filter(|row| !row.part.starts_with("link ")) {
         let bytes = row.bytes().expect("within the address space");
         let _span: BoundedVec<u8, { usize::MAX }, Lent> = session
             .arena_mut()
@@ -1714,7 +1703,6 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     assert_eq!(
         Some(reserved),
         plan.rows()
-            .iter()
             .try_fold(0usize, |sum, row| sum.checked_add(row.span()?)),
         "the arena is the sum of its rows' spans"
     );
@@ -1917,7 +1905,6 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     // goes. A row for each row of the session's token pool.
     let owed: Vec<_> = peer
         .rows()
-        .iter()
         .filter(|row| row.part == "owed tokens")
         .collect();
     let owes = cfg!(all(
@@ -1930,10 +1917,9 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     }
     let rows: Vec<_> = peer
         .rows()
-        .iter()
         .filter(|row| row.part != "owed tokens")
         .collect();
-    assert_eq!(rows.len(), client.rows().len());
+    assert_eq!(rows.len(), client.rows().count());
     for (theirs, ours) in rows.into_iter().zip(client.rows()) {
         assert_eq!(
             (theirs.part, theirs.basis),
@@ -2208,7 +2194,6 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
         .expect("the build's limits lay an arena out");
     let count = |part: &str| {
         plan.rows()
-            .iter()
             .find(|row| row.part == part)
             .map(|row| row.count)
     };
@@ -2241,7 +2226,6 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
     assert!(rows > 0, "the build's limits admit matching listeners");
     let laid = plan
         .rows()
-        .iter()
         .find(|row| row.part == "matching listener places")
         .map(|row| (row.basis, row.count));
     assert_eq!(laid, Some(("MAX_MATCHING_LISTENERS", rows)));
@@ -2262,7 +2246,6 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
     let rows = plan.entities().decl_watches;
     let laid = plan
         .rows()
-        .iter()
         .find(|row| row.part == "declaration watch places")
         .map(|row| (row.basis, row.count));
     if cfg!(any(
@@ -2292,7 +2275,6 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
     let rows = plan.entities().transport_events_listeners;
     let laid = plan
         .rows()
-        .iter()
         .find(|row| row.part == "transport events listener places")
         .map(|row| (row.basis, row.count));
     if cfg!(feature = "connectivity") {
@@ -2325,7 +2307,6 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
     let rows = plan.entities().link_events_listeners;
     let laid = plan
         .rows()
-        .iter()
         .find(|row| row.part == "link events listener places")
         .map(|row| (row.basis, row.count));
     if cfg!(feature = "connectivity") {
@@ -2392,5 +2373,5 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     })
     .and_then(|plan| plan.holding(&held))
     .expect("the build's limits lay an arena out");
-    assert_eq!(plan.rows().len(), crate::arena::ARENA_ROWS);
+    assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
 }

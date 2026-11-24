@@ -114,6 +114,8 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-t
 # session core is told its engine lends the bytes of the parameters bound at the open from the
 # session's arena (`wz-session-core/limits-lent-at-open`), so a document stating a batch or a lane
 # past the build's is refused by name at the door rather than by the arena when the session opens.
+# It is told too that its engine keeps a session's declared key expressions on the session for
+# every link (`wz-session-core/session-keeps-keyexprs`), so no link carries a table of them.
 # The selection reads features, not a config key, because what an engine does not have is not
 # linked.
 #
@@ -136,6 +138,7 @@ engine-coop = [
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
+    "wz-session-core/session-keeps-keyexprs",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
 # own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
@@ -154,6 +157,7 @@ os-zephyr = [
     "wz-session-core/no_std",
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
+    "wz-session-core/session-keeps-keyexprs",
 ]
 # `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
@@ -178,6 +182,7 @@ os-posix = [
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
+    "wz-session-core/session-keeps-keyexprs",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",
@@ -207,6 +212,7 @@ os-windows = [
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
+    "wz-session-core/session-keeps-keyexprs",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",

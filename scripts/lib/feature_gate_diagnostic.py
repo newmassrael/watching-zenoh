@@ -298,6 +298,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # constant `limit_binding::LIMITS_LENT_AT_OPEN`, which exists in every build, and what
             # it changes is the capacity, so the domain, of each limit bound at the open.
             "limits-lent-at-open",
+            # `session-keeps-keyexprs` is a selector a final build names: it takes the crate-private
+            # `LinkKeyexprs::Held` out, and appears in public only as `cfg!` in the constant
+            # `declared_keyexprs::SESSION_KEEPS_KEYEXPRS`, which exists in every build.
+            "session-keeps-keyexprs",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now

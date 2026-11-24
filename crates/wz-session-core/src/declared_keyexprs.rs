@@ -12,7 +12,9 @@
 //! declarations under the same ids, so a table per link would be a copy of the session's, and a
 //! link that read the session's would reach into the session from under its send. Such a
 //! session names each key it sends itself (`crate::named_key::NamedKey`), and reads a peer's
-//! `M=0` key from its own tables.
+//! `M=0` key from its own tables. A build whose engine is such a session's names
+//! `session-keeps-keyexprs`, and its links have no table to keep (`LinkKeyexprs::Held` is not
+//! compiled).
 //!
 //! The table is written over a storage policy ([`Storage`]): the growable policy's rows are a
 //! hash map of strings, the fixed and the lent policies' are bounded at
@@ -108,11 +110,20 @@ impl<P: Storage> OwnMappingSpace for DeclaredKeyexprs<P> {
     }
 }
 
+/// Whether the engine this build links keeps the key expressions its sessions declared on the
+/// session itself, for every link (`session-keeps-keyexprs`), so that no link keeps a table of
+/// them. A constant beside the `cfg`, so an engine whose links keep the table refuses at build time
+/// a graph that unified the selector into it.
+pub const SESSION_KEEPS_KEYEXPRS: bool = cfg!(feature = "session-keeps-keyexprs");
+
 /// Where one link reads the key expressions its session declared.
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub(crate) enum LinkKeyexprs {
     /// The link keeps them, recorded as it sends each declaration and forgotten as it sends each
-    /// retraction: the session declares through this link alone.
+    /// retraction: the session declares through this link alone. Not in a build whose engine
+    /// keeps them on the session (`session-keeps-keyexprs`), where no link would ever hold one
+    /// and the growable table would be carried for nothing.
+    #[cfg(not(feature = "session-keeps-keyexprs"))]
     Held(DeclaredKeyexprs<crate::bounded::Heap>),
     /// The session keeps them for every link it has and records them itself; the link records
     /// nothing and reads nothing of them.
@@ -120,23 +131,32 @@ pub(crate) enum LinkKeyexprs {
 }
 
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-impl Default for LinkKeyexprs {
-    fn default() -> Self {
-        Self::Held(DeclaredKeyexprs::default())
-    }
-}
-
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
 impl LinkKeyexprs {
+    /// What a new link reads: its own table, where the session declares through it alone, or
+    /// none, in a build whose engine keeps the table on the session.
+    pub(crate) fn new() -> Self {
+        #[cfg(not(feature = "session-keeps-keyexprs"))]
+        {
+            Self::Held(DeclaredKeyexprs::default())
+        }
+        #[cfg(feature = "session-keeps-keyexprs")]
+        {
+            Self::Session
+        }
+    }
+
     /// The link sent a declaration of `literal` under `id`.
     #[cfg(feature = "declare-keyexpr")]
     pub(crate) fn sent_declaration(&mut self, id: ExprId, literal: &str) {
         match self {
             // The growable policy refuses no key and no row.
+            #[cfg(not(feature = "session-keeps-keyexprs"))]
             Self::Held(table) => {
                 let _ = table.record(id, literal);
             }
-            Self::Session => {}
+            Self::Session => {
+                let _ = (id, literal);
+            }
         }
     }
 
@@ -144,16 +164,20 @@ impl LinkKeyexprs {
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     pub(crate) fn sent_retraction(&mut self, id: ExprId) {
         match self {
+            #[cfg(not(feature = "session-keeps-keyexprs"))]
             Self::Held(table) => {
                 table.forget(id);
             }
-            Self::Session => {}
+            Self::Session => {
+                let _ = id;
+            }
         }
     }
 
     /// The table the link keeps, when it keeps one.
     pub(crate) fn held(&self) -> Option<&DeclaredKeyexprs<crate::bounded::Heap>> {
         match self {
+            #[cfg(not(feature = "session-keeps-keyexprs"))]
             Self::Held(table) => Some(table),
             Self::Session => None,
         }
@@ -162,6 +186,7 @@ impl LinkKeyexprs {
     /// The space the link reads: its own table, or none where the session keeps the table.
     pub(crate) fn space(&self) -> Option<&dyn OwnMappingSpace> {
         match self {
+            #[cfg(not(feature = "session-keeps-keyexprs"))]
             Self::Held(table) => Some(table),
             Self::Session => None,
         }
@@ -253,11 +278,12 @@ mod tests {
     #[cfg(all(
         feature = "session-unicast",
         feature = "declare-keyexpr",
-        feature = "declare-undeclare"
+        feature = "declare-undeclare",
+        not(feature = "session-keeps-keyexprs")
     ))]
     #[test]
     fn a_link_records_only_where_it_keeps_the_table() {
-        let mut held = LinkKeyexprs::default();
+        let mut held = LinkKeyexprs::new();
         held.sent_declaration(5, "home/temp");
         assert_eq!(held.held().and_then(|t| t.literal(5)), Some("home/temp"));
         let mut out = KeyexprBuf::default();
@@ -276,5 +302,43 @@ mod tests {
         assert!(kept.space().is_none(), "nor reads the session's");
         kept.sent_retraction(9);
         assert!(kept.held().is_none());
+    }
+
+    /// A new link keeps a table of what it declares unless the engine of the build keeps the
+    /// table on the session; the default build is the control, whose link records.
+    #[cfg(all(feature = "session-unicast", feature = "declare-keyexpr"))]
+    #[test]
+    fn a_new_link_keeps_a_table_unless_its_session_does() {
+        let mut link = LinkKeyexprs::new();
+        link.sent_declaration(5, "home/temp");
+        assert_eq!(
+            link.held().and_then(|t| t.literal(5)).is_some(),
+            !SESSION_KEEPS_KEYEXPRS,
+            "a link records exactly where its session does not"
+        );
+        assert_eq!(link.space().is_some(), !SESSION_KEEPS_KEYEXPRS);
+    }
+
+    /// In a build whose engine keeps the declared keys on the session, a link holds no table at
+    /// all: the type has no room for one, and what the link is told to record is dropped.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "declare-keyexpr",
+        feature = "declare-undeclare",
+        feature = "session-keeps-keyexprs"
+    ))]
+    #[test]
+    fn a_link_keeps_no_table_where_the_session_keeps_it() {
+        assert_eq!(
+            core::mem::size_of::<LinkKeyexprs>(),
+            0,
+            "no room for a table"
+        );
+        let mut link = LinkKeyexprs::new();
+        link.sent_declaration(5, "home/temp");
+        assert!(link.held().is_none(), "the link keeps no table");
+        assert!(link.space().is_none(), "nor reads one");
+        link.sent_retraction(5);
+        assert!(link.held().is_none());
     }
 }

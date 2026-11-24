@@ -143,23 +143,9 @@ impl<T: FaceReports> FaceReports for Arc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::RefCell;
+    // The host's mutex: a plane shared behind an `Arc` is reached from any thread, as an engine's is.
+    use crate::plane_lock::StdLocks;
     use core::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Locks of one thread, which is all a test needs.
-    enum CellLocks {}
-
-    impl LockFamily for CellLocks {
-        type Lock<T> = RefCell<T>;
-
-        fn new<T>(value: T) -> RefCell<T> {
-            RefCell::new(value)
-        }
-
-        fn with<T, R>(lock: &RefCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
-            f(&mut lock.borrow_mut())
-        }
-    }
 
     fn face(zid: u8) -> FaceSnapshot {
         FaceSnapshot {
@@ -176,7 +162,7 @@ mod tests {
     /// one is left.
     #[test]
     fn a_watcher_is_stopped_by_its_id_once() {
-        let plane = FacePlane::<CellLocks>::default();
+        let plane = FacePlane::<StdLocks>::default();
         assert!(!plane.watched());
         let sink: FaceEventSink = Arc::new(|_, _| {});
         let first = plane.watch(Arc::clone(&sink));
@@ -193,7 +179,7 @@ mod tests {
     /// Events are handed out in the order they happened, each once.
     #[test]
     fn events_are_handed_out_in_the_order_they_happened() {
-        let plane = FacePlane::<CellLocks>::default();
+        let plane = FacePlane::<StdLocks>::default();
         plane.happened(FaceEventKind::Up, face(1));
         plane.happened(FaceEventKind::Down, face(2));
         let (kind, first) = plane.next_event().unwrap();
@@ -209,12 +195,12 @@ mod tests {
     fn a_report_reaches_a_plane_and_nothing_reaches_unit() {
         let watches = [
             <() as FaceReports>::WATCHES,
-            <Arc<FacePlane<CellLocks>> as FaceReports>::WATCHES,
+            <Arc<FacePlane<StdLocks>> as FaceReports>::WATCHES,
         ];
         assert_eq!(watches, [false, true]);
         assert!(!FaceReports::watched(&()));
         FaceReports::happened(&(), FaceEventKind::Up, face(1));
-        let plane = Arc::new(FacePlane::<CellLocks>::default());
+        let plane = Arc::new(FacePlane::<StdLocks>::default());
         let told = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&told);
         plane.watch(Arc::new(move |_, _| {

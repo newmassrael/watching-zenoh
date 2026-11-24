@@ -44,6 +44,13 @@ pub(crate) const RECORD_BYTES: usize = RoundRows::<CoopCalls>::RECORD_BYTES;
 /// The bytes of one callback a record of the engine's round owes.
 pub(crate) const CALLBACK_BYTES: usize = RoundRows::<CoopCalls>::CALLBACK_BYTES;
 
+// Each call the engine's records owe is a row's address alone, so a callback row is that and its
+// tag: what the round's callbacks cost in the session's arena stays two words a row.
+const _: () = assert!(
+    CALLBACK_BYTES <= core::mem::size_of::<usize>().saturating_mul(2),
+    "a callback a record owes is a row's address and its tag"
+);
+
 // A call is a row's address alone; the stack cost the round states of the calls the session's own
 // put is handed (`wz_session_core::round::Captured`) holds while it stays so.
 #[cfg(feature = "local-subscriber")]

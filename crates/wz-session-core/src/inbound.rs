@@ -2133,9 +2133,10 @@ pub(crate) fn control_event(
 
 /// One transport message that carries no data, read where it lies in the receive buffer: the
 /// session's in-place receive hands every unit that is not a `Frame` or a `Fragment` it read
-/// itself to [`read_control`]. A handshake body is the document's view of the bytes, so its
-/// zid and cookie are ranges of the unit and nothing is copied out of it; only the extension
-/// chain is kept, in the form the readers of each extension take.
+/// itself to [`read_control`]. It is the message's facts as the judgement reads them, made once
+/// where the message is read: a handshake body's zid and cookie are ranges of the unit, the
+/// extension chain is the document's view of it, and the admission of that chain is judged with
+/// the read. No second form of the message is kept to be projected into the facts afterwards.
 ///
 /// Its life is the unit's: it is judged and dropped before the receive goes on to the next
 /// message of the unit.
@@ -2144,39 +2145,9 @@ pub(crate) fn control_event(
     feature = "codec-frame",
     feature = "session-unicast"
 ))]
-pub(crate) enum ControlRead<'a> {
-    /// An Init: its header, its body as the document's view, its chain.
-    #[cfg(feature = "codec-init-body")]
-    Init {
-        header: u8,
-        body: wz_codecs::init_body::InitBodyView<'a>,
-        extensions: ReadChain<'a>,
-    },
-    /// An Open: its header, its body as the document's view, its chain.
-    #[cfg(feature = "codec-open-body")]
-    Open {
-        header: u8,
-        body: wz_codecs::open_body::OpenBodyView<'a>,
-        extensions: ReadChain<'a>,
-    },
-    /// A Close: its reason, its scope bit, its chain.
-    #[cfg(feature = "codec-close")]
-    Close {
-        reason: u8,
-        session: bool,
-        extensions: ReadChain<'a>,
-    },
-    /// A KeepAlive: its chain.
-    #[cfg(feature = "codec-keep-alive")]
-    KeepAlive { extensions: ReadChain<'a> },
-    /// A message a unicast participant refuses whatever it says, read to its end
-    /// ([`ControlFacts::Refused`]): a JOIN, a transport OAM.
-    Refused,
-    /// A message this reader does not take ([`ControlFacts::Unread`]): a `Frame` or a
-    /// `Fragment` that reaches it, or an id this build has no reader for.
-    ///
-    /// It carries the unit's lifetime for the reason [`ControlFacts::Unread`] carries the facts'.
-    Unread(core::marker::PhantomData<&'a ()>),
+pub(crate) struct ControlRead<'a> {
+    facts: ControlFacts<'a, ReadChain<'a>>,
+    admission: crate::ext_admit::ExtAdmission,
 }
 
 #[cfg(all(
@@ -2184,79 +2155,17 @@ pub(crate) enum ControlRead<'a> {
     feature = "codec-frame",
     feature = "session-unicast"
 ))]
-impl ControlRead<'_> {
-    /// What the session's judgement reads of this message ([`ControlFacts`]).
-    pub(crate) fn facts(&self) -> ControlFacts<'_, ReadChain<'_>> {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            ControlRead::Init {
-                header,
-                body,
-                extensions,
-            } => ControlFacts::Init(InitFacts {
-                is_ack: (header & wire_const::FLAG_T_INIT_A) != 0,
-                version: body.version,
-                whatami: body.whatami(),
-                zid: body.zid.inner(),
-                s: body.s,
-                cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                extensions: *extensions,
-            }),
-            #[cfg(feature = "codec-open-body")]
-            ControlRead::Open {
-                header,
-                body,
-                extensions,
-            } => ControlFacts::Open(OpenFacts {
-                is_ack: (header & wire_const::FLAG_T_OPEN_A) != 0,
-                // R311ku — the seconds form is projected back to milliseconds at the wire
-                // boundary, as the decoded Open's lease is.
-                lease: crate::lease::lease_from_wire(
-                    (header & wire_const::FLAG_T_OPEN_T) != 0,
-                    body.lease,
-                ),
-                initial_sn: body.initial_sn,
-                cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                extensions: *extensions,
-            }),
-            #[cfg(feature = "codec-close")]
-            ControlRead::Close {
-                reason, session, ..
-            } => ControlFacts::Close {
-                reason: *reason,
-                session: *session,
-            },
-            #[cfg(feature = "codec-keep-alive")]
-            ControlRead::KeepAlive { .. } => ControlFacts::KeepAlive,
-            ControlRead::Refused => ControlFacts::Refused,
-            ControlRead::Unread(_) => ControlFacts::Unread(core::marker::PhantomData),
-        }
+impl<'a> ControlRead<'a> {
+    /// The message's facts ([`ControlFacts`]), borrowing the unit it was read from.
+    pub(crate) fn facts(&self) -> ControlFacts<'a, ReadChain<'a>> {
+        self.facts
     }
 
     /// What a conforming participant must do with this message's extension chain, by the rule
-    /// [`InboundFrame::ext_admission`] applies to the decoded message.
+    /// [`InboundFrame::ext_admission`] applies to the decoded message: judged when the message
+    /// was read, and `Unjudged` for a message whose chain this reader keeps nothing of.
     pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
-        match self {
-            #[cfg(feature = "codec-init-body")]
-            ControlRead::Init { extensions, .. } => {
-                judge_transport_chain(wire_const::T_MID_INIT, extensions)
-            }
-            #[cfg(feature = "codec-open-body")]
-            ControlRead::Open { extensions, .. } => {
-                judge_transport_chain(wire_const::T_MID_OPEN, extensions)
-            }
-            #[cfg(feature = "codec-close")]
-            ControlRead::Close { extensions, .. } => {
-                judge_transport_chain(wire_const::T_MID_CLOSE, extensions)
-            }
-            #[cfg(feature = "codec-keep-alive")]
-            ControlRead::KeepAlive { extensions } => {
-                judge_transport_chain(wire_const::T_MID_KEEP_ALIVE, extensions)
-            }
-            ControlRead::Refused | ControlRead::Unread(_) => {
-                crate::ext_admit::ExtAdmission::Unjudged
-            }
-        }
+        self.admission
     }
 }
 
@@ -2274,116 +2183,155 @@ impl ControlRead<'_> {
 pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mut cursor = SceCursor::new(bytes);
-    let read = match header & 0x1F {
-        #[cfg(feature = "codec-init-body")]
-        wire_const::T_MID_INIT => {
-            let view = TransportInitView::decode(&mut cursor)?;
-            // The fixed profile refuses a body its storage cannot hold, the cookie past its
-            // capacity; the view holds any, so the decoder's storing is asked for its verdict.
-            #[cfg(feature = "session-slot")]
-            view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
-            // A cookie past the build's bound is refused as the slot profile's storing refuses
-            // it, and not read only to be left out of the Open that echoes it.
-            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
-            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
-            refuse_as_decoded(
-                wire_const::T_MID_INIT,
-                crate::ext_view::walked(view.extensions.as_ref()),
-            )?;
-            let extensions = view
-                .extensions
-                .as_ref()
-                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
-                    ReadChain::Init(*list.inner())
-                });
-            // A zid that is no zid is refused, after the chain as the decoder refuses it
-            // (`refuse_unnamed_zid`).
-            if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.inner()) {
-                return Err(InboundParseError::InvalidZid(refused));
+    // Each arm names the message's facts and, for a message that carries a chain, the chain with
+    // the id it is judged under, so the admission is judged once below for all of them.
+    let (facts, chain): (ControlFacts<'_, ReadChain<'_>>, Option<(u8, ReadChain<'_>)>) =
+        match header & 0x1F {
+            #[cfg(feature = "codec-init-body")]
+            wire_const::T_MID_INIT => {
+                let view = TransportInitView::decode(&mut cursor)?;
+                // The fixed profile refuses a body its storage cannot hold, the cookie past its
+                // capacity; the view holds any, so the decoder's storing is asked for its verdict.
+                #[cfg(feature = "session-slot")]
+                view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+                // A cookie past the build's bound is refused as the slot profile's storing refuses
+                // it, and not read only to be left out of the Open that echoes it.
+                #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
+                refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
+                refuse_as_decoded(
+                    wire_const::T_MID_INIT,
+                    crate::ext_view::walked(view.extensions.as_ref()),
+                )?;
+                let extensions = view
+                    .extensions
+                    .as_ref()
+                    .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                        ReadChain::Init(*list.inner())
+                    });
+                // A zid that is no zid is refused, after the chain as the decoder refuses it
+                // (`refuse_unnamed_zid`).
+                if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.inner()) {
+                    return Err(InboundParseError::InvalidZid(refused));
+                }
+                (
+                    ControlFacts::Init(InitFacts {
+                        is_ack: (view.header & wire_const::FLAG_T_INIT_A) != 0,
+                        version: view.body.version,
+                        whatami: view.body.whatami(),
+                        zid: *view.body.zid.inner(),
+                        s: view.body.s,
+                        cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
+                        extensions,
+                    }),
+                    Some((wire_const::T_MID_INIT, extensions)),
+                )
             }
-            ControlRead::Init {
-                header: view.header,
-                body: view.body,
-                extensions,
+            #[cfg(feature = "codec-open-body")]
+            wire_const::T_MID_OPEN => {
+                let view = TransportOpenView::decode(&mut cursor)?;
+                #[cfg(feature = "session-slot")]
+                view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
+                // A cookie past the build's bound is refused as the slot profile's storing refuses
+                // it, and not read only to be left out of the Open that echoes it.
+                #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
+                refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
+                refuse_as_decoded(
+                    wire_const::T_MID_OPEN,
+                    crate::ext_view::walked(view.extensions.as_ref()),
+                )?;
+                let extensions = view
+                    .extensions
+                    .as_ref()
+                    .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                        ReadChain::Open(*list.inner())
+                    });
+                (
+                    ControlFacts::Open(OpenFacts {
+                        is_ack: (view.header & wire_const::FLAG_T_OPEN_A) != 0,
+                        // R311ku — the seconds form is projected back to milliseconds at the wire
+                        // boundary, as the decoded Open's lease is.
+                        lease: crate::lease::lease_from_wire(
+                            (view.header & wire_const::FLAG_T_OPEN_T) != 0,
+                            view.body.lease,
+                        ),
+                        initial_sn: view.body.initial_sn,
+                        cookie: view.body.cookie.as_ref().map(|cookie| *cookie.inner()),
+                        extensions,
+                    }),
+                    Some((wire_const::T_MID_OPEN, extensions)),
+                )
             }
-        }
-        #[cfg(feature = "codec-open-body")]
-        wire_const::T_MID_OPEN => {
-            let view = TransportOpenView::decode(&mut cursor)?;
-            #[cfg(feature = "session-slot")]
-            view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
-            // A cookie past the build's bound is refused as the slot profile's storing refuses
-            // it, and not read only to be left out of the Open that echoes it.
-            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
-            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
-            refuse_as_decoded(
-                wire_const::T_MID_OPEN,
-                crate::ext_view::walked(view.extensions.as_ref()),
-            )?;
-            let extensions = view
-                .extensions
-                .as_ref()
-                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
-                    ReadChain::Open(*list.inner())
-                });
-            ControlRead::Open {
-                header: view.header,
-                body: view.body,
-                extensions,
+            #[cfg(feature = "codec-close")]
+            wire_const::T_MID_CLOSE => {
+                let view = TransportCloseView::decode(&mut cursor)?;
+                refuse_as_decoded(
+                    wire_const::T_MID_CLOSE,
+                    crate::ext_view::walked(view.extensions.as_ref()),
+                )?;
+                let extensions = view
+                    .extensions
+                    .as_ref()
+                    .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                        ReadChain::Close(*list.inner())
+                    });
+                (
+                    ControlFacts::Close {
+                        reason: view.body.reason,
+                        session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
+                    },
+                    Some((wire_const::T_MID_CLOSE, extensions)),
+                )
             }
-        }
-        #[cfg(feature = "codec-close")]
-        wire_const::T_MID_CLOSE => {
-            let view = TransportCloseView::decode(&mut cursor)?;
-            refuse_as_decoded(
-                wire_const::T_MID_CLOSE,
-                crate::ext_view::walked(view.extensions.as_ref()),
-            )?;
-            let extensions = view
-                .extensions
-                .as_ref()
-                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
-                    ReadChain::Close(*list.inner())
-                });
-            ControlRead::Close {
-                reason: view.body.reason,
-                session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
-                extensions,
+            #[cfg(feature = "codec-keep-alive")]
+            wire_const::T_MID_KEEP_ALIVE => {
+                let view = TransportKeepAliveView::decode(&mut cursor)?;
+                refuse_as_decoded(
+                    wire_const::T_MID_KEEP_ALIVE,
+                    crate::ext_view::walked(view.extensions.as_ref()),
+                )?;
+                let extensions = view
+                    .extensions
+                    .as_ref()
+                    .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                        ReadChain::KeepAlive(*list.inner())
+                    });
+                (
+                    ControlFacts::KeepAlive,
+                    Some((wire_const::T_MID_KEEP_ALIVE, extensions)),
+                )
             }
-        }
-        #[cfg(feature = "codec-keep-alive")]
-        wire_const::T_MID_KEEP_ALIVE => {
-            let view = TransportKeepAliveView::decode(&mut cursor)?;
-            refuse_as_decoded(
-                wire_const::T_MID_KEEP_ALIVE,
-                crate::ext_view::walked(view.extensions.as_ref()),
-            )?;
-            let extensions = view
-                .extensions
-                .as_ref()
-                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
-                    ReadChain::KeepAlive(*list.inner())
-                });
-            ControlRead::KeepAlive { extensions }
-        }
-        // A JOIN is refused whatever it says, but it is read to its end with the decoder's
-        // refusals, in the decoder's order (the message, its chain, its zid), so the walk of the
-        // unit steps over it as the decoder's reading does. Nothing of it is kept: the zid is
-        // judged where it lies and the chain by the verdict alone.
-        #[cfg(feature = "codec-join")]
-        wire_const::T_MID_JOIN => {
-            refuse_join(&mut cursor)?;
-            ControlRead::Refused
-        }
-        // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
-        // them, and nothing of it is kept.
-        wire_const::T_MID_OAM => {
-            refuse_oam(&mut cursor)?;
-            ControlRead::Refused
-        }
-        _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
-    };
-    Ok((read, bytes.len().saturating_sub(cursor.remaining())))
+            // A JOIN is refused whatever it says, but it is read to its end with the decoder's
+            // refusals, in the decoder's order (the message, its chain, its zid), so the walk of
+            // the unit steps over it as the decoder's reading does. Nothing of it is kept: the zid
+            // is judged where it lies and the chain by the verdict alone.
+            #[cfg(feature = "codec-join")]
+            wire_const::T_MID_JOIN => {
+                refuse_join(&mut cursor)?;
+                (ControlFacts::Refused, None)
+            }
+            // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
+            // them, and nothing of it is kept.
+            wire_const::T_MID_OAM => {
+                refuse_oam(&mut cursor)?;
+                (ControlFacts::Refused, None)
+            }
+            _ => {
+                return Ok((
+                    ControlRead {
+                        facts: ControlFacts::Unread(core::marker::PhantomData),
+                        admission: crate::ext_admit::ExtAdmission::Unjudged,
+                    },
+                    0,
+                ))
+            }
+        };
+    let admission = chain.map_or(crate::ext_admit::ExtAdmission::Unjudged, |(mid, chain)| {
+        judge_transport_chain(mid, &chain)
+    });
+    Ok((
+        ControlRead { facts, admission },
+        bytes.len().saturating_sub(cursor.remaining()),
+    ))
 }
 
 /// Read the JOIN at `cursor` to its end with the refusals its decode answers, in the decode's

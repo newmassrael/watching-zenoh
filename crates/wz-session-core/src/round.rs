@@ -565,12 +565,6 @@ impl<C: RoundCalls> RoundRows<C> {
                 core::mem::align_of::<Entry<C>>() == core::mem::align_of::<Span>(),
                 "a record holds nothing aligned wider than its spans"
             );
-            // Each call a record owes is a row's address alone, so a callback row is that and its
-            // tag; the plan sizes the round's arena rows by it.
-            assert!(
-                Self::CALLBACK_BYTES <= core::mem::size_of::<usize>().saturating_mul(2),
-                "a callback a record owes is a row's address and its tag"
-            );
         }
         Ok(Self {
             records: arena.lend(counts.records)?,
@@ -2131,19 +2125,6 @@ impl<C: RoundCalls> Round<C> {
     }
 }
 
-/// The round as the session's state asks it (`SessionState::retract_owed`). Named by its path
-/// alone: in scope, its methods would be found first on an `Arc<Round>`, before the round's own.
-impl<C: RoundCalls> crate::session_state::DeliveryRound for Round<C> {
-    unsafe fn has_room(&self, callbacks: usize) -> bool {
-        // SAFETY: the caller's contract, which is the round's own.
-        unsafe { Self::has_room(self, ReadRoom { callbacks }) }
-    }
-
-    fn owe(&self, owed: bool) {
-        Self::owe(self, owed);
-    }
-}
-
 /// A query of the round, read where its parts lie: what each queryable it reached is handed.
 struct RoundQuery<'t, C: RoundCalls> {
     query: &'t HeldQuery,
@@ -2332,4 +2313,4 @@ impl<C: RoundCalls> ReplyView for RoundReply<'_, C> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -462,9 +462,8 @@ watching-zenoh/
 │   ├── algorithms/
 │   │   ├── crc16_ccitt.scxml          # kind=algorithm
 │   │   ├── vle_u64.scxml
-│   │   ├── keyexpr_intersects.scxml   # wildcard matching over the key texts
-│   │   ├── keyexpr_includes.scxml     #   (and keyexpr_matches + chunk helpers)
-│   │   └── keyexpr_matches.scxml
+│   │   ├── keyexpr_relation.scxml     # intersects and includes over the key texts
+│   │   └── keyexpr_matches.scxml      #   (and the chunk helpers beside them)
 │   ├── collections/
 │   │   ├── local_sub_table.scxml      # kind=bounded-collection
 │   │   ├── local_queryable_table.scxml
