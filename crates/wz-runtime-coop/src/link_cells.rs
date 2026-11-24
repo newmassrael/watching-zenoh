@@ -115,6 +115,7 @@ impl<K> CellRc<K> {
     /// takes it ([`Self::place`]); in a cell of its own on the heap when no table is
     /// ([`Self::boxed`]). What every maker of a link's part asks, whichever memory the session
     /// lends.
+    #[inline(never)]
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
         match cells {
             Some(cells) => Self::place(cells, value),

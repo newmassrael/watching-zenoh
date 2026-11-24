@@ -1635,6 +1635,7 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 /// dropped unmade: an engine that reserved its tables at its open tells its program the session
 /// has no room, where a handle that reads as a shut runtime would say the session ended.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[inline(never)]
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     fields: PumpFields<C, L>,
