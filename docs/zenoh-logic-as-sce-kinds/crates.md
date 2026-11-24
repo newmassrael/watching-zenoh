@@ -24,7 +24,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-ap-demo` | S10 | |
 | `wz-ap-demo-app` | S10 | |
 | `wz-app-frame` | S10, S11 | |
-| `wz-app-schema` | S11 | |
+| `wz-app-schema` | S10, S11 | |
 | `wz-auth` | S6 | |
 | `wz-capi-c` | S8 | |
 | `wz-capi-coop` | S7 | |

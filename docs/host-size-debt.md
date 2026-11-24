@@ -106,8 +106,9 @@ Neither is a mismatch of the switches; both are planes the pico ABI links and ca
 belong to the reduction list, not to the reference.
 
 The two builds are also built alike: zenoh-pico's `Release` is `-O3`
-(`vendor/zenoh-pico/CMakeLists.txt` @ `add_compile_options(-pipe -O3)`), wz's release profile is
-`opt-level = 3` with thin LTO and one codegen unit.
+(`vendor/zenoh-pico/CMakeLists.txt` @ `add_compile_options(-pipe -O3)`), and the gate builds wz
+with the shipping profile (`ship` in `crates/Cargo.toml`), `opt-level = 3` with fat LTO and one
+codegen unit.
 
 ## 4. The planes of the tokio cases
 
@@ -125,7 +126,7 @@ it leaves it out.
 | accept loop and the inbound handshake (`accept_loop`, `routing-accept`, which also turns on `codec-request` in a build without the query plane) | a lone listener | needed by `peer`; the cooperative engine's listener costs 63,954 for the same role | the tokio engine's own cost, Q1 |
 | the multicast transport (open-debt item 913) | yes (`Z_FEATURE_MULTICAST_TRANSPORT`) | `multicast-transport` off; `pico-default` read 4,216,542 with it and 3,790,610 without (case note, measured) | owned by item 913 |
 | the query plane | yes | its own features; on the cooperative engine 9.4 times pico's. The case notes of 2026-11-03 put the growth of that day in `decode_one_record` (1,438 to 18,628, the borrowed-to-owned conversions of every arm) and the views' `decode_into`; whether moving those conversions out of the decoder gives any of it back is the carry those notes left | R4 |
-| the unstable API's `wz_ext_config_device_requires` (`device_requires.rs` over `wz_session_core::facilities`) | none (a wz door) | it reads endpoints with `parse_any_locator`, the grammar of every scheme the tree knows, where the cooperative engine dials with `wz_session_mcu::dial::parse_locator`; the three `unstable-api` cooperative cases grew about 110,000 when the door came (case note, attributed by feature set, not by symbol) | decision Q6 |
+| `wz_ext_config_device_requires` (`device_requires.rs` over `wz_session_core::facilities`), its own capability `device-requires` since it left `unstable-api`, so the `unstable-api` cases no longer carry it | none (a wz door) | it reads endpoints with `parse_any_locator`, the grammar of every scheme the tree knows, where the cooperative engine dials with `wz_session_mcu::dial::parse_locator`; the three `unstable-api` cooperative cases grew about 110,000 when the door came (case note, attributed by feature set, not by symbol) | decision Q6 |
 | the statechart runtime's BasicHTTP processor (`sce-rust-runtime`'s `http-send`, a default) | none | `default-features = false` with `std` and `macrostep-diagnostics`: R1, landed | small, under 5,000 |
 
 The generated codecs and machines (SCE) are in both engines alike and are the session's own logic;
@@ -180,8 +181,8 @@ python3 scripts/lib/capability_cost_gate.py --measure pico-client-small pico-cli
 ```
 
 The attribution of a plane, from two builds of the gate's own commands
-(`cargo build --release -p wz-capi-pico [--no-default-features --features <case>]` in `crates/`,
-the library copied out of `crates/target/release/` after each), by owning scope:
+(`cargo build --profile ship -p wz-capi-pico [--no-default-features --features <case>]` in
+`crates/`, the library copied out of `crates/target/ship/` after each), by owning scope:
 
 ```
 python3 scripts/lib/footprint_attribution.py --old <a.so> --new <b.so> \

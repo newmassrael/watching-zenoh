@@ -91,6 +91,15 @@ perf/thr, a sequence number in the first eight bytes):
   for up to 200 ms; in the multi-threaded arm the program sleeps on a semaphore the answer gives, in the
   single-threaded arm it steps the session until the answer comes. A run that loses more than a tenth of
   its round trips is lost.
+- **frag-rel and frag-be.** The sub cell at 3,072 bytes, past the 2,048-byte batch both libraries
+  advertise, so the router sends each sample in fragments and both rejoin it; the pacer publishes
+  reliable in one and best effort in the other (`paced_pub -u`, the unstable API of the host's
+  zenoh-pico build). Their heap is the reason they exist: zenoh-pico takes a defragmentation buffer of
+  a reliability when that reliability's first fragment comes, and wz reserves its chain buffers when the
+  session opens, so the cells that send no fragment compare wz's reservation against a zenoh-pico that
+  never took its buffers; these compare the two under the same reassembly. A datagram of the batch is
+  past the Ethernet MTU, so the image's stack reassembles IPv4 fragments (`CONFIG_NET_IPV4_FRAGMENT`,
+  prj.conf, both arms). `--sizes` does not apply to them.
 
 A publisher waits for its match before the first counted put because zenoh-pico's put returns success
 and sends nothing while its write filter knows of no subscriber, so a loop started before the probe's
@@ -157,7 +166,7 @@ python3 scripts/host-bench/mcu_speed.py --selftest
 **How long.** Not measured yet; the first run says. By the parts: the host probe about a minute; each arm P
 image a minute or two; the first arm W image the longest, its staticlib built with LTO for the core, and the
 second a rebuild of the crate whose feature moved. A run of the default matrix is 2 arms x 2 threading arms
-x 3 workloads x 3 sizes x 3 repetitions = 108 boots: a put or round-trip cell a few seconds, a throughput
+x (3 workloads x 3 sizes + 2 fragmenting workloads) x 3 repetitions = 132 boots: a put or round-trip cell a few seconds, a throughput
 cell longer, since its window is 2 s of the guest's clock and a guest kept busy by the probe runs slower
 than that in real time.
 
@@ -224,7 +233,8 @@ Every rule is the host matrix's (docs/pico-perf-matrix.md section 5), from the s
 **Filling the table.** A null row fails, so no lane runs the matrix until the table is filled (section 6).
 Run the matrix with the defaults and paste the rows the gate prints in the table's shape (each with its
 debt) into the table, run the gate again over the same result to see it pass, and commit the table with
-the run's record. The committed rows are the reading of the run of 2026-11-22: 70 rows, 5 of them WIN, the
+the run's record. The sixteen rows of the fragmenting cells are null until the first run that has them.
+The committed rows are the reading of the run of 2026-11-22: 70 rows, 5 of them WIN, the
 rest ratchets at that run's upper end, every one a debt. The eight rows of the 1,024-byte receiving cells
 are from a later run at the byte-held offer (117 samples a second), since 1,000 a second stopped the
 emulated card: all eight ratchets and debts. Its single-threaded arm kept two measured repetitions of each
@@ -257,5 +267,5 @@ lane that boots its machine.
 - **Not a lossless network.** QEMU's user network and the router are the path, and a datagram dropped there
   is lost to both arms alike; the share the probe got says how much. A frame the emulated card refused
   makes the cell invalid (section 4) rather than a loss of either arm.
-- **One client, one router, one probe,** UDP unicast, no batching window, payloads under the batch, so no
-  fragment.
+- **One client, one router, one probe,** UDP unicast, no batching window, payloads under the batch but
+  for the two fragmenting cells.

@@ -150,7 +150,9 @@ build_image() {
 }
 
 # build_peer: zenoh-pico for the host from a copy of the submodule (its CMake writes a header into the
-# source tree it configures), and the host probe against it, the same build for both arms' cells.
+# source tree it configures), and the host probe against it, the same build for both arms' cells. Its
+# unstable API is on for the publisher's reliability, which the pacer's -u sets for the best-effort
+# fragmenting cells (frag-be); every other cell publishes reliable, the default either way.
 build_peer() {
     local src="$out/pico-src" build="$out/pico-build" log="$logs/pico-host.log" lib
     command -v cmake >/dev/null 2>&1 || refuse "cmake is not on PATH (the host probe's zenoh-pico)"
@@ -165,6 +167,7 @@ build_peer() {
     if ! {
         cmake -S "$src" -B "$build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_STANDARD=11 -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DZ_FEATURE_MATCHING=1 -DZ_FEATURE_BATCHING=1 \
+            -DZ_FEATURE_UNSTABLE_API=1 \
             && cmake --build "$build" -j "$(nproc)"
     } >"$log" 2>&1; then
         tail -n 40 "$log" >&2

@@ -17243,8 +17243,8 @@ layer_c1bo_dissect_c_abi() {
 # crate must arrive already gated rather than one report later.
 #
 # The DEV profile: a SONAME is a linker argument with no profile-dependent path
-# through `wz_cdylib_build`, and nothing LTO can remove. Release is one flag
-# away (`--profile release`) and costs minutes under `lto = "thin"` +
+# through `wz_cdylib_build`, and nothing LTO can remove. The shipped profile is
+# one flag away (`--profile ship`) and costs minutes under `lto = "fat"` +
 # `codegen-units = 1` for a claim the dev artifact already settles.
 #
 # `WZ_SONAME_REQUIRE` turns the non-ELF-platform SKIP into a FAIL, the arming

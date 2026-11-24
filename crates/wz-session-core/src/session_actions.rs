@@ -4306,38 +4306,31 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     // surface has no error channel, so a transport-down reject drops the emit as the dead
     // link would.
     //
-    // The same writer serves both storage policies. With no allocator a reply the wire
-    // cannot carry is skipped (the heap drain skips one whose bounded field overflows).
-    // With one, the reply is written from its parts unless something needs the OWNED
-    // record: the session's egress policy asks a verdict of it, a routing namespace
-    // decorates its key, the transport's statistics classify its content, or the writer
-    // cannot describe it. Those go the way every owned reply goes, through
-    // [`Self::send_response`].
+    // The same writer serves both storage policies, and a reply the wire cannot carry is
+    // skipped under either: the owned path refuses the same replies (a reply that names no
+    // key), and the heap drain skips one whose bounded field overflows. A reply to a query
+    // that named its key by an id of the link's dictionary (`shared-key-ids`) names it as
+    // the query did. The OWNED record is built only where something reads it: the session's
+    // egress policy asks a verdict of it, a routing namespace decorates its key, or the
+    // transport's statistics classify its content. Those go the way every owned reply goes,
+    // through [`Self::send_response`].
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
-        // A reply whose key mirrors its query's form (`shared-key-ids`) is not a literal the
-        // writer from parts can describe: it goes as an owned reply does, which names it.
-        #[cfg(feature = "shared-key-ids")]
-        if self.reply_is_mirrored(parts.rid, parts.keyexpr) {
+        #[cfg(feature = "alloc")]
+        if !self.reply_can_be_written_from_parts() {
             if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
                 self.send_response(response);
             }
             return;
         }
-        #[cfg(feature = "alloc")]
-        let writer = match crate::lent_response::ResponseWriter::new(parts) {
-            Ok(writer) if self.reply_can_be_written_from_parts() => writer,
-            _ => {
-                if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
-                    self.send_response(response);
-                }
-                return;
-            }
-        };
-        #[cfg(not(feature = "alloc"))]
         let Ok(writer) = crate::lent_response::ResponseWriter::new(parts) else {
             return;
         };
+        #[cfg(feature = "shared-key-ids")]
+        let writer = writer.naming(self.with_facts(|facts| {
+            let keys = &mut facts.link_keys;
+            keys.reply_key(parts.rid, parts.keyexpr)
+        }));
         let qos = parts.qos;
         // The reply's own size: a Response has no size constant (its payload's bound is a u32
         // length), and the link lends a slot of this size. A reply the writer refuses is refused
@@ -16772,16 +16765,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         response
     }
 
-    /// Whether a reply on `keyexpr` to the request `rid` names its key otherwise than as the
-    /// literal, which the writer of a reply from its parts cannot do.
-    #[cfg(all(feature = "shared-key-ids", feature = "codec-response"))]
-    fn reply_is_mirrored(&self, rid: crate::wire_id::RequestId, keyexpr: &str) -> bool {
-        self.with_facts(|facts| {
-            let keys = &mut facts.link_keys;
-            keys.reply_key(rid, keyexpr) != crate::shared_key_ids::ReplyKey::Literal
-        })
-    }
-
     /// The key the installed dictionary names `id`, when one is installed and holds it.
     #[cfg(feature = "shared-key-ids")]
     fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
@@ -18052,7 +18035,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// record built: nothing between the handler and the wire needs one. The egress policy
     /// asks its verdict of the owned reply, a routing namespace decorates the owned reply's
     /// key, and the statistics classify the owned reply's content, so a session that holds
-    /// either, or is built to count, sends the owned reply.
+    /// either, or is built to count, sends the owned reply. A build with none of the three
+    /// answers `true` with no read, and links no owned reply for its staged ones.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     fn reply_can_be_written_from_parts(&self) -> bool {
         if cfg!(feature = "transport-stats") {

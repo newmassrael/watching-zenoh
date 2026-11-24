@@ -746,15 +746,7 @@ macro_rules! impl_arithmetic {
         #[doc = concat!("Deserialize one `", stringify!($ty), "` from a whole payload (pico `", stringify!($de), "`).")]
         #[no_mangle]
         pub unsafe extern "C" fn $de(bytes: *const z_loaned_bytes_t, data: *mut $ty) -> ZResult {
-            if data.is_null() {
-                return Z_ERR_NULL;
-            }
-            let mut raw = [0u8; core::mem::size_of::<$ty>()];
-            let rc = deserialize_fixed(bytes, &mut raw);
-            if rc == Z_OK {
-                *data = <$ty>::from_le_bytes(raw);
-            }
-            rc
+            deserialize_fixed(bytes, data.cast::<u8>(), core::mem::size_of::<$ty>())
         }
     };
 }
@@ -775,23 +767,33 @@ unsafe fn serialize_fixed(bytes: *mut z_owned_bytes_t, le: &[u8]) -> ZResult {
     })
 }
 
-/// The body every `ze_deserialize_<t>` of a fixed-width type shares: the payload's bytes into
-/// `out`, which is the type's width. Exactly that many: a longer or a shorter payload is an
-/// error, as pico's is-done check makes it, not a prefix read, and `out` is left as it was.
+/// The body every `ze_deserialize_<t>` of a fixed-width type shares: the payload's
+/// little-endian bytes written straight into the value at `out`, `width` bytes, in the host's
+/// order. Exactly that many: a longer or a shorter payload is an error, as pico's is-done check
+/// makes it, not a prefix read, and the value is left as it was. A null `out` is refused before
+/// the payload is read. The export is the type's width and a jump: its value is not read through
+/// a temporary of its own.
 ///
 /// # Safety
-/// `bytes` must be null or a live loaned payload.
+/// `bytes` must be null or a live loaned payload; `out` null or valid for writes of `width`
+/// bytes, the bytes of a type every pattern of which is a value.
 #[inline(never)]
-unsafe fn deserialize_fixed(bytes: *const z_loaned_bytes_t, out: &mut [u8]) -> ZResult {
+unsafe fn deserialize_fixed(bytes: *const z_loaned_bytes_t, out: *mut u8, width: usize) -> ZResult {
+    if out.is_null() {
+        return Z_ERR_NULL;
+    }
     guarded(|| {
         let Some(buf) = bytes_ref(bytes) else {
             return Z_ERR_NULL;
         };
         let read = buf.as_slice();
-        if read.len() != out.len() {
+        if read.len() != width {
             return Z_ERR_GENERIC;
         }
-        out.copy_from_slice(read);
+        let value = core::slice::from_raw_parts_mut(out, width);
+        value.copy_from_slice(read);
+        #[cfg(target_endian = "big")]
+        value.reverse();
         Z_OK
     })
 }
