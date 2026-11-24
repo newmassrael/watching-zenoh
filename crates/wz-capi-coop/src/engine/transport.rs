@@ -14,7 +14,7 @@ pub(super) type TransportState<L, C> = wz_runtime_coop::transport::TransportStat
 
 /// A face of this engine names the transport's types: its clock, its network, its link's session
 /// and the group a session joins (`group`).
-impl<C: ClockSource + Clone + 'static, L: SessionLinks + 'static> TransportFaces for Face<C, L> {
+impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Face<C, L> {
     type Clock = C;
     type Links = L;
     type Session = LinkSession<C>;
@@ -37,9 +37,7 @@ pub(super) trait TellGroups {
 }
 
 #[cfg(feature = "group")]
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TellGroups
-    for TransportState<L, C>
-{
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> TellGroups for TransportState<L, C> {
     fn announce_to_groups(&self, entity: GroupEntity<'_>) {
         for group in &self.groups {
             group.announce(entity);

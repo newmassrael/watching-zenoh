@@ -63,7 +63,7 @@ use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTim
 /// joined (`group`).
 pub trait TransportFaces {
     /// The clock the session's links run on.
-    type Clock: ClockSource + Clone + 'static;
+    type Clock: ClockSource + 'static;
     /// The network the session's links, ports and groups are opened on.
     type Links: SessionLinks + 'static;
     /// The session's half of one link.
