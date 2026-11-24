@@ -1523,6 +1523,8 @@ pub(super) fn dispatch(
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;
+    // The registry holds the group's face before the group is joined (`Registry::add_face`).
+    let face = registry.borrow().held(face);
     move |event, replies| {
         let mut registry = registry.borrow_mut();
         plane.set_arriving(generation);
@@ -1543,6 +1545,8 @@ pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
+    // The registry holds the group's face before the group is joined (`Registry::add_face`).
+    let face = registry.borrow().held(face);
     move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
 }
 
