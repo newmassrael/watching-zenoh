@@ -12456,8 +12456,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(not(feature = "transport-tx-lend"))]
             let _ = batch;
             let mut wire = Vec::with_capacity(span.wire_bound());
-            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)
-                .expect("a Vec grows, so its sink is infallible");
+            // The vector refuses no write, but the body can refuse itself (an encoder that composes
+            // its message as it writes it), as it does in a slot: refused before a byte leaves.
+            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)?;
             self.send_wire(&wire, reliability, priority);
             Ok(())
         }
