@@ -1068,6 +1068,9 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
 impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for StreamDriver<S, B, T>
 {
+    // Out of line where the link is reached through its table: the entries the trait derives from
+    // this one (`send_prioritized`, `send_urgent`) would each hold a copy of it.
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         let Ok(len) = u16::try_from(bytes.len()) else {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
@@ -1087,6 +1090,9 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // tried first, and one it does not take whole makes the frame after it ask again
     // (`send`). A link that still owes the stream part of a frame has room once that is
     // written: the wait for the stream to take bytes is what lets it be, within the message's wait.
+    // Out of line where the link is reached through its table, which the session asks through the
+    // entry the trait derives from this one (`wait_for_room_for`): two entries, one body.
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
         let wait_us = wait.wait_us();
         let owed_written = self.write_owed();

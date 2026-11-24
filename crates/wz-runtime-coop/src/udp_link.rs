@@ -567,6 +567,9 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
     /// The socket's send of `bytes` to the peer, as the outcome the session counts: a send with no
     /// peer yet, or one the stack refuses, is REPORTED (R2371's rule for the lwIP driver), not
     /// swallowed.
+    // Out of line where the link is reached through its table: the byte send's entry and the two
+    // the trait derives from it (`send_prioritized`, `send_urgent`) would each hold a copy.
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn send_datagram(&self, bytes: &[u8]) -> LinkSendOutcome {
         let Some(peer) = self.binding.peer() else {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
