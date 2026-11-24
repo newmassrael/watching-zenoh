@@ -3145,9 +3145,9 @@ pub struct BlockFirstJob {
     body: alloc::vec::Vec<u8>,
 }
 
-/// One network message a send hands its conduit: its QoS, the most its encoding may take, the
-/// class its counters are kept under, and the encoder that writes it
-/// ([`SessionLinkActions::dispatch_network_message_at`]).
+/// The conduit a network message is sent on
+/// ([`SessionLinkActions::dispatch_network_message_at`]): its priority and whether its reliable
+/// channel. Two bytes, passed in a register.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -3160,15 +3160,10 @@ pub struct BlockFirstJob {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-struct OutMessage<'a, P: ?Sized> {
-    /// R2923 — the message's congestion control, off its own ext_qos: `Drop` may be dropped
-    /// when its conduit's link is congested, `Block` waits and closes the session if the link
-    /// never frees. R2952 — the whole `ext_qos`, not only its congestion control: a
-    /// `BlockFirst` message's slot is keyed by its own priority.
-    qos: crate::sample::QosLevel,
-    worst_case_payload: usize,
-    stats_class: crate::stats::NetworkStatsClass,
-    encode_body: &'a P,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Conduit {
+    priority: Priority,
+    reliable: bool,
 }
 
 /// R2952 — which pass through [`SessionLinkActions::dispatch_network_message_at`]
@@ -4065,14 +4060,14 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                qos.priority(),
-                /*reliable=*/ true,
-                &OutMessage {
-                    qos,
-                    worst_case_payload: size,
-                    stats_class: crate::stats::NetworkStatsClass::unread(),
-                    encode_body: as_encoder(&|sink| writer.encode_tx(sink)),
+                Conduit {
+                    priority: qos.priority(),
+                    reliable: true,
                 },
+                qos,
+                size,
+                crate::stats::NetworkStatsClass::unread(),
+                as_encoder(&|sink| writer.encode_tx(sink)),
             )
             .map(|_| ());
         #[cfg(feature = "transport-batching")]
@@ -4178,22 +4173,14 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Priority::Control,
-                /*reliable=*/ true,
-                &OutMessage {
-                    qos: crate::sample::QosLevel::DEFAULT,
-                    worst_case_payload: crate::declare::local_token::token_reply_len(
-                        token_id,
-                        keyexpr,
-                        interest_id,
-                    ),
-                    stats_class: crate::stats::NetworkStatsClass::control(
-                        crate::stats::MessageLabel::Declare,
-                    ),
-                    encode_body: as_encoder(&|sink| {
-                        build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)
-                    }),
+                Conduit {
+                    priority: Priority::Control,
+                    reliable: true,
                 },
+                crate::sample::QosLevel::DEFAULT,
+                crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id),
+                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)),
             )
             .map(|_| ());
     }
@@ -4227,16 +4214,14 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 };
                 let _ = self.dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Priority::Control,
-                    /*reliable=*/ true,
-                    &OutMessage {
-                        qos: crate::sample::QosLevel::DEFAULT,
-                        worst_case_payload: crate::tx_buf::encoded_len(as_encoder(&reply)),
-                        stats_class: crate::stats::NetworkStatsClass::control(
-                            crate::stats::MessageLabel::Declare,
-                        ),
-                        encode_body: as_encoder(&reply),
+                    Conduit {
+                        priority: Priority::Control,
+                        reliable: true,
                     },
+                    crate::sample::QosLevel::DEFAULT,
+                    crate::tx_buf::encoded_len(as_encoder(&reply)),
+                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                    as_encoder(&reply),
                 );
             },
         );
@@ -6023,19 +6008,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn schedule_block_first<P>(
         &self,
         priority: Priority,
-        route: Priority,
-        reliable: bool,
-        message: &OutMessage<'_, P>,
+        route: Conduit,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
     ) -> bool
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        let OutMessage {
-            qos,
-            worst_case_payload,
-            stats_class,
-            encode_body,
-        } = *message;
+        let Conduit {
+            priority: route,
+            reliable,
+        } = route;
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
         let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
@@ -6112,16 +6097,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session's own machinery.
         let _ = self.dispatch_network_message_at(
             DispatchStage::Scheduled,
-            priority,
-            reliable,
-            &OutMessage {
-                qos,
-                worst_case_payload: body.len(),
-                stats_class,
-                encode_body: as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
-                    sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
-                }),
-            },
+            Conduit { priority, reliable },
+            qos,
+            body.len(),
+            stats_class,
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
+            }),
         );
         let class = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(class, route, |link| {
@@ -11152,18 +11134,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_network_message_at<P>(
         &self,
         stage: DispatchStage,
-        priority: Priority,
-        reliable: bool,
-        message: &OutMessage<'_, P>,
+        conduit: Conduit,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
     ) -> Result<Dispatched, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
         if stage == DispatchStage::Fresh {
-            self.dispatch_network_message_in::<false, P>(stage, priority, reliable, message)
+            self.dispatch_network_message_in::<false, P>(
+                stage,
+                conduit,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
         } else {
-            self.dispatch_network_message_in::<true, P>(stage, priority, reliable, message)
+            self.dispatch_network_message_in::<true, P>(
+                stage,
+                conduit,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
         }
     }
 
@@ -11223,20 +11221,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_network_message_in<const STAGED: bool, P>(
         &self,
         stage: DispatchStage,
-        priority: Priority,
-        reliable: bool,
-        message: &OutMessage<'_, P>,
+        conduit: Conduit,
+        // R2923 — the message's congestion control, off its own ext_qos:
+        // `Drop` may be dropped when its conduit's link is congested, `Block`
+        // waits and closes the session if the link never frees.
+        //
+        // R2952 — the whole `ext_qos`, not only its congestion control: a
+        // `BlockFirst` message's slot is keyed by its own priority.
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        _stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
     ) -> Result<Dispatched, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
-        let OutMessage {
-            qos,
-            worst_case_payload,
-            stats_class: _stats_class,
-            encode_body,
-        } = *message;
+        let Conduit { priority, reliable } = conduit;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
@@ -11432,14 +11433,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
                 message_priority,
-                priority,
-                reliable,
-                &OutMessage {
-                    qos,
-                    worst_case_payload,
-                    stats_class: _stats_class,
-                    encode_body: &encode_body,
-                },
+                Conduit { priority, reliable },
+                qos,
+                worst_case_payload,
+                _stats_class,
+                &encode_body,
             )
         {
             return Ok(Dispatched::Sent);
@@ -12889,18 +12887,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_push_class(&push);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            priority,
-            reliable,
-            &OutMessage {
-                // R2923 — every arm's congestion control comes off the message's
-                // OWN ext_qos, as upstream's `congestion_control()` reads it
-                // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
-                qos: crate::declare_ext_qos::read_push_qos(&push),
-                // What THIS message can encode to, and not the codec's reserve hint for any message.
-                worst_case_payload: crate::frame_encode::push_capacity_hint(&push),
-                stats_class: class,
-                encode_body: as_encoder(&crate::frame_encode::push_body(&push)),
-            },
+            Conduit { priority, reliable },
+            // R2923 — every arm's congestion control comes off the message's
+            // OWN ext_qos, as upstream's `congestion_control()` reads it
+            // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
+            crate::declare_ext_qos::read_push_qos(&push),
+            // What THIS message can encode to, and not the codec's reserve hint for any message.
+            crate::frame_encode::push_capacity_hint(&push),
+            class,
+            as_encoder(&crate::frame_encode::push_body(&push)),
         )
         .map(|_| ())
     }
@@ -12920,16 +12915,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = crate::frame_encode::push_body(push);
         self.dispatch_network_message_at(
             stage,
-            priority,
-            reliable,
-            &OutMessage {
-                qos: crate::declare_ext_qos::read_push_qos(push),
-                // What THIS message can encode to, and not the codec's reserve hint for any message
-                // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
-                worst_case_payload: crate::frame_encode::push_capacity_hint(push),
-                stats_class: class,
-                encode_body: as_encoder(&encode_body),
-            },
+            Conduit { priority, reliable },
+            crate::declare_ext_qos::read_push_qos(push),
+            // What THIS message can encode to, and not the codec's reserve hint for any message
+            // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
+            crate::frame_encode::push_capacity_hint(push),
+            class,
+            as_encoder(&encode_body),
         )
     }
 
@@ -13340,14 +13332,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
             DispatchStage::Probe,
-            priority,
-            reliable,
-            &OutMessage {
-                qos: encoded.qos(),
-                worst_case_payload: push.encoded_len(),
-                stats_class: class,
-                encode_body: as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| push.write(sink)),
-            },
+            Conduit { priority, reliable },
+            encoded.qos(),
+            push.encoded_len(),
+            class,
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| push.write(sink)),
         );
         match ended {
             Ok(Dispatched::Sent) => {
@@ -13927,18 +13916,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
-            Priority::Control,
-            reliable,
-            &OutMessage {
-                qos: crate::declare_ext_qos::read_declare_qos(declare),
-                worst_case_payload: len,
-                // Control plane: `n_msgs` only, no payload cell (upstream's payload
-                // labels cover the four data kinds).
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::Declare,
-                ),
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: Priority::Control,
+                reliable,
             },
+            crate::declare_ext_qos::read_declare_qos(declare),
+            len,
+            // Control plane: `n_msgs` only, no payload cell (upstream's payload
+            // labels cover the four data kinds).
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+            as_encoder(&encode_body),
         )
     }
 
@@ -13969,16 +13956,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Priority::Control,
-            /*reliable=*/ true,
-            &OutMessage {
-                qos: crate::declare_ext_qos::QOS_DECLARE,
-                worst_case_payload: what.encoded_len(),
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::Declare,
-                ),
-                encode_body: as_encoder(&|sink| what.encode(sink)),
+            Conduit {
+                priority: Priority::Control,
+                reliable: true,
             },
+            crate::declare_ext_qos::QOS_DECLARE,
+            what.encoded_len(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+            as_encoder(&|sink| what.encode(sink)),
         )
         .map(|_| ())
     }
@@ -14026,16 +14011,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
-            Priority::Control,
-            reliable,
-            &OutMessage {
-                qos: crate::declare_ext_qos::read_oam_qos(oam),
-                worst_case_payload: len,
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::Oam,
-                ),
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: Priority::Control,
+                reliable,
             },
+            crate::declare_ext_qos::read_oam_qos(oam),
+            len,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
+            as_encoder(&encode_body),
         )
     }
 
@@ -14079,14 +14062,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::request::RequestWire::measure(request).len();
         let ended = self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
-            &OutMessage {
-                qos,
-                worst_case_payload: len,
-                stats_class: class,
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: qos.priority(),
+                reliable,
             },
+            qos,
+            len,
+            class,
+            as_encoder(&encode_body),
         )?;
         #[cfg(feature = "transport-batching")]
         if qos.is_express() && ended == Dispatched::Sent {
@@ -14141,14 +14124,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::response::ResponseWire::measure(response).len();
         let ended = self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
-            &OutMessage {
-                qos,
-                worst_case_payload: len,
-                stats_class: class,
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: qos.priority(),
+                reliable,
             },
+            qos,
+            len,
+            class,
+            as_encoder(&encode_body),
         )?;
         // Express drains the open batch window, as the Push arm does for an
         // express publish; only after a response that left.
@@ -14196,18 +14179,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::response_final::ResponseFinalWire::measure(response_final).len();
         self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
-            &OutMessage {
-                qos,
-                worst_case_payload: len,
-                // A pure correlation marker — no key expression and no payload, so
-                // it is control plane even though it closes a data-plane exchange.
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::ResponseFinal,
-                ),
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: qos.priority(),
+                reliable,
             },
+            qos,
+            len,
+            // A pure correlation marker — no key expression and no payload, so
+            // it is control plane even though it closes a data-plane exchange.
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
+            as_encoder(&encode_body),
         )
     }
 
@@ -14254,16 +14235,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
-            Priority::Control,
-            reliable,
-            &OutMessage {
-                qos: crate::declare_ext_qos::read_interest_qos(interest),
-                worst_case_payload: len,
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::Interest,
-                ),
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: Priority::Control,
+                reliable,
             },
+            crate::declare_ext_qos::read_interest_qos(interest),
+            len,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
+            as_encoder(&encode_body),
         )
     }
 
@@ -14285,16 +14264,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Priority::Control,
-            /*reliable=*/ true,
-            &OutMessage {
-                qos,
-                worst_case_payload: crate::tx_buf::encoded_len(as_encoder(&encode_body)),
-                stats_class: crate::stats::NetworkStatsClass::control(
-                    crate::stats::MessageLabel::Interest,
-                ),
-                encode_body: as_encoder(&encode_body),
+            Conduit {
+                priority: Priority::Control,
+                reliable: true,
             },
+            qos,
+            crate::tx_buf::encoded_len(as_encoder(&encode_body)),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
+            as_encoder(&encode_body),
         )
         .map(|_| ())
     }
@@ -14551,16 +14528,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
         let sent = self.dispatch_network_message_at(
             stage,
-            priority,
-            reliable,
-            &OutMessage {
-                qos,
-                worst_case_payload: size,
-                stats_class: class,
-                encode_body: as_encoder(&|sink| {
-                    crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
-                }),
-            },
+            Conduit { priority, reliable },
+            qos,
+            size,
+            class,
+            as_encoder(&|sink| {
+                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            }),
         );
         let sent = match sent {
             Ok(sent) => sent,
@@ -14667,14 +14641,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let size = crate::tx_buf::encoded_len(encode);
             let sent = self.dispatch_network_message_at(
                 stage,
-                priority,
-                reliable,
-                &OutMessage {
-                    qos,
-                    worst_case_payload: size,
-                    stats_class: crate::stats::NetworkStatsClass::unread(),
-                    encode_body: encode,
-                },
+                Conduit { priority, reliable },
+                qos,
+                size,
+                crate::stats::NetworkStatsClass::unread(),
+                encode,
             );
             let sent = match sent {
                 Ok(sent) => sent,
@@ -14771,20 +14742,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let class = crate::stats::NetworkStatsClass::unread();
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                priority,
-                reliable,
-                &OutMessage {
-                    // A Put built here carries no extension, so no `ext_qos`: the
-                    // default QoS, which `read_push_qos` answers for the same message.
-                    qos: crate::sample::QosLevel::DEFAULT,
-                    worst_case_payload: crate::lent_push::literal_put_len(keyexpr_suffix, value),
-                    stats_class: class,
-                    encode_body: as_encoder(
-                        // The borrowed composition the multicast TX of a build with no
-                        // allocator encodes too (`multicast_tx::MulticastTxPut`).
-                        &|sink| crate::lent_push::literal_put(keyexpr_suffix, value)?.encode(sink),
-                    ),
-                },
+                Conduit { priority, reliable },
+                // A Put built here carries no extension, so no `ext_qos`: the
+                // default QoS, which `read_push_qos` answers for the same message.
+                crate::sample::QosLevel::DEFAULT,
+                crate::lent_push::literal_put_len(keyexpr_suffix, value),
+                class,
+                as_encoder(
+                    // The borrowed composition the multicast TX of a build with no
+                    // allocator encodes too (`multicast_tx::MulticastTxPut`).
+                    &|sink| crate::lent_push::literal_put(keyexpr_suffix, value)?.encode(sink),
+                ),
             )
             .map(|_| ())
         }
@@ -14994,16 +14962,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Priority::DEFAULT,
-                reliable,
-                &OutMessage {
-                    qos: crate::sample::QosLevel::DEFAULT,
-                    worst_case_payload: crate::lent_push::literal_del_len(keyexpr_suffix),
-                    stats_class: crate::stats::NetworkStatsClass::unread(),
-                    encode_body: as_encoder(&|sink| {
-                        crate::lent_push::literal_del(keyexpr_suffix)?.encode(sink)
-                    }),
+                Conduit {
+                    priority: Priority::DEFAULT,
+                    reliable,
                 },
+                crate::sample::QosLevel::DEFAULT,
+                crate::lent_push::literal_del_len(keyexpr_suffix),
+                crate::stats::NetworkStatsClass::unread(),
+                as_encoder(&|sink| crate::lent_push::literal_del(keyexpr_suffix)?.encode(sink)),
             )
             .map(|_| ())
         }
@@ -17095,14 +17061,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            qos.priority(),
-            /*reliable=*/ true,
-            &OutMessage {
-                qos,
-                worst_case_payload: size,
-                stats_class: crate::stats::NetworkStatsClass::unread(),
-                encode_body: as_encoder(&|sink| writer.encode(sink)),
+            Conduit {
+                priority: qos.priority(),
+                reliable: true,
             },
+            qos,
+            size,
+            crate::stats::NetworkStatsClass::unread(),
+            as_encoder(&|sink| writer.encode(sink)),
         )?;
         #[cfg(feature = "transport-batching")]
         if qos.is_express() && ended == Dispatched::Sent {
@@ -17196,20 +17162,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    qos.priority(),
-                    /*reliable=*/ true,
-                    &OutMessage {
-                        qos,
-                        worst_case_payload: crate::lent_control::response_final_len(
-                            request_id, qos,
-                        ),
-                        stats_class: crate::stats::NetworkStatsClass::control(
-                            crate::stats::MessageLabel::ResponseFinal,
-                        ),
-                        encode_body: as_encoder(&|sink| {
-                            crate::lent_control::response_final(request_id, qos).encode(sink)
-                        }),
+                    Conduit {
+                        priority: qos.priority(),
+                        reliable: true,
                     },
+                    qos,
+                    crate::lent_control::response_final_len(request_id, qos),
+                    crate::stats::NetworkStatsClass::control(
+                        crate::stats::MessageLabel::ResponseFinal,
+                    ),
+                    as_encoder(&|sink| {
+                        crate::lent_control::response_final(request_id, qos).encode(sink)
+                    }),
                 )
                 .map(|_| ());
         }
