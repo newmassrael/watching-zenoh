@@ -302,6 +302,29 @@ impl RequesterTables for NoRequesters {
     fn drain_prunes<S: LivelinessGetPrune>(&mut self, _sink: &S) {}
 }
 
+/// The calls a table of pending gets answers where a session keeps one ([`Requesters::lent`],
+/// [`Requesters::arena_bytes`], [`Requesters::clear`]), answered for a session that asks nothing,
+/// so the session's code that lends, sizes and empties its requester side is the same for both.
+impl NoRequesters {
+    /// No requester side to lend: nothing of `arena` is taken, whatever the rows say.
+    pub fn lent(
+        _arena: &mut Arena,
+        _keys: KeySpace,
+        _rows: RequesterRows,
+        _limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused> {
+        Ok(Self)
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes: none.
+    pub const fn arena_bytes(_rows: RequesterRows) -> Option<usize> {
+        Some(0)
+    }
+
+    /// Nothing is pending, so nothing ends.
+    pub fn clear(&mut self) {}
+}
+
 /// What the OTHER faces of a session declare, which the matching verdicts of one face's dispatch
 /// count beside that face's own and the application's: a matching listener on a publisher
 /// matches while ANY face's peer holds a subscriber for it, so a peer that undeclares one
@@ -2852,6 +2875,27 @@ mod lent_tests {
 
     fn reply_sink() -> BoxedReplySink {
         BoxedReplySink::new(|_reply: &dyn ReplyView| {}, |_rid: RequestId| {})
+    }
+
+    /// A session that asks nothing lends its requester side no byte of its arena, whatever rows
+    /// its plan states. The CONTROL is the requesters of a session that asks, lent the same rows,
+    /// which take bytes for them.
+    #[test]
+    fn no_requesters_take_no_byte_of_the_arena() {
+        let rows = RequesterRows {
+            queries: 2,
+            liveliness_gets: 0,
+        };
+        assert_eq!(NoRequesters::arena_bytes(rows), Some(0));
+        let mut none = arena(1 << 12);
+        let mut held = NoRequesters::lent(&mut none, keys(256), rows, &SessionLimits::defaults())
+            .expect("nothing to refuse");
+        held.clear();
+        assert_eq!(none.high_water(), 0);
+        assert!(
+            Lending::arena_bytes(rows).expect("small") > 0,
+            "CONTROL: the requesters of a session that asks take bytes for the rows"
+        );
     }
 
     /// Hold query `rid` pending in `requesters`, accepting a reply on any key.

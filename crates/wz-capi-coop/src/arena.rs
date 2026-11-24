@@ -116,12 +116,19 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
+#[cfg(not(feature = "query"))]
+use wz_session_core::slot_observer::NoRequesters;
+#[cfg(feature = "query")]
+use wz_session_core::slot_observer::Requesters;
+use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(feature = "query")]
+use crate::engine::LegSink;
+use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -384,7 +391,11 @@ impl GetTables {
 }
 
 /// One face's table of pending gets, as the arena lends it.
+#[cfg(feature = "query")]
 type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+/// A build that asks no query keeps none (`engine::registry::Gets`).
+#[cfg(not(feature = "query"))]
+type FaceGets = NoRequesters;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at

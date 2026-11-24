@@ -43,21 +43,26 @@ use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+#[cfg(not(feature = "query"))]
+use wz_session_core::slot_observer::NoRequesters;
 #[cfg(not(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-use wz_session_core::slot_observer::{
-    ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
-};
+#[cfg(feature = "query")]
+use wz_session_core::slot_observer::Requesters;
+use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, OtherPeers, SlotObserverOf};
 
 use super::queued::{MatchFlips, Queued};
-use super::{LegSink, RoundDelivery, SubscriberRow};
+#[cfg(feature = "query")]
+use super::LegSink;
+use super::{RoundDelivery, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::{FilterPlane, MatchId};
 use wz_session_core::slot_observer::RequesterRows;
@@ -93,7 +98,12 @@ type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Le
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
+#[cfg(feature = "query")]
 pub(super) type Gets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+/// A session that asks no query has no pending get on any face: its requester side is none, and
+/// the observer's fan and drains keep no path for gets.
+#[cfg(not(feature = "query"))]
+pub(super) type Gets = NoRequesters;
 
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
@@ -1255,14 +1265,13 @@ mod tests {
         >());
     }
 
-    /// A build that asks no query holds its faces' pending gets over a sink of no value: no row of
-    /// them can be made, so none is delivered to or dropped. Turned red by a sink that can be made
-    /// chosen for such a build.
+    /// A build that asks no query keeps no table of pending gets on a face: its requester side is
+    /// of no size and holds nothing to drop. Turned red by a table of gets chosen for such a build.
     #[cfg(not(feature = "query"))]
     #[test]
-    fn without_query_a_pending_get_has_a_sink_of_no_value() {
-        assert_eq!(core::mem::size_of::<LegSink>(), 0);
-        assert_eq!(core::mem::size_of::<Option<LegSink>>(), 0);
+    fn without_query_a_face_keeps_no_table_of_gets() {
+        assert_eq!(core::mem::size_of::<Gets>(), 0);
+        assert!(!core::mem::needs_drop::<Gets>());
     }
 
     /// A flip reported for a listener waits in the session's queue under the listener's id, to be
@@ -1827,6 +1836,7 @@ mod tests {
         );
         for set in &held.registry.sets[1..] {
             assert!(set.peer.finals.has_room(), "each row of each set is free");
+            #[cfg(feature = "query")]
             assert!(set.gets.replies.has_room());
         }
         assert_eq!(
@@ -1912,9 +1922,15 @@ mod tests {
             "the same tables lent in the same order take the same bytes"
         );
         let set = &mut sets[0];
+        #[cfg(feature = "query")]
         assert_eq!(
             set.gets.replies.has_room(),
             by_value_gets.replies.has_room()
+        );
+        #[cfg(not(feature = "query"))]
+        assert_eq!(
+            set.gets, by_value_gets,
+            "a build that asks no query lends neither a table of gets"
         );
         set.peer.finals.owe(1, QosLevel::DEFAULT);
         by_value_peer.finals.owe(1, QosLevel::DEFAULT);
@@ -2266,7 +2282,7 @@ mod tests {
             ("peer.tokens", size_of_val(&peer.tokens)),
             ("peer.replies", size_of_val(&peer.replies)),
             ("peer.finals", size_of_val(&peer.finals)),
-            ("gets.replies", size_of_val(&set.gets.replies)),
+            ("gets", size_of_val(&set.gets)),
         ];
         std::println!("face set: {} B", size_of_val(&*set));
         for (table, bytes) in tables {
