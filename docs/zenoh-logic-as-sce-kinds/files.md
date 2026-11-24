@@ -893,6 +893,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/response_final_build.rs` | S2 | |
 | `crates/wz-session-core/src/response_sink.rs` | S2 | |
 | `crates/wz-session-core/src/retry_period.rs` | S1 | |
+| `crates/wz-session-core/src/round.rs` | S2 | |
+| `crates/wz-session-core/src/round/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/row_callback.rs` | S2 | |
 | `crates/wz-session-core/src/row_pool.rs` | S3 | |
 | `crates/wz-session-core/src/rx_profile.rs` | S3 | |

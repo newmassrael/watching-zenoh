@@ -195,8 +195,9 @@ where
 /// The session's round of deliveries as its state asks it: whether the round takes one more record
 /// now, and whether a source the links' gate does not hold back still owes it records.
 ///
-/// An interim seam: the round is the engine's own type until it moves to this layer, when the
-/// state holds it as a type of its own and this trait goes.
+/// The state names the round it asks by this trait alone, so it is bound neither to the calls a
+/// round owes nor to the heap and the atomics the round is made of: `round::Round` answers it
+/// where the build has them, and the state's tests stand in a round of their own.
 pub trait DeliveryRound {
     /// Whether the round takes one more record that owes `callbacks` callbacks now.
     ///

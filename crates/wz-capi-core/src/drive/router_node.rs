@@ -421,7 +421,6 @@ impl RouterQueryHolder {
                 .forwarder
                 .upgrade()
                 .and_then(|forwarder| forwarder.hold_current_query()),
-            closed: Arc::clone(&self.closed),
         }
     }
 
@@ -432,13 +431,6 @@ impl RouterQueryHolder {
 }
 
 impl wz_capi_port::QueryHolder for RouterQueryHolder {
-    fn hold_query(
-        &self,
-        _view: &dyn wz_session_core::query_sink::QueryView,
-    ) -> Box<dyn wz_capi_port::HeldQuery> {
-        Box::new(self.hold_current())
-    }
-
     fn keep_query(
         &self,
         view: &dyn wz_session_core::query_sink::QueryView,
@@ -461,10 +453,9 @@ impl wz_capi_port::QueryHolder for RouterQueryHolder {
     }
 }
 
-/// A query kept through the forwarder of a router node, beside the node's closed latch.
+/// A query kept through the forwarder of a router node.
 pub struct RouterHeld {
     held: Option<wz_runtime_tokio::router_forward::HeldRouterQuery>,
-    closed: Arc<AtomicBool>,
 }
 
 impl RouterHeld {
@@ -474,16 +465,6 @@ impl RouterHeld {
         if let Some(held) = &self.held {
             held.reply(answer);
         }
-    }
-}
-
-impl wz_capi_port::HeldQuery for RouterHeld {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
-        Self::reply(self, answer);
-    }
-
-    fn session_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
     }
 }
 

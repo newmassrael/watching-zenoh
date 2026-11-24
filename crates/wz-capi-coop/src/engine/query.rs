@@ -52,9 +52,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{
-    HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey,
-};
+use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -785,7 +783,7 @@ impl QueryPlane {
 
     /// What a query that reached the queryable `row` does: hold its
     /// Final and begin a call on the row, the query held in `round` where its parts lie
-    /// ([`Round::offer_query`](crate::round::RoundOf::offer_query)); or, with no row left for its
+    /// ([`Round::offer_query`](wz_session_core::round::Round::offer_query)); or, with no row left for its
     /// Final, be refused ([`FinalHolds::admit`]): no callback runs for it, nothing answers it and
     /// it is counted. Under the session's lock, from its dispatch.
     pub(super) fn arrive(
@@ -937,16 +935,6 @@ pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone +
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
-    fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery> {
-        // A keep refused holds nothing, and the query held answers nothing, as one taken outside
-        // a callback.
-        Box::new(CoopHeld {
-            engine: self.engine.clone(),
-            id: self.keep_query(view).ok().flatten(),
-            key: Box::from(view.keyexpr()),
-        })
-    }
-
     fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
         let engine = self.engine.upgrade().ok_or(Refusal::Closed)?;
         let Some((at, generation, rid)) = Answering::innermost() else {
@@ -1023,37 +1011,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             answer(&mut responder);
         }
         self.answer(id.generation, id.rid, Release::Kept);
-    }
-}
-
-/// A query a C program keeps past its callback, as the heap-held [`HeldQuery`] the engines without
-/// ids keep: the id of its keep, `None` for one refused or taken outside a callback, which holds
-/// nothing and answers nothing, and its key, which each reply is handed.
-struct CoopHeld<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    engine: Weak<CoopEngine<L, C>>,
-    id: Option<HeldQueryId>,
-    key: Box<str>,
-}
-
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for CoopHeld<L, C> {
-    fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
-            engine.reply_kept(id, &self.key, answer);
-        }
-    }
-
-    fn session_closed(&self) -> bool {
-        self.engine
-            .upgrade()
-            .is_none_or(|engine| super::SessionEngine::is_closed(&*engine))
-    }
-}
-
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {
-    fn drop(&mut self) {
-        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
-            engine.answer(id.generation, id.rid, Release::Kept);
-        }
     }
 }
 
@@ -1242,7 +1199,7 @@ mod round_tests {
     //! A link's query held in the session's round of deliveries: handed to the queryable it reached
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
-    use crate::round::{AnswersQueries, CoopCalls, Round};
+    use crate::round::{AnswersQueries, CoopCalls};
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
     /// where they lie, the generation it came in under, and its encoding's packed id with where
@@ -1326,7 +1283,7 @@ mod round_tests {
     fn a_query_is_handed_where_its_parts_lie_and_its_call_ended() {
         let datagram = DATAGRAM;
         let key = core::str::from_utf8(&datagram[..6]).expect("a key");
-        let round = Round::leaked(4);
+        let round = crate::round::leaked(4);
         let noting = Arc::new(Noting(Noted::default()));
         // Made of the stand-in's own type, then unsized where the round takes it.
         let answering: Weak<Noting> = Arc::downgrade(&noting);
@@ -1364,7 +1321,7 @@ mod round_tests {
     fn a_round_no_engine_answers_through_ends_the_call_unhanded() {
         let datagram = DATAGRAM;
         let key = core::str::from_utf8(&datagram[..6]).expect("a key");
-        let round = Round::leaked(4);
+        let round = crate::round::leaked(4);
         let row = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
         unsafe { round.set_lending(Some(&datagram[..])) };
