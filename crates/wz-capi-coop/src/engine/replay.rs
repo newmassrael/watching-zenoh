@@ -42,7 +42,6 @@ use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
-use crate::prelude::*;
 
 /// The kinds of declaration a session holds, which is to say the lists the replay walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
