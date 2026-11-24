@@ -36,7 +36,7 @@ const BLOCK: u8 = 0x05 | 0x08;
 
 /// A round holding `events` records at once, which outlives the test.
 fn round(events: usize) -> Arc<Round> {
-    Round::leaked(events)
+    crate::round::leaked(events)
 }
 
 /// A subscriber row a test hands samples to, boxed so it lies where it is while a call of it runs.
@@ -265,7 +265,7 @@ fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
     );
     assert!(!round.deliver(), "nothing is left");
     assert_eq!(round.counts(), RoundCounts::default());
-    assert_eq!(round.samples_lent(), 1, "read where it lies");
+    assert_eq!(round.tally().lent(), 1, "read where it lies");
 }
 
 /// The samples of a datagram a link lends are read where they lie: one record for a sample
@@ -308,9 +308,9 @@ fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     assert!(gate.takes_input(), "CONTROL: an empty round takes a record");
     assert_eq!(
         (
-            round.rounds_handed(),
-            round.samples_handed(),
-            round.samples_lent()
+            round.tally().rounds(),
+            round.tally().samples(),
+            round.tally().lent()
         ),
         (1, 2, 2),
         "one round of two samples, both read where they lie"
@@ -362,7 +362,7 @@ fn a_rejoined_message_is_read_where_its_kept_buffer_lies() {
         [(1, 2, chain), (1, 1, datagram.as_ptr() as usize)],
         "each read where it lies, in the order offered"
     );
-    assert_eq!(round.samples_lent(), 2);
+    assert_eq!(round.tally().lent(), 2);
     assert_eq!(
         CHAINS.in_use(),
         1,
@@ -426,7 +426,7 @@ fn a_round_keeps_only_the_rejoined_buffer_its_table_reads() {
         [(1, 4, at_one)],
         "the first alone, read where it lies"
     );
-    assert_eq!(round.samples_lent(), 1);
+    assert_eq!(round.tally().lent(), 1);
     unsafe { round.settle() };
     assert_eq!(
         CHAINS.in_use(),
@@ -801,7 +801,7 @@ fn a_sample_offered_again_to_its_subscriber_is_a_record_of_its_own() {
         .map(|(t, b, _)| (*t, *b))
         .collect();
     assert_eq!(tags, [(1, 3), (1, 3)]);
-    assert_eq!(round.samples_handed(), 2, "two records");
+    assert_eq!(round.tally().samples(), 2, "two records");
 }
 
 /// A record is joined only by the later rows of its own fan-out: a sample of the same bytes in a
@@ -826,7 +826,7 @@ fn a_record_is_joined_only_by_the_rows_of_its_own_fan_out() {
     let tags: Vec<u8> = seen.lock().unwrap().iter().map(|(t, _, _)| *t).collect();
     assert_eq!(tags, [1, 2, 3], "every row is handed the sample, in order");
     assert_eq!(
-        round.samples_handed(),
+        round.tally().samples(),
         2,
         "CONTROL: the second row joined the first's record; the third fan-out wrote its own"
     );
@@ -1377,7 +1377,7 @@ fn a_record_with_a_part_the_round_cannot_read_where_it_lies_is_refused_and_count
         "the lent record alone, read where it lies"
     );
     assert_eq!(
-        (round.samples_handed(), round.samples_lent()),
+        (round.tally().samples(), round.tally().lent()),
         (1, 1),
         "the round handed out the lent record alone"
     );

@@ -1334,7 +1334,7 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let round = crate::round::Round::leaked(4);
+        let round = crate::round::leaked(4);
         #[cfg(not(feature = "queryable"))]
         let delivery = RoundDelivery::new(round);
         #[cfg(feature = "queryable")]

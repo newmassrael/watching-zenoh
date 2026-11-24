@@ -4138,14 +4138,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn rounds_handed(&self) -> usize {
-        self.samples.rounds_handed()
+        self.samples.tally().rounds()
     }
 
     /// How many samples the rounds handed to their callbacks where their datagram lies since the
     /// open: what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn samples_lent(&self) -> usize {
-        self.samples.samples_lent()
+        self.samples.tally().lent()
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
