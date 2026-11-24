@@ -5,12 +5,15 @@
  * A keyed topic: one key expression whose samples are several INSTANCES of one message, told
  * apart by a field of the payload, with the last value of each instance kept.
  *
- * The message is a protobuf message of the program's own .proto text, made up for this
+ * The message is a protobuf message of the program's own .proto file, made up for this
  * example:
  *
  *     message Reading { uint32 sensor = 1; uint32 level = 2; }
  *
- * A KEYER (wz_ext_instance_keyer_*) is made over that text and a description that names
+ * The program carries that schema as protoc compiled it when the program was built, a
+ * FileDescriptorSet (SCHEMA below), so the library reads no .proto text and the device links
+ * no text reader. A KEYER (wz_ext_instance_keyer_*) is made over that schema and a
+ * description that names
  * `sensor` as the key field with the values 7 and 9: a reading of sensor 7 is instance 0 and
  * one of sensor 9 instance 1, though both are published on the one key expression
  * example/keyed/reading. The instance is never on the wire. The subscribing program hands each
@@ -38,13 +41,28 @@
 
 #include "example_common.h"
 
-static const char *const SCHEMA =
-    "syntax = \"proto3\";\n"
-    "package example.keyed;\n"
-    "message Reading {\n"
-    "  uint32 sensor = 1;\n"
-    "  uint32 level = 2;\n"
-    "}\n";
+/* The FileDescriptorSet "protoc --include_imports -o" writes for example_keyed.proto:
+ *
+ *     syntax = "proto3";
+ *     package example.keyed;
+ *     message Reading {
+ *       uint32 sensor = 1;
+ *       uint32 level = 2;
+ *     }
+ *
+ * A program's build would run protoc and embed its output; it is written out here so that the
+ * example builds with a C compiler alone. */
+static const uint8_t SCHEMA[] = {
+    0x0a, 0x65, 0x0a, 0x13, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x5f,
+    0x6b, 0x65, 0x79, 0x65, 0x64, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12,
+    0x0d, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x6b, 0x65, 0x79,
+    0x65, 0x64, 0x22, 0x37, 0x0a, 0x07, 0x52, 0x65, 0x61, 0x64, 0x69, 0x6e,
+    0x67, 0x12, 0x16, 0x0a, 0x06, 0x73, 0x65, 0x6e, 0x73, 0x6f, 0x72, 0x18,
+    0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x06, 0x73, 0x65, 0x6e, 0x73, 0x6f,
+    0x72, 0x12, 0x14, 0x0a, 0x05, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x18, 0x02,
+    0x20, 0x01, 0x28, 0x0d, 0x52, 0x05, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x62,
+    0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+};
 
 static const char *const DESCRIPTION =
     "{\"message\": \"example.keyed.Reading\","
@@ -178,12 +196,9 @@ int main(void) {
     z_mutex_init(&keyed.lock);
     ex_counter_init(&probes);
 
-    /* The keyer: the program's .proto files (one here; a file another imports is named by
-     * the name it is imported by), the description of the key, and the storage of the last
-     * values, VALUE_ROOM bytes for each instance, which stays the program's memory. */
-    wz_ext_proto_file_t files[1];
-    files[0].name = "example_keyed.proto";
-    files[0].text = SCHEMA;
+    /* The keyer: the program's compiled schema (every file it imports is in the set too), the
+     * description of the key, and the storage of the last values, VALUE_ROOM bytes for each
+     * instance, which stays the program's memory. */
     wz_ext_instance_keyer_options_t options;
     wz_ext_instance_keyer_options_default(&options);
     options.storage = last_values;
@@ -193,14 +208,16 @@ int main(void) {
     /* Refused by name: a description that names a field the message does not have. */
     wz_ext_owned_instance_keyer_t wrong;
     z_owned_string_t refusal;
-    z_result_t rc = wz_ext_instance_keyer_new(&wrong, files, 1, WRONG_DESCRIPTION, &options, &refusal);
-    show_refusal("wz_ext_instance_keyer_new", &refusal);
+    z_result_t rc = wz_ext_instance_keyer_from_descriptor_set(&wrong, SCHEMA, sizeof SCHEMA, WRONG_DESCRIPTION,
+                                                              &options, &refusal);
+    show_refusal("wz_ext_instance_keyer_from_descriptor_set", &refusal);
     CHECK(rc == _Z_ERR_CONFIG_INVALID_VALUE, "a description of a field the schema lacks was not refused (rc %d)",
           (int)rc);
     CHECK(!wz_ext_internal_instance_keyer_check(&wrong), "a refused keyer is not the null state");
 
-    rc = wz_ext_instance_keyer_new(&keyer, files, 1, DESCRIPTION, &options, &refusal);
-    show_refusal("wz_ext_instance_keyer_new", &refusal);
+    rc = wz_ext_instance_keyer_from_descriptor_set(&keyer, SCHEMA, sizeof SCHEMA, DESCRIPTION, &options,
+                                                   &refusal);
+    show_refusal("wz_ext_instance_keyer_from_descriptor_set", &refusal);
     CHECK(rc == Z_OK, "the keyer was refused (rc %d)", (int)rc);
     if (!wz_ext_internal_instance_keyer_check(&keyer)) return ex_finish();
     const wz_ext_loaned_instance_keyer_t *k = wz_ext_instance_keyer_loan(&keyer);
