@@ -91,13 +91,12 @@ pub(super) enum TurnEnd {
     EndsLink,
 }
 
-/// Where the replay of the current link stands, and how it is paced.
+/// Where the replay of the current link stands; its pace is the session's
+/// (`SessionState::replay_pacing`).
 pub(super) struct Replay {
     /// How far the peer has been told. Idle while no link is established: a cursor is never
     /// resumed on another link, whose peer holds nothing.
     cursor: ReplayCursor,
-    /// `None` is one turn for the whole sequence; the session's policy states a pace otherwise.
-    pacing: Option<ReplayPacing>,
     /// Not before this time, in milliseconds on the session's clock, does the next turn send.
     next_turn_ms: u64,
     /// When the replay last told the peer a declaration, or began, in milliseconds on the
@@ -106,12 +105,10 @@ pub(super) struct Replay {
 }
 
 impl Replay {
-    /// A replay that tells at the pace `pacing` states: the session's policies' for the dial
-    /// role's face, and the pace the face before it was set to for any other.
-    pub(super) fn with_pacing(pacing: Option<ReplayPacing>) -> Self {
+    /// A replay of a face whose link is not up: nothing is owed.
+    pub(super) fn idle() -> Self {
         Self {
             cursor: ReplayCursor::idle(),
-            pacing,
             next_turn_ms: 0,
             last_progress_ms: 0,
         }
@@ -125,14 +122,21 @@ impl Replay {
         self.last_progress_ms = now_ms;
     }
 
-    /// Keep what a turn at `now_ms` did, `cursor` being where it left the replay, `told` whether
-    /// the link took any declaration of it and `refused` whether the link refused one, and say
-    /// what the link is left with. An unfinished replay sends its next turn after the pace's
-    /// interval, or, when the link refused a send, as the pace's answer to a refusal says
-    /// ([`ReplayPacing::after_refusal`]); a session that is not paced gives the replay up on a
-    /// refused send, as upstream's one call does (see the module's note). When the replay is
-    /// given up, nothing more is owed over this link.
-    fn settle(&mut self, cursor: ReplayCursor, told: bool, refused: bool, now_ms: u64) -> TurnEnd {
+    /// Keep what a turn at `now_ms` paced by `pacing` did, `cursor` being where it left the
+    /// replay, `told` whether the link took any declaration of it and `refused` whether the link
+    /// refused one, and say what the link is left with. An unfinished replay sends its next turn
+    /// after the pace's interval, or, when the link refused a send, as the pace's answer to a
+    /// refusal says ([`ReplayPacing::after_refusal`]); a session that is not paced gives the
+    /// replay up on a refused send, as upstream's one call does (see the module's note). When the
+    /// replay is given up, nothing more is owed over this link.
+    fn settle(
+        &mut self,
+        cursor: ReplayCursor,
+        told: bool,
+        refused: bool,
+        now_ms: u64,
+        pacing: Option<ReplayPacing>,
+    ) -> TurnEnd {
         self.cursor = cursor;
         if told {
             self.last_progress_ms = now_ms;
@@ -141,7 +145,7 @@ impl Replay {
             return TurnEnd::Kept;
         }
         let wait_ms = if refused {
-            let step = match self.pacing {
+            let step = match pacing {
                 Some(pace) => pace.after_refusal(self.last_progress_ms, now_ms),
                 None => RefusalStep::EndsLink,
             };
@@ -155,23 +159,10 @@ impl Replay {
         } else {
             // A turn the link took whole leaves more owed only under a pace, whose interval it
             // waits; an unpaced turn is the whole sequence.
-            self.pacing.map_or(0, |pace| pace.interval_ms())
+            pacing.map_or(0, |pace| pace.interval_ms())
         };
         self.next_turn_ms = now_ms.saturating_add(wait_ms);
         TurnEnd::Kept
-    }
-
-    /// How a link's declarations go out: what a face added beside the dial role's is told its
-    /// declarations at, and what a test reads.
-    #[cfg(any(feature = "listen", all(test, feature = "std")))]
-    pub(super) fn pacing(&self) -> Option<ReplayPacing> {
-        self.pacing
-    }
-
-    /// State how a link's declarations go out, for a caller that wants a pace regardless of the
-    /// session's policies, which state it otherwise.
-    pub(super) fn set_pacing(&mut self, pacing: Option<ReplayPacing>) {
-        self.pacing = pacing;
     }
 
     /// The link is gone: what the peer was told went with it.
@@ -337,7 +328,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if replay.cursor.finished() || now_ms < replay.next_turn_ms {
             return TurnEnd::Kept;
         }
-        let burst = replay.pacing.map_or(usize::MAX, |pace| pace.burst());
+        let pacing = self.session.replay_pacing;
+        let burst = pacing.map_or(usize::MAX, |pace| pace.burst());
         let mut cursor = replay.cursor;
         let mut told = false;
         let mut refused = false;
@@ -354,7 +346,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .faces_mut()
             .get_mut(at)
             .map_or(TurnEnd::Kept, |face| {
-                face.replay.settle(cursor, told, refused, now_ms)
+                face.replay.settle(cursor, told, refused, now_ms, pacing)
             })
     }
 
@@ -704,10 +696,14 @@ mod tests {
     /// nothing more is owed over that link.
     #[test]
     fn a_refused_turn_ends_the_link_when_the_pace_retries_nothing() {
-        let mut replay = Replay::with_pacing(pace_answering(0, 0));
+        let pace = pace_answering(0, 0);
+        let mut replay = Replay::idle();
         replay.begin(5, 100);
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, 100), TurnEnd::EndsLink);
+        assert_eq!(
+            replay.settle(cursor, false, true, 100, pace),
+            TurnEnd::EndsLink
+        );
         assert!(replay.finished(), "the link that ends is owed nothing more");
         assert_eq!(replay.next_turn_ms(), None);
     }
@@ -718,20 +714,20 @@ mod tests {
     #[test]
     fn a_refused_turn_is_retried_at_the_retry_wait_until_no_progress_ends_the_link() {
         let pace = pace_answering(3, 50);
-        let mut replay = Replay::with_pacing(pace);
+        let mut replay = Replay::idle();
         replay.begin(5, 100);
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, 120), TurnEnd::Kept);
+        assert_eq!(replay.settle(cursor, false, true, 120, pace), TurnEnd::Kept);
         assert_eq!(
             replay.next_turn_ms(),
             Some(123),
             "the retry wait (3 ms), not the turn interval (10 ms)"
         );
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, 149), TurnEnd::Kept);
+        assert_eq!(replay.settle(cursor, false, true, 149, pace), TurnEnd::Kept);
         let cursor = refused_at_once(&replay, 2);
         assert_eq!(
-            replay.settle(cursor, false, true, 150),
+            replay.settle(cursor, false, true, 150, pace),
             TurnEnd::EndsLink,
             "50 ms with nothing told since the replay began"
         );
@@ -743,37 +739,44 @@ mod tests {
     #[test]
     fn a_declaration_told_starts_the_no_progress_stretch_again() {
         let pace = pace_answering(3, 50);
-        let mut replay = Replay::with_pacing(pace);
+        let mut replay = Replay::idle();
         replay.begin(5, 100);
         let mut cursor = replay.cursor;
         let places = cursor.turn(2);
         cursor.refused(places.start + 1);
-        assert_eq!(replay.settle(cursor, true, true, 140), TurnEnd::Kept);
+        assert_eq!(replay.settle(cursor, true, true, 140, pace), TurnEnd::Kept);
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, 189), TurnEnd::Kept);
+        assert_eq!(replay.settle(cursor, false, true, 189, pace), TurnEnd::Kept);
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, 190), TurnEnd::EndsLink);
+        assert_eq!(
+            replay.settle(cursor, false, true, 190, pace),
+            TurnEnd::EndsLink
+        );
 
         let patient = pace_answering(3, 0);
-        let mut replay = Replay::with_pacing(patient);
+        let mut replay = Replay::idle();
         replay.begin(5, 0);
         let cursor = refused_at_once(&replay, 2);
-        assert_eq!(replay.settle(cursor, false, true, u64::MAX), TurnEnd::Kept);
+        assert_eq!(
+            replay.settle(cursor, false, true, u64::MAX, patient),
+            TurnEnd::Kept
+        );
     }
 
     /// A turn the link took whole waits the interval when more is owed and nothing when all is
     /// told.
     #[test]
     fn a_turn_not_refused_waits_the_interval_until_all_is_told() {
-        let mut paced = Replay::with_pacing(ReplayPacing::new(2, 10));
+        let pace = ReplayPacing::new(2, 10);
+        let mut paced = Replay::idle();
         paced.begin(5, 100);
         let mut cursor = paced.cursor;
         let _ = cursor.turn(2);
-        assert_eq!(paced.settle(cursor, true, false, 100), TurnEnd::Kept);
+        assert_eq!(paced.settle(cursor, true, false, 100, pace), TurnEnd::Kept);
         assert_eq!(paced.next_turn_ms(), Some(110));
         let mut cursor = paced.cursor;
         let _ = cursor.turn(usize::MAX);
-        assert_eq!(paced.settle(cursor, true, false, 110), TurnEnd::Kept);
+        assert_eq!(paced.settle(cursor, true, false, 110, pace), TurnEnd::Kept);
         assert!(paced.finished());
     }
 
@@ -782,12 +785,15 @@ mod tests {
     /// from the start, as upstream's reopen does; it does not try the send again on this link.
     #[test]
     fn an_unpaced_refusal_ends_the_link() {
-        let mut unpaced = Replay::with_pacing(None);
+        let mut unpaced = Replay::idle();
         unpaced.begin(3, 100);
         let mut cursor = unpaced.cursor;
         let places = cursor.turn(usize::MAX);
         cursor.refused(places.start + 1);
-        assert_eq!(unpaced.settle(cursor, true, true, 100), TurnEnd::EndsLink);
+        assert_eq!(
+            unpaced.settle(cursor, true, true, 100, None),
+            TurnEnd::EndsLink
+        );
         assert!(
             unpaced.finished(),
             "the link that ends is owed nothing more"
@@ -795,11 +801,11 @@ mod tests {
         assert_eq!(unpaced.next_turn_ms(), None);
 
         // Control: the same session with nothing refused tells everything and keeps its link.
-        let mut whole = Replay::with_pacing(None);
+        let mut whole = Replay::idle();
         whole.begin(3, 100);
         let mut cursor = whole.cursor;
         let _ = cursor.turn(usize::MAX);
-        assert_eq!(whole.settle(cursor, true, false, 100), TurnEnd::Kept);
+        assert_eq!(whole.settle(cursor, true, false, 100, None), TurnEnd::Kept);
         assert!(whole.finished());
     }
 }

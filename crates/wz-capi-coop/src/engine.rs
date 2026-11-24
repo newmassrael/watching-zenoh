@@ -3799,7 +3799,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Face {
                         id: DIAL_FACE,
                         link: Link::Waiting { at_us: u64::MAX },
-                        replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
+                        replay: Replay::idle(),
                         #[cfg(feature = "connectivity")]
                         told: FaceTold::default(),
                     },
@@ -3835,6 +3835,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // From 0, and `()` without `local-queryable`.
                 local_requests: Default::default(),
                 matching: MatchingRead::default(),
+                replay_pacing: ReplayPacing::of_snapshot(&policy, &limits),
                 #[cfg(feature = "queryable")]
                 plane: lent.plane,
                 #[cfg(not(feature = "queryable"))]
@@ -4142,9 +4143,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// `None` sends them all in one.
     pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
         if let Some(mut core) = self.live() {
-            for face in core.0.transport.links.faces_mut() {
-                face.replay.set_pacing(pacing);
-            }
+            core.0.session.replay_pacing = pacing;
         }
     }
 
@@ -4153,10 +4152,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// its readers are: the tests module is a host's (`all(test, feature = "std")`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
-        self.live().map(|core| {
-            let dial = core.0.transport.dial();
-            (dial.and_then(|dial| dial.replay.pacing()), core.0.policy)
-        })
+        self.live()
+            .map(|core| (core.0.session.replay_pacing, core.0.policy))
     }
 
     /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
