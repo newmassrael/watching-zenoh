@@ -726,6 +726,11 @@ impl Connectivity {
     fn retire_transport(entry: TransportEntry) {
         // SAFETY: the entry's hold keeps the place standing until it is dropped below.
         unsafe { (*kept_at::<TransportListenerState, TransportKept>(entry.object)).retire() };
+        // The hold may be the place's last, whose give-back takes the session's lock.
+        debug_assert!(
+            !wz_capi_port::sync::SessionHeld::any_here(),
+            "a transport listener's place is let go of under a session's lock"
+        );
         drop(entry.held);
     }
 
@@ -2621,5 +2626,153 @@ mod tests {
                 "drop(context) ran once"
             );
         }
+    }
+}
+
+/// The places of the transport events listeners of a session of the cooperative engine, let go
+/// of as the session ends. A place given back takes the session's lock, so one given back under
+/// it fails the debug build's mark of a held lock (`wz_capi_port::sync::SessionHeld`) at once
+/// instead of waiting on itself.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+mod place_tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::session::{
+        listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
+        z_session_loan_mut, z_session_move,
+    };
+
+    unsafe extern "C" fn on_event(_: *mut z_loaned_transport_event_t, _: *mut c_void) {}
+
+    /// How many transport events listener places `engine` has free: each claimed, then all
+    /// given back.
+    fn free(engine: &Arc<Engine>) -> usize {
+        let claimed: Vec<Slot<u64>> =
+            core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::TransportEventsListener))
+                .collect();
+        claimed.len()
+    }
+
+    /// A closure that counts its drops in `drops`.
+    fn counting(drops: &'static AtomicUsize) -> z_owned_closure_transport_event_t {
+        unsafe extern "C" fn on_drop(context: *mut c_void) {
+            // SAFETY: the context is the test's `'static` counter.
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+        }
+        // SAFETY: a zeroed closure is the null one, which the constructor overwrites.
+        let mut closure: z_owned_closure_transport_event_t = unsafe { core::mem::zeroed() };
+        // SAFETY: a local closure; the context outlives every listener.
+        let made = unsafe {
+            z_closure_transport_event(
+                &mut closure,
+                Some(on_event),
+                Some(on_drop),
+                core::ptr::from_ref(drops).cast_mut().cast(),
+            )
+        };
+        assert_eq!(made, Z_OK);
+        closure
+    }
+
+    /// A background listener and one with a handle, on a session of `engine`'s, each in a place:
+    /// the handle's listener.
+    fn declare_both(
+        session: &z_owned_session_t,
+        engine: &Arc<Engine>,
+        drops: &'static AtomicUsize,
+    ) -> z_owned_transport_events_listener_t {
+        let places = free(engine);
+        let mut background = counting(drops);
+        let mut handled = counting(drops);
+        let mut listener = z_owned_transport_events_listener_t::null_value();
+        // SAFETY: a live session and local closures, each consumed by its declare.
+        unsafe {
+            assert_eq!(
+                z_declare_background_transport_events_listener(
+                    z_session_loan(session),
+                    z_closure_transport_event_move(&mut background),
+                    core::ptr::null(),
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                z_declare_transport_events_listener(
+                    z_session_loan(session),
+                    &mut listener,
+                    z_closure_transport_event_move(&mut handled),
+                    core::ptr::null(),
+                ),
+                Z_OK
+            );
+        }
+        assert_eq!(free(engine), places - 2, "each listener holds a place");
+        listener
+    }
+
+    /// The engine of the session `session` holds.
+    fn engine_of_session(session: &z_owned_session_t) -> Arc<Engine> {
+        // SAFETY: a live session of this frame's caller.
+        let handle = unsafe { session_handle(z_session_loan(session)) };
+        engine_of(handle.expect("an open session has its handle"))
+    }
+
+    /// Closing the session lets go of both listeners' closures and of the background listener's
+    /// place, with no lock of the session held, and the handle's undeclare after the close lets
+    /// go of its place. Turned red, in a debug build, by a close that gives a place back under the
+    /// session's lock.
+    #[test]
+    fn closing_a_session_lets_its_listeners_go_with_no_lock_held() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let mut session = listening_on_loopback();
+        let engine = engine_of_session(&session);
+        let mut listener = declare_both(&session, &engine, &DROPS);
+        // SAFETY: the session is live and owned here.
+        let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(closed, Z_OK);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            2,
+            "the close released both contexts"
+        );
+        // SAFETY: the handle written by the declare above, let go of once.
+        let undeclared = unsafe {
+            z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener))
+        };
+        assert_eq!(undeclared, Z_OK);
+        assert!(listener.handle.is_null());
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2, "nothing is released twice");
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// Dropping the session with no close lets go of the listeners as the session goes, with no
+    /// lock of the session held. Turned red, in a debug build, by a drop that gives a place back
+    /// under the session's lock.
+    #[test]
+    fn dropping_a_session_lets_its_listeners_go_with_no_lock_held() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let mut session = listening_on_loopback();
+        let engine = engine_of_session(&session);
+        let mut listener = declare_both(&session, &engine, &DROPS);
+        // SAFETY: the handle written by the declare above, let go of once.
+        let undeclared = unsafe {
+            z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener))
+        };
+        assert_eq!(undeclared, Z_OK);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the undeclare released its context"
+        );
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            2,
+            "the session's end released the background listener's context"
+        );
     }
 }
