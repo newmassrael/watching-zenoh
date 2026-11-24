@@ -1311,6 +1311,54 @@ mod fragments {
         all_slots_home(&pair);
     }
 
+    /// A fragment the channel's SN gate refuses on the in-place path is reported once, as the
+    /// copying path reports it, and clears the chain open on its channel at once: the Router holds
+    /// no chain after that turn, the refusal is not counted as a staged fragment, and the next
+    /// message reassembles.
+    #[test]
+    fn a_refused_fragment_is_reported_and_clears_its_chain_on_that_turn() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7513);
+        let (_, body) = frame_of(0, 2);
+        let expected = decoded_puts(&body);
+
+        let chain = chain_of(&pair, &body, 7);
+        assert!(chain.len() >= 2);
+        let (_, tally, delivered, _) = send(&mut pair, &chain[..1]);
+        assert_eq!(
+            (delivered.len(), tally.sn_rejected, tally.fragment_in_place),
+            (0, 0, 1),
+            "(Puts delivered, SN rejections, fragments staged)"
+        );
+        assert_eq!(
+            pair.acceptor.reassembly().active_chains(),
+            1,
+            "a chain is open"
+        );
+
+        // The first fragment again: its SN is the one the gate last took.
+        let before = pair.acceptor.rx_path_counts();
+        let (_, tally, delivered, _) = send(&mut pair, &chain[..1]);
+        let after = pair.acceptor.rx_path_counts();
+        assert_eq!(
+            (delivered.len(), tally.sn_rejected, tally.fragment_in_place),
+            (0, 1, 0),
+            "(Puts delivered, SN rejections, fragments staged)"
+        );
+        assert_eq!(
+            after.fragment_in_place - before.fragment_in_place,
+            1,
+            "the refused unit was read in place"
+        );
+        all_slots_home(&pair);
+
+        let chain = chain_of(&pair, &body, 7);
+        let (_, _, delivered, _) = send(&mut pair, &chain);
+        assert_eq!(delivered, expected);
+        all_slots_home(&pair);
+    }
+
     /// A message the sender restarts is reported as ONE dropped chain beside
     /// the restarted message, which is delivered whole: the restart's first
     /// fragment carries `0x2 First`, ends the chain open on its key and begins
