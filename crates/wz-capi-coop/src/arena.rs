@@ -112,8 +112,6 @@
 //! pools reserve theirs); a region an image places is another implementation of it.
 
 use core::alloc::Layout;
-use core::fmt;
-use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
@@ -409,59 +407,6 @@ pub const LINK_TX_SLOTS: usize = 1;
 
 // A link of a pool holds one slot at a time (`wz_runtime_coop::link_storage::PooledTx`).
 const _: () = assert!(LINK_TX_SLOTS == 1);
-
-/// The rows a plan has put, in the order it put them, at most [`ARENA_ROWS`]. A row is written
-/// when it is put and not before: a table of the rows filled whole at a plan's start is written row
-/// by row in the code of every plan made.
-#[derive(Clone, Copy)]
-struct PlanRows {
-    rows: [MaybeUninit<ArenaRow>; ARENA_ROWS],
-    len: usize,
-}
-
-impl PlanRows {
-    /// No row yet.
-    const fn new() -> Self {
-        Self {
-            rows: [MaybeUninit::uninit(); ARENA_ROWS],
-            len: 0,
-        }
-    }
-
-    /// Put `row` after the others; `false`, and nothing put, when every row is held.
-    fn push(&mut self, row: ArenaRow) -> bool {
-        match self.rows.get_mut(self.len) {
-            Some(slot) => {
-                slot.write(row);
-                self.len = self.len.saturating_add(1);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// The rows put, in order.
-    fn as_slice(&self) -> &[ArenaRow] {
-        let len = self.len.min(ARENA_ROWS);
-        // SAFETY: `push` writes each row below `len` before it counts it, and never counts past
-        // `ARENA_ROWS`; a `MaybeUninit<ArenaRow>` has the layout of an `ArenaRow`.
-        unsafe { core::slice::from_raw_parts(self.rows.as_ptr().cast::<ArenaRow>(), len) }
-    }
-}
-
-impl PartialEq for PlanRows {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl Eq for PlanRows {}
-
-impl fmt::Debug for PlanRows {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.as_slice(), f)
-    }
-}
 
 /// Why a session's open reserved no arena, and so bound, joined and dialled nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -933,7 +878,11 @@ impl PlaceRows {
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
-    rows: PlanRows,
+    /// The rows laid out, in order: those below `len`. A row not laid out is `None`, a null name
+    /// by the niche of its `&str`, so a plan's table of rows starts as a fill of zeros and not as
+    /// a write of each row.
+    rows: [Option<ArenaRow>; ARENA_ROWS],
+    len: usize,
     /// The first refusal met while the plan was laid out, kept as it came (the limit it names, or
     /// the address space), and the one its maker is told once the plan is settled
     /// ([`Self::settled`]): every row and every limit is put and read in one pass with no exit of
@@ -978,7 +927,8 @@ impl ArenaPlan {
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
         let link_bytes = link_batch(config, limits)?;
         let mut plan = Self {
-            rows: PlanRows::new(),
+            rows: [None; ARENA_ROWS],
+            len: 0,
             refused: None,
             transport: TransportRows {
                 links,
@@ -1534,14 +1484,17 @@ impl ArenaPlan {
     /// as its refusal unless it holds an earlier one ([`Self::settled`]).
     #[inline(never)]
     fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
-        let row = ArenaRow {
-            part,
-            basis,
-            count,
-            entry_bytes,
-        };
-        if !self.rows.push(row) {
-            self.refuse(ArenaRefused::TooLarge);
+        match self.rows.get_mut(self.len) {
+            Some(row) => {
+                *row = Some(ArenaRow {
+                    part,
+                    basis,
+                    count,
+                    entry_bytes,
+                });
+                self.len = self.len.saturating_add(1);
+            }
+            None => self.refuse(ArenaRefused::TooLarge),
         }
     }
 
@@ -1694,14 +1647,13 @@ impl ArenaPlan {
     }
 
     /// The rows, in the order the plan laid them out.
-    pub fn rows(&self) -> &[ArenaRow] {
-        self.rows.as_slice()
+    pub fn rows(&self) -> impl Iterator<Item = &ArenaRow> + '_ {
+        self.rows.get(..self.len).unwrap_or(&[]).iter().flatten()
     }
 
     /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
     pub fn reserved_bytes(&self) -> Option<usize> {
         self.rows()
-            .iter()
             .try_fold(0usize, |sum, row| sum.checked_add(row.span()?))
     }
 }
@@ -2357,7 +2309,8 @@ mod tests {
 
     fn empty_plan() -> ArenaPlan {
         ArenaPlan {
-            rows: PlanRows::new(),
+            rows: [None; ARENA_ROWS],
+            len: 0,
             refused: None,
             transport: TransportRows::default(),
             session: SessionRows::default(),
@@ -2375,7 +2328,7 @@ mod tests {
         }
         assert_eq!(plan.refused, None);
         plan.put("one more", "BASIS", 1, 8);
-        assert_eq!(plan.rows().len(), ARENA_ROWS);
+        assert_eq!(plan.rows().count(), ARENA_ROWS);
         assert_eq!(plan.settled(), Err(ArenaRefused::TooLarge));
     }
 
@@ -2417,7 +2370,7 @@ mod tests {
         };
         let plan = plan.holding_cells(asked).expect("the cells fit");
         let plan = plan.holding_cells(asked).expect("held already");
-        let parts: alloc::vec::Vec<_> = plan.rows().iter().map(|row| row.part).collect();
+        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| row.part).collect();
         assert_eq!(
             parts,
             [
@@ -2427,38 +2380,31 @@ mod tests {
                 "link actions"
             ]
         );
-        assert_eq!(plan.rows()[1].entry_bytes, 40);
-        assert_eq!(plan.rows()[3].count, 3);
+        assert_eq!(plan.rows().nth(1).map(|row| row.entry_bytes), Some(40));
+        assert_eq!(plan.rows().nth(3).map(|row| row.count), Some(3));
     }
 
-    /// A plan's rows are the ones put, in order, up to `ARENA_ROWS`, and two tables of rows are
-    /// equal when they hold the same rows. Turned red by a row read before it is put, a row put
-    /// past the table, or rows compared past the ones put.
+    /// A plan reads the rows it laid out and none past them, in order, and two plans that laid
+    /// out the same rows are equal. Turned red by a row read before it is put, or rows past the
+    /// ones put read as rows.
     #[test]
-    fn a_plans_rows_are_those_put_and_no_more() {
-        let row = |count| ArenaRow {
-            part: "part",
-            basis: "BASIS",
-            count,
-            entry_bytes: 8,
-        };
-        let mut rows = PlanRows::new();
-        assert!(rows.as_slice().is_empty());
-        for count in 0..ARENA_ROWS {
-            assert!(rows.push(row(count)));
-        }
-        assert!(!rows.push(row(ARENA_ROWS)));
-        assert_eq!(rows.as_slice().len(), ARENA_ROWS);
-        assert!(rows
-            .as_slice()
-            .iter()
-            .enumerate()
-            .all(|(at, put)| put.count == at));
-        let mut one = PlanRows::new();
-        assert!(one.push(row(0)));
-        let mut same = PlanRows::new();
-        assert!(same.push(row(0)));
-        assert_eq!(one, same);
-        assert_ne!(one, rows);
+    fn a_plan_reads_the_rows_it_put_and_none_past_them() {
+        let mut plan = empty_plan();
+        assert_eq!(plan.rows().count(), 0);
+        plan.put("first", "BASIS", 1, 8);
+        plan.put("second", "BASIS", 2, 16);
+        let parts: alloc::vec::Vec<_> = plan.rows().map(|row| (row.part, row.count)).collect();
+        assert_eq!(parts, [("first", 1), ("second", 2)]);
+        assert_eq!(
+            plan.reserved_bytes(),
+            plan.rows()
+                .try_fold(0usize, |sum, row| sum.checked_add(row.span()?))
+        );
+        let mut same = empty_plan();
+        same.put("first", "BASIS", 1, 8);
+        same.put("second", "BASIS", 2, 16);
+        assert_eq!(plan, same);
+        same.put("third", "BASIS", 1, 8);
+        assert_ne!(plan, same);
     }
 }
