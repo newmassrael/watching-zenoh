@@ -27,18 +27,23 @@ diagnosis. `--list` prints every scenario and every program left out, with its r
 
 ## What runs
 
-THE PROGRAMS are zenoh-pico's, unmodified, from the pinned `vendor/zenoh-pico`: the API tests the
-integration lane runs (`crates/wz-integration-tests/tests/it/files/pico_upstream_api_tests_on_wz.rs`),
-built as upstream's CMake builds them for the host (the TCP proxy beside the two that take it, on a
-Unix only), and the example programs of `examples/unix/c11`, `examples/unix/c99` and, on Windows,
-`examples/windows`. Two units are linked beside every program and change none of its text
-(`crates/wz-capi-pico/tests/c/upstream`): `unbuffered_stdout.c`, so what a program prints reaches the
-file it is read from line by line and a program that ends only when stopped is read as surely as one
-that returns; and on Windows, for the Unix programs, `msvc-posix/unistd.h`, the POSIX calls they make
-beside the API (getopt, sleep and two thread calls). `test_encoding_with_id` carries the one
-correction the integration lane carries, by exact match. Every program left out is in `NOT_RUN` with
-its reason, and the selftest holds the table to the vendored tree, so a program upstream adds is a
-red there until it is placed.
+THE PROGRAMS are zenoh-pico's, unmodified, from the pinned `vendor/zenoh-pico`: the API tests and
+the client test the integration lane runs
+(`crates/wz-integration-tests/tests/it/files/pico_upstream_api_tests_on_wz.rs`), built as upstream's
+CMake builds them for the host (the TCP proxy beside the two that take it, on a Unix only); the
+other test programs of `tests/` that call zenoh-pico's public API (`PROGRAM_TESTS`); and the example
+programs of `examples/unix/c11`, `examples/unix/c99` and, on Windows, `examples/windows`. Units are
+linked beside a program and change none of its text (`crates/wz-capi-pico/tests/c/upstream`):
+`unbuffered_stdout.c` beside every one, so what a program prints reaches the file it is read from line
+by line and a program that ends only when stopped is read as surely as one that returns; on Windows,
+for the Unix programs, `msvc-posix/unistd.h`, the POSIX calls they make beside the API (getopt, sleep
+and two thread calls); and `pico_task_calls.c`, zenoh-pico's two task calls of its system layer,
+beside the one test that starts its own tasks, when it is built against the library under test.
+Where a program reads zenoh-pico's private layer, the read is replaced by exact match with the
+public call that means the same: `test_encoding_with_id`'s one line and the client test's reads, the
+integration lane's own replacements read from its file, and the wildcard test's one print of a
+private id. Every program left out is in `NOT_RUN` with its reason, and the selftest holds the table
+to the vendored tree, so a program upstream adds is a red there until it is placed.
 
 THE PEERS are real: a program that talks to another is paired with zenoh-pico's own counterpart
 program built against zenoh-pico itself, which is compiled from the pinned tree with CMake as the
@@ -104,6 +109,10 @@ PICO = ROOT / "vendor" / "zenoh-pico"
 HARNESS = CRATES / "wz-capi-pico" / "tests" / "c" / "upstream"
 UNBUFFERED = HARNESS / "unbuffered_stdout.c"
 MSVC_POSIX = HARNESS / "msvc-posix"
+TASK_CALLS = HARNESS / "pico_task_calls.c"
+# The integration lane's file, whose replacements a program it also runs carries here
+# (`Program.lane_corrections`): one statement of each replacement for the two runs of the program.
+INTEGRATION_LANE = CRATES / "wz-integration-tests" / "tests" / "it" / "files" / "pico_upstream_api_tests_on_wz.rs"
 
 HOSTS = ("linux", "windows")
 SETS = ("tests", "c11", "c99", "windows")
@@ -169,13 +178,17 @@ class Program:
     """One of zenoh-pico's programs (`path` under `vendor/zenoh-pico`) and how upstream builds it.
     `body` is the call a compiled body imports from the library, whose absence is a stub `main`
     (None: the program has no stub arm). `proxy`: upstream's CMake links `tests/utils/tcp_proxy.c`
-    and defines `Z_ADVANCED_PUBSUB_TEST_USE_TCP_PROXY` for it on a Unix. `correction` is
-    `(found, replacement)`, `found` occurring once in the program."""
+    and defines `Z_ADVANCED_PUBSUB_TEST_USE_TCP_PROXY` for it on a Unix. `corrections` are
+    `(found, replacement)` pairs, each `found` occurring once in the program, made in order;
+    `lane_corrections` names the `Build` of the integration lane whose corrections follow them.
+    `task_calls`: the library under test is linked with `TASK_CALLS` beside the program."""
 
     path: str
     body: str | None = "z_open"
     proxy: bool = False
-    correction: tuple[str, str] | None = None
+    corrections: tuple[tuple[str, str], ...] = ()
+    lane_corrections: str | None = None
+    task_calls: bool = False
 
     @property
     def name(self) -> str:
@@ -222,7 +235,14 @@ ENCODING_CHECKS_E4 = (
 ALONE_TESTS = ("z_api_null_drop_test", "z_api_double_drop_test", "z_api_bytes_test", "z_api_encoding_test")
 ROUTED_TESTS = ("z_api_alignment_test", "z_api_liveliness_test", "z_api_cancellation_test", "z_api_matching_test",
                 "z_api_connectivity_test", "z_api_queryable_test", "z_api_advanced_pubsub_test",
-                "z_api_callback_drop_on_undeclare_test", "z_api_batching_test")
+                "z_api_callback_drop_on_undeclare_test", "z_api_batching_test", "z_client_test")
+# `z_client_test` reads zenoh-pico's private layer for what it prints and for the lists it keeps its
+# entities in; the integration lane replaces each such read with the public call that means the same
+# (`CLIENT_TEST_PUBLIC_API` there), and the program carries the same replacements here. A hundred
+# keys, subscribers, queryables and publishers, a hundred thousand puts, ten thousand fragmented puts
+# of 100,000 bytes and ten thousand gets, each phase waited on for up to 60 s.
+CLIENT_TEST_CORRECTIONS = "CLIENT_TEST_PUBLIC_API"
+TEST_BOUND_OF = {"z_client_test": 900.0}
 PROXIED_TESTS = ("z_api_advanced_pubsub_test", "z_api_callback_drop_on_undeclare_test")
 # The API tests that fix a port or a multicast group in their own text, so that another process of
 # the host holding it fails the program for a reason that is not the library's.
@@ -234,6 +254,19 @@ FIXED_NETWORK = {
     "z_api_callback_drop_on_undeclare_test": "its peers listen on port 9000",
     "z_api_batching_test": "its sessions listen on the fixed port 12345",
 }
+
+# zenoh-pico's other test programs of `tests/` that call its public API, each played as upstream's own
+# CI or its CMake plays it (`scenarios` below). `z_wildcard_subscription_test` prints its publisher's
+# private entity id once, which a drop-in whose handles are opaque does not have: that one read is
+# dropped from the line, as the integration lane drops the client test's. `z_test_peer_unicast` starts
+# its sessions with zenoh-pico's own task calls (`TASK_CALLS`).
+WILDCARD_PUBLISHER_ID = (
+    'printf("Declared publisher entity id=%zu\\n", z_loan(pub)->_id);',
+    'printf("Declared publisher\\n");',
+)
+PROGRAM_TESTS = ("z_wildcard_subscription_test", "z_multi_pubsub_test", "z_multi_queryable_test",
+                 "z_condvar_wait_until_test", "z_test_fragment_tx", "z_test_fragment_rx", "z_perf_tx", "z_perf_rx",
+                 "z_test_peer_unicast")
 
 C11_EXAMPLES = ("z_advanced_pub", "z_advanced_sub", "z_bytes", "z_get", "z_get_attachment", "z_get_channel",
                 "z_get_lat", "z_get_liveliness", "z_info", "z_liveliness", "z_ping", "z_pong", "z_pub",
@@ -253,8 +286,14 @@ def example(make, name: str) -> Program:
 
 
 PROGRAM_LIST = (
-    [test(n, body=None, correction=ENCODING_CHECKS_E4 if n == "z_api_encoding_test" else None) for n in ALONE_TESTS]
-    + [test(n, proxy=n in PROXIED_TESTS) for n in ROUTED_TESTS]
+    [test(n, body=None, corrections=(ENCODING_CHECKS_E4,) if n == "z_api_encoding_test" else ()) for n in ALONE_TESTS]
+    + [test(n, proxy=n in PROXIED_TESTS, lane_corrections=CLIENT_TEST_CORRECTIONS if n == "z_client_test" else None)
+       for n in ROUTED_TESTS]
+    + [test("z_wildcard_subscription_test", corrections=(WILDCARD_PUBLISHER_ID,)),
+       test("z_multi_pubsub_test"), test("z_multi_queryable_test"),
+       test("z_condvar_wait_until_test", body="z_condvar_wait_until"),
+       test("z_test_fragment_tx"), test("z_test_fragment_rx"), test("z_perf_tx"), test("z_perf_rx"),
+       test("z_test_peer_unicast", task_calls=True)]
     + [example(c11, n) for n in C11_EXAMPLES]
     + [example(c99, n) for n in C99_EXAMPLES]
     + [example(win, n) for n in WINDOWS_EXAMPLES]
@@ -298,10 +337,13 @@ NOT_RUN = {
 
 def population(pico: pathlib.Path) -> set[str]:
     """The programs of zenoh-pico's tree this runner answers for: every example of the three example
-    directories and every `z_api_*_test` of `tests/`."""
+    directories, every `z_api_*_test` of `tests/`, and the client test and the other test programs of
+    public calls (`PROGRAM_TESTS`) the tree has. The rest of `tests/` tests zenoh-pico's private code,
+    or is a script; the release-proof ledger places each of them."""
     out = {p.relative_to(pico).as_posix() for d in ("examples/unix/c11", "examples/unix/c99", "examples/windows")
            for p in (pico / d).glob("*.c")}
     out |= {p.relative_to(pico).as_posix() for p in (pico / "tests").glob("z_api_*_test.c")}
+    out |= {f"tests/{n}.c" for n in ("z_client_test",) + PROGRAM_TESTS if (pico / "tests" / f"{n}.c").is_file()}
     return out
 
 
@@ -342,6 +384,7 @@ class Scenario:
     attempts: int = 1
     attempt_s: float | None = None
     bound_s: float = 90.0
+    router_port: int | None = None
 
     @property
     def id(self) -> str:
@@ -492,13 +535,59 @@ def test_scenarios() -> list[Scenario]:
     """Each API test alone, or beside a router with its locator as `argv[1]`, its own asserts the
     verdict."""
     alone = [Scenario(p(test, n), router=False, bound_s=TEST_BOUND_S) for n in ALONE_TESTS]
-    routed = [Scenario(p(test, n, (ROUTER,)), bound_s=TEST_BOUND_S, own_network=FIXED_NETWORK.get(n))
+    routed = [Scenario(p(test, n, (ROUTER,)), bound_s=TEST_BOUND_OF.get(n, TEST_BOUND_S),
+                       own_network=FIXED_NETWORK.get(n))
               for n in ROUTED_TESTS]
     return alone + routed
 
 
-SCENARIOS = (test_scenarios() + scenarios_of(c11, True) + c11_only_scenarios() + scenarios_of(c99, True)
-             + scenarios_of(win, False))
+# What the fragment pair prints, the lines `tests/fragment.py` holds it to.
+FRAGMENT_SENT = r"\[tx\]: Sending packet on test/zenoh-pico-fragment, len: 10000"
+FRAGMENT_GOT = (r"\[rx\]: Received packet on test/zenoh-pico-fragment, len: 10000, validity: 1, "
+                r"qos \{priority: 4, cong_ctrl: 1\}")
+# What the receiving side of the perf pair prints for a length it counted, and once the end packet came.
+PERF_COUNTED = r"(?m)^End test for pkt len: [0-9]+, msg nb: [0-9]+, time ms: [0-9]+$"
+PERF_ENDED = r"(?m)^End of test$"
+PERF_UP = "Start listening."
+# The second half of `z_test_peer_unicast`, which it prints only after the first half's asserts held.
+PEER_CONNECTIONS = r"Test connections\.\.\. Ok"
+# The fragment and perf pairs in their client arm dial the router on this port, written in their text.
+FIXED_ROUTER_PORT = 7447
+FIXED_ROUTER = "its programs dial the router on the fixed tcp/127.0.0.1:7447"
+
+
+def program_test_scenarios() -> list[Scenario]:
+    """The other test programs of public calls (`PROGRAM_TESTS`), each the subject once, played as
+    zenoh-pico plays them: the wildcard test beside a router with its locator as `argv[1]` (its
+    CMake's `api.sh`); the two multi tests beside a router they find by scouting, as a default
+    config does; the condition variable test alone (`add_test`); the fragment pair in its client
+    arm through a router on the port it dials, both orders, held to the lines `tests/fragment.py`
+    reads; the perf pair the same way, the receiving side ending on the end packet; and the unicast
+    peer test alone, its four sessions on the ports it fixes (upstream's `unicast_peer_test` job).
+    The peer arms of the fragment and perf pairs join a group on an interface named `lo`, which a
+    Windows host has not, and are not played."""
+    fixed = {"router_port": FIXED_ROUTER_PORT, "own_network": FIXED_ROUTER}
+    return [
+        Scenario(p(test, "z_wildcard_subscription_test", (ROUTER,)), bound_s=TEST_BOUND_S),
+        Scenario(p(test, "z_multi_pubsub_test"), scouts=True, bound_s=TEST_BOUND_S),
+        Scenario(p(test, "z_multi_queryable_test"), scouts=True, bound_s=TEST_BOUND_S),
+        Scenario(p(test, "z_condvar_wait_until_test"), router=False, bound_s=60.0),
+        Scenario(p(test, "z_test_fragment_tx"), p(test, "z_test_fragment_rx", ends=False),
+                 witnesses=(("subject", FRAGMENT_SENT), ("peer", FRAGMENT_GOT)), **fixed),
+        Scenario(p(test, "z_test_fragment_rx", ends=False), p(test, "z_test_fragment_tx"), first="subject",
+                 witnesses=(("subject", FRAGMENT_GOT),), **fixed),
+        # The sending side puts each of 18 lengths for 10 s.
+        Scenario(p(test, "z_perf_tx"), p(test, "z_perf_rx", ready=PERF_UP),
+                 witnesses=(("peer", PERF_COUNTED), ("peer", PERF_ENDED)), bound_s=300.0, **fixed),
+        Scenario(p(test, "z_perf_rx", ready=PERF_UP), p(test, "z_perf_tx"), first="subject",
+                 witnesses=(("subject", PERF_COUNTED), ("subject", PERF_ENDED)), bound_s=300.0, **fixed),
+        Scenario(p(test, "z_test_peer_unicast"), router=False, witnesses=(("subject", PEER_CONNECTIONS),),
+                 own_network="its four sessions listen on the fixed ports 7447 to 7449", bound_s=200.0),
+    ]
+
+
+SCENARIOS = (test_scenarios() + program_test_scenarios() + scenarios_of(c11, True) + c11_only_scenarios()
+             + scenarios_of(c99, True) + scenarios_of(win, False))
 SCENARIO_BY_ID = {sc.id: sc for sc in SCENARIOS}
 
 
@@ -507,17 +596,49 @@ SCENARIO_BY_ID = {sc.id: sc for sc in SCENARIOS}
 # ---------------------------------------------------------------------------
 
 
-def corrected(text: str, correction: tuple[str, str] | None, name: str) -> str:
-    """The program's text with its correction made; a correction whose text no longer occurs
-    exactly once is refused, so a changed upstream text reds rather than being skipped."""
-    if correction is None:
-        return text
-    found, replacement = correction
-    count = text.count(found)
-    if count != 1:
-        raise Refusal(f"{name} has the line its correction replaces {count} times, not once: the correction "
-                      "is stale")
-    return text.replace(found, replacement, 1)
+def corrected(text: str, corrections: tuple[tuple[str, str], ...], name: str) -> str:
+    """The program's text with its corrections made in order; a correction whose text no longer
+    occurs exactly once is refused, so a changed upstream text reds rather than being skipped."""
+    for found, replacement in corrections:
+        count = text.count(found)
+        if count != 1:
+            raise Refusal(f"{name} has the text a correction replaces {count} times, not once: the correction "
+                          f"is stale ({found.strip().splitlines()[0] if found.strip() else repr(found)})")
+        text = text.replace(found, replacement, 1)
+    return text
+
+
+# One pair of the integration lane's `corrections`, two raw strings: every pair of the lane's `Build`
+# that a program here carries is written so.
+LANE_PAIR = re.compile(r'\(\s*r#"(.*?)"#,\s*r#"(.*?)"#,?\s*\)', re.S)
+
+
+def lane_corrections(text: str, build: str) -> tuple[tuple[str, str], ...]:
+    """The `corrections` of the integration lane's `Build` named `build`, read from the lane's
+    text; refused when the Build is not there or a pair of it is not two raw strings, so the two
+    runs of a program cannot drift apart unseen."""
+    start = text.find(f"const {build}: Build = Build {{")
+    if start < 0:
+        raise Refusal(f"the integration lane has no Build {build}")
+    open_at = text.find("corrections: &[", start)
+    close_at = text.find("\n    ],\n};", open_at)
+    if open_at < 0 or close_at < 0:
+        raise Refusal(f"the integration lane's Build {build} has no list of corrections closed as written")
+    block = text[open_at + len("corrections: &["):close_at]
+    pairs = tuple(LANE_PAIR.findall(block))
+    if not pairs or block.count('r#"') != 2 * len(pairs):
+        raise Refusal(f"the integration lane's Build {build} has a correction that is not a pair of raw strings")
+    return pairs
+
+
+def corrections_of(program: Program) -> tuple[tuple[str, str], ...]:
+    """Every correction a program carries: its own, then the integration lane's it names."""
+    if program.lane_corrections is None:
+        return program.corrections
+    if not INTEGRATION_LANE.is_file():
+        raise Refusal(f"{INTEGRATION_LANE} is missing, and {program.name} carries its corrections")
+    return program.corrections + lane_corrections(INTEGRATION_LANE.read_text(encoding="utf-8"),
+                                                  program.lane_corrections)
 
 
 def normalized(raw: bytes) -> str:
@@ -680,6 +801,11 @@ def scenario_findings(sc: Scenario) -> list[str]:
         findings.append(f"{sc.id}: needs a network of its own and does not say why")
     if any(PORT in pattern for _, pattern in sc.witnesses) and not sc.router:
         findings.append(f"{sc.id}: a witness names the port of a router the scenario does not start")
+    if sc.router_port is not None and not sc.router:
+        findings.append(f"{sc.id}: fixes the port of a router the scenario does not start")
+    if sc.router_port is not None and sc.own_network is None:
+        findings.append(f"{sc.id}: fixes its router's port and does not need a network of its own, where another "
+                        "process may hold that port")
     return findings
 
 
@@ -734,6 +860,13 @@ def say(line: str) -> None:
     pwp.say(line)
 
 
+def units_of(program: Program, lib: Library) -> list[pathlib.Path]:
+    """The harness units linked beside a program: the unbuffered streams always, and zenoh-pico's task
+    calls beside a program that starts its own tasks when it is built against the library under test
+    (zenoh-pico, the control, has its own)."""
+    return [UNBUFFERED] + ([TASK_CALLS] if program.task_calls and lib.letter == LIBRARY else [])
+
+
 class Linux:
     name = "linux"
     width = os.uname().machine if hasattr(os, "uname") else ""
@@ -741,14 +874,14 @@ class Linux:
     def compile(self, program: Program, lib: Library, work: pathlib.Path) -> pathlib.Path | None:
         src = prepared(program, work)
         includes = list(lib.includes) + ([PICO / "tests"] if program.set == "tests" else [])
-        extra = [PICO / "tests" / "utils" / "tcp_proxy.c"] if program.proxy else []
+        extra = ([PICO / "tests" / "utils" / "tcp_proxy.c"] if program.proxy else []) + units_of(program, lib)
         defines = ["Z_ADVANCED_PUBSUB_TEST_USE_TCP_PROXY"] if program.proxy else []
         exe = work / program.name
         # pico's own build compiles every example and test as C11 with the compiler's extensions
         # (`set(CMAKE_C_STANDARD 11)`, the examples' `C_STANDARD 11` property), which its Unix
         # header relies on.
         cmd = (["cc", "-std=gnu11", "-DZENOH_LINUX", "-pthread"] + [f"-I{d}" for d in includes]
-               + [f"-D{d}" for d in defines] + [str(src)] + [str(x) for x in extra] + [str(UNBUFFERED)]
+               + [f"-D{d}" for d in defines] + [str(src)] + [str(x) for x in extra]
                + ["-o", str(exe)] + lib.link)
         built = subprocess.run(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                encoding="utf-8", errors="replace")
@@ -792,7 +925,8 @@ class Windows:
         # atomics of the throughput and latency programs are behind their own switch; `/MD` is the C
         # runtime zenoh-pico's own DLL is built against; the programs' text is UTF-8.
         words = (["/MD", "/utf-8", "/experimental:c11atomics"] + [f'/I"{d}"' for d in includes]
-                 + [f'"{src}"', f'"{UNBUFFERED}"'] + [f'"{x}"' for x in lib.link] + [f'/Fe:"{exe}"'])
+                 + [f'"{src}"'] + [f'"{u}"' for u in units_of(program, lib)] + [f'"{x}"' for x in lib.link]
+                 + [f'/Fe:"{exe}"'])
         if not pwp.run_cl(self.vs, self.vcvars, work, program.name, " ".join(words)) or not exe.is_file():
             return None
         for dll in lib.runtime:
@@ -811,10 +945,11 @@ def prepared(program: Program, work: pathlib.Path) -> pathlib.Path:
     src = PICO / program.path
     if not src.is_file():
         raise Refusal(f"{src} is missing; run `git submodule update --init vendor/zenoh-pico`")
-    if program.correction is None:
+    corrections = corrections_of(program)
+    if not corrections:
         return src
     copy = work / src.name
-    copy.write_text(corrected(src.read_text(encoding="utf-8"), program.correction, program.name),
+    copy.write_text(corrected(src.read_text(encoding="utf-8"), corrections, program.name),
                     encoding="utf-8", newline="\n")
     return copy
 
@@ -984,8 +1119,10 @@ class Router:
     listener came up: a host whose group cannot be joined still routes, and only the scenarios that
     scout are then not measured."""
 
-    def __init__(self, zenohd: pathlib.Path, work: pathlib.Path, scouts: bool):
-        self.port = free_port()
+    def __init__(self, zenohd: pathlib.Path, work: pathlib.Path, scouts: bool, port: int | None = None):
+        # A scenario whose programs write the router's port in their text names it; any other gets
+        # a free one.
+        self.port = port if port is not None else free_port()
         self.log = work / "zenohd.log"
         self.out = open(self.log, "wb")
         self.proc = subprocess.Popen([str(zenohd), "-l", f"tcp/0.0.0.0:{self.port}", "--rest-http-port", "none"],
@@ -1151,7 +1288,7 @@ def play_scenario(sc: Scenario, exes: dict[str, pathlib.Path], zenohd: pathlib.P
     try:
         if sc.router:
             try:
-                router = Router(zenohd, work, sc.scouts)
+                router = Router(zenohd, work, sc.scouts, sc.router_port)
             except RouterDown as err:
                 return PlayResult(str(err), [], None, err.log)
             if sc.scouts and not router.scouting:
@@ -1399,13 +1536,54 @@ def selftest() -> int:
                   pathlib.Path("zenohd"), pathlib.Path("."), True).libs
     expect("a runner holds the library under test and the reference by their two letters",
            sorted(arms) == sorted([LIBRARY, REFERENCE]) and LIBRARY != REFERENCE, sorted(arms))
-    expect("the harness units exist", UNBUFFERED.is_file() and (MSVC_POSIX / "unistd.h").is_file())
-    expect("every API test the integration lane runs is run here",
-           {p.name for p in PROGRAM_LIST if p.set == "tests"} == set(ALONE_TESTS) | set(ROUTED_TESTS)
-           and len(ALONE_TESTS) + len(ROUTED_TESTS) == 13)
-    expect("a routed test is handed the router as its one argument and the others none",
-           all((sc.subject.args == (ROUTER,)) == sc.router for sc in SCENARIOS if PROGRAMS[sc.subject.program].set
-               == "tests"))
+    expect("the harness units exist",
+           UNBUFFERED.is_file() and (MSVC_POSIX / "unistd.h").is_file() and TASK_CALLS.is_file())
+    expect("every test the integration lane runs is run here, and the test programs of public calls",
+           {p.name for p in PROGRAM_LIST if p.set == "tests"}
+           == set(ALONE_TESTS) | set(ROUTED_TESTS) | set(PROGRAM_TESTS)
+           and len(ALONE_TESTS) + len(ROUTED_TESTS) == 14
+           and not set(PROGRAM_TESTS) & (set(ALONE_TESTS) | set(ROUTED_TESTS)))
+    takes_locator = set(ROUTED_TESTS) | {"z_wildcard_subscription_test"}
+    expect("a test that takes a locator is handed the router as its one argument, and no other test is",
+           all((sc.subject.args == (ROUTER,)) == (PROGRAMS[sc.subject.program].name in takes_locator)
+               and (sc.router or PROGRAMS[sc.subject.program].name not in takes_locator)
+               for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "tests"))
+    lane_text = INTEGRATION_LANE.read_text(encoding="utf-8") if INTEGRATION_LANE.is_file() else ""
+    client = PROGRAMS["tests/z_client_test.c"]
+    client_src = PICO / "tests" / "z_client_test.c"
+    expect("the client test carries the integration lane's replacements, each found once, and reads no private "
+           "name after them",
+           client.lane_corrections == CLIENT_TEST_CORRECTIONS and client_src.is_file()
+           and not refused(lambda: corrections_of(client))
+           and len(corrections_of(client)) == len(lane_corrections(lane_text, CLIENT_TEST_CORRECTIONS))
+           and not refused(lambda: corrected(client_src.read_text(encoding="utf-8"), corrections_of(client),
+                                             "z_client_test"))
+           and re.search(r"\b_z_\w+|->_\w+", corrected(client_src.read_text(encoding="utf-8"),
+                                                       corrections_of(client), "z_client_test")) is None)
+    lane = ('const X: Build = Build {\n    extra_sources: &[],\n    corrections: &[\n        (\n'
+            '            r#"a"#,\n            r#"b"#,\n        ),\n    ],\n};\n')
+    expect("a Build of the integration lane is read as its pairs", lane_corrections(lane, "X") == (("a", "b"),))
+    expect("a Build the integration lane lacks is refused", refused(lambda: lane_corrections(lane, "Y")))
+    expect("a correction of the integration lane that is not two raw strings is refused",
+           refused(lambda: lane_corrections(lane.replace('r#"b"#', '"b"'), "X")))
+    wildcard = PICO / "tests" / "z_wildcard_subscription_test.c"
+    expect("the wildcard test's private read is replaced once, and nothing private is left",
+           wildcard.is_file() and re.search(r"->_\w+", corrected(wildcard.read_text(encoding="utf-8"),
+                                                                (WILDCARD_PUBLISHER_ID,), "w")) is None)
+    expect("the task calls are linked beside the one program that starts its own tasks, for the library alone",
+           {p.name for p in PROGRAM_LIST if p.task_calls} == {"z_test_peer_unicast"}
+           and TASK_CALLS in units_of(PROGRAMS["tests/z_test_peer_unicast.c"], Library(LIBRARY, "w", [], [], []))
+           and TASK_CALLS not in units_of(PROGRAMS["tests/z_test_peer_unicast.c"], Library(REFERENCE, "p", [], [], []))
+           and units_of(PROGRAMS["tests/z_api_bytes_test.c"], Library(LIBRARY, "w", [], [], [])) == [UNBUFFERED])
+    expect("the fragment and perf pairs dial the router on the port their text fixes, on a network of their own",
+           all(sc.router_port == FIXED_ROUTER_PORT and sc.own_network == FIXED_ROUTER and sc.router
+               for sc in SCENARIOS if PROGRAMS[sc.subject.program].name in
+               ("z_test_fragment_tx", "z_test_fragment_rx", "z_perf_tx", "z_perf_rx")))
+    expect("a router port fixed with no router, or with no network of its own, is a finding",
+           any("fixes the port of a router" in f for f in scenario_findings(
+               Scenario(Proc("tests/z_perf_tx.c"), router=False, router_port=7447, own_network=FIXED_ROUTER)))
+           and any("does not need a network of its own" in f for f in scenario_findings(
+               Scenario(Proc("tests/z_perf_tx.c"), router_port=7447))))
     expect("the proxy is the two tests upstream's Unix arm links it to",
            {p.name for p in PROGRAM_LIST if p.proxy} == set(PROXIED_TESTS))
 
@@ -1440,16 +1618,18 @@ def selftest() -> int:
     text = ('a\nz_encoding_from_substr(&e4, "custom_id;custom_schema", 16);\n'
             '    assert(z_internal_encoding_check(&e2));\n')
     expect("the correction replaces its one line",
-           "check(&e4));" in corrected(text, ENCODING_CHECKS_E4, "t") and "check(&e2));" not in
-           corrected(text, ENCODING_CHECKS_E4, "t"))
+           "check(&e4));" in corrected(text, (ENCODING_CHECKS_E4,), "t") and "check(&e2));" not in
+           corrected(text, (ENCODING_CHECKS_E4,), "t"))
     expect("a correction found twice is refused",
-           refused(lambda: corrected(text + text, ENCODING_CHECKS_E4, "t")))
-    expect("a correction not found is refused", refused(lambda: corrected("a\n", ENCODING_CHECKS_E4, "t")))
+           refused(lambda: corrected(text + text, (ENCODING_CHECKS_E4,), "t")))
+    expect("a correction not found is refused", refused(lambda: corrected("a\n", (ENCODING_CHECKS_E4,), "t")))
+    expect("corrections are made in order, a later one reading what an earlier one wrote",
+           corrected("a", (("a", "b"), ("b", "c")), "t") == "c")
     vendored = PICO / "tests" / "z_api_encoding_test.c"
     expect("the vendored encoding test has the corrected line once",
            vendored.is_file() and not refused(lambda: corrected(vendored.read_text(encoding="utf-8"),
-                                                                ENCODING_CHECKS_E4, "z_api_encoding_test")))
-    expect("no correction leaves the text as it is", corrected("x", None, "t") == "x")
+                                                                (ENCODING_CHECKS_E4,), "z_api_encoding_test")))
+    expect("no correction leaves the text as it is", corrected("x", (), "t") == "x")
 
     expect("line ends are made LF", normalized(b"a\r\nb\n") == "a\nb\n")
     expect("nm's undefined names, a versioned one read as its name",
@@ -1532,7 +1712,9 @@ def selftest() -> int:
            all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "windows")
            and all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].name == "z_scout")
            and all(sc.scouts for sc in SCENARIOS if sc.id == "c99/z_pong")
-           and not any(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "tests"))
+           and {PROGRAMS[sc.subject.program].name for sc in SCENARIOS
+                if sc.scouts and PROGRAMS[sc.subject.program].set == "tests"}
+           == {"z_multi_pubsub_test", "z_multi_queryable_test"})
     config_in = (PICO / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
     expect("every correction of the reference names a switch zenoh-pico's config has",
            all(f"#define {name} @{name}@" in config_in for name in REFERENCE_CORRECTIONS))
