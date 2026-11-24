@@ -96,7 +96,7 @@ use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
+    DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
     LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
