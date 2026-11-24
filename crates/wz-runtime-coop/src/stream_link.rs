@@ -19,6 +19,8 @@
 //! buffer only when the stream must be read for the rest of one.
 //! The send writes the length into the headroom the driver asked the session to leave in front of
 //! the frame, so length and batch leave in one write from the slot the session encoded into.
+//! That is [`LengthPrefix`]; a protocol that frames its messages itself (a WebSocket) runs the
+//! same driver under a [`StreamFraming`] of its own.
 //!
 //! ## The end of the stream
 //!
@@ -70,10 +72,6 @@ pub trait StreamSocket: Sized {
     /// failure for the deploy to report.
     type Error: Copy + Debug;
 
-    /// The protocol the stream is, which the link's two ends are named by: a plain connection
-    /// is `tcp/`, a secure channel over one `tls/`.
-    const PROTO: LinkProto = LinkProto::Tcp;
-
     /// The link a stack holds over this stream: [`StreamDriver`] over it, for every stream there
     /// is one of. [`NoStream`] names itself, a link there is none of, so the case a stack keeps
     /// for a protocol it does not carry holds nothing and no code serves it.
@@ -81,11 +79,12 @@ pub trait StreamSocket: Sized {
     where
         Self: 'static;
 
-    /// The address and port this end of the connection is bound to.
-    fn local(&self) -> SocketAddr;
-
-    /// The address and port of the other end.
-    fn peer(&self) -> SocketAddr;
+    /// The two ends of the connection, in the form the kind of link it is names them
+    /// ([`StreamEnds`]): a connection over IP by its protocol and its two addresses and ports, a
+    /// secure channel over one by the connection's addresses under its own protocol, a link over
+    /// named FIFOs by the two FIFOs. What the link reports of its ends and of itself is read off
+    /// them, and whether the rows of the build name them.
+    fn ends(&self) -> StreamEnds<'_>;
 
     /// Whether [`Self::write`] returns without waiting for the stream to take its bytes, as a
     /// non-blocking write does. A link over such a stream is not asked for room before every
@@ -282,9 +281,117 @@ pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
 }
 
 /// Whether a stream link over `stream` names both its ends in the rows of the build
-/// ([`ends_fit`]), asked of the stream before a link is made over it.
+/// ([`StreamEnds::fit`]), asked of the stream before a link is made over it.
 pub fn stream_ends_fit<S: StreamSocket>(stream: &S) -> bool {
-    ends_fit(S::PROTO, stream.local(), stream.peer())
+    stream.ends().fit()
+}
+
+/// The two ends of a connected stream, each kind of link in the form its locators take: the
+/// branches of [`Locator`](crate::session_drive::Locator) a stream link can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnds<'a> {
+    /// A connection over IP: the protocol the link speaks over it (`tcp/`, or `tls/` for a
+    /// secure channel), this end's address and port, then the peer's.
+    Ip {
+        /// The protocol the link speaks.
+        proto: LinkProto,
+        /// This end's address and port.
+        local: SocketAddr,
+        /// The other end's.
+        peer: SocketAddr,
+    },
+    /// A link over a pair of named FIFOs: the FIFO this end reads, then the one it writes, as
+    /// upstream names a unixpipe link's two ends
+    /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `dedicated_donlink_path`).
+    #[cfg(feature = "unixpipe")]
+    Unixpipe {
+        /// The FIFO this end reads.
+        local: &'a str,
+        /// The FIFO this end writes.
+        peer: &'a str,
+    },
+    /// No value: it holds the lifetime of the branches a build without them does not carry.
+    #[cfg(not(feature = "unixpipe"))]
+    #[doc(hidden)]
+    Never(core::convert::Infallible, core::marker::PhantomData<&'a ()>),
+}
+
+impl<'a> StreamEnds<'a> {
+    /// The ends as the link reports them, lent as they are: a reader that reports the link
+    /// writes its locators.
+    pub fn link_ends(self) -> LinkEnds<'a> {
+        match self {
+            Self::Ip { proto, local, peer } => LinkEnds::ip(proto.kind(), local, peer),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe { local, peer } => {
+                LinkEnds::named(wz_session_core::link::LinkKind::Unixpipe, local, peer)
+            }
+            #[cfg(not(feature = "unixpipe"))]
+            Self::Never(never, _) => match never {},
+        }
+    }
+
+    /// Whether the rows of the build name both ends: an IP end as [`ends_fit`] asks, a FIFO by
+    /// the length of its locator, `unixpipe/` and its path.
+    pub fn fit(self) -> bool {
+        match self {
+            Self::Ip { proto, local, peer } => ends_fit(proto, local, peer),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe { local, peer } => [local, peer].into_iter().all(|path| {
+                wz_session_core::locator_grammar::UNIXPIPE_SCHEME
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(path.len())
+                    <= wz_session_core::caps::MAX_LOCATOR_LEN
+            }),
+            #[cfg(not(feature = "unixpipe"))]
+            Self::Never(never, _) => match never {},
+        }
+    }
+
+    /// This end's address and port and the peer's, for a connection over IP; `None` for ends of
+    /// another kind.
+    pub fn ip(self) -> Option<(SocketAddr, SocketAddr)> {
+        match self {
+            Self::Ip { local, peer, .. } => Some((local, peer)),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe { .. } => None,
+            #[cfg(not(feature = "unixpipe"))]
+            Self::Never(never, _) => match never {},
+        }
+    }
+
+    /// The ends of a secure channel that speaks `proto` over a connection with these ends: an IP
+    /// connection's two addresses under the channel's protocol; ends of another kind as they are.
+    pub fn speaking(self, proto: LinkProto) -> Self {
+        match self {
+            Self::Ip { local, peer, .. } => Self::Ip { proto, local, peer },
+            #[cfg(feature = "unixpipe")]
+            unixpipe @ Self::Unixpipe { .. } => unixpipe,
+            #[cfg(not(feature = "unixpipe"))]
+            Self::Never(never, _) => match never {},
+        }
+    }
+
+    /// What a link over the stream reports of itself to a connectivity plane: its kind, which
+    /// says whether it is streamed and how reliable.
+    #[cfg(feature = "alloc")]
+    pub fn subject(self) -> &'static wz_session_core::link::LinkSubject {
+        match self {
+            Self::Ip { proto, .. } => proto.subject(),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe { .. } => {
+                use wz_session_core::link::{LinkKind, LinkSubject};
+                static UNIXPIPE: LinkSubject = LinkSubject {
+                    kind: Some(LinkKind::Unixpipe),
+                    ..LinkSubject::UNKNOWN
+                };
+                &UNIXPIPE
+            }
+            #[cfg(not(feature = "unixpipe"))]
+            Self::Never(never, _) => match never {},
+        }
+    }
 }
 
 /// The link a stack holds over the connected `socket` ([`StreamSocket::Link`]).
@@ -314,11 +421,7 @@ impl StreamSocket for NoStream {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        match *self {}
-    }
-
-    fn peer(&self) -> SocketAddr {
+    fn ends(&self) -> StreamEnds<'_> {
         match *self {}
     }
 
@@ -485,13 +588,113 @@ impl StreamDial for NoDial {
 
 /// What the front of a receive buffer holds, as the framing reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Front {
-    /// Not yet a whole batch: its length, or some of the batch, is still to come.
+pub enum Front {
+    /// Not yet a whole unit of the framing: some of it is still to come.
     Partial,
-    /// A whole batch of this many bytes behind its length.
-    Batch(usize),
-    /// A length whose batch, behind it, does not fit a buffer of this capacity.
+    /// A whole batch of `len` bytes, `at` bytes into what was read, in a unit of the framing that
+    /// ends `used` bytes in.
+    Batch {
+        /// Where the batch starts.
+        at: usize,
+        /// The bytes of the batch.
+        len: usize,
+        /// Where the unit that carried it ends, and the next one starts.
+        used: usize,
+    },
+    /// A whole unit of this many bytes that carries no batch: passed over.
+    Skip(usize),
+    /// A unit that does not fit a buffer of this capacity.
     TooLong,
+    /// The peer ended the link inside the framing.
+    Closed,
+}
+
+/// How batches lie on a stream: what a receive finds at the front of the bytes it read, and what
+/// a send writes in front of a batch. zenoh's own framing is [`LengthPrefix`]; a protocol that
+/// frames its messages itself (a WebSocket) brings its own, and the link over it is the same
+/// driver, its writes, its waits and its owed frames, with the framing alone changed.
+pub trait StreamFraming {
+    /// The room a send asks the session to leave in front of a batch.
+    const HEADROOM: usize;
+
+    /// Whether the batch is counted with a length the session leaves room for
+    /// ([`BoxedLinkDriver::batch_length_prefixed`]).
+    const LENGTH_PREFIXED: bool;
+
+    /// What a send writes in front of a batch.
+    type Prefix: AsRef<[u8]>;
+
+    /// Read the unit at the front of `held`, the bytes a buffer of `capacity` bytes read. With
+    /// `consume` the unit is the receive's to hand over, and the framing may change its bytes
+    /// where they lie (unmask them, join the parts of a message); without it the receive only asks
+    /// whether a whole unit is there, and nothing changes.
+    fn front(&self, held: &mut [u8], capacity: usize, consume: bool) -> Front;
+
+    /// The batch the last consuming [`Self::front`] answered has been passed over: the bytes
+    /// behind it are the next unit's.
+    fn passed(&self) {}
+
+    /// What a send writes in front of a batch of `len` bytes, and the key its bytes are masked
+    /// with when the framing masks them; `None` when no unit carries a batch that long.
+    fn prefix(&self, len: usize) -> Option<(Self::Prefix, Option<[u8; 4]>)>;
+
+    /// The ends a link over a stream with `ends` reports, which name the kind of link it is: the
+    /// stream's own ([`StreamEnds::link_ends`]), unless the framing makes the link a kind of its
+    /// own over them.
+    fn link_ends(ends: StreamEnds<'_>) -> LinkEnds<'_> {
+        ends.link_ends()
+    }
+
+    /// What such a link reports of itself ([`StreamEnds::subject`]).
+    #[cfg(feature = "alloc")]
+    fn subject(ends: StreamEnds<'_>) -> &'static wz_session_core::link::LinkSubject {
+        ends.subject()
+    }
+
+    /// The largest batch a slot of `slot_len` bytes carries.
+    fn mtu(slot_len: usize) -> usize {
+        slot_len
+    }
+
+    /// The largest batch a receive buffer of `rx_len` bytes takes.
+    fn rx_capacity(rx_len: usize) -> usize {
+        rx_len
+    }
+
+    /// Whether the framing has a unit of its own to write (an answer to the peer).
+    fn owes_control(&self) -> bool {
+        false
+    }
+
+    /// Write what the framing owes, as far as `socket` takes it: `true` once nothing is owed.
+    /// Called only between frames, so its bytes never land inside one.
+    fn write_control<S: StreamSocket>(&self, socket: &S) -> Result<bool, S::Error> {
+        let _ = socket;
+        Ok(true)
+    }
+
+    /// The link is closing: what the framing writes before the stream ends.
+    fn closing(&self) {}
+}
+
+/// zenoh's framing of a stream: every batch behind its length, a little-endian `u16`
+/// ([`STREAM_BATCH_LENGTH_BYTES`]), an empty batch passed over.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LengthPrefix;
+
+impl StreamFraming for LengthPrefix {
+    const HEADROOM: usize = STREAM_BATCH_LENGTH_BYTES;
+    const LENGTH_PREFIXED: bool = true;
+    type Prefix = [u8; STREAM_BATCH_LENGTH_BYTES];
+
+    fn front(&self, held: &mut [u8], capacity: usize, _consume: bool) -> Front {
+        front(held, capacity)
+    }
+
+    fn prefix(&self, len: usize) -> Option<(Self::Prefix, Option<[u8; 4]>)> {
+        let length = u16::try_from(len).ok()?;
+        Some((length.to_le_bytes(), None))
+    }
 }
 
 /// The most frames a stream link owes its stream at once: one for each slot its book can lend.
@@ -585,10 +788,16 @@ fn front(held: &[u8], capacity: usize) -> Front {
     let whole = len.saturating_add(STREAM_BATCH_LENGTH_BYTES);
     if whole > capacity {
         Front::TooLong
-    } else if held.len() >= whole {
-        Front::Batch(len)
-    } else {
+    } else if held.len() < whole {
         Front::Partial
+    } else if len == 0 {
+        Front::Skip(whole)
+    } else {
+        Front::Batch {
+            at: STREAM_BATCH_LENGTH_BYTES,
+            len,
+            used: whole,
+        }
     }
 }
 
@@ -599,8 +808,10 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// The peer is the other end of the connection, so the link has no binding to make: what arrives
 /// is the peer's. The receive buffer bounds the batch the link takes, and so the batch the session
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
-pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
+pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming = LengthPrefix> {
     socket: S,
+    /// How batches lie on the stream.
+    framing: F,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`: a batch's length and the batch behind it.
     rx_len: usize,
@@ -658,13 +869,23 @@ impl<S: StreamSocket> StreamDriver<S, Vec<u8>, HeapTx> {
 impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// The link over the connected `socket`, receiving into `rx_buf` and building its frames in
     /// `tx`.
-    pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
+    pub fn over(socket: S, rx_buf: B, tx: T) -> Self {
+        Self::framed(socket, rx_buf, 0, tx, LengthPrefix)
+    }
+}
+
+impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, B, T, F> {
+    /// The link over the connected `socket`, its batches framed by `framing`, receiving into
+    /// `rx_buf`, whose first `held` bytes were read off the stream already (what followed a
+    /// handshake the link's maker ran in it), and building its frames in `tx`.
+    pub fn framed(socket: S, mut rx_buf: B, held: usize, tx: T, framing: F) -> Self {
         let rx_len = rx_buf.capacity();
         Self {
             socket,
+            framing,
             rx_buf: RefCell::new(rx_buf),
             rx_len,
-            held: Cell::new(0),
+            held: Cell::new(held.min(rx_len)),
             spent: Cell::new(0),
             ready: Cell::new(false),
             #[cfg(test)]
@@ -742,23 +963,36 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         let ready = loop {
             // `start` and `held` are places of the buffer, `start` the earlier, and a batch `front`
             // answered lies whole between them: the sums below stay inside it.
-            match front(bytes.get(start..held).unwrap_or_default(), self.rx_len) {
-                Front::Batch(_) if lent => break true,
+            let unit = self.framing.front(
+                bytes.get_mut(start..held).unwrap_or_default(),
+                self.rx_len,
+                !lent,
+            );
+            match unit {
+                Front::Batch { .. } | Front::Skip(_) if lent => break true,
                 _ if lent => break false,
-                Front::Batch(0) => start = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES),
-                Front::Batch(len) => {
-                    let body = start.wrapping_add(STREAM_BATCH_LENGTH_BYTES);
+                Front::Skip(used) => start = start.wrapping_add(used),
+                Front::Batch { at, len, used } => {
+                    let body = start.wrapping_add(at);
                     let end = body.wrapping_add(len);
                     self.keeping.set(false);
                     f(bytes.get(body..end).unwrap_or_default());
                     // A batch kept is lent again by the next receive; one let go is passed over
                     // there.
                     if !self.keeping.replace(false) {
-                        start = end;
+                        start = start.wrapping_add(used);
+                        self.framing.passed();
                     }
                     lent = true;
                 }
                 Front::TooLong => {
+                    self.end(LostCause::PeerClosed);
+                    break false;
+                }
+                // The peer's end inside the framing is answered as the framing answers it, with
+                // what the link owes written first, and the link ends.
+                Front::Closed => {
+                    self.write_owed();
                     self.end(LostCause::PeerClosed);
                     break false;
                 }
@@ -812,10 +1046,22 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         lent
     }
 
-    /// Whether the link owes the stream anything ([`Owed`]).
+    /// Whether the link owes the stream anything ([`Owed`], or a unit of the framing's own).
     fn owes(&self) -> bool {
         // A queue being written owes what it held when the write began.
-        !self.owed.try_borrow().is_ok_and(|owed| owed.is_empty())
+        !self.owed.try_borrow().is_ok_and(|owed| owed.is_empty()) || self.framing.owes_control()
+    }
+
+    /// Write the framing's own units, once no frame is owed before them: `true` once nothing
+    /// of them is left (or the stream failed, which ends the link).
+    fn write_control(&self) -> bool {
+        match self.framing.write_control(&self.socket) {
+            Ok(done) => done,
+            Err(e) => {
+                self.fail(e);
+                true
+            }
+        }
     }
 
     /// Write what the link owes the stream, oldest first, without waiting: `true` once nothing is
@@ -832,7 +1078,8 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                 return false;
             };
             let Some(front) = owed.front_mut() else {
-                return true;
+                drop(owed);
+                return self.write_control();
             };
             // SAFETY: the slot is held by the link, out of its pool until the pop below or
             // `drop_owed` gives it back, so nothing writes it.
@@ -948,8 +1195,12 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     }
 }
 
-impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
-    for StreamDriver<S, B, T>
+impl<S, B, T, F> BoxedLinkDriver for StreamDriver<S, B, T, F>
+where
+    S: StreamSocket + 'static,
+    B: RxStore + 'static,
+    T: TxStore + 'static,
+    F: StreamFraming + 'static,
 {
     // The bytes are copied into a slot the link lends and sent as one, so a frame handed over as
     // bytes takes the steps of a lent one, and what the stream does not take of it is owed in its
@@ -1031,11 +1282,11 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // slot free writes what it owes first, as far as the stream takes it without waiting, and lends
     // the slot that frees. One the stream frees none for is refused, as before.
     fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
-        if let Some(grant) = self.tx.acquire(STREAM_BATCH_LENGTH_BYTES) {
+        if let Some(grant) = self.tx.acquire(F::HEADROOM) {
             return Some(grant);
         }
         if self.owes() && self.write_owed() {
-            return self.tx.acquire(STREAM_BATCH_LENGTH_BYTES);
+            return self.tx.acquire(F::HEADROOM);
         }
         None
     }
@@ -1052,14 +1303,17 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
-        let Ok(length) = u16::try_from(len) else {
+        let Some((prefix, mask)) = self.framing.prefix(len) else {
             self.tx.release(slot);
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         };
-        match self
-            .tx
-            .frame_prefixed(slot, start, len, &length.to_le_bytes())
-        {
+        if let Some(key) = mask {
+            if !self.tx.mask(slot, start, len, key) {
+                self.tx.release(slot);
+                return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+            }
+        }
+        match self.tx.frame_prefixed(slot, start, len, prefix.as_ref()) {
             Some((from, end)) => self.send(slot, from, end),
             None => {
                 self.tx.release(slot);
@@ -1089,25 +1343,20 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // stream does not take then is not written: the peer reads a frame cut short by the end of
     // the stream, which it takes as the end.
     fn close_blocking(&self) {
+        self.framing.closing();
         self.write_owed();
         self.socket.shutdown();
         self.end(LostCause::PeerClosed);
         self.drop_owed();
     }
 
-    // The connection's two addresses, lent as they are: a reader that reports the link writes
-    // its locators.
     fn link_ends(&self) -> Option<LinkEnds<'_>> {
-        Some(LinkEnds::ip(
-            S::PROTO.kind(),
-            self.socket.local(),
-            self.socket.peer(),
-        ))
+        Some(F::link_ends(self.socket.ends()))
     }
 
     #[cfg(feature = "alloc")]
     fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
-        Some(S::PROTO.subject())
+        Some(F::subject(self.socket.ends()))
     }
 
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
@@ -1115,7 +1364,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     }
 
     fn batch_length_prefixed(&self) -> bool {
-        true
+        F::LENGTH_PREFIXED
     }
 
     // A driver whose frame storage is declared is bounded by it: the batch it sends is at most a
@@ -1125,7 +1374,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // hands it.
     fn link_mtu(&self) -> usize {
         if self.tx.lends() {
-            self.tx.slot_len()
+            F::mtu(self.tx.slot_len())
         } else {
             DEFAULT_LINK_MTU
         }
@@ -1134,12 +1383,16 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // The receive buffer bounds the batch whatever the send side lends: a batch is counted with
     // its length, and the buffer holds both.
     fn link_rx_capacity(&self) -> usize {
-        self.rx_len.min(DEFAULT_LINK_MTU)
+        F::rx_capacity(self.rx_len).min(DEFAULT_LINK_MTU)
     }
 }
 
-impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
-    for StreamDriver<S, B, T>
+impl<S, B, T, F> SessionDatagramLink for StreamDriver<S, B, T, F>
+where
+    S: StreamSocket + 'static,
+    B: RxStore + 'static,
+    T: TxStore + 'static,
+    F: StreamFraming + 'static,
 {
     fn service(&self) {
         // What the link owes the stream is written as far as the stream takes it, every step.
@@ -1254,6 +1507,64 @@ mod tests {
     use std::vec::Vec;
     use wz_session_core::link::LinkEndsText;
 
+    /// A secure channel reports the connection's two addresses under its own protocol, which a
+    /// row names as it names any IP end. Turned red by ends that keep the connection's protocol,
+    /// or lose an address.
+    #[test]
+    fn a_channel_reports_the_connections_ends_under_its_own_protocol() {
+        let local = SocketAddr::from(([10, 0, 0, 2], 40_000));
+        let peer = SocketAddr::from(([10, 0, 0, 1], 7447));
+        let tcp = StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local,
+            peer,
+        };
+        let tls = tcp.speaking(LinkProto::Tls);
+        assert_eq!(
+            tls,
+            StreamEnds::Ip {
+                proto: LinkProto::Tls,
+                local,
+                peer
+            }
+        );
+        assert_eq!(tls.ip(), Some((local, peer)));
+        assert!(tls.fit());
+        #[cfg(feature = "alloc")]
+        assert_eq!(
+            tls.subject().kind,
+            Some(wz_session_core::link::LinkKind::Tls)
+        );
+    }
+
+    /// The ends of a link over named FIFOs are its two FIFOs, of no IP, kept as they are under a
+    /// channel, and named in a row while `unixpipe/` and the path fit it. Turned red by a bound
+    /// that counts the path alone, or ends reported as another kind.
+    #[cfg(feature = "unixpipe")]
+    #[test]
+    fn the_ends_of_a_fifo_link_are_its_two_fifos() {
+        let row = wz_session_core::caps::MAX_LOCATOR_LEN - "unixpipe/".len();
+        let longest = "a".repeat(row);
+        let ends = StreamEnds::Unixpipe {
+            local: &longest,
+            peer: "/tmp/p_downlink7",
+        };
+        assert!(ends.fit());
+        assert_eq!(ends.ip(), None);
+        assert_eq!(ends.speaking(LinkProto::Tls), ends);
+        #[cfg(feature = "alloc")]
+        assert_eq!(
+            ends.subject().kind,
+            Some(wz_session_core::link::LinkKind::Unixpipe)
+        );
+        let past = "a".repeat(row + 1);
+        let ends = StreamEnds::Unixpipe {
+            local: "/tmp/p_uplink7",
+            peer: &past,
+        };
+        assert!(!ends.fit());
+    }
+
     /// The ring of what a link owes keeps its frames oldest first across its end, refuses one past
     /// its places and hands it back, and lends its oldest where it lies. Turned red by a ring that
     /// reads a place no push wrote, or loses the order once it wraps.
@@ -1349,16 +1660,16 @@ mod tests {
 
         const WRITES_NOW: bool = TRIES;
 
-        fn local(&self) -> SocketAddr {
-            self.ends_at
-                .map_or(SocketAddr::from(([10, 0, 0, 2], 40_000)), |(local, _)| {
-                    local
-                })
-        }
-
-        fn peer(&self) -> SocketAddr {
-            self.ends_at
-                .map_or(SocketAddr::from(([10, 0, 0, 1], 7447)), |(_, peer)| peer)
+        fn ends(&self) -> StreamEnds<'_> {
+            let (local, peer) = self.ends_at.unwrap_or((
+                SocketAddr::from(([10, 0, 0, 2], 40_000)),
+                SocketAddr::from(([10, 0, 0, 1], 7447)),
+            ));
+            StreamEnds::Ip {
+                proto: LinkProto::Tcp,
+                local,
+                peer,
+            }
         }
 
         fn write(&self, bytes: &[u8]) -> Result<usize, Broken> {
@@ -1779,7 +2090,15 @@ mod tests {
             Front::Partial,
             "two of three bytes"
         );
-        assert_eq!(front(&[3, 0, 1, 2, 3, 9], 10), Front::Batch(3));
+        assert_eq!(
+            front(&[3, 0, 1, 2, 3, 9], 10),
+            Front::Batch {
+                at: 2,
+                len: 3,
+                used: 5
+            }
+        );
+        assert_eq!(front(&[0, 0, 7], 10), Front::Skip(2), "an empty batch");
         assert_eq!(
             front(&[8, 0], 10),
             Front::Partial,

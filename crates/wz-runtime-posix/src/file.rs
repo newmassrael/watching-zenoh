@@ -168,7 +168,7 @@ fn read_open(fd: i32, buf: &mut [u8], secret: bool) -> Result<usize, FileRefused
         if unsafe { libc::fstat(fd, &mut status) } != 0 {
             return Err(FileRefused::Status(errno()));
         }
-        // `mode_t` is 32 bits on Linux and Neutrino and 16 on 32-bit bionic.
+        // `mode_t` is 32 bits on Linux and Neutrino and 16 on 32-bit bionic and on macOS.
         #[allow(clippy::useless_conversion)]
         let mode = u32::from(status.st_mode);
         if mode & 0o077 != 0 {

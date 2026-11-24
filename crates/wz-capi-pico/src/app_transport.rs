@@ -541,8 +541,7 @@ pub unsafe extern "C" fn wz_ext_internal_transport_check(
 /// the transport replaces, and is refused as a capability the engine lacks. A locator no kind
 /// carries (`tls/`, `serial/`, ...) is refused as an unknown scheme, and so is one of a kind this
 /// build carries no link of, as the same locator over the system's sockets is: a `udp/` dial or
-/// listen without the udp link on the tokio engine, a group without the multicast transport
-/// (which the cooperative engine has not).
+/// listen without pico's unicast UDP link (`link-udp`), a group without the multicast transport.
 pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Option<ZResult> {
     use wz_session_core::app_link_table::kind_for_locator;
     if connect.is_none() && listen.is_none() {
@@ -569,10 +568,11 @@ pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Optio
     None
 }
 
-/// Whether this build carries datagram links, dialled and listened for: the tokio engine with its
-/// udp link, or the cooperative engine, which dials `udp/` and accepts on a `udp/` listener each
-/// source the program tells apart in every build.
-const DATAGRAMS_CARRIED: bool = cfg!(feature = "link-udp") || !cfg!(feature = "engine-tokio");
+/// Whether this build carries datagram links, dialled and listened for: a build with pico's unicast
+/// UDP link (`link-udp`, `Z_FEATURE_LINK_UDP_UNICAST`), on either engine, as over the system's
+/// sockets; the cooperative engine then accepts on a `udp/` listener each source the program tells
+/// apart.
+const DATAGRAMS_CARRIED: bool = cfg!(feature = "link-udp");
 
 /// Whether this build joins groups: the multicast transport, either engine's.
 const GROUPS_CARRIED: bool = cfg!(feature = "multicast-transport");
@@ -655,9 +655,9 @@ mod tests {
         );
     }
 
-    /// The cooperative engine dials `udp/` and listens on it over the program's transport in
-    /// every build, so neither is refused before the open.
-    #[cfg(not(feature = "engine-tokio"))]
+    /// The cooperative engine dials `udp/` and listens on it over the program's transport in a
+    /// build with the UDP link, so neither is refused before the open.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "link-udp"))]
     #[test]
     fn the_cooperative_engine_carries_a_udp_dial_and_a_udp_listen() {
         assert_eq!(refused_open(Some("udp/192.0.2.8:7447"), None), None);

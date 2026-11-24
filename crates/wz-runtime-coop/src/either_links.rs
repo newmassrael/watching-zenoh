@@ -366,7 +366,10 @@ mod tests {
             Err(LinkOpenError::AddressInUse)
         }
         fn open_initiator(&self, to: Locator) -> Result<OpenedLink<SharedPump>, LinkOpenError> {
-            match to.proto {
+            let Some(ip) = to.as_ip() else {
+                return Err(LinkOpenError::Unsupported);
+            };
+            match ip.proto {
                 crate::session_drive::LinkProto::Udp => {
                     Ok(opened(CellRc::boxed(Tagged(LEFT)).into_link()))
                 }

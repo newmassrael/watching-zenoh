@@ -52,9 +52,15 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LostCause;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
+#[cfg(feature = "serial")]
+use wz_session_core::locator_grammar::{
+    write_serial_address_with_config, SerialAddress, SerialOptions, SERIAL_SCHEME,
+};
+#[cfg(feature = "unixpipe")]
+use wz_session_core::locator_grammar::{write_unixpipe_path_with_config, UNIXPIPE_SCHEME};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::text_out::FixedText;
+use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::transport_timers::TransportTimers;
 use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
 
@@ -598,53 +604,302 @@ impl LinkProto {
     }
 }
 
-/// What a dial names: a protocol and the end it reaches, an IPv4 or an IPv6 address and a port:
-/// `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s, which every
-/// stack's socket seam takes, so one locator type reaches datagram and stream links alike and a
-/// stack refuses a family it does not carry when it opens the socket.
+/// What a dial names and a listener is bound to: the kind of link and the end it reaches, each kind
+/// in the form its own locators take. Every link of this runtime is reached by one of these, so a
+/// stack is asked for any link by one type and answers for the kinds it carries; a kind it does not
+/// carry is [`LinkOpenError::Unsupported`]. The text of a locator is read in one place
+/// (`crate::locator_text`) and written in one ([`Locator::text`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Locator {
+pub enum Locator {
+    /// A link over IP: `udp/`, `tcp/` or `tls/` to an address and a port.
+    Ip(IpLocator),
+    /// A link over a serial line: `serial/` to a device or a pin pair, at a baud rate.
+    #[cfg(feature = "serial")]
+    Serial(SerialLocator),
+    /// A WebSocket link: `ws/` to an address and a port, over a TCP connection.
+    #[cfg(feature = "ws")]
+    Ws(WsLocator),
+    /// A link over a pair of named FIFOs on this host: `unixpipe/` to a base path.
+    #[cfg(feature = "unixpipe")]
+    Unixpipe(UnixpipeLocator),
+}
+
+/// The locator of a link over IP: a protocol and the end it reaches, an IPv4 or an IPv6 address
+/// and a port: `udp/a.b.c.d:port`, `tcp/[x:y::z]:port`, `tls/...`. The address is `core::net`'s,
+/// which every stack's socket seam takes, so one locator reaches datagram and stream links alike
+/// and a stack refuses a family it does not carry when it opens the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpLocator {
     /// The protocol the link speaks.
     pub proto: LinkProto,
     /// The end the link reaches.
     pub at: SocketAddr,
 }
 
+impl IpLocator {
+    /// zenoh's text of the locator, written without `core::fmt` into text of
+    /// [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written whole. Whether a row of the
+    /// build holds it, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's
+    /// question ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at
+    /// compile time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
+    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+        let mut text = FixedText::new();
+        self.write(&mut text);
+        text
+    }
+
+    /// Write zenoh's text of the locator into `out`.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at).write_src(out);
+    }
+}
+
+/// The locator of a WebSocket link, as zenoh's WebSocket link reads one: `ws/<address>:<port>`,
+/// the socket address a TCP connection is made to and the RFC 6455 upgrade runs over
+/// (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`). Upstream's link
+/// reads no config key and no metadata of its own, so a locator holds the end alone.
+#[cfg(feature = "ws")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsLocator {
+    /// The end the link reaches.
+    pub at: SocketAddr,
+}
+
+#[cfg(feature = "ws")]
+impl WsLocator {
+    /// Write zenoh's text of the locator into `out`: the IP form under the `ws` scheme.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(wz_session_core::link::LinkKind::Ws, self.at, self.at)
+            .write_src(out);
+    }
+}
+
+/// The locator of a link over a serial line, as zenoh's serial link and zenoh-pico's read one:
+/// `serial/<line>[#baudrate=<n>[;exclusive=<b>][;tout=<us>][;release_on_close=<b>]]`, the line
+/// a device path or a `<tx>.<rx>` pin pair
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub const PORT_EXCLUSIVE_RAW: &str = "exclusive";`,
+/// `vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `_z_serial_endpoint_parse`).
+/// The grammar is the session core's (`wz_session_core::locator_grammar`), read and written there
+/// for this engine and the heap profile's leaf alike.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialLocator {
+    /// The line the link runs over.
+    pub line: SerialLine,
+    /// The baud rate, as written; whether the line can run at it is the device's to answer when
+    /// it opens the line.
+    pub baudrate: u32,
+    /// The three keys of upstream's serial link beyond the baud rate.
+    pub options: SerialOptions,
+}
+
+/// The line a serial link runs over.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialLine {
+    /// A device a host opens by its path.
+    Device(SerialPath),
+    /// A UART an MCU names by its transmit and receive pins.
+    Pins {
+        /// The transmit pin.
+        tx: u32,
+        /// The receive pin.
+        rx: u32,
+    },
+}
+
+/// A path held inline so a [`Locator`] stays `Copy`: at most `N` bytes, the most a locator of
+/// its kind in a row of the build ([`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN)) can name, so a link
+/// over any path it holds can be named in its faces' rows (`SerialPath`, `UnixpipePath`).
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LinkPath<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+/// The path of a serial device: what a row leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub type SerialPath = LinkPath<SERIAL_PATH_LEN>;
+
+/// The longest device path a [`SerialPath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub const SERIAL_PATH_LEN: usize = caps::MAX_LOCATOR_LEN.saturating_sub(SERIAL_SCHEME.len() + 1);
+
+/// The base path of a unixpipe link's FIFOs.
+#[cfg(feature = "unixpipe")]
+pub type UnixpipePath = LinkPath<UNIXPIPE_PATH_LEN>;
+
+/// The longest base path a [`UnixpipePath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `unixpipe/` and the longest
+/// suffix a link appends to name the FIFO of one of its ends, `_downlink` and a `u32` in decimal
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `let suffix_str = suffix.to_string();`),
+/// so both ends of every link over the path are named in its faces' rows.
+#[cfg(feature = "unixpipe")]
+pub const UNIXPIPE_PATH_LEN: usize =
+    caps::MAX_LOCATOR_LEN.saturating_sub(UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_LONGEST_SUFFIX.len());
+
+/// The longest suffix a unixpipe link appends to its base path.
+#[cfg(feature = "unixpipe")]
+const UNIXPIPE_LONGEST_SUFFIX: &str = "_downlink4294967295";
+
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> LinkPath<N> {
+    /// The path `path`, or `None` when it is empty or longer than `N` bytes.
+    pub fn new(path: &str) -> Option<Self> {
+        let mut bytes = [0u8; N];
+        bytes
+            .get_mut(..path.len())
+            .filter(|_| !path.is_empty())?
+            .copy_from_slice(path.as_bytes());
+        Some(Self {
+            bytes,
+            len: path.len(),
+        })
+    }
+
+    /// The path's text.
+    pub fn as_str(&self) -> &str {
+        // The bytes were a `&str`'s, whole, so they are UTF-8.
+        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
+#[cfg(any(feature = "serial", feature = "unixpipe"))]
+impl<const N: usize> core::fmt::Debug for LinkPath<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+/// The locator of a link over a pair of named FIFOs on this host, as zenoh's unixpipe link reads
+/// one: `unixpipe/<path>[#file_mask=<n>]`, the base path the link's FIFOs are named after and the
+/// mode they are created with (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs` @
+/// `pub const FILE_ACCESS_MASK: &str = "file_mask";`). The grammar is the session core's
+/// (`wz_session_core::locator_grammar`), read and written there for this engine and the heap
+/// profile's leaf alike.
+#[cfg(feature = "unixpipe")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixpipeLocator {
+    /// The base path of the link's FIFOs.
+    pub path: UnixpipePath,
+    /// The mode the FIFOs are created with, as written; `None` when the locator names none and
+    /// the opener's default applies.
+    pub file_mask: Option<u32>,
+}
+
+#[cfg(feature = "unixpipe")]
+impl UnixpipeLocator {
+    /// Write zenoh's text of the locator into `out`: the scheme, the path and the mask the
+    /// locator is read back with.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(UNIXPIPE_SCHEME);
+        out.push_str("/");
+        write_unixpipe_path_with_config(out, self.path.as_str(), self.file_mask);
+    }
+}
+
+#[cfg(feature = "serial")]
+impl SerialLocator {
+    /// The line as the grammar writes it.
+    pub fn address(&self) -> SerialAddress<'_> {
+        match &self.line {
+            SerialLine::Device(path) => SerialAddress::Device(path.as_str()),
+            SerialLine::Pins { tx, rx } => SerialAddress::Pins { tx: *tx, rx: *rx },
+        }
+    }
+
+    /// Write zenoh's text of the locator into `out`: the scheme, the line and the config the
+    /// locator is read back from.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(SERIAL_SCHEME);
+        out.push_str("/");
+        write_serial_address_with_config(out, self.address(), self.baudrate, self.options);
+    }
+}
+
 impl Locator {
+    /// The locator of a link of `proto` to `at`.
+    pub const fn ip(proto: LinkProto, at: SocketAddr) -> Self {
+        Self::Ip(IpLocator { proto, at })
+    }
+
     /// A UDP locator.
     pub const fn udp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Udp,
-            at,
-        }
+        Self::ip(LinkProto::Udp, at)
     }
 
     /// A TCP locator.
     pub const fn tcp(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tcp,
-            at,
-        }
+        Self::ip(LinkProto::Tcp, at)
     }
 
     /// A TLS locator.
     pub const fn tls(at: SocketAddr) -> Self {
-        Self {
-            proto: LinkProto::Tls,
-            at,
+        Self::ip(LinkProto::Tls, at)
+    }
+
+    /// A WebSocket locator.
+    #[cfg(feature = "ws")]
+    pub const fn ws(at: SocketAddr) -> Self {
+        Self::Ws(WsLocator { at })
+    }
+
+    /// The locator of an IP link, or `None` for a link of another kind, which a stack of IP links
+    /// alone refuses as [`LinkOpenError::Unsupported`].
+    pub const fn as_ip(self) -> Option<IpLocator> {
+        match self {
+            Self::Ip(ip) => Some(ip),
+            #[cfg(feature = "serial")]
+            Self::Serial(_) => None,
+            #[cfg(feature = "ws")]
+            Self::Ws(_) => None,
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(_) => None,
+        }
+    }
+
+    /// The locator of a serial link, or `None` for a link of another kind.
+    #[cfg(feature = "serial")]
+    pub const fn as_serial(self) -> Option<SerialLocator> {
+        match self {
+            Self::Serial(serial) => Some(serial),
+            _ => None,
+        }
+    }
+
+    /// The locator of a WebSocket link, or `None` for a link of another kind.
+    #[cfg(feature = "ws")]
+    pub const fn as_ws(self) -> Option<WsLocator> {
+        match self {
+            Self::Ws(ws) => Some(ws),
+            _ => None,
+        }
+    }
+
+    /// The locator of a unixpipe link, or `None` for a link of another kind.
+    #[cfg(feature = "unixpipe")]
+    pub const fn as_unixpipe(self) -> Option<UnixpipeLocator> {
+        match self {
+            Self::Unixpipe(unixpipe) => Some(unixpipe),
+            _ => None,
         }
     }
 
     /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt` into text of [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written
-    /// whole. Whether a row of the build holds it, at most
-    /// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's question
-    /// ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at compile
-    /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
-    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+    /// `core::fmt` into text that holds the longest locator of every kind the build carries.
+    pub fn text(&self) -> FixedText<LONGEST_LOCATOR_LEN> {
         let mut text = FixedText::new();
-        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at)
-            .write_src(&mut text);
+        match self {
+            Self::Ip(ip) => ip.write(&mut text),
+            #[cfg(feature = "serial")]
+            Self::Serial(serial) => serial.write(&mut text),
+            #[cfg(feature = "ws")]
+            Self::Ws(ws) => ws.write(&mut text),
+            #[cfg(feature = "unixpipe")]
+            Self::Unixpipe(unixpipe) => unixpipe.write(&mut text),
+        }
         text
     }
 }
@@ -662,13 +917,52 @@ pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
+/// The longest serial locator text: `serial/`, the longest line, and every config key written
+/// with its widest value.
+#[cfg(feature = "serial")]
+pub const LONGEST_SERIAL_LOCATOR_LEN: usize = SERIAL_SCHEME.len()
+    + 1
+    + longest(&[SERIAL_PATH_LEN, "4294967295.4294967295".len()])
+    + "#baudrate=4294967295;exclusive=false;tout=18446744073709551615;release_on_close=false".len();
+
+/// The longest unixpipe locator text: `unixpipe/`, the longest base path, and the widest mask.
+#[cfg(feature = "unixpipe")]
+pub const LONGEST_UNIXPIPE_LOCATOR_LEN: usize =
+    UNIXPIPE_SCHEME.len() + 1 + UNIXPIPE_PATH_LEN + "#file_mask=4294967295".len();
+
+/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
+/// writes into.
+pub const LONGEST_LOCATOR_LEN: usize = longest(&[
+    LONGEST_IP_LOCATOR_LEN,
+    #[cfg(feature = "serial")]
+    LONGEST_SERIAL_LOCATOR_LEN,
+    #[cfg(feature = "unixpipe")]
+    LONGEST_UNIXPIPE_LOCATOR_LEN,
+]);
+
+/// The largest of `lens`, for the constants above.
+const fn longest(lens: &[usize]) -> usize {
+    match lens {
+        [first, rest @ ..] => {
+            let rest = longest(rest);
+            if *first > rest {
+                *first
+            } else {
+                rest
+            }
+        }
+        [] => 0,
+    }
+}
+
 const _: () = assert!(
     caps::MAX_LOCATOR_LEN >= LONGEST_IPV4_LOCATOR_LEN,
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
 );
 
-/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port`: [`Locator::text`],
-/// which holds every IP locator whole, so printing one carries no `core::net` formatting.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port` or `<scheme>/[ipv6]:port` for an IP link:
+/// [`Locator::text`], which holds every locator the build carries whole, so printing one carries
+/// no `core::net` formatting.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.text().finish().map_err(|_| core::fmt::Error)?)

@@ -97,12 +97,18 @@ mod prelude {
 // on another system: a build for one is refused here by name, rather than by the paths it lacks.
 #[cfg(all(
     any(feature = "scout", feature = "group-host"),
-    not(any(target_os = "linux", target_os = "android", target_os = "nto", windows))
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "nto",
+        target_os = "macos",
+        windows
+    ))
 ))]
 compile_error!(
     "wz-capi-coop: `scout` and `group-host` open a host's multicast sockets, which \
-     `wz-runtime-posix` has on Linux, Android, QNX Neutrino and Windows; an image scouts with \
-     `scout-datagram` over its own stack"
+     `wz-runtime-posix` has on Linux, Android, QNX Neutrino, macOS and Windows; an image scouts \
+     with `scout-datagram` over its own stack"
 );
 
 #[cfg(feature = "listen")]
