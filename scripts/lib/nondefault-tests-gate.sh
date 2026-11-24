@@ -363,7 +363,7 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
     # The `ws/` link on the cooperative engine, the default one: WebSocket links over the host's
     # TCP beside its sockets, a sample across a loopback ws listener. Nothing leaves the host.
-    "wz-capi-pico|hook|transport-link-ws|files::ws_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-ws,peer|files::ws_link_roundtrip::"
     # pico's session-local delivery, a row of its own rather than two more features on
     # the row above: with them a session's own put reaches its own subscribers, which
     # every other test of the crate is written against pico's default build NOT doing.

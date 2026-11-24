@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The host profile's WebSocket links: the host's TCP connections, clock and entropy as what
-//! `wz_runtime_coop::ws_link` opens its `ws/` links with ([`PosixWsOpen`]). The handshake and
+//! `wz_runtime_coop::ws_link` opens its `ws/` links with (`PosixWsOpen`). The handshake and
 //! the framing are that module's; a client's key and the seed of its mask keys are drawn from the
 //! kernel's CSPRNG ([`PosixEntropy`](crate::PosixEntropy)) at each dial.
 

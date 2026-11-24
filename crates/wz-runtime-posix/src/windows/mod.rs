@@ -49,6 +49,10 @@ wz_runtime_coop::with_heap_link_seams! {
 pub mod group;
 pub mod net;
 pub mod stream;
+/// Winsock's TCP connections, the counter and the generator as what the cooperative engine's
+/// WebSocket links open with.
+#[cfg(feature = "ws")]
+pub mod ws;
 
 /// Monotonic [`ClockSource`] over the performance counter.
 ///

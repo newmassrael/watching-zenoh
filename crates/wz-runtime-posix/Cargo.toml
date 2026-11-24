@@ -100,8 +100,8 @@ host-multicast = ["alloc", "dep:log"]
 # profile's, as the engine's serial links are.
 serial = ["alloc", "wz-runtime-coop/serial"]
 # The host's TCP connections, clock and entropy as what the cooperative engine's `ws/` links open
-# with (`ws`: `PosixWsOpen`, on every POSIX host). The heap profile's, as the engine's WebSocket
-# links are.
+# with (`ws`: `PosixWsOpen` on a POSIX host, `windows::ws::WindowsWsOpen` on Windows). The heap
+# profile's, as the engine's WebSocket links are.
 ws = ["alloc", "wz-runtime-coop/ws"]
 
 [lints]
