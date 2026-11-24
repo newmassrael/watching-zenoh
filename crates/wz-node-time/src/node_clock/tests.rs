@@ -110,9 +110,14 @@ fn a_stamping_node_stamps_a_reply_with_its_own_identity_and_a_later_time_each_ti
     );
 }
 
+/// Every stamp of a node's clock carries the node's identity, and no timestamp carries one past
+/// sixteen bytes (`TimestampZid`), as no zenoh id is longer: upstream's id is a `uhlc::ID`
+/// (`commons/zenoh-protocol/src/core/mod.rs` @ `pub struct ZenohIdProto(uhlc::ID);`), sixteen
+/// bytes at most. So such a node holds no clock at all, rather than one that says it stamps and
+/// gives no stamp: nothing it stamps, lends or absorbs goes through a clock.
 #[cfg(feature = "time-hlc")]
 #[test]
-fn a_node_whose_identity_is_longer_than_a_timestamp_carries_stamps_no_reply() {
+fn a_node_whose_identity_is_longer_than_a_timestamp_carries_holds_no_clock() {
     use wz_session_core::reply_stage::ReplyClock;
     let node = NodeHlc::for_node_by(
         &[7; 17],
@@ -122,10 +127,22 @@ fn a_node_whose_identity_is_longer_than_a_timestamp_carries_stamps_no_reply() {
         &RuntimeLimits::BUILD,
     );
     assert!(
-        node.stamp().is_some(),
-        "its data is still stamped as it was"
+        !node.is_stamping(),
+        "no clock is built for an identity no stamp can carry"
     );
-    assert!(node.next_stamp().is_none());
+    assert_eq!(node.data_stamp(), DataStamp::NoClock, "no data is stamped");
+    assert!(node.next_stamp().is_none(), "no reply is stamped");
+    assert_eq!(node.stamp_zid(), None, "no identity is lent");
+    assert_eq!(node.absorb_word(1), None, "no remote time is taken in");
+    assert!(
+        node.clock_refused().is_none(),
+        "the bound is not why there is no clock"
+    );
+    #[cfg(feature = "pubsub-ts-stack")]
+    assert!(
+        node.interception_timestamp().is_none(),
+        "no interception is recorded with it either"
+    );
 }
 
 /// A physical clock that never moves, so the only remaining source of
@@ -172,10 +189,16 @@ fn build_bound() -> wz_session_core::ntp64::Ntp64 {
         .expect("the build's own bound is honoured")
 }
 
+/// The identity of a clock a test builds by hand.
+#[cfg(feature = "time-hlc")]
+fn clock_id(zid: &[u8]) -> wz_session_core::sample::TimestampZid {
+    wz_session_core::sample::TimestampZid::new(zid).expect("an id of at most sixteen bytes")
+}
+
 /// A stamping node whose physical clock is frozen.
 #[cfg(feature = "time-hlc")]
 fn frozen_node(zid: &[u8]) -> NodeHlc {
-    let clock = build_clock(zid, FrozenEpoch, own_standing(), build_bound());
+    let clock = build_clock(clock_id(zid), FrozenEpoch, own_standing(), build_bound());
     NodeHlc {
         #[cfg(feature = "pubsub-ts-stack")]
         interception_clock: Some(clock.clone()),
@@ -417,7 +440,7 @@ fn a_node_with_no_clock_has_no_standing_to_report() {
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
-    let clock = build_clock(&[0x01], UnsetEpoch, own_standing(), build_bound());
+    let clock = build_clock(clock_id(&[0x01]), UnsetEpoch, own_standing(), build_bound());
     let node = NodeHlc {
         #[cfg(feature = "pubsub-ts-stack")]
         interception_clock: Some(clock.clone()),
@@ -1208,29 +1231,32 @@ fn a_settled_push_is_routed_as_it_is() {
     assert_eq!(stamp.routed(), &put);
 }
 
+/// The identity is bytes the node's creator hands over, so one of any length reaches the clock:
+/// one past sixteen bytes builds no clock and does not panic, and one a timestamp carries, the full
+/// sixteen bytes or none, is stamped as it was given.
 #[cfg(feature = "time-hlc")]
 #[test]
-fn an_oversized_or_empty_zid_still_yields_a_usable_clock() {
-    // `uhlc::ID` is 1..=16 non-zero bytes. A 32-byte zid clamps and an
-    // empty one falls back to the guard id, so neither panics during
-    // construction — the absorb path derives an id from an INBOUND zid, so
-    // this guard is reachable from the wire, not only from a test.
-    let long = NodeHlc::for_node_by(
-        &[0xAB; 32],
-        WhatAmI::Router,
-        TimestampingEnabled::all(true),
-        &SessionPolicy::defaults(),
-        &RuntimeLimits::BUILD,
-    );
-    assert!(long.stamp().is_some());
-    let empty = NodeHlc::for_node_by(
-        &[],
-        WhatAmI::Router,
-        TimestampingEnabled::all(true),
-        &SessionPolicy::defaults(),
-        &RuntimeLimits::BUILD,
-    );
-    assert!(empty.stamp().is_some());
+fn an_oversized_zid_holds_no_clock_while_an_empty_or_a_full_one_stamps() {
+    fn node(zid: &[u8]) -> NodeHlc {
+        NodeHlc::for_node_by(
+            zid,
+            WhatAmI::Router,
+            TimestampingEnabled::all(true),
+            &SessionPolicy::defaults(),
+            &RuntimeLimits::BUILD,
+        )
+    }
+    let long = node(&[0xAB; 32]);
+    assert!(!long.is_stamping());
+    assert!(long.stamp().is_none());
+    let full = node(&[0xAB; 16]);
+    let stamp = full
+        .stamp()
+        .expect("sixteen bytes is an id a timestamp carries");
+    assert_eq!(stamp.zid.as_slice(), &[0xAB; 16]);
+    let empty = node(&[]);
+    let stamp = empty.stamp().expect("an empty id is carried as well");
+    assert!(stamp.zid.is_empty());
 }
 
 /// The time word and the identity of a timestamp as an interception holds it.

@@ -218,8 +218,8 @@ pub struct NodeHlc {
     /// The clock the interceptions of a timestamp stack are recorded with: this node's own when
     /// its role stamps, and otherwise a clock of its own over the same source and the same
     /// identity, which is upstream's lazy HLC seeded with the zid (`get_ts_stack_timestamp`).
-    /// `None` for a node built with no identity ([`Self::disabled`]) and for one whose clock was
-    /// refused (`clock_refused`).
+    /// `None` for a node built with no identity ([`Self::disabled`]), for one whose identity no
+    /// timestamp carries, and for one whose clock was refused (`clock_refused`).
     #[cfg(feature = "pubsub-ts-stack")]
     interception_clock: Option<alloc::sync::Arc<NodeClock>>,
     /// Why the node holds no clock although it was to have one, for its creator to read
@@ -259,9 +259,9 @@ pub enum DataStamp {
     /// The `clock-quality-stamping` policy is `trusted-only` and the clock is not trusted: the
     /// node stamps no data with it.
     Withheld,
-    /// The node holds no clock (its role does not stamp, the build has none, or the clock was
-    /// refused: [`NodeHlc::clock_refused`]), or its source cannot say what time it is. A caller
-    /// falls back as it does for a node with no clock.
+    /// The node holds no clock (its role does not stamp, the build has none, its identity is longer
+    /// than a timestamp carries, or the clock was refused: [`NodeHlc::clock_refused`]), or its
+    /// source cannot say what time it is. A caller falls back as it does for a node with no clock.
     NoClock,
 }
 
@@ -271,8 +271,9 @@ pub enum DataStamp {
 #[cfg(feature = "time-hlc")]
 struct NodeClock {
     hlc: wz_session_core::hlc::Hlc<NodeEpoch>,
-    /// This node's zid, as `TimestampHint::zid` carries it on every stamp.
-    zid: alloc::vec::Vec<u8>,
+    /// This node's zid, as `TimestampHint::zid` carries it on every stamp: held in the form a
+    /// stamp carries, so every stamp the clock gives can be made.
+    zid: wz_session_core::sample::TimestampZid,
     /// How far the clock is to be trusted, as the host last reported it.
     standing: StandingHome,
     /// Data this node passed on unstamped because of the `trusted-only` policy.
@@ -476,6 +477,10 @@ impl NodeHlc {
     /// [`RuntimeLimits::BUILD`](wz_session_core::limits::RuntimeLimits::BUILD). A stated bound the
     /// node does not honour is refused: the node is built without the clock, and
     /// [`Self::clock_refused`] says why, so its creator can refuse to go on with it.
+    ///
+    /// A `zid` longer than the sixteen bytes a timestamp carries builds no clock either, whatever
+    /// the role: every stamp of the clock would carry it, and none can. No zenoh id is that long,
+    /// so a node's creator that holds a session's zid never meets this.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
     pub fn for_node_by(
         zid: &[u8],
@@ -601,13 +606,19 @@ impl NodeHlc {
         max_delta: Result<wz_session_core::ntp64::Ntp64, MaxDeltaRefused>,
     ) -> Self {
         let stamps = enabled.get(whatami);
-        let (own, clock_refused) = if stamps || cfg!(feature = "pubsub-ts-stack") {
-            match max_delta {
-                Ok(max_delta) => (Some(build_clock(zid, source, standing, max_delta)), None),
+        // The identity is checked once, here, and not on each stamp: a clock whose every stamp
+        // would be refused is no clock, and a node that holds one would say it stamps
+        // (`is_stamping`) and lend an identity no peer can be sent. Upstream cannot be handed
+        // such an id: its HLC takes the zid as a `uhlc::ID`
+        // (`zenoh/src/net/runtime/mod.rs` @ `HLCBuilder::new().with_id(uhlc::ID::from(&zid)).build()`),
+        // which holds sixteen bytes at most (`uhlc-0.8.2/src/id.rs` @ `if size > Self::MAX_SIZE {`).
+        let id = wz_session_core::sample::TimestampZid::new(zid);
+        let (own, clock_refused) = match id {
+            Some(id) if stamps || cfg!(feature = "pubsub-ts-stack") => match max_delta {
+                Ok(max_delta) => (Some(build_clock(id, source, standing, max_delta)), None),
                 Err(refused) => (None, Some(refused)),
-            }
-        } else {
-            (None, None)
+            },
+            _ => (None, None),
         };
         let clock = own.as_ref().filter(|_| stamps).cloned();
         // Upstream's shipped default; `with_drop_future_timestamp` is how a
@@ -816,7 +827,10 @@ impl NodeHlc {
         {
             let clock = self.clock.as_deref()?;
             let time = clock.hlc.new_timestamp().ok()?.as_word();
-            wz_session_core::sample::TimestampHint::new(time, &clock.zid)
+            Some(wz_session_core::sample::TimestampHint {
+                time,
+                zid: clock.zid.clone(),
+            })
         }
         #[cfg(not(feature = "time-hlc"))]
         {
@@ -909,7 +923,8 @@ impl NodeHlc {
 
     /// A timestamp for an interception of a timestamp stack, in the form the stack holds it: the
     /// next stamp of the clock of the node, with the zid of the node, or `None` for a node built
-    /// with no identity and for a time source that cannot say what time it is.
+    /// with no identity or with one no timestamp carries, and for a time source that cannot say what
+    /// time it is.
     ///
     /// Unlike [`Self::stamp`] this is not gated by the role: upstream records an interception of
     /// a peer or a client with the HLC it falls back to (a lazy one seeded with the zid) when the
@@ -1169,8 +1184,8 @@ impl<'a> ForwardStamp<'a> {
 impl wz_session_core::reply_stage::ReplyClock for NodeHlc {
     fn next_stamp(&self) -> Option<wz_session_core::reply_stage::ReplyStamp> {
         let hint = self.stamp()?;
-        // A node whose identity is longer than a Timestamp carries has none to stamp with, as it
-        // has none to send a Timestamp with.
+        // The hint's id is at most the sixteen bytes a reply stamp holds, so this is never `None`
+        // for a stamp the clock gave.
         wz_session_core::reply_stage::ReplyStamp::new(hint.time, &hint.zid)
     }
 }
@@ -1203,14 +1218,14 @@ impl core::fmt::Debug for NodeHlc {
 /// never read here.
 #[cfg(feature = "time-hlc")]
 fn build_clock(
-    zid: &[u8],
+    zid: wz_session_core::sample::TimestampZid,
     source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
     standing: StandingHome,
     max_delta: wz_session_core::ntp64::Ntp64,
 ) -> alloc::sync::Arc<NodeClock> {
     alloc::sync::Arc::new(NodeClock {
         hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(alloc::boxed::Box::new(source)), max_delta),
-        zid: zid.to_vec(),
+        zid,
         standing,
         unstamped: core::sync::atomic::AtomicU32::new(0),
     })
