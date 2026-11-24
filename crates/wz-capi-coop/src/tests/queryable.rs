@@ -87,7 +87,7 @@ fn a_kept_query_holds_its_final_until_it_is_dropped() {
     );
 
     let held = kept.lock().unwrap().take().expect("the kept query");
-    engine.reply_held(held, &mut |out| {
+    engine.reply_held(held, "demo/k/a", &mut |out| {
         out.reply_keyed("demo/k/a", b"later")
             .expect("a reply on the query's own key");
     });
@@ -211,7 +211,7 @@ fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
         "a payload past the bound is refused to the callback"
     );
     let held = kept.lock().unwrap().take().expect("the kept query");
-    engine.reply_held(held, &mut |out| {
+    engine.reply_held(held, "demo/r/a", &mut |out| {
         out.reply_keyed("demo/r/a", b"later")
             .expect("a reply on the query's own key");
     });
@@ -258,7 +258,7 @@ fn a_query_kept_past_its_session_holds_none_of_it() {
     let gone = Arc::downgrade(&engine);
     SessionDrive::close(&*engine);
     let mut answered = false;
-    engine.reply_held(held, &mut |_out| answered = true);
+    engine.reply_held(held, "demo/p/a", &mut |_out| answered = true);
     assert!(!answered, "a query of a closed session answers nothing");
     engine.release_held(held);
     drop(engine);
@@ -268,12 +268,13 @@ fn a_query_kept_past_its_session_holds_none_of_it() {
     );
 }
 
-/// Keeping a query, answering it later and letting it go take no memory of the heap: the query's
-/// key is held in the session's key arena, the hold is a row the session lent at its open, and the
-/// program holds plain values. The allocations counted are the calling thread's, which keeps the
-/// query from inside its callback and answers and lets it go after. The CONTROL is the reply and
-/// the Final reaching the router: the counted calls did their work. Turned red by a keep that
-/// copies the query's key or parameters onto the heap, or boxes what it holds.
+/// Keeping a query, answering it later and letting it go take no memory of the heap: the hold is a
+/// row the session lent at its open, which keeps what the replies are built from beside the key,
+/// the caller hands the key to the reply, and the program holds plain values. The allocations
+/// counted are the calling thread's, which keeps the query from inside its callback and answers
+/// and lets it go after. The CONTROL is the reply and the Final reaching the router: the counted
+/// calls did their work. Turned red by a keep that copies the query's key or parameters onto the
+/// heap, or boxes what it holds.
 #[test]
 fn keeping_answering_and_letting_go_of_a_query_allocate_nothing() {
     use super::redial_heap::counted;
@@ -298,7 +299,7 @@ fn keeping_answering_and_letting_go_of_a_query_allocate_nothing() {
     });
     let (held, keeping) = kept.lock().unwrap().take().expect("the kept query");
     let answering = counted(|| {
-        engine.reply_held(held, &mut |out| {
+        engine.reply_held(held, "demo/z/a", &mut |out| {
             out.reply_keyed("demo/z/a", b"late")
                 .expect("a reply on the query's own key");
         });

@@ -583,12 +583,13 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     }
 
     /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
-    /// writes into a responder built as its handler's was (its key, the replies its parameters
-    /// accept, its QoS), on the route it came in on. A query no longer kept, one of a closed
-    /// session and one whose link has since been lost send nothing; an engine that keeps no query
-    /// answers nothing, which is the provided answer.
-    fn reply_held(&self, id: HeldQueryId, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-        let _ = (id, answer);
+    /// writes into a responder built as its handler's was (the replies its parameters accept and
+    /// its QoS, which the engine keeps, and `key`, the query's key, which the caller keeps), on
+    /// the route it came in on. A query no longer kept, one of a closed session and one whose link
+    /// has since been lost send nothing; an engine that keeps no query answers nothing, which is
+    /// the provided answer.
+    fn reply_held(&self, id: HeldQueryId, key: &str, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        let _ = (id, key, answer);
     }
 
     /// Let go of one keep of query `id`: its last hold sends the query's `ResponseFinal` when
@@ -597,18 +598,6 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     fn release_held(&self, id: HeldQueryId) {
         let _ = id;
     }
-
-    /// The key and the parameters of the kept query `id`, where the session keeps them: `None`
-    /// for a query not kept, and from an engine that keeps none, which is the provided answer.
-    ///
-    /// # Safety
-    /// The caller holds a keep of `id` it took itself, and releases it only after the last borrow
-    /// of what this answers ends: what it lends stands for as long as that keep does.
-    unsafe fn held_parts(&self, id: HeldQueryId) -> Option<(&str, &[u8])> {
-        let _ = id;
-        None
-    }
-
     /// Ask which liveliness tokens are alive on `keyexpr` (named on the wire as `wire`): one leg
     /// per peer the engine reaches, each ended by its peer's DeclFinal, `timeout_ms` (`0` is the
     /// platform default, never none) or the loss of its link. Its replies are token

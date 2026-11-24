@@ -61,15 +61,15 @@ pub trait QueryHolder: Send + Sync {
     fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery>;
 
     /// Keep the query `view` describes past its handler, its `ResponseFinal` held until the id
-    /// answered is released ([`crate::SessionEngine::release_held`]). The engine keeps what a
-    /// later reply reads of the query (its key, its parameters, its QoS) beside the hold
-    /// ([`crate::SessionEngine::held_parts`]), so nothing of it is copied out. Called from inside
-    /// the handler, as [`Self::hold_query`] is. `Ok(None)` when `view` is not the query this
-    /// thread's handler answers, which nothing can keep. Refused when the session has no room for
-    /// what the keep holds: [`Refusal::TableFull`] for the query's key, [`Refusal::KeyTooLong`],
-    /// [`Refusal::ExceedsCapacity`] for parameters longer than a hold keeps; [`Refusal::Closed`]
-    /// for a closed session; and [`Refusal::NotBuilt`] by an engine that keeps a query only as a
-    /// [`HeldQuery`], which is the provided answer.
+    /// answered is released ([`crate::SessionEngine::release_held`]). The engine keeps of it only
+    /// what a reply is built from beside its key (the replies its parameters accept and its QoS),
+    /// so a keep holds none of the session's memory but its row: the caller keeps the key and the
+    /// parameters itself, and hands the key to each reply ([`crate::SessionEngine::reply_held`]).
+    /// Called from inside the handler, as [`Self::hold_query`] is. `Ok(None)` when `view` is
+    /// not the query this thread's handler answers, which nothing can keep. Refused with
+    /// [`Refusal::TableFull`] when the query's row holds as many holds as a count holds,
+    /// [`Refusal::Closed`] for a closed session, and [`Refusal::NotBuilt`] by an engine that
+    /// keeps a query only as a [`HeldQuery`], which is the provided answer.
     fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
         let _ = view;
         Err(Refusal::NotBuilt)

@@ -263,9 +263,8 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
-/// The Finals the queryables' plane holds, the requests a dispatch refused, and the flags and the
-/// cells of the parameters of the queries kept past their callbacks (`queryable`).
-const FINAL_ROWS: usize = 4 * cfg!(feature = "queryable") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
+const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -1349,16 +1348,6 @@ impl ArenaPlan {
                 held,
                 core::mem::size_of::<crate::engine::RefusedFinal>(),
             );
-            // The parameters of the queries a program keeps past their callbacks, a cell of
-            // `HELD_QUERY_PARAMS_BYTES` for each query held (`engine::query::FinalHolds`).
-            if held != 0 && caps::HELD_QUERY_PARAMS_BYTES != 0 {
-                plan.put_table(
-                    ["kept parameter flags", "kept parameters"],
-                    "MAX_PENDING_FINALS",
-                    held,
-                    caps::HELD_QUERY_PARAMS_BYTES,
-                );
-            }
         }
         #[cfg(feature = "advanced-cache")]
         {

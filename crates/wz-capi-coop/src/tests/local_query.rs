@@ -326,7 +326,7 @@ fn a_kept_local_query_holds_its_get_open_until_it_is_dropped() {
     );
 
     let held = kept.lock().unwrap().take().expect("the kept query");
-    engine.reply_held(held, &mut |out| {
+    engine.reply_held(held, "demo/lq/a", &mut |out| {
         out.reply_keyed("demo/lq/a", b"later")
             .expect("a reply on the query's own key");
     });

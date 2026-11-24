@@ -732,7 +732,7 @@ mod asked {
         );
 
         let held = kept.lock().unwrap().take().expect("the kept query");
-        second.reply_held(held, &mut |out| {
+        second.reply_held(held, "demo/group/kept", &mut |out| {
             out.reply_keyed("demo/group/kept", b"kept-answer")
                 .expect("a reply on the query's own key");
         });

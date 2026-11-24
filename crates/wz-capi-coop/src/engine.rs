@@ -672,10 +672,6 @@ struct StateTables {
     held_finals: query::HeldFinals,
     #[cfg(feature = "queryable")]
     refused_finals: query::RefusedFinals,
-    /// The cells the parameters of the queries kept past their callbacks are written to, one for
-    /// each query held, none when a kept query keeps no parameters.
-    #[cfg(feature = "queryable")]
-    kept_params: Option<LentByteCells>,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
 }
@@ -698,9 +694,6 @@ impl SessionRows {
             held_finals: lend.table(self.held_queries()),
             #[cfg(feature = "queryable")]
             refused_finals: lend.table(self.held_queries()),
-            #[cfg(feature = "queryable")]
-            kept_params: (self.held_queries() != 0 && caps::HELD_QUERY_PARAMS_BYTES != 0)
-                .then(|| lend.byte_cells(caps::HELD_QUERY_PARAMS_BYTES, self.held_queries())),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
         }
@@ -748,8 +741,6 @@ fn lend_session(
         held_finals,
         #[cfg(feature = "queryable")]
         refused_finals,
-        #[cfg(feature = "queryable")]
-        kept_params,
         #[cfg(feature = "advanced-cache")]
         cache,
     } = plan
@@ -797,7 +788,6 @@ fn lend_session(
     let plane = Arc::new(QueryPlane::over(query::FinalHolds::over(
         held_finals,
         refused_finals,
-        kept_params.map(query::ParamCells::over),
     )));
     #[cfg(feature = "queryable")]
     let delivery = RoundDelivery::new(samples.clone(), plane.clone());
@@ -5292,18 +5282,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(core) = self.live() else {
             return;
         };
-        // The plane's lock is taken under the session's: the key the last keep of a query held
-        // goes back to the session's key arena under it.
         let due = match release {
             query::Release::Hold => lock(&self.plane.holds).release(generation, rid),
-            query::Release::Kept => {
-                let released = lock(&self.plane.holds).release_kept(generation, rid);
-                if let Some(key) = released.key {
-                    // SAFETY: the session's lock is held (`core`), and the key is its arena's.
-                    unsafe { key.release(&core.0.session.keys) };
-                }
-                released.due
-            }
+            query::Release::Kept => lock(&self.plane.holds).release_kept(generation, rid),
         };
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
@@ -7081,22 +7062,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn reply_held(
         &self,
         id: wz_capi_port::HeldQueryId,
+        key: &str,
         answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut),
     ) {
-        self.reply_kept(id, answer);
+        self.reply_kept(id, key, answer);
     }
 
     #[cfg(feature = "queryable")]
     fn release_held(&self, id: wz_capi_port::HeldQueryId) {
         self.answer(id.generation, id.rid, query::Release::Kept);
     }
-
-    #[cfg(feature = "queryable")]
-    unsafe fn held_parts(&self, id: wz_capi_port::HeldQueryId) -> Option<(&str, &[u8])> {
-        // SAFETY: the caller's contract is the trait's, which is this one's.
-        unsafe { self.kept_parts_of(id) }
-    }
-
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: QblId) {
         // The row is taken out of the tables under the lock and let go of after it: its key may hold
