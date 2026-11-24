@@ -350,16 +350,16 @@ pub fn canonize_in_place(
         // A piece past the room the walk's property promises is refused rather than written
         // where the walk has still to read; no text reaches that arm.
         len = match piece? {
-            Piece::Text { from, to } => match len.checked_add(to.saturating_sub(from)) {
-                Some(end) if (len..=to).contains(&from) && to <= text.len() => {
-                    // SAFETY: `len <= from <= to <= text.len()`, so the span read (`from..to`) and
-                    // the span written (`len..end`, as long and starting no later) lie in `text`;
-                    // `ptr::copy` moves spans that overlap, as `copy_within` does, whose own
-                    // check of the same bounds the guard above already makes.
-                    unsafe {
-                        let base = text.as_mut_ptr();
-                        core::ptr::copy(base.add(from), base.add(len), to - from);
-                    }
+            Piece::Text { from, to } => match (
+                len.checked_add(to.saturating_sub(from)),
+                text.get_mut(len..to),
+                from.checked_sub(len),
+            ) {
+                // The span from what is written to the piece's end, and the piece moved to its
+                // front: `skip <= span.len()` is the one check `copy_within` makes of a range
+                // from `skip` to a front it moves to, so it is decided here and not there.
+                (Some(end), Some(span), Some(skip)) if skip <= span.len() => {
+                    span.copy_within(skip.., 0);
                     end
                 }
                 _ => return Err(KeyexprCanonError::ExceedsCapacity),

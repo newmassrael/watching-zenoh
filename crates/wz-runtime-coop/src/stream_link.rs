@@ -766,7 +766,13 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                     // Nothing before the part of a batch is lent any more: it moves to the front,
                     // so the rest is read behind it and the whole batch fits where it lies.
                     if start > 0 {
-                        bytes.copy_within(start..held, 0);
+                        // `start <= part.len()` is the one check `copy_within` makes of a range
+                        // from `start` to a front it moves to, so it is decided here.
+                        if let Some(part) = bytes.get_mut(..held) {
+                            if start <= part.len() {
+                                part.copy_within(start.., 0);
+                            }
+                        }
                         #[cfg(test)]
                         self.moved.set(self.moved.get() + (held - start));
                         held = held.wrapping_sub(start);
