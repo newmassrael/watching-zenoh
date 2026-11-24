@@ -366,7 +366,7 @@ pub unsafe extern "C" fn z_declare_querier(
         let encoding = if options.is_null() {
             None
         } else {
-            crate::encoding::take_moved_encoding((*options).encoding)
+            crate::encoding::take_moved_encoding_copy((*options).encoding)
         };
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
@@ -533,7 +533,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                 crate::pubsub::take_moved_bytes((*options).payload),
                 crate::pubsub::take_moved_bytes((*options).attachment),
                 crate::get::PicoQueryValueMeta {
-                    encoding: crate::encoding::take_moved_encoding((*options).encoding),
+                    encoding: crate::encoding::take_moved_encoding_copy((*options).encoding),
                     source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 },
                 // R311y575 — consumed on the same every-path line as the byte

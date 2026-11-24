@@ -9,9 +9,9 @@
 //!
 //! Each kind of object has a pool of its own (`crate::object_slot::Kind`): the objects behind the
 //! owned handles (on the tokio engine its sessions, publishers, subscribers, queryables,
-//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries and
-//! payloads a program holds), and what a program makes before any session: its configs and the
-//! hellos it keeps. Beside the pools lies the payloads' area: the bytes the owned payloads,
+//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries,
+//! payloads and encodings a program holds), and what a program makes before any session: its
+//! configs and the hellos it keeps. Beside the pools lies the payloads' area: the bytes the owned payloads,
 //! strings and slices carry, in blocks of power-of-two sizes a payload takes the smallest of that
 //! holds it, of `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative
 //! engine lies in its own arena, not here, and so do its entities, each in a place its open laid
@@ -32,8 +32,8 @@
 //! sessions, each holding as many entities as the session limits the library opens under admit
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
 //! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`), `HELD_SAMPLES`, `HELD_REPLIES`,
-//! `HELD_QUERIES` and `HELD_PAYLOADS` of the values it holds, `HELD_CONFIGS` configs,
-//! `HELD_HELLOS` kept hellos and `HELD_PAYLOAD_BYTES` bytes of payload. A program that states its
+//! `HELD_QUERIES`, `HELD_PAYLOADS` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
+//! configs, `HELD_HELLOS` kept hellos and `HELD_PAYLOAD_BYTES` bytes of payload. A program that states its
 //! own counts reserves them before its first object through the doors instead.
 //!
 //! # The counts and the limits of a session
@@ -104,6 +104,8 @@ pub(crate) struct Counts {
     pub(crate) keyexprs: usize,
     /// The bytes the payloads, strings and slices carry, their blocks' heads included.
     pub(crate) payload_bytes: usize,
+    /// Owned encodings, each with room for a schema of `MAX_ENCODING_SCHEMA_BYTES`.
+    pub(crate) encodings: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -285,12 +287,13 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
         )),
         keyexprs: planned!(bounded(true, sessions, stated.keyexprs, bounds.keyexprs)),
         payload_bytes: stated.payload_bytes,
+        encodings: stated.encodings,
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 14;
+const KINDS: usize = 15;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,6 +361,7 @@ impl Plan {
             plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
         }
         plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
+        plan = plan.with::<crate::encoding::HeldEncoding>(Kind::Encoding, objects.encodings);
         let mut kind = 0;
         let mut holds = plan.area != 0;
         while kind < KINDS {
@@ -892,6 +896,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         queriers: 0,
         keyexprs: 0,
         payload_bytes: caps::HELD_PAYLOAD_BYTES,
+        encodings: caps::HELD_ENCODINGS,
     };
     resolve(&built, &bounds)
 }
@@ -1237,6 +1242,7 @@ mod tests {
             queriers: 1,
             keyexprs: 1,
             payload_bytes: 11,
+            encodings: 12,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1254,6 +1260,7 @@ mod tests {
         let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
         assert_eq!(objects.hellos, if scouts { 10 } else { 0 });
         assert_eq!(objects.payload_bytes, 11);
+        assert_eq!(objects.encodings, 12);
     }
 
     /// A bounded count left at zero whose limit holds no bound is refused; with no session no
@@ -1628,6 +1635,11 @@ mod tests {
             Kind::Keyexpr,
             core::mem::size_of::<crate::keyexpr::DeclaredKeyexpr>(),
         );
+        row(
+            "encoding",
+            Kind::Encoding,
+            core::mem::size_of::<crate::encoding::HeldEncoding>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1718,6 +1730,7 @@ mod tests {
         let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
         assert_eq!(objects.hellos, if scouts { caps::HELD_HELLOS } else { 0 });
         assert_eq!(objects.payload_bytes, caps::HELD_PAYLOAD_BYTES);
+        assert_eq!(objects.encodings, caps::HELD_ENCODINGS);
         let limits = session_limits();
         let per_session = |value: Quota, build: usize| {
             value
@@ -1805,6 +1818,7 @@ mod tests {
         #[cfg(all(feature = "engine-tokio", feature = "query"))]
         check(Kind::Querier);
         check(Kind::Keyexpr);
+        check(Kind::Encoding);
         assert_eq!(pools.held(), 0);
     }
 

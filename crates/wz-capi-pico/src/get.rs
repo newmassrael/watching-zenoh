@@ -1158,7 +1158,9 @@ pub(crate) unsafe fn get_inner(
             // R311y562 — the moved encoding is consumed on this same
             // every-path line, for the same reason the two byte buffers are.
             PicoQueryValueMeta {
-                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
+                encoding: crate::encoding::take_moved_encoding_copy(
+                    (*options).encoding as *mut c_void,
+                ),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
             },
             // R311y575 — the cancellation token joins the same consume-first

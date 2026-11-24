@@ -311,7 +311,7 @@ pub const LENT_PUBLICATION_MAY_DECLINE: bool = cfg!(any(
 struct BodyParts<'m> {
     timestamp: Option<&'m crate::sample::TimestampHint>,
     /// A Put's alone: a Del has no encoding.
-    encoding: Option<&'m crate::sample::EncodingHint>,
+    encoding: Option<crate::sample::EncodingRef<'m>>,
     /// Absent where the info names no source, which the owned builder leaves out too.
     source_info: Option<&'m crate::sample::SourceInfo>,
     /// The extension's id, which a Put and a Del number apart, and the bytes.
@@ -399,11 +399,8 @@ impl<'m> BodyParts<'m> {
     /// with `LengthOutOfRange`: a timestamp's id past 16 bytes, a schema past 255 and an
     /// attachment past the protocol's `u32` length.
     fn refused(&self) -> bool {
-        let long_schema = |encoding: &crate::sample::EncodingHint| {
-            encoding
-                .schema
-                .as_ref()
-                .is_some_and(|schema| schema.len() > 255)
+        let long_schema = |encoding: crate::sample::EncodingRef<'_>| {
+            encoding.schema.is_some_and(|schema| schema.len() > 255)
         };
         self.timestamp.is_some_and(|stamp| stamp.zid.len() > 16)
             || self.encoding.is_some_and(long_schema)
@@ -539,7 +536,7 @@ where
     if let Some(encoding) = body.encoding {
         // The id's low bit says a schema follows.
         sink.write_vle_u32((encoding.packed_id & !1) | u32::from(encoding.schema.is_some()))?;
-        if let Some(schema) = &encoding.schema {
+        if let Some(schema) = encoding.schema {
             sink.write_vle_u64(schema.len() as u64)?;
             sink.write_bytes(schema)?;
         }
@@ -953,7 +950,7 @@ mod tests {
             };
             let meta = PushMetadata {
                 timestamp: (fields & 1 != 0).then_some(&stamp),
-                encoding: (fields & 2 != 0).then_some(&encoded),
+                encoding: (fields & 2 != 0).then(|| encoded.view()),
                 source_info: (fields & 8 != 0)
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
                 attachment: (fields & 16 != 0).then_some(&[3u8; 200] as &[u8]),
@@ -1063,10 +1060,10 @@ mod tests {
             (Some("k"), stamped(&stamp_at), false),
             (
                 Some("k"),
-                encoded(&encoding_past),
+                encoded(encoding_past.view()),
                 cfg!(feature = "pubsub-encoding"),
             ),
-            (Some("k"), encoded(&encoding_at), false),
+            (Some("k"), encoded(encoding_at.view()), false),
         ];
         for (suffix, meta, refused) in cases {
             let owned = build_push_aliased_with_meta(3, suffix, b"x", &meta);

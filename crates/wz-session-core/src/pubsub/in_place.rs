@@ -615,7 +615,7 @@ mod tests {
     fn meta((stamp, encoded): &(TimestampHint, EncodingHint)) -> crate::metadata::PushMetadata<'_> {
         crate::metadata::PushMetadata {
             timestamp: Some(stamp),
-            encoding: Some(encoded),
+            encoding: Some(encoded.view()),
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
             attachment: Some(&[1, 2, 3, 4, 5]),
             qos: Some(QosLevel::from_raw(0x05)),
