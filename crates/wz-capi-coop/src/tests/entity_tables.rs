@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, KeyHolds, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -182,8 +182,15 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         if cfg!(feature = "liveliness") { 3 } else { 0 }
     );
     assert_eq!(rows.keyexprs, 6);
-    assert_eq!(rows.filters(), Some(7));
-    assert_eq!(rows.interests(), Some(12));
+    // Five matching listeners, each with a filter of its own where a listener may be declared on a
+    // key.
+    let key_listeners = if cfg!(feature = "key-matching-listener") {
+        5
+    } else {
+        0
+    };
+    assert_eq!(rows.filters(), Some(7 + key_listeners));
+    assert_eq!(rows.interests(), Some(7 + key_listeners));
     let count = |part: &str| {
         plan.rows()
             .find(|row| row.part() == part)
@@ -302,10 +309,13 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let before = router.seen(|s| s.declares);
-    let id = engine.acquire_keyexpr("demo/k/a").expect("a row is free");
+    let first = engine.acquire_keyexpr("demo/k/a").expect("a row is free");
+    let again = engine
+        .acquire_keyexpr("demo/k/a")
+        .expect("a held key is held again");
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/a"),
-        Ok(id),
+        (again.mapping_id(), again.row()),
+        (first.mapping_id(), first.row()),
         "a held key is held again, in its row"
     );
     until(&engine, "the router to see the key", || {
@@ -318,13 +328,13 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
     assert_eq!(engine.keyexpr_declarations().len(), 1);
 
-    engine.release_keyexpr(id);
+    first.release(&*engine);
     assert_eq!(
         engine.acquire_keyexpr("demo/k/b"),
         Err(Refusal::TableFull),
         "one hold is left on the first key"
     );
-    engine.release_keyexpr(id);
+    again.release(&*engine);
     assert!(
         engine.acquire_keyexpr("demo/k/b").is_ok(),
         "the last hold gone, its row takes the next key"
@@ -339,7 +349,10 @@ fn a_key_handed_as_a_borrow_is_kept_in_the_sessions_own_row() {
     let engine = open_under(&router, SessionLimits::defaults());
     let mut buffer = *b"demo/k/borrowed";
     let key = core::str::from_utf8(&buffer).expect("the key is text");
-    let id = engine.acquire_keyexpr(key).expect("a row is free");
+    let id = engine
+        .acquire_keyexpr(key)
+        .expect("a row is free")
+        .mapping_id();
     buffer.copy_from_slice(b"xxxx/x/xxxxxxxx");
     assert_eq!(
         engine.keyexpr_declarations(),
@@ -347,7 +360,9 @@ fn a_key_handed_as_a_borrow_is_kept_in_the_sessions_own_row() {
         "the row holds its own copy of the key"
     );
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/borrowed"),
+        engine
+            .acquire_keyexpr("demo/k/borrowed")
+            .map(|hold| hold.mapping_id()),
         Ok(id),
         "the held key is held again by its text"
     );
@@ -805,7 +820,7 @@ fn a_key_expression_the_link_refuses_is_not_declared() {
     );
     settle(&engine);
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
-    engine
+    let _held = engine
         .acquire_keyexpr("demo/kx/ok")
         .expect("CONTROL: a key the link takes");
     until(&engine, "the router to see the declaration", || {
@@ -847,37 +862,93 @@ fn an_undeclared_write_filters_id_names_no_later_filter() {
     );
 }
 
-/// A write filter and a matching listener on one key of one plane hold one Interest: the second
-/// asks nothing, and the Interest's Final goes once the last of them goes, not before.
+/// Each write filter on one key of one plane asks an Interest of its own, as zenoh-pico's
+/// `_z_write_filter_create` adds one for each filter, and so does a matching listener declared on
+/// the key; a listener declared on a filter asks nothing. Each Interest's Final goes with its own
+/// holder. Turned red by a second filter or a key's listener that takes the first one's Interest,
+/// or a filter's listener that asks one of its own.
+#[cfg(feature = "key-matching-listener")]
 #[test]
-fn a_filter_and_a_listener_on_one_key_hold_one_interest_until_both_go() {
+fn each_filter_and_each_keys_listener_asks_an_interest_of_its_own() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, SessionLimits::defaults());
-    let publisher =
-        filter(&engine, FilterPlane::Subscribers, "demo/one/key").expect("a row is free");
+    let first = filter(&engine, FilterPlane::Subscribers, "demo/one/key").expect("a row is free");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
     let asked = router.seen(|s| s.interests);
-    let sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
-    let listener = engine
-        .declare_matching_listener(FilterPlane::Subscribers, "demo/one/key", sink, false)
+    let second = filter(&engine, FilterPlane::Subscribers, "demo/one/key").expect("a row is free");
+    until(&engine, "the second filter's own Interest", || {
+        router.seen(|s| s.interests) == asked + 1
+    });
+    let on_filter = engine
+        .declare_filter_matching_listener(first, MatchingSink::shared(|_matching: bool| {}))
         .expect("a row is free");
     settle(&engine);
     assert_eq!(
         router.seen(|s| s.interests),
-        asked,
-        "the listener holds the filter's Interest and asks nothing"
+        asked + 1,
+        "the filter's listener asks nothing"
     );
-    engine.undeclare_write_filter(publisher);
+    let on_key = engine
+        .declare_matching_listener(
+            FilterPlane::Subscribers,
+            "demo/one/key",
+            MatchingSink::shared(|_matching: bool| {}),
+            false,
+        )
+        .expect("a row is free");
+    until(&engine, "the key's listener's own Interest", || {
+        router.seen(|s| s.interests) == asked + 2
+    });
+    engine.undeclare_matching_listener(on_filter);
     settle(&engine);
     assert_eq!(
         router.seen(|s| s.interests),
-        asked,
-        "the listener still holds the Interest: no Final"
+        asked + 2,
+        "no Final for a listener that asked nothing"
     );
-    engine.undeclare_matching_listener(listener);
-    until(&engine, "the Final of the Interest's last holder", || {
-        router.seen(|s| s.interests) == asked + 1
+    engine.undeclare_write_filter(first);
+    until(&engine, "the first filter's Final", || {
+        router.seen(|s| s.interests) == asked + 3
     });
+    engine.undeclare_matching_listener(on_key);
+    until(&engine, "the key's listener's Final", || {
+        router.seen(|s| s.interests) == asked + 4
+    });
+    engine.undeclare_write_filter(second);
+    until(&engine, "the second filter's Final", || {
+        router.seen(|s| s.interests) == asked + 5
+    });
+}
+
+/// A build that keeps no filter rows for a matching listener on a key refuses one as not built,
+/// its sink let go of. The CONTROL is a listener on an entity's filter, which every build takes.
+#[cfg(not(feature = "key-matching-listener"))]
+#[test]
+fn a_build_without_key_listeners_refuses_one_as_not_built() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let held = Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(held.clone());
+    let sink = MatchingSink::shared(move |_matching: bool| {
+        let _held = &guard;
+    });
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/none", sink, false),
+        Err(Refusal::NotBuilt)
+    );
+    assert_eq!(
+        held.load(Ordering::SeqCst),
+        1,
+        "the refused sink is let go of"
+    );
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/k/none").expect("a row is free");
+    assert!(
+        engine
+            .declare_filter_matching_listener(publisher, MatchingSink::shared(|_matching: bool| {}))
+            .is_ok(),
+        "CONTROL: a listener on an entity's filter"
+    );
 }

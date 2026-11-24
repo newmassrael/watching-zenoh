@@ -71,6 +71,8 @@
 //! with `sha3::Shake128` — the crate zenoh's `compute_sn` uses — across
 //! every length pair the wire allows and past the rate.
 
+use crate::sn::Sn;
+
 /// SHAKE128's rate in bytes: 1600 state bits minus twice the 128-bit
 /// capacity, FIPS 202 §6.2.
 const SHAKE128_RATE: usize = 168;
@@ -150,16 +152,21 @@ impl Shake128 {
 ///
 /// zenoh reads `(0 as TransportSn).to_le_bytes()` — four bytes, because its
 /// `TransportSn` is a `u32` (`zenoh-protocol/src/transport/mod.rs:99`) and
-/// its widest ring is capped there. wz's SN is a real `u64`, so a four-byte
-/// read would leave the top half of a `seq_num_res == 3` ring unreachable.
+/// its widest ring is capped there. wz holds a `seq_num_res == 3` ring in a
+/// 64-bit word where the build allows that width ([`crate::sn::Sn`]), so a
+/// four-byte read would leave the top half of that ring unreachable.
 /// Reading EIGHT bytes and masking is a strict extension, not a divergence:
 /// an XOF is a byte stream and little-endian puts the first bytes in the low
 /// positions, so for every resolution zenoh can express the masked value is
 /// bit-identical to what zenoh computes. `the_low_half_is_what_zenoh_reads`
 /// pins that.
 #[cfg(not(feature = "initial-sn-compact"))]
-pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
-    zenoh_initial_sn(own_zid, peer_zid, sn_mask)
+pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: Sn) -> Sn {
+    crate::sn::from_wire(zenoh_initial_sn(
+        own_zid,
+        peer_zid,
+        crate::sn::to_wire(sn_mask),
+    ))
 }
 
 /// zenoh's `compute_sn` itself, in every build: the origin a zenoh sender
@@ -201,7 +208,7 @@ pub fn zenoh_initial_sn(sender_zid: &[u8], receiver_zid: &[u8], sn_mask: u64) ->
 /// the finalizer of SplitMix64 so that the low bits a narrow ring keeps depend
 /// on every input byte.
 #[cfg(feature = "initial-sn-compact")]
-pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
+pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: Sn) -> Sn {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     // Out of line: the byte loop is unrolled, and the two zids would carry a copy each.
@@ -219,7 +226,7 @@ pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
     hash ^= hash >> 27;
     hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
     hash ^= hash >> 31;
-    hash & sn_mask
+    crate::sn::from_wire(hash) & sn_mask
 }
 
 #[cfg(test)]
@@ -327,7 +334,9 @@ mod tests {
         }
     }
 
-    /// The eight-byte squeeze is REACHED, not merely written. Added because
+    /// The squeeze is REACHED to the top of the widest ring the build runs, not
+    /// merely written: in a 64-bit word that bit is far above the four bytes
+    /// zenoh reads. Added because
     /// the probe that truncates `derive_initial_sn` back to zenoh's four
     /// bytes left every other test in this module GREEN — `mask_from_res(3)`
     /// is 63 bits wide but nothing asserted a value ever landed above the
@@ -336,16 +345,14 @@ mod tests {
     /// four-byte read structurally unable to satisfy it.
     #[test]
     fn the_widest_ring_reaches_past_the_u32_ceiling() {
-        let reached = (0u8..16).any(|i| {
-            derive_initial_sn(
-                &[0x01, 0x02, 0x03, i],
-                &[0x0a, 0x0b, 0x0c, i],
-                mask_from_res(3),
-            ) > u32::MAX as u64
+        let widest = mask_from_res(crate::sn::SN_RES_WIDEST);
+        let top = widest ^ (widest >> 1);
+        let reached = (0u8..64).any(|i| {
+            (derive_initial_sn(&[0x01, 0x02, 0x03, i], &[0x0a, 0x0b, 0x0c, i], widest) & top) != 0
         });
         assert!(
             reached,
-            "a 63-bit ring must be reachable above 2^32, or the squeeze is truncated"
+            "the top bit of the widest ring must be reachable, or the squeeze is truncated"
         );
     }
 
@@ -358,11 +365,15 @@ mod tests {
     fn the_low_half_is_what_zenoh_reads() {
         let mut four = [0u8; 4];
         reference_shake128(A, B, &mut four);
-        let zenoh_value = u32::from_le_bytes(four) as u64;
+        let zenoh_value = u64::from(u32::from_le_bytes(four));
 
         // res 2 masks to 28 bits, so compare on the full u32 ring the way
         // zenoh's own `RES_U64` cap does.
-        assert_eq!(derive_initial_sn(A, B, u32::MAX as u64), zenoh_value);
+        let ring = crate::sn::from_wire(u64::from(u32::MAX));
+        assert_eq!(
+            crate::sn::to_wire(derive_initial_sn(A, B, ring)),
+            zenoh_value
+        );
     }
 
     /// The derivation a passive reader checks a foreign origin against is
@@ -378,10 +389,8 @@ mod tests {
         hasher.finalize_xof().read(&mut four);
         let zenoh_value = u64::from(u32::from_le_bytes(four));
         assert_eq!(zenoh_initial_sn(A, B, u64::from(u32::MAX)), zenoh_value);
-        assert_eq!(
-            zenoh_initial_sn(A, B, mask_from_res(2)),
-            zenoh_value & mask_from_res(2)
-        );
+        let res_2 = crate::sn::to_wire(mask_from_res(2));
+        assert_eq!(zenoh_initial_sn(A, B, res_2), zenoh_value & res_2);
         assert_ne!(
             zenoh_initial_sn(A, B, u64::from(u32::MAX)),
             zenoh_initial_sn(B, A, u64::from(u32::MAX)),
@@ -429,7 +438,7 @@ mod tests {
             let mut want = [0u8; 8];
             reference_shake128(own, peer, &mut want);
             assert_eq!(
-                derive_initial_sn(own, peer, u64::MAX),
+                zenoh_initial_sn(own, peer, u64::MAX),
                 u64::from_le_bytes(want),
                 "SHAKE128 differs from sha3 at lengths ({}, {})",
                 own.len(),

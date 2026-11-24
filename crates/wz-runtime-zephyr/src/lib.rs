@@ -70,7 +70,7 @@ wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     pub mod links;
     #[cfg(feature = "alloc")]
-    pub use links::{ZephyrIpLinks, ZephyrLinks};
+    pub use links::{ZephyrIpLinks, ZephyrLinks, ZephyrStreamLinks};
 }
 pub mod net;
 pub mod stack;

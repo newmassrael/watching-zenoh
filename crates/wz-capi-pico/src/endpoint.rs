@@ -157,7 +157,9 @@ impl<'a> PicoEndpoint<'a> {
 }
 
 /// Whether a unicast endpoint the program wrote can be handed to a session of the cooperative
-/// engine as pico reads it ([`with_engine_text`]): a malformed config is refused with pico's
+/// engine as pico reads it ([`with_engine_text`]): a scheme this build has no link for is refused
+/// first, with pico's `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` ([`link_built`]), a malformed config
+/// with pico's
 /// `_Z_ERR_CONFIG_INVALID_VALUE`, and a kept text past the build's `MAX_LOCATOR_LEN`, the bound
 /// every locator text of a session is held to, with pico's `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its
 /// reading of a config answers when it has no memory to hold a value in
@@ -166,11 +168,37 @@ impl<'a> PicoEndpoint<'a> {
 /// locator text of the stack that is let go of here.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZResult> {
+    let scheme = scheme_of(endpoint);
+    // A text with no scheme is the engine's to refuse, as an endpoint it cannot read.
+    if !scheme.is_empty() && !link_built(scheme) {
+        return Err(crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN);
+    }
     kept_text(
         endpoint,
         &mut wz_session_core::locator_directory::LocatorText::new(),
     )
     .map(|_| ())
+}
+
+/// Whether this build has a link for `scheme`, as zenoh-pico's build has one for each link its
+/// switches compile in and answers any other scheme `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` before
+/// it opens anything (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_open_link(`, whose
+/// last arm is `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`). The cooperative engine dials and
+/// listens on `tcp/` in every build, as pico's TCP link is in every build of it; `udp/` with
+/// pico's unicast UDP link (`link-udp`, `Z_FEATURE_LINK_UDP_UNICAST`), `tls/` with its secure
+/// channel (`tls-mbedtls`), `serial/` with the host's ttys (`transport-link-serial`) and
+/// `unixpipe/`, which pico has no link for, with the host's named FIFOs
+/// (`transport-link-unixpipe`). A group is no unicast endpoint and is not judged here.
+#[cfg(not(feature = "engine-tokio"))]
+fn link_built(scheme: &str) -> bool {
+    match scheme {
+        "tcp" => true,
+        "udp" => cfg!(feature = "link-udp"),
+        "tls" => cfg!(feature = "tls-mbedtls"),
+        "serial" => cfg!(feature = "transport-link-serial"),
+        "unixpipe" => cfg!(feature = "transport-link-unixpipe"),
+        _ => false,
+    }
 }
 
 /// `use_text` handed a unicast endpoint the program wrote as pico reads it, for a session of the
@@ -229,12 +257,20 @@ fn keep_piece(kept: &mut wz_session_core::locator_directory::LocatorText, piece:
 mod tests {
     use super::*;
     use crate::prelude::*;
-    use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_SYSTEM_OUT_OF_MEMORY};
+    use crate::result::{
+        ZResult, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+        Z_ERR_SYSTEM_OUT_OF_MEMORY,
+    };
     use wz_session_core::caps::MAX_LOCATOR_LEN;
 
-    /// The endpoint the engine is handed for `written`.
+    /// The endpoint the engine is handed for `written`, whose config pico's link for its scheme
+    /// reads whether or not this build has that link.
     fn dialled(written: &str) -> Result<String, ZResult> {
-        checked_endpoint(written)?;
+        kept_text(
+            written,
+            &mut wz_session_core::locator_directory::LocatorText::new(),
+        )
+        .map(|_| ())?;
         Ok(with_engine_text(written, |text: &str| String::from(text)))
     }
 
@@ -397,18 +433,65 @@ mod tests {
             with_engine_text(&long, |text: &str| String::from(text)),
             long
         );
-        let malformed = "udp/127.0.0.1:9000#iface";
+        let malformed = "tcp/127.0.0.1:9000#tout";
         assert_eq!(checked_endpoint(malformed), Err(Z_ERR_CONFIG_INVALID_VALUE));
         assert_eq!(
             with_engine_text(malformed, |text: &str| String::from(text)),
             malformed
         );
         let unread = "tls/127.0.0.1:9000#root_ca_certificate=x";
-        assert_eq!(checked_endpoint(unread), Ok(()));
+        let unread_checked = if cfg!(feature = "tls-mbedtls") {
+            Ok(())
+        } else {
+            Err(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN)
+        };
+        assert_eq!(checked_endpoint(unread), unread_checked);
         assert_eq!(
             with_engine_text(unread, |text: &str| String::from(text)),
             unread
         );
+    }
+
+    /// A scheme this build has no link for is refused before anything is opened, as zenoh-pico
+    /// refuses one its switches left out; one it has goes on to the reading of its config, and a
+    /// text with no scheme to the engine. Turned red by a scheme judged built that no link of the
+    /// build opens, or by a built one refused.
+    #[test]
+    fn a_scheme_without_a_link_in_this_build_is_unknown() {
+        for unknown in [
+            "quic/127.0.0.1:7447",
+            "ws/127.0.0.1:7447",
+            "reth/eth0",
+            "tlsx/127.0.0.1:7447",
+        ] {
+            assert_eq!(
+                checked_endpoint(unknown),
+                Err(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN),
+                "{unknown}"
+            );
+        }
+        for built in ["tcp/127.0.0.1:7447", "no-scheme"] {
+            assert_eq!(checked_endpoint(built), Ok(()), "{built}");
+        }
+        for (endpoint, built) in [
+            ("udp/127.0.0.1:7447", cfg!(feature = "link-udp")),
+            ("tls/127.0.0.1:7447", cfg!(feature = "tls-mbedtls")),
+            (
+                "serial//dev/ttyS0#baudrate=9600",
+                cfg!(feature = "transport-link-serial"),
+            ),
+            (
+                "unixpipe//tmp/wz-pipe#file_mask=384",
+                cfg!(feature = "transport-link-unixpipe"),
+            ),
+        ] {
+            let expected = if built {
+                Ok(())
+            } else {
+                Err(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN)
+            };
+            assert_eq!(checked_endpoint(endpoint), expected, "{endpoint}");
+        }
     }
 
     /// Every link's keys have room among the values a reading keeps.

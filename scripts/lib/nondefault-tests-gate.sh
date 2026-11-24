@@ -359,8 +359,29 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     #
     # `admin-space` joins with the pico admin space: its unit tests and the
     # `admin_space_roundtrip` target are reached only by that feature.
-    "wz-capi-pico|hook|admin-space,transport-link-quic,transport-link-serial,transport-link-tls,\
-transport-link-unixpipe,transport-link-ws|"
+    #
+    # The leg is the TOKIO engine's build. `transport-link-quic`, `transport-link-tls` and
+    # `transport-link-ws` select `engine-tokio`, and `src/lib.rs` refuses each beside the
+    # crate's default `engine-coop` by name, so the same list over the default features is a
+    # build that never compiles. The features are the crate's default list with `engine-coop`
+    # replaced by the tokio option's of deploy/wz-config.toml (`wz_config.py --bench-cargo-args
+    # tokio` prints them), spelled out because a leg's field is cargo features. The cooperative
+    # engine's serial and unixpipe links are the legs after this one; its admin space is the
+    # `resource-snapshot,peer,query,admin-space` leg's.
+    "wz-capi-pico|hook|-default,std,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
+transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
+transport-link-ws|"
+    # The `serial/` link on the cooperative engine, the default one: the host's ttys beside its
+    # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
+    # which names no tty of a host, refused at the dial. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-serial|files::serial_link_roundtrip::"
+    # The `unixpipe/` link on the cooperative engine, the default one: the host's named FIFOs
+    # beside its sockets, a listen that holds its request FIFO, and a sample across the pair a
+    # dial reserved and the listener confirmed. Nothing leaves the host.
+    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_link_roundtrip::"
+    "wz-capi-pico|hook|transport-link-unixpipe|files::unixpipe_listen_multiclient::"
     # pico's session-local delivery, a row of its own rather than two more features on
     # the row above: with them a session's own put reaches its own subscribers, which
     # every other test of the crate is written against pico's default build NOT doing.
@@ -687,6 +708,18 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
+    # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
+    # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
+    # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
+    # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
+    # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
+    # in this form too.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
+    # listener declared on a key is refused as not built, its sink let go of, while one on an
+    # entity's filter is taken. No other row builds without it, so this one runs the refusal.
+    "wz-capi-coop|hook|-default,std,threads|tests::entity_tables::a_build_without_key_listeners_refuses_one_as_not_built"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).
@@ -723,9 +756,9 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
     # And with the members' keyexprs read member by member (`multicast-declarations`,
     # `tests::group::member_keyexprs::`): two members that declare one keyexpr id for two keys each
-    # put on, and declare a subscriber on, the key that member declared. The group reads its
-    # datagrams into owned batches there, so the module's other tests, a get and its answer among
-    # them, run on that receive too.
+    # put on, and declare a subscriber on, the key that member declared, and one that leaves takes
+    # its keyexprs with it. The group still reads its records where the datagram lies, each under
+    # its member's tag, so the module's other tests, a get and its answer among them, run there too.
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
@@ -778,6 +811,12 @@ transport-link-unixpipe,transport-link-ws|"
     # bound and pinned as its keys say, the group transport's room and input over loopback, and a
     # scouting window's sockets asking, reading and waiting.
     "wz-runtime-posix|hook|host-multicast|"
+    # The host's ttys as serial lines (`serial`): a pseudo-terminal set as zenoh-pico sets a tty,
+    # bytes both ways without a blocking read, the queues discarded, and each refusal's kind.
+    "wz-runtime-posix|hook|serial|"
+    # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
+    # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
+    "wz-runtime-posix|hook|unixpipe|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
@@ -882,6 +921,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         reassembly,\
         rx-in-place,\
         scouting-static,\
+        serial,\
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\
@@ -889,7 +929,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-batching,\
         transport-keepalive,\
         transport-qos,\
-        udp-listen\
+        udp-listen,\
+        unixpipe,\
+        ws\
         |"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
@@ -1020,6 +1062,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         transport-link-raweth,\
         transport-link-serial,\
+        transport-link-ws,\
         transport-lowlatency,\
         transport-multilink,\
         transport-qos,\

@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use wz_codecs::whatami::WhatAmI;
 
 use crate::limits::SessionLimits;
-use crate::policy::SessionPolicy;
+use crate::policy::{SessionPolicy, SnResolution};
 use crate::signing_key::SigningKey;
 
 pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
@@ -178,8 +178,9 @@ pub struct SessionInitParams {
     /// invalid zid where its parameters are made and never later. The codec
     /// encodes the length in the high 4 bits of `cbyte` as `zid_len - 1`.
     pub zid: SessionZid,
-    /// Sequence-number resolution (0..=3 → 8 / 16 / 32 / 64-bit).
-    pub seq_num_res: u8,
+    /// The width of the sequence numbers the session offers in its Init, a value of the
+    /// `sn-resolution` policy; the Init carries its two-bit code ([`SnResolution::wire_code`]).
+    pub seq_num_res: SnResolution,
     /// Request-id resolution (0..=3).
     pub req_id_res: u8,
     /// Per-link batch size (bytes). Transport.h documents 1..=65535.

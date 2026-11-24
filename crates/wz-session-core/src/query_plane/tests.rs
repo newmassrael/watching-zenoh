@@ -65,6 +65,7 @@ impl RoundCalls for Local {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
 }
 
 impl PlaneCalls for Local {
@@ -90,6 +91,7 @@ impl RoundCalls for Linked {
     type Group = Absent;
     type Locks = StdLocks;
     type Tally = ();
+    type Form = crate::row_callback::Threads;
 }
 
 impl PlaneCalls for Linked {

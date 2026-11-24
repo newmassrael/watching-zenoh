@@ -340,10 +340,13 @@ impl SessionLinks for MemoryLinks {
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The network carries datagrams, as the UDP link it stands in for does.
-        if to.proto != LinkProto::Udp {
+        let Some(ip) = to.as_ip() else {
+            return Err(LinkOpenError::Unsupported);
+        };
+        if ip.proto != LinkProto::Udp {
             return Err(LinkOpenError::Unsupported);
         }
-        let end = self.net.bind_ephemeral(self.host, Some(to.at))?;
+        let end = self.net.bind_ephemeral(self.host, Some(ip.at))?;
         Ok(Self::opened(end))
     }
 }

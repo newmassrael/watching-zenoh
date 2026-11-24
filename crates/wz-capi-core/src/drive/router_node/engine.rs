@@ -176,11 +176,13 @@ fn plane_of(plane: FilterPlane) -> MatchPlane {
 }
 
 impl wz_capi_port::KeyHolds for RouterState {
-    fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn release_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) {}
 
     /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
     /// here and there is nothing to count.
-    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+    fn retain_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) -> bool {
+        false
+    }
 }
 
 impl wz_capi_port::Tickers for RouterState {
@@ -353,7 +355,7 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         // A node names every key whole: there is no alias to hold.
         Err(Refusal::NotBuilt)
     }

@@ -31,7 +31,6 @@
 //! ([`AfPacketCarrier`](crate::raweth_group::AfPacketCarrier) is the one a session opens).
 
 use std::io;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 #[cfg(feature = "reassembly")]
 use std::sync::Mutex;
@@ -40,9 +39,11 @@ use tokio::io::unix::AsyncFd;
 use wz_packet_socket::raweth_socket::AfPacketSocket;
 use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 use wz_session_core::raweth_link::{
-    deframe, frame, leading_message_key, RawEthHeader, RethLocator, ETH_HEADER_LEN,
-    ETH_VLAN_HEADER_LEN, MAC_LEN, MAX_ETH_FRAME_SIZE,
+    deframe, frame, leading_message_key, mac_text, RawEthHeader, RethLocator, ETH_HEADER_LEN,
+    ETH_VLAN_HEADER_LEN, MAX_ETH_FRAME_SIZE,
 };
+// A member's key is the session core's, which both engines' raweth groups name it by.
+pub use wz_session_core::raweth_link::{member_address, member_locator};
 use wz_session_core::reliability::Reliability;
 
 use crate::multicast_glue::{MulticastDatagramSender, MulticastLinkDriver};
@@ -101,44 +102,6 @@ impl RawEthCarrier for AfPacketCarrier {
             }
         }
     }
-}
-
-/// The address a member whose frames come from `mac` is keyed by: the IPv6 link-local address
-/// of the MAC's modified EUI-64.
-pub fn member_address(mac: [u8; MAC_LEN]) -> SocketAddr {
-    let ip = Ipv6Addr::new(
-        0xfe80,
-        0,
-        0,
-        0,
-        u16::from_be_bytes([mac[0] ^ 0x02, mac[1]]),
-        u16::from_be_bytes([mac[2], 0xff]),
-        u16::from_be_bytes([0xfe, mac[3]]),
-        u16::from_be_bytes([mac[4], mac[5]]),
-    );
-    SocketAddr::V6(SocketAddrV6::new(ip, 0, 0, 0))
-}
-
-/// The `reth/` locator of the member [`member_address`] keyed `addr` by: its MAC, read back out
-/// of the modified EUI-64. `None` for an address no raweth member is keyed by.
-pub fn member_locator(addr: &SocketAddr) -> Option<String> {
-    let SocketAddr::V6(v6) = addr else {
-        return None;
-    };
-    let o = v6.ip().octets();
-    if o[..8] != [0xfe, 0x80, 0, 0, 0, 0, 0, 0] || o[11] != 0xff || o[12] != 0xfe {
-        return None;
-    }
-    let mac = [o[8] ^ 0x02, o[9], o[10], o[13], o[14], o[15]];
-    Some(format!("reth/{}", mac_text(&mac)))
-}
-
-/// `aa:bb:cc:dd:ee:ff`.
-fn mac_text(mac: &[u8; MAC_LEN]) -> String {
-    mac.iter()
-        .map(|octet| format!("{octet:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
 }
 
 /// A group over raw Ethernet, as the endpoint `endpoint` configures it, on `carrier`.
@@ -517,19 +480,6 @@ mod tests {
         let n = raw_right.recv(&mut buf).await.expect("a frame");
         let (header, _) = deframe(&buf[..n]).expect("a raweth frame");
         assert_eq!(header.dmac, [0x02, 0, 0, 0, 0, 0xaa]);
-    }
-
-    /// A member's address reads back as its MAC's `reth/` locator, and an address no raweth
-    /// member is keyed by reads as none.
-    #[test]
-    fn a_member_address_reads_back_as_its_mac() {
-        let mac = [0x30, 0x03, 0x8c, 0xc8, 0x00, 0xa1];
-        assert_eq!(
-            member_locator(&member_address(mac)).as_deref(),
-            Some("reth/30:03:8c:c8:00:a1")
-        );
-        assert_eq!(member_locator(&"127.0.0.1:7447".parse().unwrap()), None);
-        assert_eq!(member_locator(&"[fe80::1]:0".parse().unwrap()), None);
     }
 
     /// The link frames to what a raweth frame holds, the widest header its mapping makes taken

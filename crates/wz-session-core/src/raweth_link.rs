@@ -598,12 +598,80 @@ pub fn parse_mac(s: &str) -> Result<[u8; MAC_LEN], RawEthError> {
     Ok(out)
 }
 
+/// The address a member whose frames come from `mac` is keyed by: the IPv6 link-local address
+/// of the MAC's modified EUI-64 (RFC 4291 appendix A), which is unique per MAC, so a group keys a
+/// raweth member by address as it keys a UDP one, on either engine.
+pub fn member_address(mac: [u8; MAC_LEN]) -> core::net::SocketAddr {
+    let ip = core::net::Ipv6Addr::new(
+        0xfe80,
+        0,
+        0,
+        0,
+        u16::from_be_bytes([mac[0] ^ 0x02, mac[1]]),
+        u16::from_be_bytes([mac[2], 0xff]),
+        u16::from_be_bytes([0xfe, mac[3]]),
+        u16::from_be_bytes([mac[4], mac[5]]),
+    );
+    core::net::SocketAddr::V6(core::net::SocketAddrV6::new(ip, 0, 0, 0))
+}
+
+/// The `reth/` locator of the member [`member_address`] keyed `addr` by: its MAC, read back out
+/// of the modified EUI-64. `None` for an address no raweth member is keyed by.
+pub fn member_locator(addr: &core::net::SocketAddr) -> Option<String> {
+    let core::net::SocketAddr::V6(v6) = addr else {
+        return None;
+    };
+    let o = v6.ip().octets();
+    if o[..8] != [0xfe, 0x80, 0, 0, 0, 0, 0, 0] || o[11] != 0xff || o[12] != 0xfe {
+        return None;
+    }
+    let mac = [o[8] ^ 0x02, o[9], o[10], o[13], o[14], o[15]];
+    Some(alloc::format!("reth/{}", mac_text(&mac)))
+}
+
+/// `mac` as a locator writes it, `aa:bb:cc:dd:ee:ff`, the form [`parse_mac`] reads.
+pub fn mac_text(mac: &[u8; MAC_LEN]) -> String {
+    use core::fmt::Write as _;
+    let mut text = String::with_capacity(3 * MAC_LEN - 1);
+    for (at, octet) in mac.iter().enumerate() {
+        if at > 0 {
+            text.push(':');
+        }
+        // A write into a `String` does not fail.
+        let _ = write!(text, "{octet:02x}");
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const A: [u8; MAC_LEN] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
     const B: [u8; MAC_LEN] = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16];
+
+    /// A member's address reads back as its MAC's `reth/` locator, the MAC as `parse_mac` reads
+    /// it, and an address no raweth member is keyed by reads as none. Turned red by an EUI-64
+    /// that does not flip the universal bit, or a reading back that takes an address of another
+    /// kind for a member.
+    #[test]
+    fn a_member_address_reads_back_as_its_mac() {
+        use alloc::string::ToString;
+        let mac = [0x30, 0x03, 0x8c, 0xc8, 0x00, 0xa1];
+        assert_eq!(
+            member_address(mac).to_string(),
+            "[fe80::3203:8cff:fec8:a1]:0"
+        );
+        assert_eq!(
+            member_locator(&member_address(mac)).as_deref(),
+            Some("reth/30:03:8c:c8:00:a1")
+        );
+        assert_eq!(parse_mac(&mac_text(&mac)), Ok(mac));
+        let v4: core::net::SocketAddr = "127.0.0.1:7447".parse().unwrap();
+        let other_v6: core::net::SocketAddr = "[fe80::1]:0".parse().unwrap();
+        assert_eq!(member_locator(&v4), None);
+        assert_eq!(member_locator(&other_v6), None);
+    }
 
     #[test]
     fn the_wire_order_is_picos_not_a_tidied_one() {

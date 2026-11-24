@@ -93,6 +93,13 @@ use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::str::FromStr;
 
+pub use crate::locator_grammar::parse_dscp_value;
+use crate::locator_grammar::{
+    read_serial_locator, read_unixpipe_locator, split_locator_parts, unixpipe_file_mask,
+    write_serial_address_with_config, SerialAddress, SerialTextError, UnixpipeTextError,
+    UNIXPIPE_FILE_MASK_KEY,
+};
+
 /// Transport protocol of a locator. MVP set; extended as new link
 /// drivers land (the catalog's transport domain).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,11 +725,6 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     })
 }
 
-/// zenoh's locator separators (`zenoh-protocol/src/core/endpoint.rs:22-24`),
-/// mirrored by pico (`include/zenoh-pico/link/endpoint.h:49,71`).
-const LOCATOR_METADATA_SEPARATOR: char = '?';
-const LOCATOR_CONFIG_SEPARATOR: char = '#';
-
 /// The `key=value` list grammar SHARED by the metadata and config spans
 /// (zenoh routes both through one `parameters` module —
 /// `zenoh-protocol/src/core/parameters.rs:32-33`).
@@ -872,68 +874,6 @@ enum LocatorReliability {
     Reliable,
 }
 
-/// R311y469 — the three spans of a locator BODY (everything after the
-/// `<proto>/` separator) under zenoh's canon form
-/// `<proto>/<address>[?<metadata>][#<config>]`
-/// (`zenoh-protocol/src/core/endpoint.rs:460`).
-///
-/// Borrowed slices, so the split allocates nothing and every leaf can share it.
-struct LocatorParts<'a> {
-    /// Up to whichever of `?` / `#` comes first — zenoh `address()`
-    /// (endpoint.rs:32-37), pico `_z_locator_address_from_string`
-    /// (src/link/endpoint.c:110-137).
-    address: &'a str,
-    /// Between `?` and the following `#` — zenoh `metadata()` (endpoint.rs:39-47).
-    /// Empty when there is no `?`.
-    metadata: &'a str,
-    /// Everything after the first `#` — zenoh `config()` (endpoint.rs:49-54).
-    /// Empty when there is no `#`.
-    config: &'a str,
-}
-
-/// R311y469 — split a locator body into address / metadata / config, mirroring
-/// zenoh's three accessors. The single seam EVERY leaf goes through, so no leaf
-/// can drift on where the address ends.
-///
-/// Before R311y469 the leaves split only `#` (and unixsock / unixpipe split
-/// nothing at all), so a canon locator carrying `?<metadata>` pushed it into the
-/// ADDRESS: R311y467 measured pico opening `<dev>` from
-/// `serial/<dev>?meta=x#baudrate=115200` while wz built the device path
-/// `<dev>?meta=x` and failed the open.
-///
-/// zenoh's own `metadata()` would panic on the non-canon order `#` before `?`
-/// (a reversed slice); its `EndPoint::try_from` rejects that string outright
-/// (endpoint.rs:626-630). Here the metadata span is simply empty in that case,
-/// which agrees with zenoh byte-for-byte on every string zenoh accepts and
-/// keeps `address` / `config` equal to its accessors on the rest.
-fn split_locator_parts(body: &str) -> LocatorParts<'_> {
-    let midx = body.find(LOCATOR_METADATA_SEPARATOR);
-    let cidx = body.find(LOCATOR_CONFIG_SEPARATOR);
-    let address_end = match (midx, cidx) {
-        (Some(m), Some(c)) => m.min(c),
-        (Some(m), None) => m,
-        (None, Some(c)) => c,
-        (None, None) => body.len(),
-    };
-    // Each separator is one ASCII byte, so a cut past it or before it is a
-    // char boundary; a cut `get` refuses is no part.
-    let after = |at: usize| at.saturating_add(1);
-    let metadata = match (midx, cidx) {
-        (Some(m), Some(c)) if m < c => body.get(after(m)..c).unwrap_or(""),
-        (Some(m), None) => body.get(after(m)..).unwrap_or(""),
-        _ => "",
-    };
-    let config = match cidx {
-        Some(c) => body.get(after(c)..).unwrap_or(""),
-        None => "",
-    };
-    LocatorParts {
-        address: body.get(..address_end).unwrap_or(body),
-        metadata,
-        config,
-    }
-}
-
 /// R311y469 — look one key up in a `;`-delimited `key=value` list. The metadata
 /// and config spans share this grammar in zenoh (one `parameters` module serves
 /// both, parameters.rs:32-33), so they share it here too. Unknown keys are
@@ -977,7 +917,8 @@ fn lookup_param_all<'a>(params: &'a str, key: &'a str) -> impl Iterator<Item = &
 /// R311y236 — extract the optional `iface=<name>` interface-binding name from
 /// the `#`-delimited CONFIG span (zenoh `BIND_INTERFACE = "iface"`,
 /// zenoh-link-commons/src/lib.rs:52). An empty value or an absent `iface` key
-/// yields `None`. Pure alloc string work, like [`parse_baudrate`].
+/// yields `None`. Pure alloc string work, like the serial leaf's config reader
+/// ([`crate::locator_grammar::read_serial_locator`]).
 ///
 /// R311y469 — takes the config span specifically, never the metadata one: the
 /// two are distinct namespaces in zenoh even though they share a grammar, so
@@ -1216,33 +1157,6 @@ fn pem_source(
         }
     }
     Ok(None)
-}
-
-/// R2590 — a `dscp` value in upstream's EXACT accepted set, or `None`.
-///
-/// Mirrors `parse_dscp`
-/// (`io/zenoh-link-commons/src/dscp.rs` @ `dscp.split('|')`): `|`-separated
-/// integers OR-ed together, each decimal, `0x`/`0X` hexadecimal, or `0B`
-/// binary. Upstream also lists a `0xb` binary prefix, but its `0x` arm is tried
-/// first and takes every string that prefix could match, so `0xb101` is
-/// hexadecimal there and here. Mirrored rather than corrected: an operator's
-/// string must mean the same thing to both implementations. Any part that does
-/// not parse refuses the whole value, as upstream's `reduce` over `Option`s does.
-pub fn parse_dscp_value(value: &str) -> Option<u32> {
-    fn part(s: &str) -> Option<u32> {
-        if let Some(hex) = ["0x", "0X"].iter().find_map(|p| s.strip_prefix(p)) {
-            u32::from_str_radix(hex, 16).ok()
-        } else if let Some(bin) = ["0xb", "0B"].iter().find_map(|p| s.strip_prefix(p)) {
-            u32::from_str_radix(bin, 2).ok()
-        } else {
-            s.parse::<u32>().ok()
-        }
-    }
-    value
-        .split('|')
-        .map(part)
-        .reduce(|a, b| Some(a? | b?))
-        .flatten()
 }
 
 /// R311y832 — the `#ttl=<n>` multicast hop limit from the CONFIG span.
@@ -1622,57 +1536,13 @@ pub enum SerialTarget {
     Pins { tx: u32, rx: u32 },
 }
 
+pub use crate::locator_grammar::{SerialOptions, SERIAL_DEFAULT_BAUDRATE};
+
 /// A parsed `serial/...` locator: its connection target and baud rate.
 /// The baud-rate *value* is carried verbatim (any `u32`); validating it
 /// against a supported speed table is the tty backend's concern, not the
 /// parser's (pico parses the `u32` here and validates at tty-open,
 /// tty_posix.c:27-56).
-/// R2704 — upstream's default for `baudrate` when the locator omits it
-/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `const DEFAULT_BAUDRATE: u32 = 9_600;`).
-///
-/// wz used to REFUSE a serial locator with no `#baudrate=` tail, which matched
-/// zenoh-pico (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
-/// @ `baudrate_str = _z_str_intmap_get(&endpoint->_config, SERIAL_CONFIG_BAUDRATE_KEY);`
-/// feeds a parse that fails on the absent key) but not zenoh, which dials
-/// `serial//dev/ttyUSB0` happily at 9600. A locator zenoh accepts and wz
-/// refuses is a hole in the drop-in claim, and pico never EMITS such a locator,
-/// so accepting it costs pico parity nothing.
-pub const SERIAL_DEFAULT_BAUDRATE: u32 = 9_600;
-
-/// R2704 — the three serial locator config keys beyond `baudrate`, with
-/// upstream's own defaults.
-///
-/// zenoh's serial link declares FOUR keys in its `pub mod config`
-/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub const PORT_EXCLUSIVE_RAW: &str = "exclusive";`)
-/// and reads every one off the endpoint config; wz bound only `baudrate`, so a
-/// locator asking for any of the other three was silently ignored. They are one
-/// struct rather than three loose fields because they share a fate: all three
-/// are READ at the same place (the locator) and CONSUMED at the same place (the
-/// tty open), and a default that lives in one named place cannot drift between
-/// the parser and the renderer the way two hand-kept copies would.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SerialOptions {
-    /// Claim the tty exclusively. Upstream default `true`
-    /// (`@ const DEFAULT_EXCLUSIVE: bool = true;`).
-    pub exclusive: bool,
-    /// Port-level read timeout in MICROSECONDS — upstream's unit, not
-    /// milliseconds (`@ const DEFAULT_TIMEOUT: u64 = 50_000;`, i.e. 50 ms).
-    pub timeout_us: u64,
-    /// Release the device when the link closes. Upstream default `true`
-    /// (`@ const DEFAULT_RELEASE_ON_CLOSE: bool = true;`).
-    pub release_on_close: bool,
-}
-
-impl Default for SerialOptions {
-    fn default() -> Self {
-        Self {
-            exclusive: true,
-            timeout_us: 50_000,
-            release_on_close: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialEndpoint {
     pub target: SerialTarget,
@@ -1704,42 +1574,12 @@ impl SerialEndpoint {
     /// now defaults it (R2704): zenoh-pico's parser still requires the key, so an
     /// emitter that dropped it would produce a locator a pico peer cannot read.
     pub fn locator_address_with_config(&self) -> alloc::string::String {
-        use alloc::format;
-        // The address form is the `.`-heuristic parse_serial_locator reads back
-        // (`/dev/ttyUSB0` device vs `12.13` pins, serial_protocol.c:109).
         let address = match &self.target {
-            SerialTarget::Device(path) => path.clone(),
-            SerialTarget::Pins { tx, rx } => format!("{tx}.{rx}"),
+            SerialTarget::Device(path) => SerialAddress::Device(path),
+            SerialTarget::Pins { tx, rx } => SerialAddress::Pins { tx: *tx, rx: *rx },
         };
-        // R2704 — `baudrate` is ALWAYS emitted even though the parser now
-        // defaults it: zenoh-pico's parser still requires the key, so dropping
-        // it would make wz emit a locator a pico peer cannot read.
-        let mut out = format!("{address}#{SERIAL_BAUDRATE_KEY}={}", self.baudrate);
-        // The other three are emitted ONLY when they differ from the default,
-        // and that is a round-trip property rather than tidiness: emitting them
-        // always would change every serial locator this tree already produces
-        // (and hand a pico peer three keys its config map has no slot for),
-        // while emitting them never would silently discard a caller's choice at
-        // the first reconnect, which re-parses this string.
-        let defaults = SerialOptions::default();
-        if self.options.exclusive != defaults.exclusive {
-            out.push_str(&format!(
-                ";{SERIAL_EXCLUSIVE_KEY}={}",
-                self.options.exclusive
-            ));
-        }
-        if self.options.timeout_us != defaults.timeout_us {
-            out.push_str(&format!(
-                ";{SERIAL_TIMEOUT_KEY}={}",
-                self.options.timeout_us
-            ));
-        }
-        if self.options.release_on_close != defaults.release_on_close {
-            out.push_str(&format!(
-                ";{SERIAL_RELEASE_ON_CLOSE_KEY}={}",
-                self.options.release_on_close
-            ));
-        }
+        let mut out = String::new();
+        write_serial_address_with_config(&mut out, address, self.baudrate, self.options);
         out
     }
 }
@@ -1759,14 +1599,6 @@ pub enum SerialLocatorError {
     BadNumber(String),
 }
 
-const SERIAL_SCHEME: &str = "serial";
-const SERIAL_BAUDRATE_KEY: &str = "baudrate";
-// R2704 — the other three keys upstream's `pub mod config` declares, spelled
-// exactly as upstream spells them so a zenoh-authored locator parses here.
-const SERIAL_EXCLUSIVE_KEY: &str = "exclusive";
-const SERIAL_TIMEOUT_KEY: &str = "tout";
-const SERIAL_RELEASE_ON_CLOSE_KEY: &str = "release_on_close";
-
 /// Parse a zenoh serial locator into a [`SerialEndpoint`].
 ///
 /// Accepted forms (mirror of `_z_serial_endpoint_parse`,
@@ -1774,113 +1606,27 @@ const SERIAL_RELEASE_ON_CLOSE_KEY: &str = "release_on_close";
 /// - device: `serial//dev/ttyUSB0#baudrate=115200`
 /// - pins:   `serial/12.13#baudrate=115200`
 ///
-/// The scheme is the substring before the first `/`; the remainder is
-/// `<address>#<config>` (config optional in shape, but `baudrate` is
-/// required). An address containing `.` is read as a `TX.RX` pin pair,
-/// otherwise as a device path — the same `.`-heuristic pico uses
-/// (serial_protocol.c:109).
+/// The grammar is [`read_serial_locator`]'s, which reads the text without a
+/// heap; this leaf owns what it read and adds the QoS keys of the metadata span.
 ///
 /// The serial counterpart of [`parse_locator`] (the IP `tcp`/`udp` leaf);
 /// [`parse_any_locator`] is the scheme-dispatcher delegating to the two.
 pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocatorError> {
-    let (scheme, rest) = locator
-        .split_once('/')
-        .ok_or(SerialLocatorError::NotSerialScheme)?;
-    if scheme != SERIAL_SCHEME {
-        return Err(SerialLocatorError::NotSerialScheme);
-    }
-
-    // R311y469 — the shared canon split, so a `?<metadata>` span no longer ends
-    // up inside the device path (the divergence R311y467 measured against pico).
-    let parts = split_locator_parts(rest);
-    let address = parts.address;
-    if address.is_empty() {
-        return Err(SerialLocatorError::EmptyAddress);
-    }
-
-    let baudrate = parse_baudrate(parts.config)?;
-    let options = parse_serial_options(parts.config);
-
-    let target = match address.split_once('.') {
-        Some((tx_str, rx_str)) => {
-            let tx = parse_u32(tx_str)?;
-            let rx = parse_u32(rx_str)?;
-            SerialTarget::Pins { tx, rx }
-        }
-        None => SerialTarget::Device(address.to_string()),
+    let read = read_serial_locator(locator).map_err(|why| match why {
+        SerialTextError::NotSerialScheme => SerialLocatorError::NotSerialScheme,
+        SerialTextError::EmptyAddress => SerialLocatorError::EmptyAddress,
+        SerialTextError::BadNumber(text) => SerialLocatorError::BadNumber(text.to_string()),
+    })?;
+    let target = match read.address {
+        SerialAddress::Device(path) => SerialTarget::Device(path.to_string()),
+        SerialAddress::Pins { tx, rx } => SerialTarget::Pins { tx, rx },
     };
-
     Ok(SerialEndpoint {
         target,
-        baudrate,
-        options,
-        qos: parse_qos_metadata(parts.metadata),
+        baudrate: read.baudrate,
+        options: read.options,
+        qos: parse_qos_metadata(read.metadata),
     })
-}
-
-/// R2704 — read `exclusive`, `tout` and `release_on_close` out of the same
-/// `#`-delimited config tail, each falling back to upstream's default.
-///
-/// ⚠ THE FALLBACK IS UPSTREAM'S AND IS DELIBERATELY LOOSER THAN [`parse_baudrate`]'s,
-/// and the asymmetry is DERIVED rather than chosen. These three keys exist in
-/// zenoh only, and zenoh reads each as `T::from_str(v).unwrap_or(DEFAULT)`
-/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub fn get_exclusive(endpoint: &EndPoint) -> bool {`),
-/// so an unparseable value takes the default and the locator still dials.
-/// `baudrate` is the one key BOTH references know, and zenoh-pico REFUSES a
-/// malformed one, so wz keeps the refusing arm there: where the two references
-/// disagree about an error arm, wz takes the one that fails fast, and where only
-/// zenoh has an opinion, wz takes zenoh's.
-fn parse_serial_options(config: &str) -> SerialOptions {
-    let mut options = SerialOptions::default();
-    for pair in config.split(';') {
-        let Some((key, value)) = pair.split_once('=') else {
-            continue;
-        };
-        match key {
-            SERIAL_EXCLUSIVE_KEY => {
-                options.exclusive = value.parse().unwrap_or(options.exclusive);
-            }
-            SERIAL_TIMEOUT_KEY => {
-                options.timeout_us = value.parse().unwrap_or(options.timeout_us);
-            }
-            SERIAL_RELEASE_ON_CLOSE_KEY => {
-                options.release_on_close = value.parse().unwrap_or(options.release_on_close);
-            }
-            _ => {}
-        }
-    }
-    options
-}
-
-/// Extract `baudrate=<u32>` from the `#`-delimited config tail (`key=value`
-/// pairs separated by `;`).
-///
-/// R2704 — ABSENT is no longer an error. It yields [`SERIAL_DEFAULT_BAUDRATE`],
-/// which is what zenoh does; see that constant for why wz's old refusal was a
-/// hole rather than strictness. MALFORMED is still [`SerialLocatorError::BadNumber`],
-/// because that is the arm both references can be read for and zenoh-pico takes
-/// it — silently running a tty at 9600 because someone typed `baudrate=115.200`
-/// is the misconfiguration this tree refuses to paper over elsewhere.
-fn parse_baudrate(config: &str) -> Result<u32, SerialLocatorError> {
-    for pair in config.split(';') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == SERIAL_BAUDRATE_KEY {
-                return parse_u32(value);
-            }
-        }
-    }
-    Ok(SERIAL_DEFAULT_BAUDRATE)
-}
-
-/// Parse a positive `u32` config value (baud rate or pin). Pico's
-/// `_z_serial_parse_u32` (serial_protocol.c:62) rejects zero — a `0` baud
-/// rate or pin number is invalid — so `0` is a `BadNumber` here too, for
-/// parity.
-fn parse_u32(s: &str) -> Result<u32, SerialLocatorError> {
-    match s.parse::<u32>() {
-        Ok(v) if v != 0 => Ok(v),
-        _ => Err(SerialLocatorError::BadNumber(s.to_string())),
-    }
 }
 
 // ─── unixsock-stream locator leaf ───
@@ -2021,40 +1767,23 @@ pub enum UnixpipeLocatorError {
     BadConfigValue { key: &'static str, value: String },
 }
 
-const UNIXPIPE_SCHEME: &str = "unixpipe";
-
-/// zenoh `FILE_ACCESS_MASK` config key
-/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/mod.rs`
-/// @ `pub const FILE_ACCESS_MASK: &str = "file_mask";`).
-const LOCATOR_FILE_MASK_KEY: &str = "file_mask";
-
 /// Parse a `unixpipe/...` locator into a [`UnixpipeEndpoint`] — the FIFO-pair
-/// sibling of [`parse_unixsock_locator`]. The scheme is the substring before
-/// the first `/`; the remainder is the FIFO-pair base path, taken verbatim (an
-/// absolute path keeps its leading `/`: `unixpipe//tmp/wz.pipe` -> path
-/// `/tmp/wz.pipe`). An empty path is rejected ([`UnixpipeLocatorError::EmptyPath`]).
+/// sibling of [`parse_unixsock_locator`]. The text is read by the grammar every engine reads it
+/// with ([`read_unixpipe_locator`]): the scheme is the substring before the first `/`, the
+/// remainder the FIFO-pair base path, taken verbatim (an absolute path keeps its leading `/`:
+/// `unixpipe//tmp/wz.pipe` -> path `/tmp/wz.pipe`). An empty path is rejected
+/// ([`UnixpipeLocatorError::EmptyPath`]).
 pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, UnixpipeLocatorError> {
-    let (scheme, body) = locator
-        .split_once('/')
-        .ok_or(UnixpipeLocatorError::NotUnixpipeScheme)?;
-    if scheme != UNIXPIPE_SCHEME {
-        return Err(UnixpipeLocatorError::NotUnixpipeScheme);
-    }
-    // R311y469 — the FIFO-pair base path is the ADDRESS span, exactly as for
-    // the unixsock sibling above.
-    let parts = split_locator_parts(body);
-    let path = parts.address;
-    if path.is_empty() {
-        return Err(UnixpipeLocatorError::EmptyPath);
-    }
+    let read = read_unixpipe_locator(locator).map_err(UnixpipeLocatorError::from)?;
     Ok(UnixpipeEndpoint {
-        path: path.to_string(),
-        file_mask: parse_file_mask(parts.config)?,
-        qos: parse_qos_metadata(parts.metadata),
+        path: read.path.to_string(),
+        file_mask: read.file_mask,
+        qos: parse_qos_metadata(read.metadata),
     })
 }
 
-/// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span.
+/// R2363 — the `#file_mask=<n>` FIFO creation mode from the CONFIG span, read by the grammar's
+/// one reader of the key ([`unixpipe_file_mask`]).
 ///
 /// Absent or empty yields `Ok(None)`, leaving the backend's own default; a
 /// value that is not a `u32` is REFUSED. See [`UnixpipeEndpoint::file_mask`]
@@ -2065,16 +1794,18 @@ pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, Unixpip
 /// rule `iface` / `ttl` / `join` follow, and upstream reads this key off
 /// `endpoint.config()`.
 fn parse_file_mask(config: &str) -> Result<Option<u32>, UnixpipeLocatorError> {
-    match lookup_param(config, LOCATOR_FILE_MASK_KEY).filter(|v| !v.is_empty()) {
-        None => Ok(None),
-        Some(value) => {
-            value
-                .parse::<u32>()
-                .map(Some)
-                .map_err(|_| UnixpipeLocatorError::BadConfigValue {
-                    key: LOCATOR_FILE_MASK_KEY,
-                    value: value.to_string(),
-                })
+    unixpipe_file_mask(config).map_err(UnixpipeLocatorError::from)
+}
+
+impl From<UnixpipeTextError<'_>> for UnixpipeLocatorError {
+    fn from(error: UnixpipeTextError<'_>) -> Self {
+        match error {
+            UnixpipeTextError::NotUnixpipeScheme => UnixpipeLocatorError::NotUnixpipeScheme,
+            UnixpipeTextError::EmptyPath => UnixpipeLocatorError::EmptyPath,
+            UnixpipeTextError::BadFileMask(value) => UnixpipeLocatorError::BadConfigValue {
+                key: UNIXPIPE_FILE_MASK_KEY,
+                value: value.to_string(),
+            },
         }
     }
 }
@@ -3672,7 +3403,7 @@ mod tests {
         );
         // ...and the ANTI-VACUITY half: a MALFORMED value is still refused, so
         // the default above cannot be read as "wz stopped parsing the key".
-        // zenoh-pico refuses this one too; see `parse_baudrate`.
+        // zenoh-pico refuses this one too; see `locator_grammar::baudrate`.
         assert!(matches!(
             parse_serial_locator("serial//dev/ttyUSB0#baudrate=115.200"),
             Err(SerialLocatorError::BadNumber(_))

@@ -1282,7 +1282,10 @@ unsafe fn hand_adv_sample(context: *mut c_void, sample: Delivery<'_>) {
     let kept = unsafe {
         &*crate::object_slot::kept_at::<AdvSubState, AdvSubKept>(context.cast::<AdvSubState>())
     };
-    crate::pubsub::hand_sample(&kept.sample.closure, sample.view());
+    crate::pubsub::hand_sample(
+        &kept.sample.closure,
+        &wz_session_core::sink::SampleRef::of(sample.view()),
+    );
 }
 
 /// The host let go of the sample callback, after its last call: the C closure is taken out of the

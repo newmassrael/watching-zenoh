@@ -47,6 +47,8 @@ use core::time::Duration;
 mod unix;
 #[cfg(unix)]
 use unix as sys;
+#[cfg(any(windows, test))]
+mod counter;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

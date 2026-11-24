@@ -216,7 +216,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: crate::session_zid::SessionZid::from_array([0x51; 4]),
-        seq_num_res: 2,
+        seq_num_res: crate::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -1096,6 +1096,132 @@ mod lent_frame_refusal {
             sent[0][1], 0,
             "the second frame carries the SN the refused one gave back"
         );
+    }
+}
+
+/// A control message the link has no slot for, because the batch a data conduit holds open has
+/// its one slot, sends that batch first and then takes the slot it gave back: the control message
+/// does not overtake data the session staged before it. The session machine's Close is that case,
+/// since it does not drain the window first (the application's close does). Turned red by a
+/// control send that asks the link once and no more (`send_control_lent` over
+/// `TxLease::acquire` again), which is refused and sends nothing.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "transport-batching",
+    feature = "transport-qos",
+    feature = "codec-push",
+    feature = "codec-close",
+    feature = "alloc"
+))]
+mod lent_control_order {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link of one slot, lent to one holder at a time, that keeps each message sent.
+    struct OneSlotLink {
+        lent: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl BoxedLinkDriver for OneSlotLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            if self.lent.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            self.lent.store(false, Ordering::SeqCst);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.lent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_close_with_no_slot_free_sends_the_open_data_batch_before_it() {
+        let link = Arc::new(OneSlotLink {
+            lent: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 2048]),
+            sent: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
+        actions.enter_established();
+        assert_eq!(actions.batch_start(), Ok(()));
+        let key = crate::named_key::NamedKey::literal("home/order").expect("a key");
+        let put = actions.send_plain_put_qos(
+            key,
+            b"v",
+            None,
+            super::super::SendAs {
+                reliable: true,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        );
+        assert_eq!(put, Some(Ok(())));
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "CONTROL: the put waits in the window's slot"
+        );
+        assert!(
+            link.lent.load(Ordering::SeqCst),
+            "CONTROL: which is the link's one slot, out"
+        );
+
+        assert_eq!(actions.send_close_lent(0x02), Ok(()));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "the batch, then the Close");
+        assert_eq!(
+            sent[0][0] & 0x1F,
+            wz_codecs::wire_const::T_MID_FRAME,
+            "the data first"
+        );
+        assert_eq!(
+            sent[1][0] & 0x1F,
+            wz_codecs::wire_const::T_MID_CLOSE,
+            "the Close behind it"
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 0, "nothing was refused");
     }
 }
 

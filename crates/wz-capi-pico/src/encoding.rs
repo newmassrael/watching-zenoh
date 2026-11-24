@@ -171,6 +171,35 @@ impl EncodingState {
             _block: block,
         })
     }
+
+    /// [`Self::kept`] with the schema already copied to `schema_start` of `block`, the one
+    /// block a value kept past its callback copies its lent parts into
+    /// ([`Block::kept_parts`]): this state holds a share of it. Refused with [`NoRoom`] only for
+    /// a share the block cannot give.
+    ///
+    /// # Safety
+    /// The schema's bytes, when it has some, are written at `schema_start` of `block`.
+    pub(crate) unsafe fn kept_in(
+        &self,
+        block: &Block,
+        schema_start: *const u8,
+    ) -> Result<Self, NoRoom> {
+        let (schema_start, block) = match self.view().schema {
+            None => (core::ptr::null(), None),
+            // Present but empty: a start that reads nothing and outlives every lender.
+            Some([]) => (
+                core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
+                None,
+            ),
+            Some(_) => (schema_start, Some(block.share().ok_or(NoRoom)?)),
+        };
+        Ok(Self {
+            packed_id: self.packed_id,
+            schema_start,
+            schema_len: self.schema_len,
+            _block: block,
+        })
+    }
 }
 
 /// An encoding a program holds (`z_owned_encoding_t`), in a slot of the pool of encodings
@@ -194,19 +223,31 @@ impl HeldEncoding {
     /// the room a slot has or the pool has no slot free, which every door that makes one answers
     /// with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as zenoh-pico answers a schema its heap cannot copy.
     fn place(encoding: EncodingRef<'_>) -> Option<*mut HeldEncoding> {
-        let kept = BoundedEncoding::of(encoding).ok()?;
         let slot = Slot::<HeldEncoding>::take(Kind::Encoding)?;
-        // SAFETY: `write_at` writes both fields of the slot it is handed.
-        Some(unsafe { slot.fill_in_place(|at| Self::write_at(at, kept)) })
+        // SAFETY: `write_at` writes both fields of the slot it is handed when it keeps the
+        // encoding, and nothing when it refuses it, which gives the slot back.
+        unsafe { slot.try_fill_in_place(|at| Self::write_at(at, encoding)) }.ok()
     }
 
-    /// Write `kept` at `at` and the state that reads it there.
+    /// Keep `encoding` in the room at `at`, written there rather than made on the stack and moved
+    /// in, and write the state that reads it there. Refused with nothing written when the schema is
+    /// longer than the room, so a held encoding keeps the one it had.
+    ///
+    /// One body out of line for the encoding placed and the schema set, so that neither holds a
+    /// copy of the write of the room.
     ///
     /// # Safety
-    /// `at` is the place of a `HeldEncoding` that holds none and does not move while it is held.
-    unsafe fn write_at(at: *mut HeldEncoding, kept: BoundedEncoding) {
-        core::ptr::addr_of_mut!((*at).kept).write(kept);
+    /// `at` is the place of a `HeldEncoding`, holding one or none, that does not move while it is
+    /// held and that nothing else reads while this runs.
+    #[inline(never)]
+    unsafe fn write_at(at: *mut HeldEncoding, encoding: EncodingRef<'_>) -> Result<(), NoRoom> {
+        // SAFETY: the caller's; a kept encoding has no drop, so its room is written over whatever
+        // it held, and is left holding a whole one or untouched.
+        let room = &mut *core::ptr::addr_of_mut!((*at).kept)
+            .cast::<core::mem::MaybeUninit<BoundedEncoding>>();
+        BoundedEncoding::write_into(room, encoding).map_err(|_| NoRoom)?;
         Self::read_own_room(at);
+        Ok(())
     }
 
     /// Point the state at `at` at the room beside it, as it now holds.
@@ -228,14 +269,13 @@ impl HeldEncoding {
     /// `at` is a live `HeldEncoding` nothing else reads while this runs.
     unsafe fn set_schema(at: *mut HeldEncoding, bytes: &[u8]) -> Result<(), NoRoom> {
         let has_schema = !bytes.is_empty();
-        let kept = BoundedEncoding::of(EncodingRef {
-            packed_id: with_schema_flag((*at).kept.view().packed_id, has_schema),
-            schema: has_schema.then_some(bytes),
-        })
-        .map_err(|_| NoRoom)?;
-        (*at).kept = kept;
-        Self::read_own_room(at);
-        Ok(())
+        Self::write_at(
+            at,
+            EncodingRef {
+                packed_id: with_schema_flag((*at).kept.view().packed_id, has_schema),
+                schema: has_schema.then_some(bytes),
+            },
+        )
     }
 }
 
