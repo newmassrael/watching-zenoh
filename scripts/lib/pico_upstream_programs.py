@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""zenoh-pico's own API tests and example programs, run against a built pico C ABI library.
+"""R4619 (no register item) -- zenoh-pico's own API tests and example programs, run against a built
+pico C ABI library.
 
     pico_upstream_programs.py --package ZIP --zenohd EXE [--sets SETS] [--only IDS] [--no-control]
     pico_upstream_programs.py --host-library PROFILE --zenohd EXE [--sets SETS] [--only IDS] [--no-control]
