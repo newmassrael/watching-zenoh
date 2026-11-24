@@ -251,13 +251,13 @@ impl HeldFace {
     }
 
     /// The place of the face's set, which its link and its room keep too.
-    #[cfg(any(feature = "listen", test))]
+    #[cfg(any(feature = "listen", feature = "group", test))]
     pub(super) const fn at(&self) -> usize {
         self.at
     }
 
     /// The face's id.
-    #[cfg(feature = "listen")]
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) const fn id(&self) -> FaceId {
         self.id
     }
@@ -431,10 +431,11 @@ pub(super) struct Registry {
     sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
-    /// the first. The place is the face's in every table of the session (its link's, its room's). Every walk over the faces and every
-    /// lookup of one reads this and the held sets alone; the open lends a set for each face the
-    /// config admits, most of them free at any time. Lent at the open with a row for each set
-    /// lent, so a face coming or going writes its set's row and moves none.
+    /// the first. The place is the face's in every table of the session (its link's, its room's).
+    /// Every walk over the faces and every lookup of one reads this and the held sets alone; the
+    /// open lends a set for each face the config admits, most of them free at any time. Lent at
+    /// the open with a row for each set lent, so a face coming or going writes its set's row and
+    /// moves none.
     holders: BoundedVec<FaceId, MAX_FACE_SETS, Lent>,
     /// The tokens of faces that went before each was retracted, in the order the faces went: each
     /// the token table the face's set held, its rows still in the session's pool, the set given

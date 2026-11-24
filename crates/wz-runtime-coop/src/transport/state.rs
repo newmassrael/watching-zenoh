@@ -234,12 +234,15 @@ impl<T: TransportFaces> TransportState<T> {
         })
     }
 
-    /// [`Self::ups`], each with the id of its face.
-    pub fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &SessionHandle<T::Clock>)> {
-        self.links.faces().filter_map(|face| match face.link() {
-            Link::Up(wire) => Some((face.id(), wire.actions())),
-            _ => None,
-        })
+    /// [`Self::ups`], each with its face's place, which the session's other tables of the face
+    /// keep too, and its id.
+    pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &SessionHandle<T::Clock>)> {
+        self.links
+            .placed()
+            .filter_map(|(at, face)| match face.link() {
+                Link::Up(wire) => Some((at, face.id(), wire.actions())),
+                _ => None,
+            })
     }
 
     /// The face of the least id past `after` (any, for none) whose link is up, when `remote`:

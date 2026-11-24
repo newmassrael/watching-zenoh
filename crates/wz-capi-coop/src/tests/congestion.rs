@@ -94,7 +94,7 @@ fn a_session_whose_links_give_no_wait_is_not_asked() {
 fn each_link_is_asked_and_one_without_room_is_congestion() {
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, true));
+    rooms.hold(0, answers.face(10, true));
     assert_eq!(
         rooms.within(1_234),
         Room::Free,
@@ -102,7 +102,7 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
     );
     assert_eq!(answers.asked(10), [1_234]);
 
-    rooms.hold(2, answers.face(20, false));
+    rooms.hold(1, answers.face(20, false));
     assert_eq!(
         congested(rooms.within(1_234)),
         Some(vec![1]),
@@ -118,9 +118,9 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
 fn only_the_faces_without_room_are_the_congestion() {
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, false));
-    rooms.hold(2, answers.face(20, true));
-    rooms.hold(3, answers.face(30, false));
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(20, true));
+    rooms.hold(2, answers.face(30, false));
     assert_eq!(congested(rooms.within(1_000)), Some(vec![0, 2]));
     assert_eq!(answers.asked(10), [1_000], "the first spends the wait");
     assert_eq!(
@@ -142,7 +142,7 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, true));
+    rooms.hold(0, answers.face(10, true));
     assert_eq!(
         rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000),
         Room::Held(7)
@@ -175,7 +175,7 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
     use wz_session_core::session_init_params::HeldDrop;
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, true));
+    rooms.hold(0, answers.face(10, true));
     for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
         assert_eq!(
             rooms.for_held(profile, Holder::Waiting, 1_000),
@@ -202,16 +202,16 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
 fn a_link_that_has_gone_is_not_asked() {
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, false));
+    rooms.hold(0, answers.face(10, false));
     assert_eq!(
         congested(rooms.within(1_000)),
         Some(vec![0]),
         "CONTROL: while it is up"
     );
-    rooms.forget(1);
+    rooms.forget(0);
     assert_eq!(rooms.within(1_000), Room::Unasked);
-    rooms.hold(1, answers.face(11, false));
-    rooms.hold(1, answers.face(12, true));
+    rooms.hold(0, answers.face(11, false));
+    rooms.hold(0, answers.face(12, true));
     assert_eq!(
         rooms.within(1_000),
         Room::Free,
@@ -219,6 +219,24 @@ fn a_link_that_has_gone_is_not_asked() {
     );
     rooms.forget_all();
     assert_eq!(rooms.within(1_000), Room::Unasked);
+}
+
+/// A face's room lies at the face's own place, which its tables and its link keep, whatever
+/// places are free before it: a drop on it names that place. Turned red by a room put at the
+/// first free place of the table.
+#[test]
+fn a_faces_room_lies_at_its_own_place() {
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(2, answers.face(20, false));
+    assert_eq!(congested(rooms.within(1_000)), Some(vec![2]));
+    rooms.hold(9, answers.face(90, false));
+    assert_eq!(
+        congested(rooms.within(1_000)),
+        Some(vec![2]),
+        "a place past the table holds no room"
+    );
+    assert!(answers.asked(90).is_empty());
 }
 
 /// A face keeps its place while it is up, and a publish dropped on a set read at one mark is sent
@@ -232,21 +250,21 @@ fn a_link_that_has_gone_is_not_asked() {
 fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
     let answers = Answers::default();
     let rooms = rooms(&answers);
-    rooms.hold(1, answers.face(10, false));
-    rooms.hold(2, answers.face(20, true));
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(20, true));
     let Room::Congested(dropped) = rooms.within(1_000) else {
         panic!("the first face is congested");
     };
-    assert!(rooms.skips(&dropped, 1), "the face it was dropped on");
-    assert!(!rooms.skips(&dropped, 2), "a face with room is sent it");
-    rooms.forget(1);
-    rooms.hold(3, answers.face(30, true));
+    assert!(rooms.skips(&dropped, 0), "the face it was dropped on");
+    assert!(!rooms.skips(&dropped, 1), "a face with room is sent it");
+    rooms.forget(0);
+    rooms.hold(0, answers.face(30, true));
     assert!(
-        rooms.skips(&dropped, 3),
+        rooms.skips(&dropped, 0),
         "the face that took the first face's place came after the drop"
     );
     assert!(
-        !rooms.skips(&rooms.dropped_on(2), 3),
+        !rooms.skips(&rooms.dropped_on(1), 0),
         "CONTROL: a set read now owes it"
     );
     assert!(

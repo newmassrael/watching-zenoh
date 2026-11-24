@@ -86,7 +86,7 @@ use {
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use super::registry::{FaceId, Registry};
+use super::registry::{FaceId, HeldFace, Registry};
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -499,7 +499,8 @@ impl<C: ClockSource> Pace for SessionPace<C> {
 /// it is, what the session advertises and tells it), the stack's transport, the parameters its
 /// session runs with, and what the session's messages wait with on a full queue.
 pub(super) struct GroupJoining {
-    pub(super) id: FaceId,
+    /// The group's face: its id and the place its tables, and its room, lie at.
+    pub(super) face: HeldFace,
     pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     /// Whether the session has room for what the group delivers: the round's room for one record
@@ -524,7 +525,7 @@ pub(super) struct GroupJoining {
 /// One group of the session: its face, its task, its queue, its members and its stop, the group's
 /// socket waited on with `W`, the waits of the session's stack.
 pub(super) struct GroupFace<W> {
-    id: FaceId,
+    face: HeldFace,
     join: GroupJoin,
     /// The group's session; `None` once the session's end was read ([`Self::take_outcome`]).
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
@@ -597,7 +598,7 @@ impl<W: LinkWaits> GroupFace<W> {
         D: FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static,
     {
         let GroupJoining {
-            id,
+            face,
             join,
             transport,
             input_gate,
@@ -670,7 +671,7 @@ impl<W: LinkWaits> GroupFace<W> {
         // from: the task's pull seam yields nothing.
         let task = try_spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop)?;
         Ok(Self {
-            id,
+            face,
             join,
             task: Some(task),
             rejoin_at_us: None,
@@ -868,7 +869,12 @@ impl<W: LinkWaits> GroupFace<W> {
 
     /// The face the group's tables are in.
     pub(super) fn id(&self) -> FaceId {
-        self.id
+        self.face.id()
+    }
+
+    /// The place of the group's face in the session's tables, its room's among them.
+    pub(super) fn at(&self) -> usize {
+        self.face.at()
     }
 
     /// What the session tells the group of its declarations.
@@ -1317,7 +1323,7 @@ impl<W: LinkWaits> GroupFace<W> {
 /// of the group's own.
 impl<W: LinkWaits> GroupRecord for GroupFace<W> {
     fn id(&self) -> FaceId {
-        self.id
+        self.face.id()
     }
 
     fn took_input(&self) -> bool {
@@ -1518,13 +1524,11 @@ pub(super) struct GroupPut<'a> {
 #[cfg(feature = "queryable")]
 pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
-    face: FaceId,
+    face: HeldFace,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
     use wz_session_core::response_sink::ResponseSink;
-    // The registry holds the group's face before the group is joined (`Registry::add_face`).
-    let face = registry.borrow().held(face);
     move |event, replies| {
         let mut registry = registry.borrow_mut();
         plane.set_arriving(generation);
@@ -1543,10 +1547,8 @@ pub(super) fn dispatch(
 #[cfg(not(feature = "queryable"))]
 pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
-    face: FaceId,
+    face: HeldFace,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
-    // The registry holds the group's face before the group is joined (`Registry::add_face`).
-    let face = registry.borrow().held(face);
     move |event, replies| registry.borrow_mut().dispatch(face, event, replies)
 }
 
