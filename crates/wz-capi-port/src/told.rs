@@ -117,6 +117,15 @@ impl ToldBits {
     pub fn is_empty(self) -> bool {
         self.transports == 0 && self.links == 0
     }
+
+    /// The listeners told either `self` or `other`: two departures of one key owed to listeners
+    /// apart, kept as one.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            transports: self.transports | other.transports,
+            links: self.links | other.links,
+        }
+    }
 }
 
 /// The row of `key` as `engine` holds it now, read a row at a time; `None` when no row that
@@ -265,6 +274,24 @@ mod tests {
             !ledger.tell_went(ToldPlane::Transports, 0, &key(2)),
             "nor is it told it left"
         );
+    }
+
+    /// The union holds each listener of either side, in its own plane only.
+    ///
+    /// # Control
+    ///
+    /// A union that keeps one side's bits alone reds the first or the second assertion.
+    #[test]
+    fn a_union_holds_the_listeners_of_both_sides() {
+        let mut one = ToldBits::default();
+        one.set(ToldPlane::Transports, 0);
+        let mut other = ToldBits::default();
+        other.set(ToldPlane::Links, 3);
+        let both = one.union(other);
+        assert!(both.has(ToldPlane::Transports, 0));
+        assert!(both.has(ToldPlane::Links, 3));
+        assert!(!both.has(ToldPlane::Links, 0), "a bit stays in its plane");
+        assert!(ToldBits::default().union(ToldBits::default()).is_empty());
     }
 
     /// A row that went is kept, as a tombstone, until every listener told it came was told it

@@ -221,11 +221,18 @@ use {
 mod faces;
 #[cfg(feature = "connectivity")]
 use faces::FacePlane;
+#[cfg(feature = "connectivity")]
+mod told;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
 #[cfg(feature = "connectivity")]
 use wz_session_core::face::{FaceEventSink, FaceLinkRow};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
+#[cfg(feature = "connectivity")]
+use {
+    told::FaceTold,
+    wz_capi_port::told::{ToldKey, ToldPlane},
+};
 
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
@@ -1770,6 +1777,10 @@ struct Face<C: ClockSource + 'static, L: SessionLinks> {
     id: FaceId,
     link: Link<LinkSession<C>, L::Dial>,
     replay: Replay,
+    /// What the connectivity listeners whose history is being replayed were told of the face, and
+    /// the tomb of a row of it that went (`told`).
+    #[cfg(feature = "connectivity")]
+    told: FaceTold,
 }
 
 impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
@@ -3359,6 +3370,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(zid) = lost.and_then(|wire| wire.actions.peer_zid()) {
             self.transport.router.abort_peer(&zid);
         }
+        // What a replaying listener was told of the face is read while its link is held.
+        #[cfg(feature = "connectivity")]
+        self.face_went(at);
         self.transport
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
@@ -3751,6 +3765,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                                 row.history(),
                             );
                         }
+                        // A departure owed to a replaying listener outlives the join that ended.
+                        #[cfg(feature = "connectivity")]
+                        face.keep_tombs_of(&self.transport.groups[at]);
                         self.transport.groups[at] = face;
                     }
                     Err(_) => {
@@ -3782,6 +3799,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Take the face at `at` out of the session, with its tables. The dial role's face is never
     /// taken out.
     fn remove_face(&mut self, at: usize) {
+        // A face whose departure a replaying listener is owed keeps its place for its tomb.
+        #[cfg(feature = "connectivity")]
+        if self.keep_departed(at) {
+            return;
+        }
         if let Some(face) = self.transport.links.remove_face(at) {
             self.session.registry.borrow_mut().remove_face(face.id);
         }
@@ -4371,6 +4393,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         id: DIAL_FACE,
                         link: Link::Waiting { at_us: u64::MAX },
                         replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
+                        #[cfg(feature = "connectivity")]
+                        told: FaceTold::default(),
                     },
                     config.max_faces.saturating_add(1),
                     wait_room,
@@ -6484,6 +6508,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "connectivity")]
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         self.live().and_then(|core| core.0.face_link_at(at))
+    }
+
+    // The told bits live on the session's own face rows (`told`), not in a ledger.
+    #[cfg(feature = "connectivity")]
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.live()
+            .is_some_and(|mut core| core.0.tell_came(plane, listener, key))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+        self.live()
+            .is_some_and(|mut core| core.0.tell_went(plane, listener, key))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn first_told_gone(&self, plane: ToldPlane, listener: usize) -> Option<FaceLinkRow> {
+        self.live()
+            .and_then(|core| core.0.first_told_gone(plane, listener))
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn forget_told(&self, plane: ToldPlane, listener: usize) {
+        if let Some(mut core) = self.live() {
+            core.0.forget_told(plane, listener);
+        }
     }
 
     #[cfg(feature = "connectivity")]

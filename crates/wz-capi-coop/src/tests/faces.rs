@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
 use wz_session_core::face::FaceEventKind;
 use wz_session_core::link::LinkKind;
@@ -148,4 +149,245 @@ fn walking_the_faces_a_row_at_a_time_allocates_nothing() {
         core::hint::black_box(engine.face_snapshots());
     });
     assert!(snapshots > 0, "a snapshot of the same face allocates");
+}
+
+/// The face rows a replaying listener converges to as `converge_transports` of the pico ABI
+/// brings one to them: each departure it is owed, then each face that stands it was not told,
+/// as `DEL`/`PUT` and the zid's first byte.
+fn converge(engine: &super::Engine, listener: usize) -> Vec<(&'static str, u8)> {
+    let plane = ToldPlane::Transports;
+    let mut told = Vec::new();
+    while let Some(row) = engine.first_told_gone(plane, listener) {
+        assert!(
+            engine.tell_went(plane, listener, &ToldKey::of_row(&row)),
+            "a departure owed is told"
+        );
+        told.push(("DEL", row.zid[0]));
+    }
+    let mut at = 0;
+    while let Some(row) = engine.face_link_at(at) {
+        if engine.tell_came(plane, listener, &ToldKey::of_row(&row)) {
+            told.push(("PUT", row.zid[0]));
+        }
+        at += 1;
+    }
+    told
+}
+
+/// What a replaying listener was told is kept on the face's own row. A face it was told keeps the
+/// row it was told as when it goes, a tomb owed to that listener alone; the face dialled again
+/// under the same key is not told to it before that departure, and is told once after it, so a
+/// reconnect reads as one, in order. A face no listener was told leaves nothing behind, and one
+/// that does not stand is told neither way (it came and went unseen).
+///
+/// # Control
+///
+/// An engine that keeps no told bits (the port's provided answers) tells `tell_came` twice and
+/// reds the second assertion; one that keeps no tomb reds the `first_told_gone` after the loss.
+#[test]
+fn a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    let plane = ToldPlane::Transports;
+    let row = engine
+        .face_link_at(0)
+        .expect("the session stands on a face");
+    let key = ToldKey::of_row(&row);
+    assert!(engine.tell_came(plane, 0, &key), "told once");
+    assert!(!engine.tell_came(plane, 0, &key), "and not again");
+    assert!(
+        engine.first_told_gone(plane, 0).is_none(),
+        "a face that stands is no tomb"
+    );
+
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+    assert_eq!(
+        engine.first_told_gone(plane, 0).map(|row| row.zid),
+        Some(row.zid),
+        "the face that went is owed to the listener told it"
+    );
+    assert!(
+        engine.first_told_gone(plane, 1).is_none(),
+        "and to no other"
+    );
+    assert!(
+        !engine.tell_came(plane, 1, &key),
+        "a face that does not stand is not told"
+    );
+    assert!(
+        !engine.tell_went(plane, 1, &key),
+        "nor its departure, to a listener never told it came"
+    );
+
+    let router = Router::start_on(port, CatchAll::None);
+    until(&engine, "the link to be dialled again", || {
+        engine.face_link_at(0).is_some()
+    });
+    assert!(
+        !engine.tell_came(plane, 0, &key),
+        "the face again waits for the departure owed under its key"
+    );
+    assert!(
+        engine.tell_came(plane, 1, &key),
+        "a listener owed nothing is told it"
+    );
+    assert!(engine.tell_went(plane, 0, &key), "the departure is told");
+    assert!(!engine.tell_went(plane, 0, &key), "once");
+    assert!(engine.tell_came(plane, 0, &key), "then the reconnect");
+
+    engine.forget_told(plane, 0);
+    engine.forget_told(plane, 1);
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost again", || {
+        engine.face_link_at(0).is_none()
+    });
+    assert!(
+        engine.first_told_gone(plane, 0).is_none() && engine.first_told_gone(plane, 1).is_none(),
+        "a face no replaying listener was told keeps no tomb"
+    );
+}
+
+/// The dial role's face keeps one tomb beside the link it dials again: a second departure under
+/// another key, the face dialled to another node, takes a free place of the face table as a
+/// departed face, and each listener is owed its own departure until it was told it.
+///
+/// # Control
+///
+/// Dropping the tomb `FaceTold::went` hands back (no departed place) reds listener 1's
+/// `first_told_gone`; writing it over the first reds listener 0's.
+#[test]
+fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    let plane = ToldPlane::Transports;
+    let first = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
+    assert!(engine.tell_came(plane, 0, &first));
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+
+    let router = Router::start_on_as(port, 0x5a, CatchAll::None);
+    until(&engine, "the link to another node", || {
+        engine.face_link_at(0).is_some()
+    });
+    let second_row = engine.face_link_at(0).expect("the face again");
+    assert_eq!(second_row.zid[0], 0x5a, "another node, another key");
+    let second = ToldKey::of_row(&second_row);
+    assert!(engine.tell_came(plane, 1, &second));
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the second face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+
+    assert_eq!(
+        engine.first_told_gone(plane, 0).map(|row| row.zid[0]),
+        Some(0xc3),
+        "the first departure is still owed"
+    );
+    assert_eq!(
+        engine.first_told_gone(plane, 1).map(|row| row.zid[0]),
+        Some(0x5a),
+        "the second is kept apart"
+    );
+    assert!(engine.tell_went(plane, 1, &second));
+    assert!(engine.tell_went(plane, 0, &first));
+    assert!(
+        engine.first_told_gone(plane, 0).is_none() && engine.first_told_gone(plane, 1).is_none(),
+        "both told, nothing kept"
+    );
+}
+
+/// A listener whose replay queue ran out of rows converges to the faces as they stand: told the
+/// departure of the face it heard come, then the face dialled again, once each. Converging again
+/// tells nothing, so no face that stands is told twice.
+///
+/// # Control
+///
+/// The port's provided answers (no told bits on coop) tell no `DEL` and `PUT` the face again on
+/// the second convergence, which reds both lists.
+#[test]
+fn a_listener_past_its_queue_converges_to_the_faces_that_stand() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    assert_eq!(converge(&engine, 0), [("PUT", 0xc3)], "the history");
+
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+    let router = Router::start_on(port, CatchAll::None);
+    until(&engine, "the link to be dialled again", || {
+        engine.face_link_at(0).is_some()
+    });
+    assert_eq!(
+        converge(&engine, 0),
+        [("DEL", 0xc3), ("PUT", 0xc3)],
+        "the departure, then the reconnect"
+    );
+    assert!(converge(&engine, 0).is_empty(), "nothing told twice");
+    engine.forget_told(ToldPlane::Transports, 0);
+    router.send(Command::Close);
+    drop(router);
+}
+
+/// Noting what a replaying listener was told, reading the departure it is owed and forgetting it
+/// allocate nothing: the bits and the tomb lie in the face's row, and the tomb's row is copied
+/// out whole.
+///
+/// # Control
+///
+/// A ledger on the heap (the port's `ToldLedger`) allocates at the first `tell_came`.
+#[test]
+fn noting_what_a_replaying_listener_was_told_allocates_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    let plane = ToldPlane::Links;
+    let key = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
+    let standing = super::redial_heap::counted(|| {
+        assert!(engine.tell_came(plane, 3, &key));
+        assert!(engine.first_told_gone(plane, 3).is_none());
+    });
+    assert_eq!(standing, 0, "noting a face that stands allocates nothing");
+
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the face to be lost", || {
+        engine.face_link_at(0).is_none()
+    });
+    let gone = super::redial_heap::counted(|| {
+        let row = engine.first_told_gone(plane, 3);
+        core::hint::black_box(&row);
+        assert!(row.is_some(), "the tomb is read");
+        assert!(engine.tell_went(plane, 3, &key));
+        engine.forget_told(plane, 3);
+    });
+    assert_eq!(gone, 0, "reading and telling a tomb allocates nothing");
 }
