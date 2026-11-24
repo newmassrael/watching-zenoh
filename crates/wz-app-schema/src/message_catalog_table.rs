@@ -140,3 +140,81 @@ pub struct Table {
     /// The messages, in the catalog's order.
     pub messages: &'static [MessageRow],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DocumentRow, KeyFieldRow, KeyValue, Limits, MessageRow, NodeRow, ProtectionRow, SenderRow,
+        SupervisionRow, Table,
+    };
+
+    /// A catalog that uses every kind of row, as the generator writes one: a constant, which a
+    /// row that held anything on the heap could not be.
+    const CATALOG: Table = Table {
+        nodes: &[
+            NodeRow {
+                name: "north",
+                address: Some(0x7A100),
+            },
+            NodeRow {
+                name: "south",
+                address: None,
+            },
+        ],
+        e2e_profiles: &[DocumentRow {
+            name: "p",
+            text: "{}",
+        }],
+        segment_profiles: &[DocumentRow {
+            name: "s",
+            text: "{}",
+        }],
+        supervision_start_delay_ms: 750,
+        messages: &[MessageRow {
+            key_expr: "demo/pose",
+            id: 401,
+            publishers: &[0],
+            subscribers: &[1],
+            period_ms: Some(40),
+            protection: Some(ProtectionRow {
+                profile: 0,
+                values: "{}",
+            }),
+            senders: &[SenderRow { node: 0, id: 7 }],
+            instance_key: &[KeyFieldRow {
+                field: "side",
+                values: &[KeyValue::Number(1), KeyValue::Text("left")],
+            }],
+            replay_depth: Some(6),
+            supervision: Some(SupervisionRow {
+                factor: 4,
+                awaited: true,
+            }),
+            segment_profile: Some(0),
+        }],
+    };
+
+    const LIMITS: Limits = Limits {
+        messages: 1,
+        replay_depth_max: 6,
+        sender_slots: 1,
+        key_fields: 1,
+        instances: 2,
+    };
+
+    #[test]
+    fn a_whole_catalog_is_a_constant_of_static_rows() {
+        let message = &CATALOG.messages[0];
+        assert_eq!(
+            CATALOG.nodes[usize::from(message.publishers[0])].name,
+            "north"
+        );
+        assert_eq!(
+            CATALOG.nodes[usize::from(message.subscribers[0])].address,
+            None
+        );
+        assert_eq!(message.instance_key[0].values.len(), LIMITS.instances);
+        assert_eq!(message.replay_depth, Some(6));
+        assert_eq!(CATALOG.messages.len(), LIMITS.messages);
+    }
+}
