@@ -201,6 +201,107 @@ impl<R: ReplySink, G: ReplySink, P: Storage> Default for Requesters<R, G, P> {
     }
 }
 
+/// The requester side of one session as the observer's fan and drains read it: the pending gets
+/// and liveliness snapshots of [`Requesters`], or none at all ([`NoRequesters`]) in a build that
+/// asks nothing, whose fan and drains then carry no requester path. Who holds the session's
+/// requesters chooses which by the type it passes.
+pub trait RequesterTables {
+    /// Whether the liveliness token answering `interest_id` belongs to one of this session's
+    /// pending liveliness snapshots, and so to no liveliness subscriber.
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, interest_id: u64) -> bool;
+
+    /// Fan `event` into the pending snapshots, then the pending gets, resolving the peer's keys
+    /// through `peer_table`.
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    );
+
+    /// Whether a snapshot terminated since the last drain, its prune still to run.
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool;
+
+    /// Hand the interest of every snapshot that terminated to `sink` to prune.
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, sink: &S);
+}
+
+impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G, P> {
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, interest_id: u64) -> bool {
+        self.liveliness_gets.has_pending(interest_id)
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets
+            .dispatch_iteration_event(event, peer_table);
+        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+        self.replies.dispatch_iteration_event(event, peer_table);
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool {
+        self.liveliness_gets.has_finalized()
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, sink: &S) {
+        for interest_id in self.liveliness_gets.take_finalized() {
+            sink.prune_liveliness_get_interest(interest_id);
+        }
+    }
+}
+
+/// The requester side of a session that asks nothing: no get and no liveliness snapshot is ever
+/// pending, so the observer's fan hands it nothing and its drains find nothing in it. Of no size
+/// and with nothing to drop: a session that holds it holds no table of pending gets.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NoRequesters;
+
+impl RequesterTables for NoRequesters {
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, _interest_id: u64) -> bool {
+        false
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        _event: IterationEvent<'_, '_>,
+        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, _sink: &S) {}
+}
+
 /// What the OTHER faces of a session declare, which the matching verdicts of one face's dispatch
 /// count beside that face's own and the application's: a matching listener on a publisher
 /// matches while ANY face's peer holds a subscriber for it, so a peer that undeclares one
@@ -1155,11 +1256,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     // in, and inlined into the session's `on_event` they are all there for the length of the
     // application layer's call.
     #[inline(never)]
-    pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn dispatch_event<Q: RequesterTables, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
     ) {
         self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
@@ -1173,17 +1274,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     // however few planes the event concerns. Out of line, the stack under this call is this frame
     // and the one plane running.
     #[inline(never)]
-    pub fn dispatch_event_among<
-        R: ReplySink,
-        G: ReplySink,
-        Q: Storage,
-        O: OtherPeers,
-        T: Storage,
-    >(
+    pub fn dispatch_event_among<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
     ) {
@@ -1210,9 +1305,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             #[cfg(feature = "liveliness-get")]
-            let gets = &requesters.liveliness_gets;
-            #[cfg(feature = "liveliness-get")]
-            let claimed = |id: u64| gets.has_pending(id);
+            let claimed = |id: u64| requesters.claims(id);
             #[cfg(not(feature = "liveliness-get"))]
             let claimed = |_: u64| false;
             let (own, subscribers) = self.tables.liveliness_mut();
@@ -1279,11 +1372,8 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // liveliness GET belongs to that GET and to no observer plane (zenoh
         // answers the query and returns first): the claim is per id.
         #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
-        {
-            let gets = &requesters.liveliness_gets;
-            self.liveliness
-                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
-        }
+        self.liveliness
+            .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
         #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
         self.liveliness.dispatch_iteration_event(event, peer_table);
         // R283 -- stage an interest-response for each inbound non-final liveliness
@@ -1301,16 +1391,18 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 .token_interest_chains_refused
                 .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
         }
-        #[cfg(feature = "liveliness-get")]
-        requesters
-            .liveliness_gets
-            .dispatch_iteration_event(event, peer_table);
-        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-        requesters
-            .replies
-            .dispatch_iteration_event(event, peer_table);
+        #[cfg(any(
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-get"
+        ))]
+        requesters.dispatch_iteration_event(event, peer_table);
         // Consumed only by the arms above, which a build with none of them lacks.
-        #[cfg(not(feature = "liveliness-get"))]
+        #[cfg(not(any(
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-get"
+        )))]
         let _ = &requesters;
         let _ = (&peers, event, others);
     }
@@ -1319,10 +1411,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// through its send path: the replies, the answers to its interests, the
     /// terminated-get prunes, and last the `Final`s, so every Reply for a request
     /// precedes the `Final` that ends it.
-    pub fn flush_pending<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn flush_pending<S, Q: RequesterTables, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -1352,10 +1444,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// `peers.finals` its quota, and sends each when the last of them has, so no `Final`
     /// overtakes a reply. The replies it drains are one burst, as
     /// `flush_pending`'s are.
-    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn flush_pending_replies<S, Q: RequesterTables, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -1376,11 +1468,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
-    pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn dispatch<S, Q: RequesterTables, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         actions: &S,
     ) where
@@ -1638,20 +1730,13 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
     #[inline(never)]
-    pub(crate) fn drain_get_prunes<
-        S: LivelinessGetPrune,
-        R: ReplySink,
-        G: ReplySink,
-        Q: Storage,
-    >(
+    pub(crate) fn drain_get_prunes<S: LivelinessGetPrune, Q: RequesterTables>(
         &mut self,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         sink: &S,
     ) {
         #[cfg(feature = "liveliness-get")]
-        for interest_id in requesters.liveliness_gets.take_finalized() {
-            sink.prune_liveliness_get_interest(interest_id);
-        }
+        requesters.drain_prunes(sink);
         #[cfg(not(feature = "liveliness-get"))]
         let _ = (requesters, sink);
     }
@@ -1662,10 +1747,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 /// the peer's interests, a terminated get's prune. Asked first, so a drain with nothing to send
 /// opens no burst: closing one takes the lock of every conduit to send what it gathered, which
 /// every received Push, drained after as every record is, would pay each time.
-fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
-    peers: &PeerTables<T>,
-    requesters: &Requesters<R, G, Q>,
-) -> bool {
+fn stages_replies<Q: RequesterTables, T: Storage>(peers: &PeerTables<T>, requesters: &Q) -> bool {
     #[allow(unused_mut)]
     let mut staged = false;
     #[cfg(feature = "query-queryable")]
@@ -1682,7 +1764,7 @@ fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
     }
     #[cfg(feature = "liveliness-get")]
     {
-        staged |= requesters.liveliness_gets.has_finalized();
+        staged |= requesters.has_finalized();
     }
     let _ = (peers, requesters);
     staged
@@ -1861,6 +1943,40 @@ mod tests {
             observer.dispatch_event(&mut (), &mut peers, &mut requesters, event)
         });
         assert_eq!(*seen.lock().unwrap(), vec!["topic/a".to_string()]);
+    }
+
+    /// A session that asks nothing holds its requesters as [`NoRequesters`], of no size, and the
+    /// fan delivers a peer's Push beside them as it does beside real ones: the matching key once,
+    /// another key not at all. Nothing is then staged for a drain to send.
+    #[test]
+    fn the_slot_fan_delivers_a_peers_push_beside_no_requesters() {
+        use crate::session_tables::KeyForm;
+        assert_eq!(core::mem::size_of::<NoRequesters>(), 0);
+        let mut observer = SlotObserverOf::<super::lent_tests::TableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = NoRequesters;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let into = seen.clone();
+        observer
+            .tables
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(move |s: &dyn SampleView| {
+                    into.lock().unwrap().push(s.keyexpr().to_string());
+                }),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+            NetworkMessage::Push(Box::new(push_literal("topic/b"))),
+        ]);
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut (), &mut peers, &mut requesters, event)
+        });
+        assert_eq!(*seen.lock().unwrap(), vec!["topic/a".to_string()]);
+        assert!(!stages_replies(&peers, &requesters));
     }
 
     /// A delivery context that records the handle of each row it is handed and calls no row.
