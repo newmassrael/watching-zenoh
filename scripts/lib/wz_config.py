@@ -57,8 +57,10 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   from the pinned config.h.in: every Z_FEATURE_* switch as the
                                   build carries it, every value switch a limit maps to at the
                                   WZ_LIMIT_<ID> the environment states, pico's defaults for the
-                                  rest. A C program compiled against it allocates the structs
-                                  that build's library writes
+                                  rest, and every capability of wz's own that no switch states
+                                  as `#define WZ_FEATURE_<ID> 0|1`. A C program compiled against
+                                  it allocates the structs that build's library writes and sees
+                                  the declarations of the doors that build has
     --bench-engine [ENGINE]       the engine a host bench builds the pico ABI on: ENGINE (tokio or
                                   coop) when given, else the one the package's profile
                                   (configs/profiles/host-peer-ext.conf) chooses (kconfiglib)
@@ -185,7 +187,8 @@ Usage:
     wz_config.py --pico-config-h [--engine coop] FEATURES
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
-        `#define Z_FEATURE_X 0|1` lines; a capability the file does not mention is OFF.
+        `#define Z_FEATURE_X 0|1` and `#define WZ_FEATURE_X 0|1` lines; a capability the
+        file does not mention is OFF.
 """
 
 from __future__ import annotations
@@ -2115,6 +2118,11 @@ DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s+([01])\b")
 # when it is on and `/* #undef ... */` when it is off, and its headers test it with `#ifdef`.
 BARE_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s*(?://.*|/\*.*)?$")
 UNDEF_RE = re.compile(r"^\s*/\*\s*#\s*undef\s+(Z_FEATURE_[A-Z0-9_]+)\s*\*/")
+# The macro a rendered pico header states a capability of wz's own with, as pico states its own
+# switches: `#define WZ_FEATURE_<ID> 0|1` (`wz_feature_macro`).
+WZ_FEATURE_PREFIX = "WZ_FEATURE_"
+WZ_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(WZ_FEATURE_[A-Z0-9_]+)\s+([01])\b")
+WZ_FEATURE_TOKEN_RE = re.compile(r"\bWZ_FEATURE_[A-Z0-9_]+\b")
 
 
 def pico_flag_states(text: str) -> tuple[set[str], set[str]]:
@@ -2182,12 +2190,16 @@ def pico_header_conflicts(decl: dict, abi: str, text: str) -> list[str]:
     caps = decl["caps"]
     on = read_config(decl, text)
     flags_on, flags_off = pico_flag_states(text)
+    wz_stated = wz_feature_states(text)
     out: list[str] = []
     for cid in sorted(closure(caps, on) - on):
         if abi not in caps[cid]["abis"]:
             continue
         flags, _ = pico_switches(decl, cid)
-        if flags and all(f in flags_on | flags_off for f in flags):
+        if not (flags and all(f in flags_on | flags_off for f in flags)):
+            # A capability of wz's own is stated off by its own macro at 0.
+            flags = [wz_feature_macro(cid)] if wz_stated.get(wz_feature_macro(cid)) == 0 else []
+        if flags:
             askers = sorted(x for x in on if cid in closure(caps, {x}) and x != cid)
             out.append(f"the header states {cid} off ({', '.join(flags)}), and {', '.join(askers)}, "
                        f"which it turns on, implies it in wz")
@@ -2201,7 +2213,8 @@ def read_config(decl: dict, text: str) -> set[str]:
     of them is (the advanced plane, which either advanced switch asks for), or when all are where
     it says so (the multicast transport, which pico has only with its group link). One no row
     reaches is on when every switch of its `pico_flags_all` is (the liveliness get exists where
-    pico has both the liveliness and the query plane).
+    pico has both the liveliness and the query plane). A capability of wz's own, which no switch
+    states, is on when its `WZ_FEATURE_*` macro is 1 (`wz_own_header_features`).
     """
     by_kconfig = {c["kconfig"]: cid for cid, c in decl["caps"].items()}
     on: set[str] = set()
@@ -2214,6 +2227,8 @@ def read_config(decl: dict, text: str) -> set[str]:
         flags, combine = pico_switches(decl, cid)
         if flags and (all if combine == "all" else any)(f in flags_on for f in flags):
             on.add(cid)
+    wz_stated = wz_feature_states(text)
+    on |= {cid for cid in wz_own_header_features(decl) if wz_stated.get(wz_feature_macro(cid)) == 1}
     return on
 
 
@@ -2493,17 +2508,69 @@ def pico_config_header(decl: dict, enabled: set[str], env: dict[str, str],
 
     template = (source / "include" / "zenoh-pico" / "config.h.in").read_text(encoding="utf-8")
     defaults = usm.cmake_defaults(usm.pico_cmake_text(source))
-    return render_pico_config(template, pico_config_values(decl, enabled, defaults, env))
+    rendered = render_pico_config(template, pico_config_values(decl, enabled, defaults, env))
+    return with_wz_features(decl, enabled, rendered)
 
 
 def pico_header_features(decl: dict) -> set[str]:
-    """The wz-capi-pico capabilities a pico header states: those a zenoh-pico `Z_FEATURE_*` switch
-    maps to. They are what a rendered header must give back, since `--features pico` reads only
-    them; a capability no switch reaches is not in a header to be read."""
+    """The wz-capi-pico capabilities a pico header states by a zenoh-pico `Z_FEATURE_*` switch:
+    those a `maps` row reaches. A capability no switch reaches is stated by its own
+    `WZ_FEATURE_*` macro instead (`wz_own_header_features`)."""
     return {row["anchor"].removeprefix(PICO_DROP_IN) for row in decl["switches"]
             if row.get("original") == "zenoh-pico" and row.get("class") == "maps"
             and row["switch"].startswith("Z_FEATURE_")
             and row["anchor"].removeprefix(PICO_DROP_IN) in decl["caps"]}
+
+
+def wz_feature_macro(cid: str) -> str:
+    """The macro a pico header states capability `cid` with: `WZ_FEATURE_` and the id in capitals,
+    each `-` a `_` (`message-payload`: `WZ_FEATURE_MESSAGE_PAYLOAD`)."""
+    return WZ_FEATURE_PREFIX + cid.upper().replace("-", "_")
+
+
+def wz_own_header_features(decl: dict) -> list[str]:
+    """The wz-capi-pico capabilities no zenoh-pico switch states, in the declaration's order: no
+    `maps` row reaches them and they name no `pico_flags_all`. A C program compiled against a
+    build's header learns whether the build has one from its `WZ_FEATURE_*` macro, as it learns
+    the others from pico's `Z_FEATURE_*` switches."""
+    stated = pico_header_features(decl)
+    return [cid for cid in decl["order"]
+            if "pico" in decl["caps"][cid]["abis"] and cid not in stated
+            and not decl["caps"][cid].get("pico_flags_all")]
+
+
+def wz_feature_states(text: str) -> dict[str, int]:
+    """Each `WZ_FEATURE_*` macro a header defines to 0 or 1, and that value."""
+    return {m.group(1): int(m.group(2)) for line in text.splitlines() if (m := WZ_DEFINE_RE.match(line))}
+
+
+def with_wz_features(decl: dict, enabled: set[str], rendered: str) -> str:
+    """`rendered` (a pico `config.h`) with every capability of `wz_own_header_features` stated as
+    the build of the features `enabled` carries it, `#define WZ_FEATURE_<ID> 0|1` as pico states
+    its own switches, inside the include guard: before the header's last `#endif`. A header with
+    no `#endif` is a `ValueError`: the template changed shape, and a block after its guard would
+    be read again on every include."""
+    lines = rendered.splitlines(keepends=True)
+    last = max((i for i, line in enumerate(lines) if re.match(r"\s*#\s*endif\b", line)), default=None)
+    if last is None:
+        raise ValueError("the pico config template has no #endif to state wz's capabilities before")
+    block = ["/* The capabilities of wz's own that no Z_FEATURE_* switch states, each 1 when this\n",
+             " * build has it (scripts/lib/wz_config.py, from deploy/wz-config.toml). */\n"]
+    block += [f"#define {wz_feature_macro(cid)} {int(cid in enabled)}\n"
+              for cid in wz_own_header_features(decl)]
+    return "".join(lines[:last] + block + ["\n"] + lines[last:])
+
+
+def check_wz_feature_uses(decl: dict, headers: dict[str, str]) -> list[str]:
+    """Each `WZ_FEATURE_*` name a header of the C ABIs (`headers`, its path to its text) tests
+    that no rendered pico header defines: a test of a macro nobody defines hides its declarations
+    in every build, which a program reads as a door the library has not."""
+    known = {wz_feature_macro(cid) for cid in wz_own_header_features(decl)}
+    out: list[str] = []
+    for path, text in sorted(headers.items()):
+        for name in sorted(set(WZ_FEATURE_TOKEN_RE.findall(text)) - known):
+            out.append(f"{path} tests {name}, which no rendered pico header defines")
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -4916,6 +4983,8 @@ def cmd_check() -> int:
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
     findings += check_policy_binding_rs(POLICY_BINDING_RS.read_text(encoding="utf-8"))
     findings += check_open_facilities_rs(decl, OPEN_FACILITIES_RS.read_text(encoding="utf-8"))
+    findings += check_wz_feature_uses(decl, {str(p.relative_to(ROOT)): p.read_text(encoding="utf-8")
+                                             for p in sorted(CRATES_ROOT.glob("*/include/*.h"))})
     for abi, path in MANIFESTS.items():
         try:
             feats = manifest_features(path)
@@ -5350,6 +5419,37 @@ def cmd_selftest() -> int:
     expect("a #cmakedefine with no value renders as its #undef",
            render_pico_config('#cmakedefine P "@P@"\n#define A @A@\n', {"A": "1"})
            == '/* #undef P */\n#define A 1\n')
+    # The capabilities of wz's own: a macro each, stated in the guard as pico states its switches,
+    # read back, held against the capabilities it implies, and the only ones a header may test.
+    own = wz_own_header_features(decl)
+    expect("a capability's macro is its id in capitals",
+           wz_feature_macro("message-payload") == "WZ_FEATURE_MESSAGE_PAYLOAD")
+    expect("a capability of wz's own is one no pico switch states",
+           "message-payload" in own and "query" not in own and "liveliness-get" not in own
+           and not set(own) & pico_header_features(decl)
+           and all("pico" in caps[cid]["abis"] for cid in own))
+    guarded = with_wz_features(decl, {"message-catalog"}, "#ifndef G\n#define G\n#endif /* G */\n")
+    expect("the capabilities of wz's own are stated inside the guard, each as the build has it",
+           "#define WZ_FEATURE_MESSAGE_CATALOG 1\n" in guarded
+           and "#define WZ_FEATURE_MESSAGE_PAYLOAD 0\n" in guarded
+           and guarded.endswith("#endif /* G */\n")
+           and len(wz_feature_states(guarded)) == len(own))
+    try:
+        with_wz_features(decl, set(), "#define A 1\n")
+        expect("a template with no #endif is refused", False)
+    except ValueError:
+        pass
+    expect("a header reads a wz capability at 1 and not at 0",
+           read_config(decl, "#define WZ_FEATURE_MESSAGE_CATALOG 1\n#define WZ_FEATURE_MESSAGE_PAYLOAD 0\n")
+           == {"message-catalog"})
+    expect("a header that states a wz capability off under one it implies it from is refused",
+           pico_header_conflicts(decl, "pico", "#define WZ_FEATURE_MESSAGE_PAYLOAD 1\n"
+                                               "#define WZ_FEATURE_MESSAGE_CATALOG 0\n") != []
+           and pico_header_conflicts(decl, "pico", "#define WZ_FEATURE_MESSAGE_PAYLOAD 1\n"
+                                                   "#define WZ_FEATURE_MESSAGE_CATALOG 1\n") == [])
+    expect("a header of the C ABIs tests only a macro a rendered header defines",
+           check_wz_feature_uses(decl, {"a.h": "#if WZ_FEATURE_MESSAGE_PAYLOAD == 1\n"}) == []
+           and len(check_wz_feature_uses(decl, {"a.h": "#if defined(WZ_FEATURE_NO_SUCH_THING)\n"})) == 1)
     stated_limits = limit_rows(decl)
     if stated_limits:
         switch0, lid0 = stated_limits[0]
@@ -5377,6 +5477,8 @@ def cmd_selftest() -> int:
             back = coop_features(back, pico_table)
         expect(f"the header of the {label} build reads back as that build",
                enabled_features(pico_table, back) & header_caps == enabled & header_caps)
+        expect(f"the header of the {label} build states each capability of wz's own as it has it",
+               wz_feature_states(rendered) == {wz_feature_macro(cid): int(cid in enabled) for cid in own})
         flags_on, flags_off = pico_flag_states(rendered)
         expect(f"the header of the {label} build states its threading arm and the unstable API",
                ("Z_FEATURE_MULTI_THREAD" in flags_on) == ("multi-thread" in enabled)
