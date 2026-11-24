@@ -10905,6 +10905,10 @@ layer_c1bl_cargo_test_router_failfast() {
 # `quic_listen_cert` (z_open(listen=quic/) + the native Z_CONFIG_TLS_LISTEN_* cert keys
 # binds) under transport-link-quic with the same `1 passed` guard + clippy gate.
 #
+# The unixpipe arm is the tokio engine's: `transport-link-unixpipe` selects no engine, and on the
+# default cooperative engine the same file, with the sample across a FIFO pair beside it, runs in
+# the nondefault-tests gate's `transport-link-unixpipe` legs.
+#
 # R311y413 — HOSTED on ci.yml's feature-gates job. Both discriminators already carry
 # anchored `^test result: ok\. 1 passed` count-guards (no run-ci change), so hosting
 # converts an already-falsification-proven lane from local-only to enforced.
@@ -10932,7 +10936,8 @@ layer_c1bm_cargo_test_pico_failfast() {
             unixpipe) suite=unixpipe_listen_multiclient ;;
             quic) suite=quic_listen_cert ;;
         esac
-        # Both links run on the tokio engine alone until the cooperative runtime has their drivers.
+        # Graded here on the tokio engine: quic runs on it alone, and the cooperative engine's
+        # unixpipe listen is the nondefault-tests gate's `transport-link-unixpipe` legs.
         tokio_args="$(pico_tokio_args "transport-link-$link")" || return 1
         wz_test_args wz-capi-pico "$suite"
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
