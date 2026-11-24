@@ -31,6 +31,7 @@ use alloc::rc::Rc;
 use crate::atomic::{AtomicBool, Ordering};
 use crate::executor::{flag_waker, ClaimedPlace, SpawnRefusal, SpawnRefused, TaskJoin};
 use crate::runtime_impl::CoopRuntime;
+use crate::sync::LockKind;
 use crate::time::ClockSource;
 
 /// Handle returned by [`CoopLocalSet::spawn_local`]. Implements
@@ -165,8 +166,8 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is copied, so the
     /// local set and any other holder of the same runtime share one task table and
     /// one timer table.
-    pub fn new<D: ?Sized>(runtime: &CoopRuntime<C, D>) -> Self {
-        let runtime: CoopRuntime<C> = runtime.with_driver();
+    pub fn new<D: ?Sized, L: LockKind>(runtime: &CoopRuntime<C, D, L>) -> Self {
+        let runtime: CoopRuntime<C> = runtime.retyped();
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         let owner = Rc::new(SetOwner {
             set: runtime.inner.executor.new_local_set(),

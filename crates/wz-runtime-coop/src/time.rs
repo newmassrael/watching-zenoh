@@ -63,6 +63,7 @@
 //! kept every pass active.
 
 use crate::runtime_impl::{share_inner, CoopRuntime, InnerRef};
+use crate::sync::LockKind;
 use core::future::Future;
 use core::marker::PhantomPinned;
 use core::pin::Pin;
@@ -106,7 +107,7 @@ impl<C: ClockSource> CoopTime<C> {
     /// Build a new `CoopTime` sharing the runtime's clock + timer
     /// queue. Snapshots the clock's current `now_us()` as the
     /// epoch for this instance.
-    pub fn new<D: ?Sized>(rt: &CoopRuntime<C, D>) -> Self {
+    pub fn new<D: ?Sized, L: LockKind>(rt: &CoopRuntime<C, D, L>) -> Self {
         let epoch_us = rt.clock().now_us();
         Self {
             inner: share_inner(&rt.inner),

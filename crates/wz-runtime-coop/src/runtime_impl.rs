@@ -12,8 +12,8 @@
 //!   and call nested `spawn` (R311av-pre Decision 5).
 //! - `impl Runtime for CoopRuntime<C>`:
 //!   - `type JoinHandle<T> = CoopJoinHandle<T>`
-//!   - `type Mutex<T> = crate::sync::Mutex<T>`
-//!   - `type RwLock<T> = crate::sync::RwLock<T>`
+//!   - `type Mutex<T> = L::Mutex<T>` (`crate::sync::LockKind`)
+//!   - `type RwLock<T> = L::Mutex<T>`
 //!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: writes the
 //!     future into a cell of the runtime's task table, where its output
 //!     is written too when it ends ([`crate::executor`]).
@@ -109,6 +109,7 @@ use wz_runtime_core::RuntimeError;
 use crate::executor::TaskTable;
 use crate::executor::{ExecutorState, TaskJoin};
 use crate::join_handle::CoopJoinHandle;
+use crate::sync::{Confined, ConfinedOwner, LockKind, Shared};
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
 #[cfg(feature = "session-slot")]
@@ -175,12 +176,17 @@ pub type DefaultDriver = ();
 /// Kconfig chose) gets direct calls through the link, and the default, the trait object, is the
 /// profile that picks its driver at run time. A build with no session tier has no driver trait
 /// to name and its default is `()`, which nothing reads.
-pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver> {
+///
+/// `L` is how the values the runtime lends a session are locked (`Runtime::Mutex`): the
+/// profile's lock ([`Shared`], the default), or none under an engine that keeps each of its
+/// sessions behind one lock of its own ([`Confined`], [`Self::confined`]). The runtime holds no
+/// such value itself, so the choice is a type and costs the runtime nothing.
+pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver, L: LockKind = Shared> {
     pub(crate) inner: InnerRef<C>,
-    driver: PhantomData<fn() -> *const D>,
+    driver: PhantomData<fn() -> (L, *const D)>,
 }
 
-impl<C: ClockSource, D: ?Sized> Clone for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, L: LockKind> Clone for CoopRuntime<C, D, L> {
     fn clone(&self) -> Self {
         Self {
             inner: share_inner(&self.inner),
@@ -290,11 +296,24 @@ impl RuntimeRows {
     }
 }
 
-impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
     /// The same runtime read as one whose sessions send through `D2`. The driver is only a type
     /// the session tier reads back; the runtime holds none, so a handle to the runtime serves for
     /// any driver and the tables and the executor stay the one pair.
-    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2> {
+    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2, L> {
+        self.retyped()
+    }
+
+    /// The same runtime read as one that lends its values with no lock of their own, reached
+    /// under the lock of `O`'s engine ([`Confined`]): what `O`'s `unsafe impl ConfinedOwner`
+    /// answers for.
+    pub fn confined<O: ConfinedOwner>(&self) -> CoopRuntime<C, D, Confined<O>> {
+        self.retyped()
+    }
+
+    /// The same runtime state under another driver and lock type: both are types the session
+    /// tier reads back, and the runtime holds a value of neither.
+    pub(crate) fn retyped<D2: ?Sized, L2: LockKind>(&self) -> CoopRuntime<C, D2, L2> {
         CoopRuntime {
             inner: share_inner(&self.inner),
             driver: PhantomData,
@@ -458,7 +477,7 @@ impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     }
 }
 
-impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, L: LockKind> CoopRuntime<C, D, L> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
         self.inner.executor.refusals()
@@ -486,7 +505,9 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
 /// The runtime's task table as a pool (`pool-monitor`): see
 /// [`crate::executor::ExecutorState`].
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, D: ?Sized> wz_session_core::pool_gauge::PoolGauge for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized, L: LockKind> wz_session_core::pool_gauge::PoolGauge
+    for CoopRuntime<C, D, L>
+{
     fn pool_stat(&self, name: &'static str) -> wz_session_core::pool_gauge::PoolStat {
         wz_session_core::pool_gauge::PoolGauge::pool_stat(&self.inner.executor, name)
     }
@@ -585,19 +606,21 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     }
 }
 
-impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
+impl<C: ClockSource, D: ?Sized + 'static, L: LockKind> Runtime for CoopRuntime<C, D, L> {
     type JoinHandle<T>
         = CoopJoinHandle<T>
     where
         T: Send + 'static;
 
     type Mutex<T>
-        = crate::sync::Mutex<T>
+        = L::Mutex<T>
     where
         T: Send + 'static;
 
+    // One kind of hold for both: a reader is exclusive on a single core and under an owner's
+    // lock alike (`crate::sync`).
     type RwLock<T>
-        = crate::sync::RwLock<T>
+        = L::Mutex<T>
     where
         T: Send + Sync + 'static;
 
@@ -616,53 +639,43 @@ impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
         }
     }
 
-    // R311ct — closure-scoped mutex access. MCU profile binds through
-    // `critical_section::with` (interrupt-disabling) + `RefCell::borrow_mut`
-    // (interior-mutable shared access inside the critical section). No
-    // poison concept on this profile: a panicking observer task would
-    // abort the whole executor under `panic = "abort"` (MCU default),
-    // so the only observable lock-failure mode is the runtime never
-    // resuming — recovery is not meaningful.
+    // Closure-scoped access, as `L` holds the value (`crate::sync::LockKind`). No poison concept
+    // on this profile: a panicking observer task would abort the whole executor under
+    // `panic = "abort"` (MCU default), so the only observable lock-failure mode is the runtime
+    // never resuming, and recovery is not meaningful.
     fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
     where
         T: Send + 'static,
     {
-        crate::sync::with(mutex, f)
+        L::with(mutex, f)
     }
 
     // The non-waiting twin. On a host (`host-lock`) a held value answers `None`, as the tokio
     // runtime's lock does, so a sender that may not wait behind another (a droppable message
-    // behind a blocking one waiting for its link's room) is told so; under a critical section
-    // there is never another holder, and `f` runs.
+    // behind a blocking one waiting for its link's room) is told so; under a critical section or
+    // an owner's lock (`Confined`) there is never another holder, and `f` runs.
     fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
     where
         T: Send + 'static,
     {
-        crate::sync::try_with(mutex, f)
+        L::try_with(mutex, f)
     }
 
-    // R311di-pre-e — construction-side Mutex/RwLock helpers. MCU profile
-    // wraps `value` in `RefCell<T>` first (interior-mutable storage that
-    // `critical_section::Mutex` exposes via `borrow(cs).borrow_mut()`),
-    // then in `critical_section::Mutex<RefCell<T>>` (the interrupt-
-    // disabling outer lock). RwLock collapses to the same shape per the
-    // single-core IRQ-safe model — see crate::sync module doc.
-    //
-    // Both constructors are infallible — `critical_section::Mutex::new` /
-    // `RefCell::new` are pure value-wrapping with no allocator or syscall
-    // dependency, matching the no_std + alloc constraint of this profile.
+    // Both constructors are infallible: `L` wraps the value with no allocator or syscall
+    // dependency, matching the no_std + alloc constraint of this profile. RwLock is the same
+    // form per the single-core IRQ-safe model (crate::sync module doc).
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,
     {
-        crate::sync::new(value)
+        L::wrap(value)
     }
 
     fn new_rwlock<T>(value: T) -> Self::RwLock<T>
     where
         T: Send + Sync + 'static,
     {
-        crate::sync::new(value)
+        L::wrap(value)
     }
 }
 
@@ -698,6 +711,15 @@ mod compile_time_assertions {
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u64>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u32>>();
         _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u64>>();
+    };
+
+    // The same bounds for a runtime that lends its values under its owner's lock.
+    type ConfinedRuntime =
+        CoopRuntime<NopClock, DefaultDriver, Confined<crate::sync::tests::TestOwner>>;
+    const _: fn() = || {
+        _assert_send_sync::<ConfinedRuntime>();
+        _assert_send_sync::<<ConfinedRuntime as Runtime>::Mutex<u32>>();
+        _assert_send_sync::<<ConfinedRuntime as Runtime>::RwLock<u32>>();
     };
 
     // R258 / R311av — generic-composition smoke fn. Validates
@@ -837,6 +859,29 @@ mod tests {
             <R as Runtime>::try_with_mutex_mut(&*value, |held| *held),
             Some(1)
         );
+    }
+
+    /// A runtime that lends its values under its owner's lock runs each closure on the value and
+    /// never finds a holder to wait for, and its tasks run as the shared runtime's do: it is the
+    /// same runtime state read under another lock type.
+    #[test]
+    fn a_confined_runtime_lends_values_its_owner_holds() {
+        type R = CoopRuntime<NopClock, DefaultDriver, Confined<crate::sync::tests::TestOwner>>;
+        let shared = CoopRuntime::new(NopClock);
+        let rt: R = shared.confined();
+        let value = <R as Runtime>::new_mutex(1u32);
+        <R as Runtime>::with_mutex_mut(&value, |held| *held += 1);
+        assert_eq!(
+            <R as Runtime>::try_with_mutex_mut(&value, |held| *held),
+            Some(2)
+        );
+        let h = rt.spawn(async { 7u8 });
+        assert_eq!(
+            shared.live_task_count(),
+            1,
+            "the task is in the one table both handles read"
+        );
+        assert_eq!(rt.block_on(h).expect("not stalled").expect("spawn ok"), 7);
     }
 
     #[test]
