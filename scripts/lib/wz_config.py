@@ -163,7 +163,9 @@ A policy's domain is the set of its values a stage after the build may select. T
 it as one `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value (`off` leaves the value out, `on` allows
 it), from Kconfig through one `default y` bool per value whose prompt hides while the value is the
 chosen default, so the default is always allowed. A value the build does not state is allowed on
-a target with an operating system and, on a target with none, only when it is the default;
+a target with an operating system in a build where a stage after it selects a policy (a door,
+a document; `wz-session-core`'s `policy-selection` feature), and otherwise only when it is the
+default: a value no stage can select is code no session reaches.
 `WZ_POLICY_DOMAINS` (`full` or `defaults`) forces either rule, and `--resolve-env` states `on`
 for an allowance a fragment assigns so that a configuration means the same on both. The generated
 module refuses, in a constant, a build whose domain leaves out its default, and so does
@@ -228,6 +230,9 @@ RUST_LIMIT_SNAPSHOTS = ROOT / "crates" / "wz-session-core" / "src" / "limits_gen
 # The hand-written types the generated policy and limit rows name (`Domain`, `Bound`, the words
 # of where a value is bound); `--check` holds the variants of its enums to the declaration's words.
 POLICY_BINDING_RS = ROOT / "crates" / "wz-session-core" / "src" / "policy_binding.rs"
+# The hand-written rule an unstated allowance follows in the build, which `policy_defaults_only`
+# here mirrors and the selftest holds it to.
+POLICY_RS = ROOT / "crates" / "wz-session-core" / "src" / "policy.rs"
 # The JSON Schema of the run-time document: what a stage after the build may decide.
 CONFIG_SCHEMA = ROOT / "deploy" / "wz-config.schema.json"
 RUST_FEATURE_BITS = ROOT / "crates" / "wz-session-core" / "src" / "feature_bits_generated.rs"
@@ -1861,29 +1866,36 @@ def policy_allows_symbol(pol: dict, value: str) -> str:
 # The variable that forces the rule an unstated allowance follows, whatever the target: `full`
 # allows its value, `defaults` keeps the policy's default alone.
 POLICY_DOMAINS_ENV = "WZ_POLICY_DOMAINS"
+# The feature of `wz-session-core` a build has when a stage after it selects a policy (a door, a
+# document, a test); `policy::policy_defaults_only` there reads it beside the target.
+POLICY_SELECTION_FEATURE = "policy-selection"
 
 
-def policy_defaults_only(env: dict[str, str], no_os: bool) -> bool:
+def policy_defaults_only(env: dict[str, str], no_os: bool, selects: bool = True) -> bool:
     """Whether an allowance `env` does not state keeps only the policy's default: what
-    `WZ_POLICY_DOMAINS` states, else whether the build's target has no operating system (`no_os`),
-    as `policy_defaults_only` of the generated module decides it in the build."""
+    `WZ_POLICY_DOMAINS` states, else whether the build's target has no operating system (`no_os`)
+    or nothing in the build selects a policy after it (`not selects`, a build without
+    `POLICY_SELECTION_FEATURE`), as `policy_defaults_only` of `wz-session-core` decides it in
+    the build."""
     text = env.get(POLICY_DOMAINS_ENV)
     if text is None:
-        return no_os
+        return no_os or not selects
     if text not in ("full", "defaults"):
         raise ValueError(f"{POLICY_DOMAINS_ENV} is neither `full` nor `defaults` ({text})")
     return text == "defaults"
 
 
-def policy_domain(pol: dict, env: dict[str, str], no_os: bool = False) -> list[str]:
+def policy_domain(pol: dict, env: dict[str, str], no_os: bool = False,
+                  selects: bool = True) -> list[str]:
     """The values of `pol` a build whose environment states `env` allows, in the declaration's
     order: one whose `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` is `on` is allowed and `off` leaves it out.
     One it does not state is allowed, except where `policy_defaults_only` holds (a target with no
-    operating system, `no_os`, or `WZ_POLICY_DOMAINS=defaults`): then only the default is. The
+    operating system, `no_os`, a build where nothing selects a policy, `not selects`, or
+    `WZ_POLICY_DOMAINS=defaults`): then only the default is. The
     build's default (its `WZ_POLICY_<NAME>`, else upstream's) must be one of them; a domain
     without it is refused here, as the generated module's constant refuses it in the build."""
     default = env.get(pol["kconfig"], pol["default"])
-    defaults_only = policy_defaults_only(env, no_os)
+    defaults_only = policy_defaults_only(env, no_os, selects)
     allowed: list[str] = []
     for value in policy_values(pol):
         name = policy_allows_symbol(pol, value)
@@ -3468,7 +3480,8 @@ def policy_domain_kconfig(pol: dict) -> list[str]:
                 "\tdefault y",
                 "\thelp",
                 f"\t  Whether `{value}` stays selectable after the build; the chosen default always does.",
-                "\t  A target with no operating system keeps only the default unless this is set here.",
+                "\t  A target with no operating system, or a build where nothing selects a policy after it,",
+                "\t  keeps only the default unless this is set here.",
                 ""]
     return out
 
@@ -3599,8 +3612,9 @@ def emit_rust_policies(decl: dict) -> str:
         # A word the build states and a policy does not take is `None`; the constant assertion
         # refuses the build, and the value it would have had is never read.
         out += [f"/// What `{POLICY_DOMAINS_ENV}` states: whether an allowance the build does not state keeps",
-                "/// only the build default, else whether the target has no operating system; `None` for a",
-                "/// word that is neither `full` nor `defaults`.",
+                "/// only the build default, else whether the target has no operating system or nothing in",
+                f"/// the build selects a policy after it (no `{POLICY_SELECTION_FEATURE}`); `None` for a word",
+                "/// that is neither `full` nor `defaults`.",
                 f'const STATED_DOMAINS: Option<bool> = policy_defaults_only(option_env!("{POLICY_DOMAINS_ENV}"));',
                 "",
                 "/// Whether an allowance the build does not state keeps only the build default.",
@@ -4499,8 +4513,9 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
     followed by `WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off` for every value the configuration leaves out
     of its domain and `=on` for every other value a fragment assigns its allowance, so a
     configuration that narrows nothing states no allowance. An assigned `on` is what keeps a value
-    on a target with no operating system, where an unstated allowance keeps the default alone
-    (`policy_defaults_only`); the default's own allowance has no prompt and is never assigned. A
+    on a target with no operating system, or in a build where nothing selects a policy, where an
+    unstated allowance keeps the default alone (`policy_defaults_only`); the default's own
+    allowance has no prompt and is never assigned. A
     domain without the policy's value is refused, as the build would refuse it on either target."""
     out: list[str] = []
     for pol in decl["policies"]:
@@ -6149,6 +6164,29 @@ def cmd_selftest() -> int:
            policy_domain(wmode, {"WZ_POLICY_DOMAINS": "full"}, no_os=True) == ["os-default", "on", "off"]
            and policy_domain(wmode, {"WZ_POLICY_DOMAINS": "defaults"}) == ["os-default"]
            and _refuses_domain(wmode, {"WZ_POLICY_DOMAINS": "all"}))
+    expect("a build where nothing selects a policy keeps the default alone where nothing is stated",
+           policy_domain(weager, {}, selects=False) == ["off"]
+           and policy_domain(wmode, {}, selects=False) == ["os-default"]
+           and policy_domain(wmode, {}, no_os=True, selects=False) == ["os-default"]
+           and policy_domain(weager, {"WZ_POLICY_EAGER_FLUSH": "on"}, selects=False) == ["on"])
+    expect("a stated allowance and WZ_POLICY_DOMAINS win over the rule of a build that selects nothing",
+           policy_domain(wmode, {"WZ_POLICY_WIRE_MODE_ALLOWS_OFF": "on"}, selects=False)
+           == ["os-default", "off"]
+           and policy_domain(wmode, {"WZ_POLICY_DOMAINS": "full"}, selects=False)
+           == ["os-default", "on", "off"])
+    policy_rs = POLICY_RS.read_text(encoding="utf-8")
+    expect("the build decides the unstated rule from its target and from the feature of a door",
+           'cfg!(target_os = "none")' in policy_rs
+           and f'cfg!(feature = "{POLICY_SELECTION_FEATURE}")' in policy_rs
+           and "    no_os || !selects\n" in policy_rs)
+    expect("the generated rule and the Kconfig help name the build that selects nothing",
+           f"(no `{POLICY_SELECTION_FEATURE}`)" in rpolicies
+           and "or a build where nothing selects a policy after it," in kpolicies)
+    pico_doors = re.search(r"^config-policy = \[(.*)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
+                           re.MULTILINE)
+    expect("the pico config doors keep the domains wide, and a pico build without them does not",
+           pico_doors is not None
+           and f'"wz-session-core/{POLICY_SELECTION_FEATURE}"' in pico_doors.group(1))
     expect("each value of a policy is an allowance: default y, its prompt hidden while it is the default",
            "config WZ_POLICY_EAGER_FLUSH_ALLOWS_OFF\n"
            "\tbool \"eager-flush allows off\" if WZ_POLICY_EAGER_FLUSH\n\tdefault y\n\thelp\n" in kpolicies
