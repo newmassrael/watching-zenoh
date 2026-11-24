@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_chunk_intersects.scxml:17 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -33,16 +33,16 @@ pub fn keyexpr_chunk_intersects(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_
     if keyexpr_range_equal::keyexpr_range_equal(a, a_start, a_end, b, b_start, b_end) {
         return true;
     }
-    if a[(a_start) as usize] == 64 || b[(b_start) as usize] == 64 {
+    if sce_forge_runtime::algorithm::proven::at(&a, a_start) == 64 || sce_forge_runtime::algorithm::proven::at(&b, b_start) == 64 {
         return false;
     }
     if wild_single {
-        let a_next: u32 = a_start + 1;
-        let b_next: u32 = b_start + 1;
-        if a[(a_start) as usize] == 42 && a_next == a_end {
+        let a_next: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(a_start, 1);
+        let b_next: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(b_start, 1);
+        if sce_forge_runtime::algorithm::proven::at(&a, a_start) == 42 && a_next == a_end {
             return true;
         }
-        if b[(b_start) as usize] == 42 && b_next == b_end {
+        if sce_forge_runtime::algorithm::proven::at(&b, b_start) == 42 && b_next == b_end {
             return true;
         }
     }
@@ -65,16 +65,16 @@ pub fn keyexpr_chunk_intersects(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_
     let mut a_seen: bool = false;
     let mut ai: u32 = a_start;
     while ai < a_end {
-        let ai1: u32 = ai + 1;
+        let ai1: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(ai, 1);
         let mut a_step: u32 = ai1;
         if ai1 < a_end {
-            if a[(ai) as usize] == 36 && a[(ai1) as usize] == 42 {
+            if sce_forge_runtime::algorithm::proven::at(&a, ai) == 36 && sce_forge_runtime::algorithm::proven::at(&a, ai1) == 42 {
                 if !a_seen {
                     a_lead_end = ai;
                     a_seen = true;
                 }
-                a_trail = ai1 + 1;
-                a_step = ai1 + 1;
+                a_trail = sce_forge_runtime::algorithm::proven::add::<u32>(ai1, 1);
+                a_step = sce_forge_runtime::algorithm::proven::add::<u32>(ai1, 1);
             }
         }
         ai = a_step;
@@ -84,16 +84,16 @@ pub fn keyexpr_chunk_intersects(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_
     let mut b_seen: bool = false;
     let mut bi: u32 = b_start;
     while bi < b_end {
-        let bi1: u32 = bi + 1;
+        let bi1: u32 = sce_forge_runtime::algorithm::proven::add::<u32>(bi, 1);
         let mut b_step: u32 = bi1;
         if bi1 < b_end {
-            if b[(bi) as usize] == 36 && b[(bi1) as usize] == 42 {
+            if sce_forge_runtime::algorithm::proven::at(&b, bi) == 36 && sce_forge_runtime::algorithm::proven::at(&b, bi1) == 42 {
                 if !b_seen {
                     b_lead_end = bi;
                     b_seen = true;
                 }
-                b_trail = bi1 + 1;
-                b_step = bi1 + 1;
+                b_trail = sce_forge_runtime::algorithm::proven::add::<u32>(bi1, 1);
+                b_step = sce_forge_runtime::algorithm::proven::add::<u32>(bi1, 1);
             }
         }
         bi = b_step;
@@ -104,25 +104,25 @@ pub fn keyexpr_chunk_intersects(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_
         if la >= a_end || lb >= b_end {
             return false;
         }
-        if a[(la) as usize] != b[(lb) as usize] {
+        if sce_forge_runtime::algorithm::proven::at(&a, la) != sce_forge_runtime::algorithm::proven::at(&b, lb) {
             return false;
         }
-        la = la + 1;
-        lb = lb + 1;
+        la = sce_forge_runtime::algorithm::proven::add::<u32>(la, 1);
+        lb = sce_forge_runtime::algorithm::proven::add::<u32>(lb, 1);
     }
     let mut ts_a: u32 = a_trail;
     while ts_a < a_end {
         if keyexpr_range_equal::keyexpr_range_equal(a, ts_a, a_end, b, b_trail, b_end) {
             return true;
         }
-        ts_a = ts_a + 1;
+        ts_a = sce_forge_runtime::algorithm::proven::add::<u32>(ts_a, 1);
     }
     let mut ts_b: u32 = b_trail;
     while ts_b < b_end {
         if keyexpr_range_equal::keyexpr_range_equal(b, ts_b, b_end, a, a_trail, a_end) {
             return true;
         }
-        ts_b = ts_b + 1;
+        ts_b = sce_forge_runtime::algorithm::proven::add::<u32>(ts_b, 1);
     }
     return a_trail >= a_end || b_trail >= b_end;
 }

@@ -1,7 +1,7 @@
 // SCE-MAP: crc32:49 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -22,7 +22,7 @@ pub fn crc32(data: &[u8]) -> u32 {
             } else {
                 crc = crc >> 1;
             }
-            i = i + 1;
+            i = sce_forge_runtime::algorithm::proven::add::<u8>(i, 1);
         }
     }
     return crc ^ 0xFFFFFFFF;

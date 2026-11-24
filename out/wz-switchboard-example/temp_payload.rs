@@ -152,7 +152,7 @@ impl<S: TempPayloadStorage> TempPayloadIn<S> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let celsius_centi = {
-            let raw = cursor.peek_slice(2)?;
+            let raw = cursor.peek_array::<2>()?;
             let _v = ((raw[0] as u16) << 8) | raw[1] as u16;
             cursor.advance(2)?;
             _v
