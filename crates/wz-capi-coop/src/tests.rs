@@ -1391,6 +1391,47 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     );
 }
 
+/// The samples of one batch are handed in the read that hands the first of them, in a build of one
+/// thread as in one of threads: a round of one thread takes one record at a time, and the read
+/// steps on while the link still holds the rest of the batch it read, which the round's gate tells
+/// the read (`holds_input`). Turned red by a read that ends after the first record while the link
+/// holds the rest.
+#[test]
+fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
+    const SAMPLES: u8 = 3;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = got.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            }),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushBatch("demo/batch", SAMPLES));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while got.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "timed out waiting for the batch");
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
+    assert_eq!(
+        *got.lock().unwrap(),
+        sent,
+        "the whole batch, in order, by the read that handed its first sample"
+    );
+}
+
 /// A peer's sample that reaches three subscribers is handed to each of them once, in the same order
 /// for every sample, each sample after the one before it, with the session's lock let go: one
 /// callback steps the session and publishes from inside itself, and the router receives what it

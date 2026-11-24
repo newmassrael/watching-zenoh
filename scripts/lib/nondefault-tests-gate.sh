@@ -689,6 +689,9 @@ transport-link-unixpipe,transport-link-ws|"
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated.
     "wz-capi-coop|hook|-default,std,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
+    # round with the links held, which the watch's tests prove only where they run in it.
+    "wz-capi-coop|hook|-default,std,liveliness,query,queryable,remote-declaration-watch|"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).
