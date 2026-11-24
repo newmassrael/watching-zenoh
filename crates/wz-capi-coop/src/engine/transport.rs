@@ -19,6 +19,7 @@ impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Fac
     type Links = L;
     type Session = LinkSession<C>;
     type Face = Self;
+    type Places = wz_runtime_coop::faces::ManyFaces<Self>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
 }

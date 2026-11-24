@@ -43,8 +43,8 @@ use crate::face_life::{FaceEffect, FaceLife, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FaceRead, FaceRecord, IdleWait, Link,
-    LinkSupervisor, Wire,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
+    IdleWait, Link, LinkSupervisor, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -85,6 +85,9 @@ pub trait TransportFaces {
         Pump = <Self::Links as SessionLinks>::Pump,
         Dial = <Self::Links as SessionLinks>::Dial,
     >;
+    /// The table the engine keeps its faces in by their places: one face alone for a session that
+    /// only dials, a place for each face for one that takes faces beside it.
+    type Places: FacePlaces<Self::Face>;
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;
@@ -112,7 +115,7 @@ pub struct TransportState<T: TransportFaces> {
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
-    pub links: LinkSupervisor<T::Links, T::Face>,
+    pub links: LinkSupervisor<T::Links, T::Face, T::Places>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
     /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
     /// copies went with the open.
