@@ -166,8 +166,8 @@ where
         now_ms: u64,
         on_event: &mut dyn EventSink,
     ) {
-        // The observer type the reassembling dispatch's hand-off reports through too, so the two
-        // reach one instance of the report.
+        // The observer type the reassembling dispatch reports a compressed batch through too, so
+        // the two reach one instance of the report.
         let forward: &mut dyn FnMut(IterationEvent<'_, '_>) =
             &mut |event: IterationEvent<'_, '_>| on_event.event(event);
         crate::drive::report_outcome_in_place(outcome, self, actions, now_ms, forward);
