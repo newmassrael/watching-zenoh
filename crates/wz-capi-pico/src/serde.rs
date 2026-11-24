@@ -645,21 +645,10 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_slice(
     deserializer: *mut ze_deserializer_t,
     val: *mut z_owned_slice_t,
 ) -> ZResult {
-    guarded(|| {
-        if val.is_null() {
-            return Z_ERR_NULL;
-        }
-        match length_prefixed(deserializer) {
-            Some((body, end)) => {
-                let rc = store_owned_slice(val, ByteBuf::copy_of(body));
-                if rc == Z_OK {
-                    (*deserializer)._reader.advance(end);
-                }
-                rc
-            }
-            None => Z_ERR_GENERIC,
-        }
-    })
+    if val.is_null() {
+        return Z_ERR_NULL;
+    }
+    deserialize_record(deserializer, RecordInto::Slice(val))
 }
 
 /// Read a length-prefixed byte run into an owned string (pico
@@ -669,20 +658,39 @@ pub unsafe extern "C" fn ze_deserializer_deserialize_string(
     deserializer: *mut ze_deserializer_t,
     val: *mut z_owned_string_t,
 ) -> ZResult {
+    if val.is_null() {
+        return Z_ERR_NULL;
+    }
+    deserialize_record(deserializer, RecordInto::String(val))
+}
+
+/// Where a deserialized length-prefixed record is kept: a slice or a string of its own.
+enum RecordInto {
+    Slice(*mut z_owned_slice_t),
+    String(*mut z_owned_string_t),
+}
+
+/// The body both record deserializers share, out of line so neither export holds a copy of it:
+/// the record at the reader's position ([`length_prefixed`]) kept in `into`, and the reader moved
+/// past it only once it is kept. `Z_ERR_GENERIC` for a record that is not whole there, the code
+/// of the store for one there was no room to keep, the reader left where it was on either.
+///
+/// # Safety
+/// `deserializer` must be null or valid; `into`'s destination is valid and writable.
+#[inline(never)]
+unsafe fn deserialize_record(deserializer: *mut ze_deserializer_t, into: RecordInto) -> ZResult {
     guarded(|| {
-        if val.is_null() {
-            return Z_ERR_NULL;
+        let Some((body, end)) = length_prefixed(deserializer) else {
+            return Z_ERR_GENERIC;
+        };
+        let rc = match into {
+            RecordInto::Slice(val) => store_owned_slice(val, ByteBuf::copy_of(body)),
+            RecordInto::String(val) => store_owned_string(val, body),
+        };
+        if rc == Z_OK {
+            (*deserializer)._reader.advance(end);
         }
-        match length_prefixed(deserializer) {
-            Some((body, end)) => {
-                let rc = store_owned_string(val, body);
-                if rc == Z_OK {
-                    (*deserializer)._reader.advance(end);
-                }
-                rc
-            }
-            None => Z_ERR_GENERIC,
-        }
+        rc
     })
 }
 
@@ -1252,6 +1260,55 @@ mod tests {
                 "a short record must be an error"
             );
             assert_eq!(d._reader.pos, before, "the reader must not have advanced");
+        }
+    }
+
+    /// The record deserializers read one record through one body: a slice and a string read the
+    /// same bytes and move the reader past them alike, a null destination is `Z_ERR_NULL` with the
+    /// reader left, and so is a null deserializer's `Z_ERR_GENERIC`. Turned red by a reader moved
+    /// before the record is kept, or by a destination the record is not kept in.
+    #[test]
+    fn a_slice_and_a_string_read_a_record_alike() {
+        unsafe {
+            let mut bytes = core::mem::zeroed();
+            store_owned_bytes(&mut bytes, ByteBuf::copy_of(&[2u8, b'h', b'i', 1, b'!']));
+            let mut d = ze_deserializer_from_bytes(crate::bytes::z_bytes_loan(&bytes));
+            assert_eq!(
+                ze_deserializer_deserialize_slice(&mut d, core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                ze_deserializer_deserialize_string(&mut d, core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+            assert_eq!(d._reader.pos, 0, "a refused destination leaves the reader");
+            let mut slice = core::mem::zeroed();
+            assert_eq!(ze_deserializer_deserialize_slice(&mut d, &mut slice), Z_OK);
+            assert_eq!(d._reader.pos, 3);
+            let ls = crate::bytes::z_slice_loan(&slice);
+            assert_eq!(
+                core::slice::from_raw_parts(
+                    crate::bytes::z_slice_data(ls),
+                    crate::bytes::z_slice_len(ls)
+                ),
+                b"hi"
+            );
+            let mut s = core::mem::zeroed();
+            assert_eq!(ze_deserializer_deserialize_string(&mut d, &mut s), Z_OK);
+            assert_eq!(d._reader.pos, 5);
+            let ls = crate::bytes::z_string_loan(&s);
+            assert_eq!(
+                core::slice::from_raw_parts(
+                    crate::bytes::z_string_data(ls) as *const u8,
+                    crate::bytes::z_string_len(ls)
+                ),
+                b"!"
+            );
+            assert!(ze_deserializer_is_done(&d));
+            assert_eq!(
+                ze_deserializer_deserialize_slice(core::ptr::null_mut(), &mut slice),
+                Z_ERR_GENERIC
+            );
         }
     }
 
