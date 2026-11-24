@@ -11,10 +11,10 @@ use wz_runtime_coop::face_life::{FaceRole, Turn};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::FaceRead;
-use wz_runtime_coop::session_drive::PendingDial;
+use wz_runtime_coop::locator_text::parse_locator;
+use wz_runtime_coop::session_drive::{LinkWait, PendingDial};
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
-use wz_session_mcu::dial::parse_locator;
 
 /// The transport's part of [`Core`]: the session's links and what their handshakes and
 /// receives are handed.
@@ -82,9 +82,10 @@ pub(super) enum DialRow<D, P> {
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState<L, C> {
-    /// The dial role's face, which the session holds for its whole life.
-    pub(super) fn dial(&self) -> &Face<C, L> {
-        &self.links.faces()[0]
+    /// The dial role's face, which the session holds for its whole life: the first of the faces,
+    /// placed by the open, so `None` is a session no open made.
+    pub(super) fn dial(&self) -> Option<&Face<C, L>> {
+        self.links.faces().first()
     }
 
     /// The actions of every face whose link is up, which is what the session sends through. A
@@ -360,7 +361,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     /// took a datagram its next step reads: what makes a read's wait none ([`Self::idle_wait`]).
     pub(super) fn holds_input(&self) -> bool {
         #[cfg(feature = "group")]
-        if self.groups.iter().any(GroupFace::took_input) {
+        if self.group_took_input() {
             return true;
         }
         self.links.holds_input()
@@ -369,10 +370,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     /// Whether the dial role's face has what an open waits for: its link is up, or the node it
     /// reached is held by another face (`Link::Held`, with `listen`).
     pub(super) fn dial_settled(&self) -> bool {
-        match self.dial().link {
-            Link::Up(_) => true,
+        match self.dial().map(|face| &face.link) {
+            Some(Link::Up(_)) => true,
             #[cfg(feature = "listen")]
-            Link::Held { .. } => true,
+            Some(Link::Held { .. }) => true,
             _ => false,
         }
     }
@@ -454,6 +455,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     #[inline(always)]
     pub(super) fn dial_row(&self, at: usize) -> Result<DialRow<L::Dial, L::Pump>, OpenError> {
         let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
+        // A dial that answered has handed out all it held (the socket, the link's buffers, the
+        // program's link), and keeps only handles that own nothing, so it is let go of here,
+        // before its link is opened, with nothing to observe: every stack's dial takes those out
+        // as it answers (`Dialled`, `ip_stack::IpDial`, `app_link::AppDial`).
         Ok(match pending.poll() {
             None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
             Some(answer) => DialRow::Answered(answer),
@@ -489,10 +494,63 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
         while let Some(accepted) = self.links.accept_at(*at) {
             match accepted {
                 Accepted::Link(opened, endpoint) => return Some((opened, endpoint)),
-                Accepted::Idle => *at += 1,
+                Accepted::Idle => *at = at.saturating_add(1),
                 Accepted::Broken => {}
             }
         }
         None
+    }
+
+    /// Whether a group took a datagram its next step reads (`group`): it is stepped again at
+    /// once, its task taking one a step.
+    #[cfg(feature = "group")]
+    pub(super) fn group_took_input(&self) -> bool {
+        self.groups.iter().any(GroupFace::took_input)
+    }
+
+    /// When a group's session is next due with nothing arriving, in whole milliseconds of the
+    /// session's clock rounded up (`group`): its beacon, its sweep, what the session pushed onto
+    /// it, its join again.
+    #[cfg(feature = "group")]
+    pub(super) fn groups_due_ms(&self) -> Option<u64> {
+        self.groups
+            .iter()
+            .filter_map(GroupFace::due_us)
+            .min()
+            .map(|due_us| due_us.div_ceil(1_000))
+    }
+
+    /// Whether a group's stack gives no wait for its input, so the group is looked at on its tick
+    /// (`group`).
+    #[cfg(feature = "group")]
+    pub(super) fn group_unwaited(&self) -> bool {
+        self.groups.iter().any(GroupFace::unwaited)
+    }
+
+    /// What a read waits on for at most `most` milliseconds: the input of every link and port, and
+    /// each group's after them, since a wait over several is made by the first and a link's names a
+    /// group's socket to the platform beside its own; `beside` ends it as well. `now_us` reads the
+    /// session's clock, once, and only for a face with a time to be looked at again.
+    pub(super) fn idle_wait(
+        &mut self,
+        most: u32,
+        now_us: &mut dyn FnMut() -> u64,
+        beside: Option<LinkWait>,
+    ) -> IdleWait {
+        #[cfg(feature = "group")]
+        let others = self.groups.iter().filter_map(GroupFace::input);
+        #[cfg(not(feature = "group"))]
+        let others = core::iter::empty();
+        self.links.idle_wait(most, now_us, others, beside)
+    }
+
+    /// Ask each group's session to stop, so that its next step tells the group it leaves and lets
+    /// the group's link go; whether the session joined any (`group`).
+    #[cfg(feature = "group")]
+    pub(super) fn stop_groups(&self) -> bool {
+        for group in &self.groups {
+            group.stop();
+        }
+        !self.groups.is_empty()
     }
 }

@@ -128,6 +128,8 @@ use wz_session_core::locality::Locality;
 use wz_session_core::locator_directory::LocatorText;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
@@ -152,8 +154,6 @@ use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
-#[cfg(feature = "listen")]
-use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::McuActions;
 #[cfg(feature = "queryable")]
 use {
@@ -493,7 +493,7 @@ impl EndpointRefusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The endpoint does not parse as a locator this build can dial or listen on.
-    Locator(wz_session_mcu::connect_manager::DialRefused),
+    Locator(wz_runtime_coop::locator_text::DialRefused),
     /// The network opened no link, listener or group for it.
     Link(LinkOpenError),
     /// The handshake ended with a close reason.
@@ -982,7 +982,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint.as_ref()) else {
+        let Ok(at) = wz_runtime_coop::locator_text::parse_listen_locator(endpoint.as_ref()) else {
             continue;
         };
         let transport = match at.proto {
@@ -3530,7 +3530,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // datagram is stepped again at once, its task taking one a step, so its own time is not
         // asked.
         #[cfg(feature = "group")]
-        let group_took = self.transport.groups.iter().any(GroupFace::took_input);
+        let group_took = self.transport.group_took_input();
         let due_ms = [
             #[cfg(feature = "query")]
             self.next_get_deadline_ms(),
@@ -3546,12 +3546,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if group_took {
                 None
             } else {
-                self.transport
-                    .groups
-                    .iter()
-                    .filter_map(GroupFace::due_us)
-                    .min()
-                    .map(|due_us| due_us.div_ceil(1_000))
+                self.transport.groups_due_ms()
             },
         ]
         .into_iter()
@@ -3572,7 +3567,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         let most = if group_took {
             0
-        } else if self.transport.groups.iter().any(GroupFace::unwaited) {
+        } else if self.transport.group_unwaited() {
             most.min(group::GROUP_TICK_MS)
         } else {
             most
@@ -3593,10 +3588,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 clock.now_us()
             })
         };
-        #[cfg(feature = "group")]
-        let others = self.transport.groups.iter().filter_map(GroupFace::input);
-        #[cfg(not(feature = "group"))]
-        let others = core::iter::empty();
         // The bounds above are the clock's time read as the wall's, which a clock the program
         // moves is not: its word that the time moved on ends the wait as well.
         #[cfg(feature = "time-base")]
@@ -3607,9 +3598,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "time-base"))]
         let beside = None;
-        self.transport
-            .links
-            .idle_wait(most, &mut now_us, others, beside)
+        self.transport.idle_wait(most, &mut now_us, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
@@ -3636,10 +3625,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
         // leaves and lets the group's link go; its tables go with it.
         #[cfg(feature = "group")]
-        if !self.transport.groups.is_empty() {
-            for group in &self.transport.groups {
-                group.stop();
-            }
+        if self.transport.stop_groups() {
             self.run_tasks();
             let mut registry = self.session.registry.borrow_mut();
             for group in self.transport.groups.drain(..) {
@@ -4244,8 +4230,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// its readers are: the tests module is a host's (`all(test, feature = "std")`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn policy_in_force(&self) -> Option<(Option<ReplayPacing>, SessionPolicy)> {
-        self.live()
-            .map(|core| (core.0.transport.dial().replay.pacing(), core.0.policy))
+        self.live().map(|core| {
+            let dial = core.0.transport.dial();
+            (dial.and_then(|dial| dial.replay.pacing()), core.0.policy)
+        })
     }
 
     /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a

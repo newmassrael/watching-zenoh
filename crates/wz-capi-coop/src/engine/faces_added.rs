@@ -72,7 +72,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// in the table; one past them, which the callers refuse before they make it, is let go of
     /// with its tables.
     fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Dial>) {
-        let pacing = self.transport.dial().replay.pacing();
+        let pacing = self.transport.dial().and_then(|dial| dial.replay.pacing());
         let face = Face {
             id,
             link,

@@ -238,6 +238,11 @@ pub mod session_runtime;
 #[cfg(feature = "session-unicast")]
 pub mod session_drive;
 
+// An endpoint's text read into the locator a link opens towards, for every engine over this
+// runtime that dials or listens. Documented in its own `//!`.
+#[cfg(feature = "session-unicast")]
+pub mod locator_text;
+
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
 /// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
 /// `input_wait` and `room_wait` methods of the socket traits), and nothing elsewhere.

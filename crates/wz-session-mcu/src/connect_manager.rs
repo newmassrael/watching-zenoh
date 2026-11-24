@@ -122,31 +122,7 @@ impl EndpointSource for StaticEndpoints {
     }
 }
 
-/// Why a dial could not even be attempted. Permanent for this endpoint text
-/// in this build, so it is not retried.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DialRefused {
-    /// The endpoint's scheme names a link this build does not carry.
-    Unsupported,
-    /// The address could not be read as one this link can reach.
-    BadAddress,
-    /// R2841 — one locator of a `{ strategy, locators }` group of several:
-    /// one session over several links, which this node's session cannot
-    /// hold. Decided by the manager from the list, before any dial.
-    MultiLinkGroup,
-}
-
-impl DialRefused {
-    /// R2846 — the reason in the word the node reports it with, at
-    /// `status/connect`.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            DialRefused::Unsupported => "unsupported",
-            DialRefused::BadAddress => "bad_address",
-            DialRefused::MultiLinkGroup => "multi_link_group",
-        }
-    }
-}
+pub use wz_runtime_coop::locator_text::DialRefused;
 
 /// Why a dial did not start a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
