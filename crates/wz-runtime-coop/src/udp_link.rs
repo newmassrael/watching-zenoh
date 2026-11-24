@@ -833,6 +833,10 @@ pub struct UdpPort<S: DatagramSocket> {
     fresh: RefCell<VecDeque<SocketAddr>>,
     /// What one datagram is read into before it is sorted.
     buf: RefCell<Vec<u8>>,
+    /// Buffers a peer's link gave back once it read the datagram held in them, which the next
+    /// datagram sorted for a peer is held in: a port whose peers keep sending holds each datagram
+    /// in a buffer it already has, and allocates only while its backlog grows past any it held.
+    spare: RefCell<Vec<Vec<u8>>>,
     strays: Cell<u32>,
     overflows: Cell<u32>,
 }
@@ -854,6 +858,7 @@ impl<S: DatagramSocket> UdpPort<S> {
             peers: RefCell::new(Vec::new()),
             fresh: RefCell::new(VecDeque::new()),
             buf: RefCell::new(vec![0u8; rx_capacity]),
+            spare: RefCell::new(Vec::new()),
             strays: Cell::new(0),
             overflows: Cell::new(0),
         }
@@ -912,7 +917,7 @@ impl<S: DatagramSocket> UdpPort<S> {
         let mut peers = self.peers.borrow_mut();
         if let Some(inbox) = peers.iter_mut().find(|inbox| inbox.peer == from) {
             if inbox.datagrams.len() < PORT_PEER_BACKLOG {
-                inbox.datagrams.push_back(datagram.to_vec());
+                inbox.datagrams.push_back(self.held(datagram));
             } else {
                 self.overflows.set(self.overflows.get().saturating_add(1));
             }
@@ -923,12 +928,30 @@ impl<S: DatagramSocket> UdpPort<S> {
             return;
         }
         let mut datagrams = VecDeque::new();
-        datagrams.push_back(datagram.to_vec());
+        datagrams.push_back(self.held(datagram));
         peers.push(PeerInbox {
             peer: from,
             datagrams,
         });
         self.fresh.borrow_mut().push_back(from);
+    }
+
+    /// `datagram` in a buffer of its own until its link reads it: one a link gave back when there
+    /// is one, else a new one.
+    fn held(&self, datagram: &[u8]) -> Vec<u8> {
+        let mut held = self.spare.borrow_mut().pop().unwrap_or_default();
+        held.clear();
+        held.extend_from_slice(datagram);
+        held
+    }
+
+    /// `held`, read by its link, kept for the next datagram sorted; past as many as one peer's
+    /// backlog it goes, so a burst that is over leaves no more buffers than a backlog holds.
+    fn give_back(&self, held: Vec<u8>) {
+        let mut spare = self.spare.borrow_mut();
+        if spare.len() < PORT_PEER_BACKLOG {
+            spare.push(held);
+        }
     }
 
     /// The next datagram taken for `peer`.
@@ -1039,6 +1062,7 @@ impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
             if let (Some(to), Some(from)) = (buf.get_mut(..len), datagram.get(..len)) {
                 to.copy_from_slice(from);
             }
+            self.port.give_back(datagram);
             return Ok(Some((len, self.peer)));
         }
         pumped.map(|()| None).map_err(PortPeerError::Socket)
@@ -1177,6 +1201,47 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::vec::Vec;
+
+    /// A datagram sorted for a peer's link is held in a buffer the port keeps once the link read
+    /// it, so a peer that keeps sending datagrams of one length is held in the same buffer each
+    /// time and costs no allocation after its first. The datagram the listener's look takes off
+    /// the socket waits there for the link, as it did before.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn a_port_holds_each_datagram_in_a_buffer_a_read_gave_back() {
+        let port = Rc::new(UdpPort::new(Loop::default(), 64));
+        queued(&port.socket, SYN);
+        let peer = UdpPort::take_fresh(&port)
+            .expect("the socket reads")
+            .expect("the share of the peer whose InitSyn came");
+        let mut buf = [0u8; 64];
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+        assert_eq!(
+            port.spare.borrow().len(),
+            1,
+            "the read gave its buffer back"
+        );
+        let mut held = None;
+        for round in 0..3 {
+            queued(&port.socket, b"put");
+            // The listener's look takes the datagram off the socket and holds it for the link.
+            assert!(UdpPort::take_fresh(&port)
+                .expect("the socket reads")
+                .is_none());
+            assert!(
+                port.spare.borrow().is_empty(),
+                "round {round}: the datagram is held in the spare buffer"
+            );
+            assert_eq!(peer.try_recv(&mut buf), Ok(Some((3, PEER))));
+            assert_eq!(&buf[..3], b"put");
+            let at = port.spare.borrow()[0].as_ptr();
+            assert_eq!(
+                *held.get_or_insert(at),
+                at,
+                "round {round}: the same buffer"
+            );
+        }
+    }
 
     /// A datagram is the bytes the socket reported, cut to the buffer it was read into.
     #[test]

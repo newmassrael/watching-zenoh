@@ -3035,8 +3035,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
     /// gave no entropy.
     ///
-    /// What became of the link is the driver's to say (`LinkSupervisor::advance`), and the link
-    /// stays in its face while what it means for the session is done here.
+    /// What became of the link, and what the session does about it, is the face's value to say
+    /// (`wz_runtime_coop::face_life`); the link stays in its face while that is done here.
     fn poll_face(
         &mut self,
         at: usize,
@@ -3072,7 +3072,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         } else {
             FaceRole::Taken
         };
-        let (phase, signals, answer) = self.read_face(at, id, now_us);
+        let (phase, signals, answer) = self.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         // A dial that is over is let go of now, with what it held for its link (a socket, the
@@ -3085,14 +3085,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.carry_out(at, &life, effect, answer, redial_ms, now_us)
     }
 
-    /// What the face at `at`, numbered `id`, holds read at `now_us`: where its link stands,
-    /// what it did since (`Signals`), and the answer of a dial under way, which is asked here and
-    /// kept for the link it made.
+    /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
+    /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
+    /// made.
     fn read_face(
         &mut self,
         at: usize,
         id: FaceId,
-        now_us: u64,
     ) -> (
         Phase,
         Signals,
@@ -3136,11 +3135,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
             }
             Some(Link::Waiting { at_us }) => Phase::Waiting { at_us: *at_us },
-            // A node no zid holds is one no face can hold: the face is due at once.
-            Some(Link::Held { zid }) => SessionZid::new(zid)
-                .map_or(Phase::Waiting { at_us: now_us }, |node| Phase::Held {
-                    node,
-                }),
+            Some(Link::Held { zid }) => Phase::Held { node: *zid },
             None => Phase::Waiting { at_us: u64::MAX },
         };
         if let Phase::Held { node } = &phase {
@@ -3296,12 +3291,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // face has the node, where dialling at once would be refused again and the handshake
             // paid each time.
             Next::StandBy { node } => {
-                self.links.put_link(
-                    at,
-                    Link::Held {
-                        zid: node.as_slice().to_vec(),
-                    },
-                );
+                self.links.put_link(at, Link::Held { zid: node });
                 Ok(())
             }
         }
