@@ -208,27 +208,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    // The places below count declarations the session holds in memory, so no sum of them reaches
+    // `usize::MAX`; were one to, it would saturate to a place past the sequence, which has nothing
+    // to send.
+
     /// The place of the first declaration of `kind` in the replay's order.
     fn start_of(&self, kind: Kind) -> usize {
         ORDER
             .iter()
             .take_while(|&&earlier| earlier != kind)
             .map(|&earlier| self.len_of(earlier))
-            .sum()
+            .fold(0, usize::saturating_add)
+    }
+
+    /// The place of the declaration at `rank` of `kind`'s list in the replay's order.
+    fn place(&self, kind: Kind, rank: usize) -> usize {
+        self.start_of(kind).saturating_add(rank)
     }
 
     /// How many declarations the session holds, which is how many a replay owes.
     fn sequence_len(&self) -> usize {
-        ORDER.iter().map(|&kind| self.len_of(kind)).sum()
+        ORDER
+            .iter()
+            .map(|&kind| self.len_of(kind))
+            .fold(0, usize::saturating_add)
     }
 
     /// Tell the peer of the declaration at `place`: whether the link took it.
     fn emit(&self, actions: &McuActions<C>, place: usize) -> bool {
         let mut left = place;
         for &kind in ORDER {
-            let len = self.len_of(kind);
-            if left >= len {
-                left -= len;
+            if let Some(rest) = left.checked_sub(self.len_of(kind)) {
+                left = rest;
                 continue;
             }
             return match kind {
@@ -303,9 +314,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_ms: u64,
     ) -> TurnEnd {
         let owed = self.sequence_len();
-        self.transport.links.faces_mut()[at]
-            .replay
-            .begin(owed, now_ms);
+        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+            face.replay.begin(owed, now_ms);
+        }
         self.replay_turn(at, actions, now_ms)
     }
 
@@ -319,7 +330,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         actions: &McuActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
-        let replay = &self.transport.links.faces()[at].replay;
+        // A place with no face has no replay to send.
+        let Some(Face { replay, .. }) = self.transport.links.faces().get(at) else {
+            return TurnEnd::Kept;
+        };
         if replay.cursor.finished() || now_ms < replay.next_turn_ms {
             return TurnEnd::Kept;
         }
@@ -335,9 +349,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             told = true;
         }
-        self.transport.links.faces_mut()[at]
-            .replay
-            .settle(cursor, told, refused, now_ms)
+        self.transport
+            .links
+            .faces_mut()
+            .get_mut(at)
+            .map_or(TurnEnd::Kept, |face| {
+                face.replay.settle(cursor, told, refused, now_ms)
+            })
     }
 
     /// A declaration takes `place` in the replay's order: tell the peer of each
@@ -374,7 +392,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(subscribers.len());
-        self.start_of(Kind::Subscriber) + rank
+        self.place(Kind::Subscriber, rank)
     }
 
     /// Tell each face that is up of the subscriber `handle` names, as [`Self::announce`] tells a
@@ -412,7 +430,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(interests.len());
-        self.start_of(Kind::Interest) + rank
+        self.place(Kind::Interest, rank)
     }
 
     /// Ask each face that is up what the Interest `handle` names asks, as
@@ -448,7 +466,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(queryables.len());
-        self.start_of(Kind::Queryable) + rank
+        self.place(Kind::Queryable, rank)
     }
 
     /// Tell each face that is up of the queryable `handle` names, as [`Self::announce`] tells a
@@ -500,7 +518,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(keyexprs.len());
-        self.start_of(Kind::Keyexpr) + rank
+        self.place(Kind::Keyexpr, rank)
     }
 
     /// The place in the replay's order of the token `handle` names, the one past the last for a
@@ -513,7 +531,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(tokens.len());
-        self.start_of(Kind::Token) + rank
+        self.place(Kind::Token, rank)
     }
 
     /// Tell each face that is up of the token `handle` names, as [`Self::announce`] tells a
@@ -551,7 +569,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .iter()
             .position(|(held, _)| held == handle)
             .unwrap_or(subscribers.len());
-        self.start_of(Kind::LiveSub) + rank
+        self.place(Kind::LiveSub, rank)
     }
 
     /// Ask each face that is up for what the liveliness subscriber `handle` names asks, as
@@ -584,7 +602,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// ([`Self::retract_at`]). `index` is where it lay, and the kinds before it in the replay's
     /// order are as they were.
     pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn Fn(&McuActions<C>)) {
-        let place = self.start_of(kind) + index;
+        let place = self.place(kind, index);
         self.retract_at(place, send);
     }
 
