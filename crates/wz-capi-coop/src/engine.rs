@@ -1777,13 +1777,12 @@ fn sleep_ms(ms: u32) {
 }
 
 /// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// the pattern the subscriber matches and the declaration its key is named by, which it holds, and
-/// this everything else the session knows of it, its callback among it. The subscriber is that one
+/// its entity id, the pattern the subscriber matches and the declaration its key is named by, which
+/// it holds, and this everything else the session knows of it, its callback among it. The subscriber is that one
 /// row (`docs/c-abi-architecture.md`, P1), and so is its callback's life (P11): a call is begun on
 /// the row's latch with the session held and made after it, and an undeclared row is let go of by
 /// whoever sees its last call end.
 pub(crate) struct SubscriberRow {
-    id: SubId,
     retraction: Option<RetractionKey>,
     /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
     /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
@@ -1815,19 +1814,17 @@ impl RowHolds for SubscriberRow {
 }
 
 impl SubscriberRow {
-    /// Subscriber `id`, retracted as `retraction` names it, keeping `holds`, handing what it
-    /// hears to `sink`, the timestamp shown when `expose`.
+    /// A subscriber retracted as `retraction` names it, keeping `holds`, handing what it hears
+    /// to `sink`, the timestamp shown when `expose`.
     // Out of line: measured smaller apart from the declaration that builds the row.
     #[inline(never)]
     pub(crate) fn new(
-        id: SubId,
         retraction: Option<RetractionKey>,
         holds: WireHolds,
         sink: SubscriberSink,
         expose: bool,
     ) -> Self {
         Self {
-            id,
             retraction,
             holds,
             sink,
@@ -1849,14 +1846,15 @@ impl SubscriberRow {
         }
     }
 
-    /// Declare this subscriber, on `key`, over `actions`: whether the link took it.
+    /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
+    /// whether the link took it.
     fn declare<C: ClockSource + 'static>(
-        &self,
+        id: SubId,
         key: NamedKey<'_>,
         actions: &McuActions<C>,
     ) -> bool {
         actions
-            .send_declare_subscriber(self.id, key_on_link(actions, key))
+            .send_declare_subscriber(id, key_on_link(actions, key))
             .is_ok()
     }
 
@@ -6212,7 +6210,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let named = holds.take_named();
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(id, retraction, holds, sink, exposed_by(&core.policy));
+        let row = SubscriberRow::new(retraction, holds, sink, exposed_by(&core.policy));
         let declared = tables_mut(&core.session.registry).declare_subscriber(
             keyexpr,
             allowed_origin,
@@ -6744,7 +6742,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // else the key held.
         let mut holds = wire.into_holds();
         let named = holds.take_named();
-        let row = QueryableRow::new(id, retraction, holds, sink);
+        let row = QueryableRow::new(retraction, holds, sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
