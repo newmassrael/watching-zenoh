@@ -464,8 +464,19 @@ pub struct KeyForm {
     /// of the key. One that names no live declaration, or one the key does not start with, is not
     /// used: the key goes on the wire whole.
     pub prefix: Option<KeyexprHandle>,
+    /// The declaration of the entity's own key, when the declaring ABI states one besides the one
+    /// its key is named by: the row holds it while it stands, as zenoh-pico's subscription keeps
+    /// its own declared key. One that names no live declaration is not held.
+    pub own: Option<KeyexprHandle>,
     /// What the retraction names beside the id.
     pub retraction: Retraction,
+}
+
+impl KeyForm {
+    /// This form, its row holding `own`, the declaration of the entity's own key, as well.
+    pub fn owning(self, own: Option<KeyexprHandle>) -> Self {
+        Self { own, ..self }
+    }
 }
 
 /// What an entity's retraction names beside its id: the one record of it, read off the entity's
@@ -489,6 +500,10 @@ pub enum Retraction {
 pub struct EntityKey<Key> {
     key: Key,
     prefix: Option<KeyexprHandle>,
+    /// The declaration of the entity's own key, which the row holds as it holds `prefix`: the one
+    /// the form states, or else the one a named retraction names, which the entity's retraction
+    /// names after every other holder may have let it go.
+    named: Option<KeyexprHandle>,
     retraction: Retraction,
 }
 
@@ -511,6 +526,17 @@ impl<Key: KeyBacking> EntityKey<Key> {
     /// The key as the row keeps it: a clone is one more holder of it, for a reader past the row.
     pub fn backing(&self) -> &Key {
         &self.key
+    }
+}
+
+impl<Key> EntityKey<Key> {
+    /// The declarations the row holds, each once: the one the key is named by, and the one of the
+    /// entity's own key when that is another.
+    pub fn holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
+        (
+            self.prefix,
+            self.named.filter(|&named| Some(named) != self.prefix),
+        )
     }
 }
 
@@ -1142,9 +1168,12 @@ pub struct Undeclared<T> {
     /// let go of around it, or the row of a kind that has none; `None` while a call of its
     /// callback runs, whose last unpin hands the row back.
     pub taken: Option<T>,
-    /// The key expression declaration the entity held last, retracted with it: its id goes on
-    /// the wire after the entity's retraction.
+    /// The key expression declaration the entity's key was named by, when the entity held it
+    /// last, retracted with it: its id goes on the wire after the entity's retraction.
     pub keyexpr: Option<ExprId>,
+    /// The declaration of its own key ([`KeyForm::own`]), when that was another and the entity
+    /// held it last: retracted as [`Self::keyexpr`] is, after it.
+    pub named: Option<ExprId>,
 }
 
 /// A write filter or a matching listener declared.
@@ -1302,7 +1331,8 @@ fn unkept(why: KeyUnkept) -> RegisterError {
 /// What a declared entity's row says of its declaration.
 trait Entity {
     fn entity_id(&self) -> EntityId;
-    fn key_prefix(&self) -> Option<KeyexprHandle>;
+    /// The declarations the row holds ([`EntityKey::holds`]).
+    fn key_holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>);
     /// Retire what the row calls ([`RowCallback::retire`]): `true` when no call of it runs.
     fn retire(&self) -> bool;
     /// Whether the row, retired, has no call left running ([`RowCallback::drained`]).
@@ -1313,8 +1343,8 @@ impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
-    fn key_prefix(&self) -> Option<KeyexprHandle> {
-        self.key.prefix
+    fn key_holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
+        self.key.holds()
     }
     fn retire(&self) -> bool {
         self.callback.retire()
@@ -1328,8 +1358,8 @@ impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
-    fn key_prefix(&self) -> Option<KeyexprHandle> {
-        self.key.prefix
+    fn key_holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
+        self.key.holds()
     }
     fn retire(&self) -> bool {
         self.callback.retire()
@@ -1343,8 +1373,8 @@ impl<Key> Entity for TokenRow<Key> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
-    fn key_prefix(&self) -> Option<KeyexprHandle> {
-        self.key.prefix
+    fn key_holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
+        self.key.holds()
     }
     fn retire(&self) -> bool {
         true
@@ -1358,8 +1388,8 @@ impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
     }
-    fn key_prefix(&self) -> Option<KeyexprHandle> {
-        self.key.prefix
+    fn key_holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
+        self.key.holds()
     }
     fn retire(&self) -> bool {
         self.callback.retire()
@@ -1386,7 +1416,7 @@ fn release_keyexpr<P: Storage>(
     Some(id)
 }
 
-/// Remove the entity `handle` names from `table`, and its hold of the declaration its key names.
+/// Remove the entity `handle` names from `table`, and its holds of the declarations it names.
 // What the caller drops is taken out of the row here (`hand`), once for every caller, so the
 // whole row is moved no further than this.
 fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
@@ -1396,9 +1426,9 @@ fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
     hand: impl FnOnce(R) -> T,
 ) -> Option<Undeclared<T>> {
     let mut entry = table.entry(handle)?;
-    let (id, prefix, idle) = entry
+    let (id, (prefix, named), idle) = entry
         .get()
-        .map(|row| (row.entity_id(), row.key_prefix(), row.retire()))?;
+        .map(|row| (row.entity_id(), row.key_holds(), row.retire()))?;
     // A row a call of which runs is kept, retired, for the call that ends last to let go of
     // (`release_*`).
     if !(idle || entry.pin()) {
@@ -1406,10 +1436,12 @@ fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
     }
     let removal = entry.remove()?;
     let keyexpr = prefix.and_then(|prefix| release_keyexpr(keyexprs, prefix));
+    let named = named.and_then(|named| release_keyexpr(keyexprs, named));
     Some(Undeclared {
         id,
         taken: removal.taken().map(hand),
         keyexpr,
+        named,
     })
 }
 
@@ -1446,9 +1478,26 @@ impl<P: Storage> Declaring<'_, P> {
                 row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
             })
         });
+        // The declaration of the entity's own key: the one the form states, or else the one a
+        // named retraction names, found by its id once, here, and held by handle from here on.
+        // One no longer declared is not held, and a retraction that named it names the key whole.
+        let stated = form.own.filter(|&own| {
+            self.keyexprs
+                .get(own)
+                .is_some_and(|row| row.holds < u16::MAX)
+        });
+        let named = stated.or_else(|| match form.retraction {
+            Retraction::Named(named) if named.mapping_id != 0 => self
+                .keyexprs
+                .iter()
+                .find(|(_, row)| row.id == named.mapping_id && row.holds < u16::MAX)
+                .map(|(handle, _)| handle),
+            _ => None,
+        });
         Ok(EntityKey {
             key,
             prefix,
+            named,
             retraction: form.retraction,
         })
     }
@@ -1503,10 +1552,11 @@ impl<P: Storage> Declaring<'_, P> {
             Ok(keyed) => keyed,
             Err(why) => return Err(Refused { why, callback }),
         };
-        let prefix = key.prefix;
+        let (prefix, named) = key.holds();
         match table.insert(make(id, key, callback)) {
             Ok(handle) => {
                 self.hold(prefix);
+                self.hold(named);
                 Ok(Declared { handle, id })
             }
             Err(CapacityFull(row)) => Err(Refused {
@@ -1711,7 +1761,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         } else {
             self.keyexpr_by_id(mapping_id)
         };
-        KeyForm { prefix, retraction }
+        KeyForm {
+            prefix,
+            own: None,
+            retraction,
+        }
     }
 
     /// The next key expression id: from 1, past any still declared and any `usable` refuses;
@@ -1780,7 +1834,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 let form = self.wire_of(key);
                 Some(RetractionKey::declared(form.mapping, form.suffix))
             }
-            Retraction::Named(named) => Some(named),
+            // The declaration as the row holds it: its id while it stands, the whole key once it
+            // was retracted whatever held it.
+            Retraction::Named(named) => {
+                let (mapping, rest) = named.names(text(&key.key));
+                Some(match key.named.and_then(|held| self.keyexprs.get(held)) {
+                    Some(row) if mapping == row.id => RetractionKey::declared(row.id, rest),
+                    _ => RetractionKey::literal(),
+                })
+            }
         }
     }
 

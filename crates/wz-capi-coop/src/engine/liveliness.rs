@@ -20,7 +20,7 @@
 
 use core::ptr::NonNull;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
+use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -96,9 +96,9 @@ pub(super) fn retract_token<C: ClockSource + 'static>(
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
 /// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct LivelinessRow {
-    /// What the ABI's key held besides the declaration the tables' row holds (an object of the
-    /// ABI's), let go of with the row, with no lock of the session held.
-    holds: WireHolds,
+    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
+    /// lock of the session held: the declaration the key names is the tables' row's to hold.
+    _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
     sink: LivelinessSink,
@@ -106,17 +106,11 @@ pub(crate) struct LivelinessRow {
     latch: CallLatch,
 }
 
-impl super::RowHolds for LivelinessRow {
-    fn into_holds(self) -> WireHolds {
-        self.holds
-    }
-}
-
 impl LivelinessRow {
-    /// A subscriber keeping `holds`, handing what it hears to `sink`.
-    pub(crate) fn new(holds: WireHolds, sink: LivelinessSink) -> Self {
+    /// A subscriber keeping `anchor`, handing what it hears to `sink`.
+    pub(crate) fn new(anchor: KeyAnchor, sink: LivelinessSink) -> Self {
         Self {
-            holds,
+            _anchor: anchor,
             sink,
             latch: CallLatch::new(),
         }
