@@ -219,10 +219,10 @@ pub trait RequesterTables {
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event(
+    fn dispatch_iteration_event<T: Storage, O: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     );
 
     /// Whether a snapshot terminated since the last drain, its prune still to run.
@@ -245,10 +245,10 @@ impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event(
+    fn dispatch_iteration_event<T: Storage, O: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     ) {
         #[cfg(feature = "liveliness-get")]
         self.liveliness_gets
@@ -287,10 +287,10 @@ impl RequesterTables for NoRequesters {
         feature = "codec-response-final",
         feature = "liveliness-get"
     ))]
-    fn dispatch_iteration_event(
+    fn dispatch_iteration_event<T: Storage, O: Storage>(
         &mut self,
         _event: IterationEvent<'_, '_>,
-        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_, T, O>,
     ) {
     }
 
@@ -554,6 +554,11 @@ pub trait QueryTables<Sink, Id> {
     #[cfg(feature = "query-queryable")]
     type Queryables: LocalQueryables<Sink = Sink, RowId = Id>;
 
+    /// The storage policy of the table of the key expressions the session declared, which
+    /// [`Self::queries_mut`] lends as our own id space.
+    #[cfg(feature = "query-queryable")]
+    type QueryOwnPolicy: Storage;
+
     /// The queryables, to read, where the tables keep them.
     #[cfg(feature = "query-queryable")]
     fn queryables(&self) -> Option<&Self::Queryables>;
@@ -565,7 +570,7 @@ pub trait QueryTables<Sink, Id> {
     fn queries_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, Self::QueryOwnPolicy>>,
         Option<&mut Self::Queryables>,
     );
 }
@@ -578,6 +583,11 @@ pub trait LivelinessTables<Sink, Id> {
     #[cfg(feature = "liveliness-subscriber")]
     type LivelinessSubscribers: LocalLivelinessSubscribers<Sink = Sink, RowId = Id>;
 
+    /// The storage policy of the table of the key expressions the session declared, which
+    /// [`Self::liveliness_mut`] lends as our own id space.
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessOwnPolicy: Storage;
+
     /// The liveliness subscribers, to read, where the tables keep them.
     #[cfg(feature = "liveliness-subscriber")]
     fn liveliness_subscribers(&self) -> Option<&Self::LivelinessSubscribers>;
@@ -589,7 +599,7 @@ pub trait LivelinessTables<Sink, Id> {
     fn liveliness_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, Self::LivelinessOwnPolicy>>,
         Option<&mut Self::LivelinessSubscribers>,
     );
 }
@@ -639,6 +649,7 @@ pub struct RegistryRows {
 impl<S, Q, L: LivelinessSampleSink, P: Storage> LocalSubscribers for RegistryTables<S, Q, L, P> {
     type Sink = S;
     type RowId = SubscriptionId;
+    type OwnPolicy = P;
 
     fn epoch(&self) -> u64 {
         LocalSubscribers::epoch(&self.subscribers)
@@ -748,6 +759,8 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> QueryTables<Q, crate::query::Que
 {
     #[cfg(feature = "query-queryable")]
     type Queryables = QueryableRegistry<Q, P>;
+    #[cfg(feature = "query-queryable")]
+    type QueryOwnPolicy = P;
 
     #[cfg(feature = "query-queryable")]
     fn queryables(&self) -> Option<&QueryableRegistry<Q, P>> {
@@ -758,7 +771,7 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> QueryTables<Q, crate::query::Que
     fn queries_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, P>>,
         Option<&mut QueryableRegistry<Q, P>>,
     ) {
         (
@@ -774,6 +787,8 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> LivelinessTables<L, u64>
 {
     #[cfg(feature = "liveliness-subscriber")]
     type LivelinessSubscribers = LivelinessSubscriberTable<L, P>;
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessOwnPolicy = P;
 
     #[cfg(feature = "liveliness-subscriber")]
     fn liveliness_subscribers(&self) -> Option<&LivelinessSubscriberTable<L, P>> {
@@ -784,7 +799,7 @@ impl<S, Q, L: LivelinessSampleSink, P: Storage> LivelinessTables<L, u64>
     fn liveliness_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, P>>,
         Option<&mut LivelinessSubscriberTable<L, P>>,
     ) {
         (
@@ -840,6 +855,8 @@ impl<F: RowCallbacks, P: Storage> QueryTables<F::Queryable, crate::session_table
 {
     #[cfg(feature = "query-queryable")]
     type Queryables = crate::session_tables::Queryables<F, P>;
+    #[cfg(feature = "query-queryable")]
+    type QueryOwnPolicy = P;
 
     #[cfg(feature = "query-queryable")]
     fn queryables(&self) -> Option<&Self::Queryables> {
@@ -850,7 +867,7 @@ impl<F: RowCallbacks, P: Storage> QueryTables<F::Queryable, crate::session_table
     fn queries_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, P>>,
         Option<&mut Self::Queryables>,
     ) {
         let (own, queryables) = SessionTables::queries_mut(self);
@@ -869,6 +886,8 @@ impl<F: RowCallbacks, P: Storage>
 {
     #[cfg(feature = "liveliness-subscriber")]
     type LivelinessSubscribers = crate::session_tables::LivelinessSubscribers<F, P>;
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessOwnPolicy = P;
 
     #[cfg(feature = "liveliness-subscriber")]
     fn liveliness_subscribers(&self) -> Option<&Self::LivelinessSubscribers> {
@@ -879,7 +898,7 @@ impl<F: RowCallbacks, P: Storage>
     fn liveliness_mut(
         &mut self,
     ) -> (
-        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<crate::wireexpr_resolve::OwnSpace<'_, P>>,
         Option<&mut Self::LivelinessSubscribers>,
     ) {
         let (own, subscribers) = SessionTables::liveliness_mut(self);

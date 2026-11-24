@@ -200,10 +200,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
     /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
     /// funnels through the no-heap fire SSOT.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
@@ -237,10 +237,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view<'a, 'f>(
+    pub fn dispatch_declare_view<'a, 'f, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareVariant<'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
@@ -275,10 +275,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, &|_| false);
     }
@@ -298,10 +298,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
     /// closure that claims nothing, so a build without `liveliness-get`
     /// cannot drift from a build with it.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages_unclaimed<'a>(
+    pub fn dispatch_messages_unclaimed<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -317,10 +317,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
 
     /// `IterationEvent` adapter; mirror of the other Remote* registries.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_iteration_event_unclaimed(event, peer_keyexpr_table, &|_| false);
     }
@@ -331,10 +331,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event_unclaimed<'a>(
+    pub fn dispatch_iteration_event_unclaimed<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();

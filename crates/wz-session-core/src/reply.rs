@@ -1375,10 +1375,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// dispatch entry point elides in a `codec-response`-OFF subset
     /// (the loopback `deliver_local_reply` keeps the registry useful).
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    pub fn dispatch_response<'a>(
+    pub fn dispatch_response<'a, PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_response_with(response, peer_keyexpr_table.into(), None);
     }
@@ -1391,10 +1391,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// value of a Put reply and let go for any other, and a reply that routing cannot place
     /// settles nothing, since nothing of it is owed any more.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    pub fn dispatch_response_read<'a>(
+    pub fn dispatch_response_read<'a, PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         payload: crate::link::RxBytes,
     ) {
         self.dispatch_response_with(response, peer_keyexpr_table.into(), Some(payload));
@@ -1403,10 +1403,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// The dispatch of a `Response`, its Put value being `read` when the caller read it and the
     /// response's own otherwise.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn dispatch_response_with(
+    fn dispatch_response_with<PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseOwned,
-        peer_keyexpr_table: MappingSpaces<'_>,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         read: Option<crate::link::RxBytes>,
     ) {
         // A build that reads no Put reply has nothing to put a read value in.
@@ -1873,10 +1873,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// (Push / Request / Declare / Interest / Oam / Unknown) are
     /// no-ops here.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311s / R311dy — `NetworkMessage::{Response,ResponseFinal}` are
@@ -1922,10 +1922,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // Read only by the owned arm and by the lent Response arm.

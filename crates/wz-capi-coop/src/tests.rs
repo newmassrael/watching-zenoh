@@ -1317,6 +1317,99 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     );
 }
 
+/// A peer's sample that reaches three subscribers is handed to each of them once, in the same order
+/// for every sample, each sample after the one before it, with the session's lock let go: one
+/// callback steps the session and publishes from inside itself, and the router receives what it
+/// published. Turned red by a delivery made under the session's lock (the step and the put from
+/// inside the call would wait on it for good), a row handed a sample twice or not at all, or the
+/// rows of one sample handed in another order than those of the next.
+#[test]
+fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_free() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let handed: Arc<Mutex<Vec<(u8, Vec<u8>)>>> = Arc::default();
+    let published: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let session = Arc::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    for tag in 1..=3u8 {
+        let handed = handed.clone();
+        let published = published.clone();
+        let session = session.clone();
+        engine
+            .declare_subscriber_on_wire(
+                "demo/**",
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    handed
+                        .lock()
+                        .unwrap()
+                        .push((tag, sample.payload().to_vec()));
+                    if tag != 2 {
+                        return;
+                    }
+                    // From inside the call: a step and a put, each of which takes the session's
+                    // lock.
+                    if let Some(engine) = session.upgrade() {
+                        let _ = SessionDrive::read(&*engine, false);
+                        let put = engine.publish_on_wire_all(
+                            "echo/two",
+                            &WireKey::literal(),
+                            sample.payload(),
+                            &PublishOptions::put().with_locality(Locality::Remote),
+                        );
+                        published.lock().unwrap().push(put.is_ok());
+                    }
+                }),
+            )
+            .expect("the session declares the subscriber");
+    }
+    until(&engine, "the router to see the subscribers", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::Push("demo/a", b"one"));
+    router.send(Command::Push("demo/a", b"two"));
+    until(&engine, "both samples, to every subscriber", || {
+        handed.lock().unwrap().len() >= 6
+    });
+    let handed = handed.lock().unwrap().clone();
+    assert_eq!(
+        handed.len(),
+        6,
+        "each sample handed to each subscriber once"
+    );
+    let (one, two) = handed.split_at(3);
+    assert!(
+        one.iter().all(|(_, payload)| payload == b"one")
+            && two.iter().all(|(_, payload)| payload == b"two"),
+        "each sample handed to every subscriber before the next: {handed:?}"
+    );
+    let order = |of: &[(u8, Vec<u8>)]| of.iter().map(|(tag, _)| *tag).collect::<Vec<u8>>();
+    let mut tags = order(one);
+    assert_eq!(order(two), tags, "the same order for each sample");
+    tags.sort_unstable();
+    assert_eq!(tags, [1, 2, 3], "each subscriber once a sample");
+    assert_eq!(
+        *published.lock().unwrap(),
+        [true, true],
+        "the put from inside the call was taken"
+    );
+    until(
+        &engine,
+        "the router to receive the puts made in the calls",
+        || {
+            router.seen(|s| {
+                s.samples
+                    .iter()
+                    .filter(|(key, _)| key == "echo/two")
+                    .count()
+                    == 2
+            })
+        },
+    );
+}
+
 /// Under the pico profile a droppable publish that finds the session held by a read step waits for
 /// the step, blocked, and is sent once the step lets go: the holder holds no send, so the publish
 /// is no congestion drop, and it does not spin on the session while it waits. The CONTROL is the

@@ -730,10 +730,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// remote-subscriber callbacks; see
     /// [`RemoteSubscriberTable::dispatch_declare`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a>(
+    pub fn dispatch_declare<'a, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_declare(&mut self.peer, body, peer_keyexpr_table);
@@ -742,10 +742,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// R311y788 — [`Self::dispatch_declare`] with the SESSION-LOCAL half
     /// of the matching verdict supplied by the caller.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_with_local<'a>(
+    pub fn dispatch_declare_with_local<'a, PS: Storage, OS: Storage>(
         &mut self,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         self.table.dispatch_declare_with_local(
@@ -758,10 +758,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages<'a>(
+    pub fn dispatch_messages<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_messages(&mut self.peer, messages, peer_keyexpr_table);
@@ -770,10 +770,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// R311y788 — [`Self::dispatch_messages`] carrying the session-local
     /// half of the matching verdict.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages_with_local<'a>(
+    pub fn dispatch_messages_with_local<'a, PS: Storage, OS: Storage>(
         &mut self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         self.table.dispatch_messages_with_local(
@@ -787,10 +787,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// Convenience adapter over an `IterationEvent`; see
     /// [`RemoteSubscriberTable::dispatch_iteration_event`].
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event<'a>(
+    pub fn dispatch_iteration_event<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.table
             .dispatch_iteration_event(&mut self.peer, event, peer_keyexpr_table);
@@ -799,10 +799,10 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// R311y788 — [`Self::dispatch_iteration_event`] carrying the
     /// session-local half of the matching verdict.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event_with_local<'a>(
+    pub fn dispatch_iteration_event_with_local<'a, PS: Storage, OS: Storage>(
         &mut self,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         self.table.dispatch_iteration_event_with_local(
@@ -1067,11 +1067,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// S9a — `peer` is the declaring peer's side (its `declared` table), passed
     /// in so one table serves many sessions.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare<'a, Q: Storage>(
+    pub fn dispatch_declare<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_declare_with_local(peer, body, peer_keyexpr_table, &|_| false)
     }
@@ -1100,11 +1100,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// The keyexpr is resolved into a bounded buffer, so on the fixed backing the
     /// whole absorb allocates nothing.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_with_local<'a, Q: Storage>(
+    pub fn dispatch_declare_with_local<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareOwnedVariant,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -1145,11 +1145,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage>(
+    pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         body: &DeclareVariant<'f>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -1312,11 +1312,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// sibling registries so the observer in production code can fan
     /// one event into every registry uniformly.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages<'a, Q: Storage>(
+    pub fn dispatch_messages<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, &|_| false)
     }
@@ -1325,11 +1325,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// half of the matching verdict; see
     /// [`Self::dispatch_declare_with_local`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_messages_with_local<'a, Q: Storage>(
+    pub fn dispatch_messages_with_local<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
@@ -1354,11 +1354,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// sibling registries. Other `IterationEvent` variants (`Lease`,
     /// non-FramePayload `Poll` outcomes) are no-ops.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event<'a, Q: Storage>(
+    pub fn dispatch_iteration_event<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
     ) {
         self.dispatch_iteration_event_with_local(peer, event, peer_keyexpr_table, &|_| false)
     }
@@ -1372,11 +1372,11 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    pub fn dispatch_iteration_event_with_local<'a, Q: Storage>(
+    pub fn dispatch_iteration_event_with_local<'a, Q: Storage, PS: Storage, OS: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();

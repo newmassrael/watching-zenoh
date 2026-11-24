@@ -1868,6 +1868,72 @@ fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
     tables.subscribers().get(handle).unwrap().callback().0.get()
 }
 
+/// A pair reads each half under the storage policy that keeps it: the peer's aliases of the
+/// static policy, and our own space the table set's declarations of the build's policy, handed
+/// beside the pair. Under one id, `M=1` reads the peer's literal and `M=0` ours; with no own space
+/// handed the `M=0` key resolves to nothing, and a space installed on the pair is read before the
+/// tables.
+#[cfg(all(feature = "alloc", feature = "storage-profile"))]
+#[test]
+fn a_pair_reads_each_half_under_the_policy_that_keeps_it() {
+    use crate::id_map::{key_text_as, FixedIdMap, IdMap, PeerAliases};
+    use crate::wireexpr_resolve::{
+        resolve_wireexpr_into_over, KeyexprBuf, MappingSpaces, OwnMappingSpace, OwnSpace,
+    };
+    use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_codecs::wireexpr_local::WireexprLocalOwned;
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
+
+    let mut tables = SessionTables::<Sinks>::new();
+    let declared = tables.declare_keyexpr("ours/temp").unwrap();
+    let mut peer: PeerAliases<Static> = FixedIdMap::new();
+    let key = key_text_as::<Static>(&crate::bounded::InlineKeys, "peers/temp")
+        .expect("the key fits a row");
+    peer.bind(crate::wire_id::peer_key(declared.id), key)
+        .expect("the table has room");
+    let sender: WireexprOwnedVariant = WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+        id: declared.id,
+        suffix_len: None,
+        suffix: None,
+    });
+    let receiver: WireexprOwnedVariant =
+        WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+            id: declared.id,
+            suffix_len: None,
+            suffix: None,
+        });
+    let spaces = MappingSpaces::<Static, Static>::for_aliases(&peer, None);
+    let own = Some(OwnSpace::of_keyexprs(&tables.keyexprs));
+    let mut out = KeyexprBuf::new();
+    assert_eq!(
+        resolve_wireexpr_into_over(&sender, spaces, own, &mut out),
+        Ok(Some("peers/temp")),
+        "M=1 reads the peer's aliases"
+    );
+    assert_eq!(
+        resolve_wireexpr_into_over(&receiver, spaces, own, &mut out),
+        Ok(Some("ours/temp")),
+        "M=0 reads the table set's declarations under the same id"
+    );
+    assert_eq!(
+        resolve_wireexpr_into_over(&receiver, spaces, None::<OwnSpace<'_, Static>>, &mut out),
+        Ok(None),
+        "CONTROL: with no own space handed the M=0 key resolves to nothing"
+    );
+    let mut installed: hashbrown::HashMap<crate::wire_id::ExprId, std::string::String> =
+        hashbrown::HashMap::new();
+    installed.insert(declared.id, std::string::String::from("installed/temp"));
+    let with_handle = MappingSpaces::<Static, Static>::for_aliases(
+        &peer,
+        Some(&installed as &dyn OwnMappingSpace),
+    );
+    assert_eq!(
+        resolve_wireexpr_into_over(&receiver, with_handle, own, &mut out),
+        Ok(Some("installed/temp")),
+        "a space installed on the pair is read before the tables"
+    );
+}
+
 /// A key delivered again at the same epoch is answered from the match cache, the same function
 /// the subscriber table delivers through; a subscriber declared in the place an undeclared one
 /// left is reached, and the cache answers nothing it remembered from before.

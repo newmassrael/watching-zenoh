@@ -1948,11 +1948,6 @@ impl SubscriberCall {
         Self { call }
     }
 
-    /// Whether `other` is a call of the same row.
-    pub(crate) fn same_row(&self, other: &Self) -> bool {
-        self.call.0 == other.call.0
-    }
-
     /// Hand `sample` to the row's callback.
     pub(crate) fn hand(&self, sample: &dyn SampleView) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has

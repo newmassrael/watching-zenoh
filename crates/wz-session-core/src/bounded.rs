@@ -107,7 +107,11 @@ impl<T> core::error::Error for CapacityFull<T> {}
 /// the session shell rather than a feature. Implemented by [`Heap`] and
 /// [`Static`]; a container is generic over it and the algorithm around the
 /// container is written once.
-pub trait Storage {
+///
+/// A policy is a tag of types, never a borrow: `'static`, so a borrow of a table of any policy
+/// is well formed for every lifetime the borrow is named by, and a signature generic over a policy
+/// and a lifetime asks nothing more of the policy.
+pub trait Storage: 'static {
     /// Whether a push past the declared capacity is refused (`true`) or the
     /// backing grows past it (`false`).
     const ENFORCES_CAPACITY: bool;
@@ -174,27 +178,6 @@ pub trait Storage {
     /// memory after it.
     #[cfg(feature = "storage-profile")]
     type Compose: crate::wireexpr_resolve::ComposeRoom;
-
-    /// A peer's keyexpr-alias table of this policy as the id space a
-    /// [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads. The policy knows
-    /// which table it keeps, so a reader that holds one through a generic table never
-    /// has to.
-    #[cfg(feature = "storage-profile")]
-    fn peer_space(
-        aliases: &crate::id_map::PeerAliases<Self>,
-    ) -> crate::wireexpr_resolve::PeerSpace<'_>
-    where
-        Self: Sized;
-
-    /// The session's table of the key expressions it declared, of this policy, as the own id
-    /// space a [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads: what an `M=0`
-    /// key of a peer's message names, read where the table keeps it.
-    #[cfg(feature = "storage-profile")]
-    fn own_space(
-        keyexprs: &crate::session_tables::Keyexprs<Self>,
-    ) -> crate::wireexpr_resolve::OwnSpace<'_>
-    where
-        Self: Sized;
 }
 
 /// The counter of a table's changes; see [`Storage::Epoch`].
@@ -427,20 +410,6 @@ impl Storage for Heap {
     type Epoch = ();
     #[cfg(feature = "storage-profile")]
     type Compose = ();
-
-    #[cfg(feature = "storage-profile")]
-    fn peer_space(
-        aliases: &crate::id_map::PeerAliases<Self>,
-    ) -> crate::wireexpr_resolve::PeerSpace<'_> {
-        crate::wireexpr_resolve::PeerSpace::of_map(aliases.as_map())
-    }
-
-    #[cfg(feature = "storage-profile")]
-    fn own_space(
-        keyexprs: &crate::session_tables::Keyexprs<Self>,
-    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
-        crate::wireexpr_resolve::OwnSpace::of_heap_keyexprs(keyexprs)
-    }
 }
 
 /// The static policy: a capacity fixed in the type and no allocator. A push past
@@ -461,20 +430,6 @@ impl Storage for Static {
     type Epoch = ();
     #[cfg(feature = "storage-profile")]
     type Compose = ();
-
-    #[cfg(feature = "storage-profile")]
-    fn peer_space(
-        aliases: &crate::id_map::PeerAliases<Self>,
-    ) -> crate::wireexpr_resolve::PeerSpace<'_> {
-        crate::wireexpr_resolve::PeerSpace::of_table(aliases)
-    }
-
-    #[cfg(feature = "storage-profile")]
-    fn own_space(
-        keyexprs: &crate::session_tables::Keyexprs<Self>,
-    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
-        crate::wireexpr_resolve::OwnSpace::of_static_keyexprs(keyexprs)
-    }
 }
 
 /// The policy of storage lent at open: a table whose rows are a span of an [`Arena`], the memory a
@@ -519,20 +474,6 @@ impl Storage for Lent {
     type Epoch = ();
     #[cfg(feature = "storage-profile")]
     type Compose = crate::wireexpr_resolve::ComposeRow;
-
-    #[cfg(feature = "storage-profile")]
-    fn peer_space(
-        aliases: &crate::id_map::PeerAliases<Self>,
-    ) -> crate::wireexpr_resolve::PeerSpace<'_> {
-        crate::wireexpr_resolve::PeerSpace::of_lent_table(aliases)
-    }
-
-    #[cfg(feature = "storage-profile")]
-    fn own_space(
-        keyexprs: &crate::session_tables::Keyexprs<Self>,
-    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
-        crate::wireexpr_resolve::OwnSpace::of_lent_keyexprs(keyexprs)
-    }
 }
 
 /// The policy this build's features choose, and the default of every container's

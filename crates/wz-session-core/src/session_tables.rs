@@ -2856,10 +2856,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn queries_mut(
         &mut self,
     ) -> (
-        crate::wireexpr_resolve::OwnSpace<'_>,
+        crate::wireexpr_resolve::OwnSpace<'_, P>,
         &mut QueryablesKept<F, P>,
     ) {
-        (P::own_space(&self.keyexprs), &mut self.queryables)
+        (
+            crate::wireexpr_resolve::OwnSpace::of_keyexprs(&self.keyexprs),
+            &mut self.queryables,
+        )
     }
 
     /// The liveliness subscribers to tell, with the key expressions the session declared beside
@@ -2869,11 +2872,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn liveliness_mut(
         &mut self,
     ) -> (
-        crate::wireexpr_resolve::OwnSpace<'_>,
+        crate::wireexpr_resolve::OwnSpace<'_, P>,
         &mut LivelinessSubscribersKept<F, P>,
     ) {
         (
-            P::own_space(&self.keyexprs),
+            crate::wireexpr_resolve::OwnSpace::of_keyexprs(&self.keyexprs),
             &mut self.liveliness_subscribers,
         )
     }
@@ -3178,12 +3181,15 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage> SubscriberRows
 impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P> {
     type Sink = F::Subscriber;
     type RowId = SubscriberHandle;
+    type OwnPolicy = P;
 
     // The table set holds the key expressions the session declared: a peer's `M=0` key is read
     // from them where they lie.
     #[cfg(feature = "storage-profile")]
-    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
-        Some(P::own_space(&self.keyexprs))
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_, P>> {
+        Some(crate::wireexpr_resolve::OwnSpace::of_keyexprs(
+            &self.keyexprs,
+        ))
     }
 
     fn epoch(&self) -> u64 {

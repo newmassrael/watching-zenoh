@@ -336,10 +336,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// of [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned
     /// projection.
-    pub(super) fn dispatch_response_in_place(
+    pub(super) fn dispatch_response_in_place<PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
     ) {
         match self.deliver_lent(response, spaces) {
             Ok(()) => {}
@@ -366,10 +366,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
 
     /// The lent delivery itself: nothing on the heap for a reply whose keyexpr
     /// fits, short of a timestamp hint a sink asks for.
-    fn deliver_lent(
+    fn deliver_lent<PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
     ) -> Result<(), Fallback> {
         let Some(body) = lent_body(response)? else {
             return Ok(());
@@ -425,10 +425,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// lent form cannot represent is delivered exactly as it always was. Heap
     /// profile only.
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection(
+    fn dispatch_owned_projection<PS: Storage, OS: Storage>(
         &mut self,
         response: &ResponseView<'_>,
-        spaces: MappingSpaces<'_>,
+        spaces: MappingSpaces<'_, PS, OS>,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Response. The
