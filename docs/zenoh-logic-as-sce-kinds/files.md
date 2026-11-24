@@ -456,6 +456,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/table_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-coop/src/time.rs` | S5 | |
 | `crates/wz-runtime-coop/src/timer.rs` | S5 | |
+| `crates/wz-runtime-coop/src/transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/udp_link.rs` | S5 | |
 | `crates/wz-runtime-coop/src/yield_now.rs` | S10 | |
 | `crates/wz-runtime-core/src/allocator.rs` | S9 | |

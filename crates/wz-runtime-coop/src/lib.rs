@@ -327,6 +327,14 @@ pub mod face_life;
     target_has_atomic = "ptr"
 ))]
 pub mod face_send;
+// The refusals of the transport of a session over those faces. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod transport;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket
