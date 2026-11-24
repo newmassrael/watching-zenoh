@@ -792,7 +792,7 @@ pub mod ext_header;
 /// header bytes, so an observer build that implements none of these
 /// capabilities still names them.
 // Totality debt TD-102 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(clippy::indexing_slicing)]
 pub mod ext_name;
 
 /// R311y630 (§14.1) — the MANDATORY-extension admission rule: which decoded
