@@ -962,8 +962,10 @@ impl<W: LinkWaits> GroupFace<W> {
             _ => key.suffix,
         };
         multicast_tx_publication(
-            key.mapping_id,
-            suffix,
+            wz_session_core::declare_form::GroupKey {
+                mapping_id: key.mapping_id,
+                suffix,
+            },
             put.kind,
             put.payload,
             put.meta,

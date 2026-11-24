@@ -676,9 +676,11 @@ where
     Q: MulticastTxQueue + ?Sized,
 {
     push_frame(
-        message.framing.meta(params),
-        message.size,
-        message.body,
+        FramedBody {
+            meta: message.framing.meta(params),
+            worst_case: message.size,
+            body: message.body,
+        },
         tx_sn,
         params,
         conf,
@@ -875,17 +877,15 @@ pub fn multicast_tx_encode_into(
 
 /// [`multicast_tx_push_encoded`] of a message whose framing was read off it before
 /// (`meta`) and whose body is `body`, at most `size` bytes.
+/// The group's own queue configuration (`params.tx_queue`) paces it, as it paces
+/// [`multicast_tx_push_staged`].
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-// The message (meta, size, body), where its SN comes from, the group and its queue, and the
-// window: as for the walk it hands them to.
-#[allow(clippy::too_many_arguments)]
 pub fn multicast_tx_push_meta<M, Q>(
     meta: MulticastTxMeta,
     size: usize,
     body: &crate::frame_encode::BodyEncoder<'_>,
     tx_sn: &mut M,
     params: &crate::multicast_params::MulticastParams,
-    conf: &TxQueueConf,
     queue: &mut Q,
     window: Option<&mut MulticastBatch>,
 ) -> PushOutcome
@@ -893,7 +893,18 @@ where
     M: MulticastTxMint + ?Sized,
     Q: MulticastTxQueue + ?Sized,
 {
-    push_frame(meta.0, size, body, tx_sn, params, conf, queue, window)
+    push_frame(
+        FramedBody {
+            meta: meta.0,
+            worst_case: size,
+            body,
+        },
+        tx_sn,
+        params,
+        &params.tx_queue,
+        queue,
+        window,
+    )
 }
 
 /// [`multicast_tx_push_meta`] of a message whose body was encoded before, into `staged`
@@ -914,9 +925,11 @@ where
     use sce_forge_runtime::codec::SceSink;
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| sink.write_bytes(staged);
     push_frame(
-        meta.0,
-        staged.len(),
-        body,
+        FramedBody {
+            meta: meta.0,
+            worst_case: staged.len(),
+            body,
+        },
         tx_sn,
         params,
         &params.tx_queue,
@@ -1116,11 +1129,8 @@ pub fn multicast_tx_group_retraction<R>(
 /// `reliable`. The writer's refusal, `LengthOutOfRange` (a key, a payload or a field past its
 /// bound, which the owned builders refuse alike), with `f` not called.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-// The key, the kind and value, the metadata, the channel and band, and what is done with it.
-#[allow(clippy::too_many_arguments)]
 pub fn multicast_tx_publication<R>(
-    mapping_id: crate::wire_id::ExprId,
-    suffix: Option<&str>,
+    key: crate::declare_form::GroupKey<'_>,
     kind: crate::sample::SampleKind,
     value: &[u8],
     meta: &crate::metadata::PushMetadata,
@@ -1132,6 +1142,7 @@ pub fn multicast_tx_publication<R>(
     let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
     #[cfg(not(feature = "pubsub-qos"))]
     let qos = crate::sample::QosLevel::DEFAULT;
+    let crate::declare_form::GroupKey { mapping_id, suffix } = key;
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
@@ -1186,9 +1197,11 @@ where
         // pico — so the loop's send is best-effort like the JOIN beacon.
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, .. } => push_frame(
-            meta,
-            worst_case,
-            crate::frame_encode::push_body(&push),
+            FramedBody {
+                meta,
+                worst_case,
+                body: crate::frame_encode::push_body(&push),
+            },
             tx_sn,
             params,
             conf,
@@ -1199,9 +1212,11 @@ where
         // value) re-frames as a fragment chain exactly like an oversize Push.
         #[cfg(all(feature = "codec-push", feature = "codec-request"))]
         MulticastTxItem::Request { request } => push_frame(
-            meta,
-            worst_case,
-            |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink),
+            FramedBody {
+                meta,
+                worst_case,
+                body: |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink),
+            },
             tx_sn,
             params,
             conf,
@@ -1215,9 +1230,11 @@ where
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { response } => push_frame(
             // `meta.reliable` is pinned true for a reply (`frame_meta`).
-            meta,
-            worst_case,
-            |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink),
+            FramedBody {
+                meta,
+                worst_case,
+                body: |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink),
+            },
             tx_sn,
             params,
             conf,
@@ -1236,9 +1253,11 @@ where
             // all four variants rather than a special case.
             let response_final = crate::response_final_build::build_response_final(request_id, qos);
             push_frame(
-                meta,
-                worst_case,
-                |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink),
+                FramedBody {
+                    meta,
+                    worst_case,
+                    body: |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink),
+                },
                 tx_sn,
                 params,
                 conf,
@@ -1254,9 +1273,11 @@ where
         // `meta` pins a declare reply reliable and DEFAULT-band (no ext_qos),
         // the frame `encode_frame_with_declare` writes.
         MulticastTxItem::DeclareReply { declare } => push_frame(
-            meta,
-            worst_case,
-            declare_body(&declare),
+            FramedBody {
+                meta,
+                worst_case,
+                body: declare_body(&declare),
+            },
             tx_sn,
             params,
             conf,
@@ -1265,9 +1286,11 @@ where
         ),
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => push_frame(
-            meta,
-            worst_case,
-            declare_body(&declare),
+            FramedBody {
+                meta,
+                worst_case,
+                body: declare_body(&declare),
+            },
             tx_sn,
             params,
             conf,
@@ -1276,9 +1299,11 @@ where
         ),
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Interest { interest } => push_frame(
-            meta,
-            worst_case,
-            |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink),
+            FramedBody {
+                meta,
+                worst_case,
+                body: |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink),
+            },
             tx_sn,
             params,
             conf,
@@ -1695,6 +1720,23 @@ struct FrameMeta {
     express: bool,
 }
 
+/// A message as [`push_frame`] frames it: how it is framed, the most bytes it can encode to,
+/// and the encoder of its body.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+struct FramedBody<P> {
+    meta: FrameMeta,
+    worst_case: usize,
+    body: P,
+}
+
 /// R2928 — one message's walk onto the queue: ask for room, mint, encode, and
 /// enqueue the frame, or stream it as a fragment chain that asks again before
 /// each further fragment. `body` encodes the network message the frame carries
@@ -1721,13 +1763,8 @@ struct FrameMeta {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
-// The message (meta, size, body), where its SN comes from, the group and its queue, and the
-// window: each is a separate input of one walk, and none is a part of another.
-#[allow(clippy::too_many_arguments)]
 fn push_frame<M, Q, P>(
-    meta: FrameMeta,
-    worst_case: usize,
-    body: P,
+    message: FramedBody<P>,
     tx_sn: &mut M,
     params: &crate::multicast_params::MulticastParams,
     conf: &TxQueueConf,
@@ -1739,6 +1776,11 @@ where
     Q: MulticastTxQueue + ?Sized,
     P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
 {
+    let FramedBody {
+        meta,
+        worst_case,
+        body,
+    } = message;
     let FrameMeta {
         priority,
         ext_qos,
@@ -3964,8 +4006,7 @@ mod group_publications_written_from_parts {
         meta: &PushMetadata,
     ) -> Vec<u8> {
         multicast_tx_publication(
-            mapping_id,
-            suffix,
+            crate::declare_form::GroupKey { mapping_id, suffix },
             kind,
             b"value",
             meta,
