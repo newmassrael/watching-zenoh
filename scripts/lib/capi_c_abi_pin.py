@@ -159,10 +159,14 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # revision that commit introduced with the revision door. A new door is pinned at
 # the revision its own commit moves `EXPECTED_REVISION` to, which `pin_findings`
 # holds.
-EXPECTED_REVISION = 19
+EXPECTED_REVISION = 20
 EXPECTED_SYMBOLS: dict[str, int] = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version": 1,
+    # Revision 20 — what a config's access control decides for a list of messages, the rule that
+    # decided each, and the attributes an answer waits on (`config-verdict` with `interceptors`,
+    # both on by default). Its refusals are the revision-4 verdict rows.
+    "wz_capi_c_config_acl_verdicts": 20,
     # Revision 19 — a time base the program supplies, which the timers of a session opened from a
     # config naming it run on (`time-base`, off by default and on in the lane's build): the owned
     # handle's set, the config's door, the program's word that its time moved, and the internal

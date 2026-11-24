@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 19
+#define WZ_CAPI_C_ABI_REVISION 20
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -455,6 +455,122 @@ void wz_capi_c_config_verdict_drop(wz_capi_c_moved_config_verdict_t *this_);
 void wz_capi_c_internal_config_verdict_null(wz_capi_c_owned_config_verdict_t *this_);
 bool wz_capi_c_internal_config_verdict_check(
     const wz_capi_c_owned_config_verdict_t *this_);
+
+/* ------------------------------------------------------------------ *
+ * What a config's access control decides (revision 20).
+ *
+ * In builds with `config-verdict` and `interceptors`, both ON by
+ * default. A build without either exports no such door.
+ *
+ * WHAT IT ANSWERS. For each message you describe, whether the
+ * access_control of `config` lets it through, which rule decided, and
+ * when the answer depends on something about the sender you did not
+ * state, what that is. The verdict is the one a node opened from the same
+ * config enforces: the config is read as wz_capi_c_config_validate_rows
+ * reads it, access_control is compiled as the node's enforcer compiles it,
+ * and every answer is that enforcer's own decision, not a second reading
+ * of the rules.
+ *
+ * WHICH ZENOH. access_control is read in the shape of zenoh 1.10.2, the
+ * version this library is built against: `rules`, `subjects` and
+ * `policies` joined by id, with `enabled` and `default_permission`. That
+ * shape has no other version here. A config that states a key or a member
+ * 1.10.2 does not have is refused, as zenohd 1.10.2 refuses it, so a
+ * config written for another shape is refused rather than misjudged.
+ *
+ * THE QUESTIONS. `questions_json` is a NUL-terminated JSON5 (so also
+ * JSON) list, one object per message:
+ *
+ *   flow              required. "ingress" (a message arriving at the
+ *                     node) or "egress" (one the node sends).
+ *   message           required. One of upstream's access control message
+ *                     names: put, delete, declare_subscriber, query,
+ *                     declare_queryable, reply, liveliness_token,
+ *                     declare_liveliness_subscriber, liveliness_query.
+ *   key_expr          required. The message's key expression.
+ *
+ * and, for the sender, only what you know. A member LEFT OUT is unknown;
+ * a member stated as null is known to be absent:
+ *
+ *   zid               the peer's zid, lowercase hex as zenoh spells it.
+ *                     null: a face the node could not attribute to any
+ *                     peer, which only rules naming no zid govern.
+ *   link_protocol     the protocol of the link, as access_control's
+ *                     `link_protocols` spells it (tcp, udp, tls, quic, ...).
+ *                     It cannot be null: every link has one.
+ *   interfaces        a list of the interface names the link sits on.
+ *                     []: a link on no interface (a unix socket, a pipe).
+ *   username          the name the peer authenticated with. null: none.
+ *   cert_common_name  the common name of the peer's certificate.
+ *                     null: none.
+ *
+ * Any other member is refused.
+ *
+ * THE ANSWERS. On Z_OK `out_answers` holds one JSON document:
+ *
+ *   {"enabled":true,"default_permission":"deny","answers":[
+ *     {"permission":"allow",
+ *      "decided_by":[{"kind":"rule","rule":"r1","subject":"s1",
+ *                     "policy":"p1","policy_index":0}],
+ *      "needs":[],"exhaustive":true}, ...]}
+ *
+ * `answers` is in the order of the questions.
+ *
+ *   permission   "allow" or "deny". null when it depends on a member you
+ *                left out (see needs).
+ *   decided_by   what decided, one entry per distinct answer:
+ *                  {"kind":"rule", ...}  a rule. `rule`, `subject` and
+ *                      `policy` are the ids in access_control/rules,
+ *                      /subjects and /policies; a policy has no id unless
+ *                      the config gives it one, so `policy` may be null
+ *                      and `policy_index` is its position in the list.
+ *                  {"kind":"default"}  no rule decided, so
+ *                      default_permission did. A rule that only repeats
+ *                      the default (an allow under an allow default) is
+ *                      not consulted, as the enforcer does not consult it.
+ *                  {"kind":"disabled"}  access_control/enabled is false
+ *                      (zenoh's default), so no enforcer is installed and
+ *                      nothing is refused; "enabled" says so too.
+ *                A deny rule is checked before anything else, and the
+ *                first one that applies decides. Under a deny default the
+ *                first allow rule that applies decides.
+ *   needs        the members you left out whose value changes the answer
+ *                (the permission, or the rule that decides it): "zid",
+ *                "link_protocol", "interfaces", "username",
+ *                "cert_common_name". Every value a rule could tell apart
+ *                was tried, so [] means the answer is the same whatever
+ *                they are; when the permission alone is settled,
+ *                decided_by lists every rule that can decide it.
+ *   exhaustive   false only when the values to try outnumber 65536
+ *                combinations; then permission is null, decided_by is
+ *                empty, and needs lists every member that had several
+ *                values to try. State more of the sender to narrow it.
+ *
+ * REFUSALS ARE THE VERDICT'S ROWS. `out_refusals` is the owned verdict of
+ * the rows doors above, read with the same accessors and freed with
+ * wz_capi_c_config_verdict_drop. On Z_OK it holds no rows. Otherwise the
+ * door returns the FIRST refusal's code, writes an empty `out_answers`,
+ * and reports EVERY refusal in the call as a row:
+ *
+ *   - a config that cannot be read: the code and the row
+ *     wz_capi_c_config_validate_rows gives for it;
+ *   - an access_control that reads and cannot become a policy (a policy
+ *     naming a rule or subject no entry defines, an id given twice, a blank
+ *     username, ...): Z_EPARSE, the row named after the reason
+ *     (UnknownRule, DuplicateId, ...), its key the list at fault;
+ *   - questions that cannot be read: NoQuestions (Z_ENULL),
+ *     QuestionsNotUtf8, QuestionsNotJson5, QuestionsNotAList, and per
+ *     question QuestionNotAnObject, QuestionMemberMissing,
+ *     QuestionMemberUnknown and QuestionMemberInvalid (Z_EPARSE), whose
+ *     message starts "question <index>:" and which carry no key.
+ *
+ * MEMORY. Both outputs are yours and are written on every path that can
+ * write them, a gravestone first. Z_ENULL when either is NULL, with the
+ * other left as a gravestone. */
+z_result_t wz_capi_c_config_acl_verdicts(const z_loaned_config_t *config,
+                                         const char *questions_json,
+                                         z_owned_string_t *out_answers,
+                                         wz_capi_c_owned_config_verdict_t *out_refusals);
 
 /* ------------------------------------------------------------------ *
  * Link schemes: what this build carries, and what stock zenoh does.
