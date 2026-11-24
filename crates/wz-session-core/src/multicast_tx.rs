@@ -2031,11 +2031,9 @@ impl MulticastBatch {
             return false;
         }
         let before = self.buf.len();
-        let encoded = {
-            let mut capped = crate::tx_buf::CappedTxBuf::new(&mut self.buf, mtu);
-            let mut sink = crate::tx_buf::TxSink::new(&mut capped);
-            body(&mut sink).is_ok()
-        };
+        let encoded = held_to(&mut self.buf, mtu, |buf| {
+            body(&mut crate::tx_buf::TxSink::new(buf)).is_ok()
+        });
         if encoded && self.buf.len() <= mtu {
             return true;
         }
@@ -2051,11 +2049,11 @@ impl MulticastBatch {
         reliable: bool,
         sn: u64,
         mtu: usize,
-        write: impl FnOnce(&mut crate::tx_buf::CappedTxBuf<'_, '_>) -> bool,
+        write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
     ) -> bool {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
         self.buf.clear();
-        let written = write(&mut crate::tx_buf::CappedTxBuf::new(&mut self.buf, mtu));
+        let written = held_to(&mut self.buf, mtu, write);
         if written && self.buf.len() <= mtu {
             self.open = Some(OpenFrame { reliable, sn });
             return true;
@@ -2070,6 +2068,35 @@ impl MulticastBatch {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
         self.buf = bytes;
         self.open = Some(OpenFrame { reliable, sn });
+    }
+}
+
+/// Run `write` over `buf`, a batch's storage, held to `mtu`: a build whose encoders write through
+/// `dyn TxBuf` (`transport-tx-lend`) refuses a write past it as it is made
+/// ([`CappedTxBuf`](crate::tx_buf::CappedTxBuf)), and one whose encoders write a vector writes the
+/// storage itself, which its caller checks against `mtu` after.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+fn held_to<T>(
+    buf: &mut Vec<u8>,
+    mtu: usize,
+    write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> T,
+) -> T {
+    #[cfg(feature = "transport-tx-lend")]
+    {
+        write(&mut crate::tx_buf::CappedTxBuf::new(buf, mtu))
+    }
+    #[cfg(not(feature = "transport-tx-lend"))]
+    {
+        let _ = mtu;
+        write(buf)
     }
 }
 
@@ -3783,16 +3810,16 @@ mod group_declarations_written_from_parts {
 
     /// Every kind this build has a declaration plane of.
     fn kinds() -> Vec<GroupDeclaration> {
-        let mut kinds = Vec::new();
-        #[cfg(feature = "declare-subscriber")]
-        kinds.push(GroupDeclaration::Subscriber);
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: true });
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: false });
-        #[cfg(feature = "liveliness-token")]
-        kinds.push(GroupDeclaration::Token);
-        kinds
+        Vec::from([
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber,
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: true },
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: false },
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token,
+        ])
     }
 
     /// The keys a group names: a literal, an alias with a suffix, an alias alone, and a multi-byte
@@ -3913,7 +3940,7 @@ mod group_publications_written_from_parts {
         let mut metas = alloc::vec![
             PushMetadata::default(),
             PushMetadata {
-                attachment: Some(alloc::vec![1, 2, 3]),
+                attachment: Some(&[1, 2, 3]),
                 ..PushMetadata::default()
             },
         ];

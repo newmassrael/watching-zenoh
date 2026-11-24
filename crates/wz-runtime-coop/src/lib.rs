@@ -245,8 +245,8 @@ pub mod session_runtime;
 pub mod session_drive;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
-/// (`alloc` without `session-slot`: `session_drive::LinkReadiness` and the `readiness` method of
-/// the socket traits), and nothing elsewhere.
+/// (`alloc` without `session-slot`: `session_drive::LinkWaits`, and the `Waits` type and the
+/// `input_wait` and `room_wait` methods of the socket traits), and nothing elsewhere.
 ///
 /// A platform crate that implements those seams wraps its implementation in this, and not in a
 /// `cfg` of its own features: features unify across the graph, so a platform crate built without

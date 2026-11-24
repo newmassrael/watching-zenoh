@@ -175,6 +175,15 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
     // The port's lwIP has no IPv6 (`Self::bind_driver` refuses that family).
     const IPV6: bool = false;
 
+    wz_runtime_coop::with_heap_link_seams! {
+        // Its links name no handle a thread outside them could wait on.
+        type Waits = wz_runtime_coop::session_drive::NoWaits;
+
+        fn waits(&self) -> wz_runtime_coop::session_drive::NoWaits {
+            wz_runtime_coop::session_drive::NoWaits
+        }
+    }
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its
         // InitSyn.

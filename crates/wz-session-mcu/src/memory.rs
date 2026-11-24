@@ -343,6 +343,15 @@ impl SessionLinks for MemoryLinks {
 
     type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
+    wz_runtime_coop::with_heap_link_seams! {
+        // Its links name no handle a thread outside them could wait on.
+        type Waits = wz_runtime_coop::session_drive::NoWaits;
+
+        fn waits(&self) -> wz_runtime_coop::session_drive::NoWaits {
+            wz_runtime_coop::session_drive::NoWaits
+        }
+    }
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let end = self.net.bind(SocketAddr::new(self.host, port), None)?;
         Ok(Self::opened(end))

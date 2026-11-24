@@ -66,6 +66,12 @@ impl SessionLinks for SlowDials {
 
     type Dial = SlowDial;
 
+    type Waits = <PosixLinks as SessionLinks>::Waits;
+
+    fn waits(&self) -> Self::Waits {
+        self.inner.waits()
+    }
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         self.inner.open_acceptor(port)
     }

@@ -111,6 +111,17 @@ impl<K> CellRc<K> {
         }
     }
 
+    /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
+    /// takes it ([`Self::place`]); in a cell of its own on the heap when no table is
+    /// ([`Self::boxed`]). What every maker of a link's part asks, whichever memory the session
+    /// lends.
+    pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
+        match cells {
+            Some(cells) => Self::place(cells, value),
+            None => Ok(Self::boxed(value)),
+        }
+    }
+
     /// `value` in a cell of its own on the heap: the handle of a link lent no table.
     pub fn boxed(value: K) -> Self {
         let slot = Box::into_raw(Box::new(Slot {
@@ -333,6 +344,32 @@ mod tests {
         );
         drop(second);
         assert_eq!((drops.get(), cells.in_use()), (3, 0));
+    }
+
+    /// A value is placed in a cell of a table when one is lent, refused with the value handed back
+    /// when the table has no cell left, and placed on the heap when no table is lent. Turned red by
+    /// a lent table that is passed over for the heap, or a full one that is.
+    #[test]
+    fn a_value_goes_in_the_lent_table_or_on_the_heap_when_none_is_lent() {
+        let cells = table(CellRc::<Counted>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let first = CellRc::in_cells(Some(&cells), Counted(drops.clone()))
+            .ok()
+            .expect("a cell");
+        let second = CellRc::in_cells(Some(&cells), Counted(drops.clone()))
+            .ok()
+            .expect("a cell");
+        assert_eq!(cells.in_use(), 2, "both in the table");
+        assert!(
+            CellRc::in_cells(Some(&cells), Counted(drops.clone())).is_err(),
+            "a full table refuses, and the heap is not asked"
+        );
+        let boxed = CellRc::in_cells(None, Counted(drops.clone()))
+            .ok()
+            .expect("the heap when no table is lent");
+        assert_eq!(cells.in_use(), 2, "the heap's takes no cell");
+        drop((first, second, boxed));
+        assert_eq!((drops.get(), cells.in_use()), (4, 0));
     }
 
     /// A value larger than a cell is refused, with the value handed back, and takes no cell.

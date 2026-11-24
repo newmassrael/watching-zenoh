@@ -321,12 +321,13 @@ fn digit_of(byte: u8, radix: u8) -> Option<u8> {
 
 /// What a stack's refusal to open a link means for the dial: a protocol it has
 /// no link for is permanent for the endpoint, and an end that did not take the
-/// link or a stack with nothing left to give is a failed attempt of the outage.
+/// link, a stack with nothing left to give or an address another socket holds is
+/// a failed attempt of the outage.
 pub fn dial_failed(refused: LinkOpenError) -> DialFailed {
     match refused {
         LinkOpenError::Unsupported => DialFailed::Refused(DialRefused::Unsupported),
         LinkOpenError::Refused => DialFailed::Unreachable,
-        LinkOpenError::Exhausted => DialFailed::Exhausted,
+        LinkOpenError::Exhausted | LinkOpenError::AddressInUse => DialFailed::Exhausted,
     }
 }
 
@@ -713,6 +714,10 @@ mod parse_tests {
         );
         std::assert_eq!(dial_failed(LinkOpenError::Refused), DialFailed::Unreachable);
         std::assert_eq!(dial_failed(LinkOpenError::Exhausted), DialFailed::Exhausted);
+        std::assert_eq!(
+            dial_failed(LinkOpenError::AddressInUse),
+            DialFailed::Exhausted
+        );
     }
 
     /// The IPv4 reader takes exactly the texts `SocketAddrV4`'s `FromStr` takes, as the same
@@ -1252,6 +1257,10 @@ mod tests {
         impl SessionLinks for NoLinks {
             type Pump = wz_runtime_coop::link_cells::CellRc<crate::memory::MemoryEnd>;
             type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+            type Waits = wz_runtime_coop::session_drive::NoWaits;
+            fn waits(&self) -> Self::Waits {
+                wz_runtime_coop::session_drive::NoWaits
+            }
             fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)
             }

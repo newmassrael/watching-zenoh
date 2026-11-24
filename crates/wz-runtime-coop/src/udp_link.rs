@@ -61,11 +61,11 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxLender, TxStore};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::LinkReadiness;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
 use crate::session_drive::{LinkProto, Locator, SessionDatagramLink};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
 /// The largest UDP payload the session receives in one datagram: the transport's own ceiling, so a
 /// whole batch always fits.
@@ -140,11 +140,17 @@ pub trait DatagramSocket: Sized {
     /// else its length and source.
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error>;
 
-    /// A wait for this socket that a thread other than the link's can make
-    /// ([`SessionDatagramLink::readiness`]); `None` when the platform gives none, and then a link
-    /// over the socket waits in its own loop whatever it was asked.
+    /// The waits of this platform's sockets ([`LinkWaits`]), which a stack of them waits on its
+    /// links with ([`crate::session_drive::SessionLinks::waits`]): one value, made when the stack
+    /// is asked for it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+    type Waits: LinkWaits + Clone + Default + 'static;
+
+    /// What a thread other than the link's waits on for this socket's input
+    /// ([`SessionDatagramLink::input_wait`]); `None` when the platform gives none, and then a
+    /// link over the socket waits in its own loop whatever it was asked.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
         None
     }
 
@@ -177,13 +183,25 @@ pub trait DatagramSocket: Sized {
         let _ = error;
         false
     }
+
+    /// Whether `error`, from a [`Self::bind`], says another socket holds the address: the open
+    /// is `LinkOpenError::AddressInUse`, kept apart from a stack with no socket to give. The
+    /// provided answer is that it never says so, for a platform whose error does not tell.
+    fn address_in_use(error: &Self::Error) -> bool {
+        let _ = error;
+        false
+    }
 }
 
 /// A failed [`DatagramSocket::bind`] as the stack's refusal to open the link: permanent for an
-/// address the socket can never have ([`DatagramSocket::refuses_address`]), retried otherwise.
+/// address the socket can never have ([`DatagramSocket::refuses_address`]), an address another
+/// socket holds ([`DatagramSocket::address_in_use`]), and otherwise a stack with no socket to
+/// give; the last two are retried.
 pub fn bind_refused<S: DatagramSocket>(error: S::Error) -> crate::session_drive::LinkOpenError {
     if S::refuses_address(&error) {
         crate::session_drive::LinkOpenError::Unsupported
+    } else if S::address_in_use(&error) {
+        crate::session_drive::LinkOpenError::AddressInUse
     } else {
         crate::session_drive::LinkOpenError::Exhausted
     }
@@ -197,6 +215,9 @@ pub enum NoDatagram {}
 
 impl DatagramSocket for NoDatagram {
     type Error = ();
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits = NoWaits;
 
     const CARRIED: bool = false;
 
@@ -400,13 +421,13 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     }
 
     /// The same link, waited on by its owner when its socket can be
-    /// ([`SessionDatagramLink::readiness`]): its loop then reads what is queued and does not
+    /// ([`SessionDatagramLink::input_wait`]): its loop then reads what is queued and does not
     /// wait, and its owner waits on the socket with nothing of the session held. A socket that
     /// gives no such wait keeps the link waiting in its loop.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.readiness().is_some();
+        self.owner_waits = self.socket.input_wait().is_some();
         self
     }
 
@@ -735,9 +756,9 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+    fn input_wait(&self) -> Option<WaitOn> {
         if self.owner_waits {
-            self.socket.readiness()
+            self.socket.input_wait()
         } else {
             None
         }
@@ -843,9 +864,9 @@ impl<S: DatagramSocket> UdpPort<S> {
         self.socket.local()
     }
 
-    /// A wait for the socket that another thread can make, when the platform gives one.
-    pub fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        self.socket.readiness()
+    /// What another thread waits on for the socket's input, when the platform gives one.
+    pub fn input_wait(&self) -> Option<WaitOn> {
+        self.socket.input_wait()
     }
 
     /// Datagrams from a source with no link that were not an `InitSyn`.
@@ -973,6 +994,8 @@ impl<S: DatagramSocket> Drop for PortPeer<S> {
 impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
     type Error = PortPeerError<S::Error>;
 
+    type Waits = S::Waits;
+
     const CARRIED: bool = S::CARRIED;
 
     const IPV6: bool = S::IPV6;
@@ -1021,8 +1044,8 @@ impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
         pumped.map(|()| None).map_err(PortPeerError::Socket)
     }
 
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        self.port.readiness()
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.port.input_wait()
     }
 
     fn holds_datagram(&self) -> bool {
@@ -1312,6 +1335,9 @@ mod tests {
 
     impl DatagramSocket for Loop {
         type Error = Refused;
+
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        type Waits = crate::session_drive::NoWaits;
 
         fn bind(_at: SocketAddr) -> Result<Self, Refused> {
             Ok(Loop::default())

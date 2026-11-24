@@ -588,7 +588,7 @@ mod enforcement {
         observer.with_parts(|app_half, face_half| {
             app_half
                 .liveliness_subscribers
-                .register(&mut *face_half.tokens, index as u64, &key, false, sink)
+                .register(&*face_half.tokens, index as u64, &key, false, sink)
                 .map(|_| ())
         })
     }
@@ -2486,14 +2486,14 @@ mod enforcement {
                     assert_eq!(
                         observer.with_parts(|app_half, face_half| app_half
                             .liveliness_subscribers
-                            .register(&mut *face_half.tokens, 1, "abc", false, sink())
+                            .register(&*face_half.tokens, 1, "abc", false, sink())
                             .err()),
                         too_long
                     );
                     assert_eq!(
                         observer.with_parts(|app_half, face_half| app_half
                             .liveliness_subscribers
-                            .register(&mut *face_half.tokens, 2, "ab", false, sink())),
+                            .register(&*face_half.tokens, 2, "ab", false, sink())),
                         Ok(true)
                     );
                     assert_eq!(

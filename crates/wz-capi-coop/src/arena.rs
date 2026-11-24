@@ -485,11 +485,44 @@ pub struct LinkCells<T> {
     pub actions: T,
 }
 
+impl<T> LinkCells<T> {
+    /// The three in the order their tables are laid out and lent: the driver's, the gate's, the
+    /// actions'.
+    pub fn into_array(self) -> [T; 3] {
+        [self.driver, self.gate, self.actions]
+    }
+
+    /// The three from [`Self::into_array`]'s order.
+    pub fn from_array([driver, gate, actions]: [T; 3]) -> Self {
+        Self {
+            driver,
+            gate,
+            actions,
+        }
+    }
+}
+
+/// The names of the two rows of each table of [`LinkCells`], in [`LinkCells::into_array`]'s
+/// order: its flags, then its cells.
+const CELL_ROWS_NAMED: [[&str; 2]; 3] = [
+    ["link cell flags", "link cells"],
+    ["link gate flags", "link gates"],
+    ["link actions flags", "link actions"],
+];
+
+/// The limits a table of a cell for each link is sized by.
+const CELL_BASIS: &str = "MAX_FACES + MAX_ACCEPT_PENDING";
+
 /// What a session's arena holds, row by row, in the order the rows are lent from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
     rows: [ArenaRow; ARENA_ROWS],
     len: usize,
+    /// The first refusal met while the plan was laid out, kept as it came (the limit it names, or
+    /// the address space), and the one its maker is told once the plan is settled
+    /// ([`Self::settled`]): every row and every limit is put and read in one pass with no exit of
+    /// its own, and nothing after the first refusal replaces it.
+    refused: Option<ArenaRefused>,
     /// The links whose buffers the arena holds.
     links: usize,
     /// The receive buffers of the pool those links share (`RX_POOL_BUFFERS`, at most one for each
@@ -557,105 +590,115 @@ impl ArenaPlan {
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
         let link_bytes = link_batch(config, limits)?;
-        // The largest message a link rejoins is decided before the lane that hands it on, so a
-        // value over the build's is refused under its own name.
-        let reassembly_bytes = lent::<{ caps::PICO_FRAG_MAX_BYTES }>(
-            "PICO_FRAG_MAX_BYTES",
-            limits.pico_frag_max_bytes(),
-        )?;
-        // The links read into a pool they share, a buffer held by a link only while it holds part
-        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
-        // a pool of more buffers than links would hold one no link can take.
-        #[cfg(feature = "listen")]
-        let rx_buffers = lent::<{ caps::RX_POOL_BUFFERS }>(
-            "RX_POOL_BUFFERS",
-            Quota::at_most(limits.rx_pool_buffers()),
-        )?
-        .min(links);
-        // A build that only dials holds its dial and the faces it attaches, and lends each link
-        // buffers of its own: no pool's bookkeeping for a session of one link.
-        #[cfg(not(feature = "listen"))]
-        let rx_buffers = links;
-        // The links encode their frames into a pool of slots they share as well, a slot held by a
-        // link from its grant to its send, or until a frame its stream took in part is written
-        // (`wz_runtime_coop::link_storage::PooledTx`).
-        #[cfg(feature = "listen")]
-        let tx_slots = lent::<{ caps::TX_POOL_SLOTS }>(
-            "TX_POOL_SLOTS",
-            Quota::at_most(limits.tx_pool_slots()),
-        )?
-        .min(links);
-        #[cfg(not(feature = "listen"))]
-        let tx_slots = links;
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
+            refused: None,
             links,
-            rx_buffers,
-            tx_slots,
+            rx_buffers: links,
+            tx_slots: links,
             link_bytes,
-            lane_bytes: lent::<{ caps::DELIVERY_LANE_BYTES }>(
-                "DELIVERY_LANE_BYTES",
-                Quota::at_most(limits.delivery_lane_bytes()),
-            )?,
-            round: RoundRowCounts {
-                records: lent::<{ caps::DELIVERY_LANE_EVENTS }>(
-                    "DELIVERY_LANE_EVENTS",
-                    limits.delivery_lane_events(),
-                )?,
-                callbacks: lent::<{ caps::DELIVERY_LANE_CALLBACKS }>(
-                    "DELIVERY_LANE_CALLBACKS",
-                    limits.delivery_lane_callbacks(),
-                )?,
-                longest_key: lent::<{ caps::MAX_KEYEXPR_BYTES }>(
-                    "MAX_KEYEXPR_BYTES",
-                    limits.max_keyexpr_bytes(),
-                )?,
-            },
-            reassembly_bytes,
+            lane_bytes: 0,
+            round: RoundRowCounts::default(),
+            reassembly_bytes: 0,
             reassembly_chains: LENT_CHAINS,
             entities: EntityRows::default(),
             gets: GetTables::default(),
             peers: FacePeers::default(),
             held_queries: 0,
-            key_bytes: lent::<{ caps::KEY_ARENA_BYTES }>(
-                "KEY_ARENA_BYTES",
-                Quota::at_most(limits.key_arena_bytes()),
-            )?,
+            key_bytes: 0,
             handle_bytes: 0,
             entity_bytes: [0; ENTITY_KINDS],
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
             cell_bytes: LinkCells::default(),
         };
-        let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
+        // The largest message a link rejoins is decided before the lane that hands it on, so a
+        // value over the build's is refused under its own name.
+        plan.reassembly_bytes = plan.lent(
+            "PICO_FRAG_MAX_BYTES",
+            limits.pico_frag_max_bytes(),
+            caps::PICO_FRAG_MAX_BYTES,
+        );
+        // The links read into a pool they share, a buffer held by a link only while it holds part
+        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
+        // a pool of more buffers than links would hold one no link can take. They encode their
+        // frames into a pool of slots they share as well, a slot held by a link from its grant to
+        // its send, or until a frame its stream took in part is written
+        // (`wz_runtime_coop::link_storage::PooledTx`). A build that only dials holds its dial and
+        // the faces it attaches, and lends each link a buffer and a slot of its own.
+        #[cfg(feature = "listen")]
+        {
+            plan.rx_buffers = plan
+                .lent(
+                    "RX_POOL_BUFFERS",
+                    Quota::at_most(limits.rx_pool_buffers()),
+                    caps::RX_POOL_BUFFERS,
+                )
+                .min(links);
+            plan.tx_slots = plan
+                .lent(
+                    "TX_POOL_SLOTS",
+                    Quota::at_most(limits.tx_pool_slots()),
+                    caps::TX_POOL_SLOTS,
+                )
+                .min(links);
+        }
+        plan.lane_bytes = plan.lent(
+            "DELIVERY_LANE_BYTES",
+            Quota::at_most(limits.delivery_lane_bytes()),
+            caps::DELIVERY_LANE_BYTES,
+        );
+        plan.round = RoundRowCounts {
+            records: plan.lent(
+                "DELIVERY_LANE_EVENTS",
+                limits.delivery_lane_events(),
+                caps::DELIVERY_LANE_EVENTS,
+            ),
+            callbacks: plan.lent(
+                "DELIVERY_LANE_CALLBACKS",
+                limits.delivery_lane_callbacks(),
+                caps::DELIVERY_LANE_CALLBACKS,
+            ),
+            longest_key: plan.lent(
+                "MAX_KEYEXPR_BYTES",
+                limits.max_keyexpr_bytes(),
+                caps::MAX_KEYEXPR_BYTES,
+            ),
+        };
+        plan.key_bytes = plan.lent(
+            "KEY_ARENA_BYTES",
+            Quota::at_most(limits.key_arena_bytes()),
+            caps::KEY_ARENA_BYTES,
+        );
+        let faces = plan.sized(faces_of(config));
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
         // (`SessionArena::lend_endpoints`): one row of the plan, the two tables' spans.
         let (dial_rows, listen_rows) = plan.endpoint_rows;
+        let texts = plan.sized(
+            Arena::table_bytes::<LocatorText>(dial_rows)
+                .zip(Arena::table_bytes::<LocatorText>(listen_rows))
+                .and_then(|(dial, listen)| dial.checked_add(listen)),
+        );
         plan.put(
             "endpoint texts",
             "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
             1,
-            Arena::table_bytes::<LocatorText>(dial_rows)
-                .zip(Arena::table_bytes::<LocatorText>(listen_rows))
-                .and_then(|(dial, listen)| dial.checked_add(listen))
-                .ok_or(ArenaRefused::TooLarge)?,
-        )?;
+            texts,
+        );
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
-        plan.put(
-            "link receive flags",
+        plan.put_table(
+            ["link receive flags", "link receive buffers"],
             RX_BASIS,
-            rx_buffers,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        plan.put("link receive buffers", RX_BASIS, rx_buffers, link_bytes)?;
-        plan.put(
-            "link transmit flags",
+            plan.rx_buffers,
+            link_bytes,
+        );
+        plan.put_table(
+            ["link transmit flags", "link transmit slots"],
             TX_BASIS,
-            tx_slots,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        plan.put("link transmit slots", TX_BASIS, tx_slots, link_bytes)?;
+            plan.tx_slots,
+            link_bytes,
+        );
         // A place for each link, which bounds the links that open where the slots are a pool:
         // the flags of a table of buffers of no bytes.
         #[cfg(feature = "listen")]
@@ -664,113 +707,119 @@ impl ArenaPlan {
             "MAX_FACES + MAX_ACCEPT_PENDING",
             links,
             LentByteCells::FLAG_BYTES,
-        )?;
+        );
         // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
-        plan.put(
-            "delivery lane flag",
+        plan.put_table(
+            ["delivery lane flag", "delivery lane"],
             "DELIVERY_LANE_BYTES",
             1,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes)?;
+            plan.lane_bytes,
+        );
         // The round's tables, lent after its area (`crate::round::RoundRows::lent`).
         plan.put(
             "delivery records",
             "DELIVERY_LANE_EVENTS",
             plan.round.records,
             RECORD_BYTES,
-        )?;
+        );
         plan.put(
             "delivery callbacks",
             "DELIVERY_LANE_CALLBACKS",
             plan.round.callbacks,
             CALLBACK_BYTES,
-        )?;
+        );
         plan.put(
             "delivery keys",
             "MAX_KEYEXPR_BYTES",
             1,
             plan.round.key_bytes(),
-        )?;
+        );
         // The session's reassembly buffers, which its links share, lent next
         // (`SessionArena::lend_reassembly`).
-        plan.put(
-            "reassembly flags",
-            "PICO_FRAG_MAX_BYTES",
-            plan.reassembly_chains,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        plan.put(
-            "reassembly buffers",
+        plan.put_table(
+            ["reassembly flags", "reassembly buffers"],
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             plan.reassembly_bytes,
-        )?;
+        );
+        // The rows of the session's own declarations, read once: the registries' rows below and
+        // the declaration tables after them count the same limits.
+        plan.entities = plan.kept(entity_rows(limits));
         #[cfg(feature = "liveliness")]
         plan.put(
             "liveliness tokens",
             "MAX_LOCAL_TOKENS",
-            lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?,
+            plan.entities.tokens,
             wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-        )?;
+        );
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
-        let watchers = lent::<{ caps::MAX_DECL_OBSERVERS }>(
+        let watchers = plan.lent(
             "MAX_DECL_OBSERVERS",
             limits.max_decl_observers(),
-        )?;
+            caps::MAX_DECL_OBSERVERS,
+        );
+        let watcher_bytes = plan.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
+            watchers,
+        ));
         plan.put(
             "declaration watchers",
             "MAX_DECL_OBSERVERS",
             1,
-            SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(watchers)
-                .ok_or(ArenaRefused::TooLarge)?,
-        )?;
+            watcher_bytes,
+        );
+        // A build that asks no query registers no get, so its tables of them hold no row.
+        let queries = if cfg!(feature = "query") {
+            plan.lent(
+                "MAX_PENDING_QUERIES",
+                limits.max_pending_queries(),
+                caps::MAX_PENDING_QUERIES,
+            )
+        } else {
+            0
+        };
+        let liveliness_gets = if cfg!(feature = "liveliness-get") {
+            plan.lent(
+                "MAX_PENDING_LIVELINESS_GETS",
+                limits.max_pending_liveliness_gets(),
+                caps::MAX_PENDING_LIVELINESS_GETS,
+            )
+        } else {
+            0
+        };
+        let tables = plan.sized(faces.checked_add(usize::from(cfg!(feature = "local-queryable"))));
         plan.gets = GetTables {
             rows: RequesterRows {
-                // A build that asks no query registers no get, so its tables of them hold no row.
-                queries: if cfg!(feature = "query") {
-                    lent::<{ caps::MAX_PENDING_QUERIES }>(
-                        "MAX_PENDING_QUERIES",
-                        limits.max_pending_queries(),
-                    )?
-                } else {
-                    0
-                },
-                liveliness_gets: if cfg!(feature = "liveliness-get") {
-                    lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
-                        "MAX_PENDING_LIVELINESS_GETS",
-                        limits.max_pending_liveliness_gets(),
-                    )?
-                } else {
-                    0
-                },
+                queries,
+                liveliness_gets,
             },
-            tables: faces
-                .checked_add(usize::from(cfg!(feature = "local-queryable")))
-                .ok_or(ArenaRefused::TooLarge)?,
+            tables,
         };
         // A row of tables, each the spans of one face's registries: a face takes one whole.
+        let get_bytes = plan.sized(FaceGets::arena_bytes(plan.gets.rows));
         plan.put(
             "pending gets",
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.tables,
-            FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
-        )?;
+            get_bytes,
+        );
         // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
-        plan.put(
-            "ended legs",
-            "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
-            plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
-            core::mem::size_of::<crate::engine::Ended>(),
-        )?;
+        {
+            let legs = plan.sized(plan.gets.legs());
+            plan.put(
+                "ended legs",
+                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                legs,
+                core::mem::size_of::<crate::engine::Ended>(),
+            );
+        }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
         plan.peers = FacePeers {
-            rows: peer_rows(limits)?,
+            rows: plan.kept(peer_rows(limits)),
             tables: faces,
-            pools: pool_rows(limits, faces)?,
+            pools: plan.kept(pool_rows(limits, faces)),
             dial: dials(config),
         };
         // The sets of face tables themselves, one for each face, in one table
@@ -780,20 +829,21 @@ impl ArenaPlan {
             "MAX_FACES + 1",
             plan.peers.sets(),
             FACE_SET_BYTES,
-        )?;
+        );
         // Which face holds which set, a row for each set.
         plan.put(
             "held faces",
             "MAX_FACES + 1",
             plan.peers.sets(),
             HELD_SET_BYTES,
-        )?;
+        );
+        let peer_bytes = plan.sized(PeerTables::<Lent>::arena_bytes(plan.peers.rows));
         plan.put(
             "peer tables",
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
             plan.peers.tables,
-            PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
-        )?;
+            peer_bytes,
+        );
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
         if SHARES_ROWS {
@@ -807,7 +857,8 @@ impl ArenaPlan {
                     pools.interest_bytes(),
                 ),
             ] {
-                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?)?;
+                let bytes = plan.sized(bytes);
+                plan.put(part, kind.session, 1, bytes);
             }
         }
         // The tokens the faces that went still owe, lent with the pools
@@ -821,57 +872,52 @@ impl ArenaPlan {
                 core::mem::size_of::<
                     wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
                 >(),
-            )?;
+            );
         }
         plan.held_queries = if cfg!(feature = "queryable") {
-            lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
+            plan.lent(
+                "MAX_PENDING_FINALS",
+                limits.max_pending_finals(),
+                caps::MAX_PENDING_FINALS,
+            )
         } else {
             0
         };
-        plan.entities = entity_rows(limits)?;
-        plan.put_entities()?;
-        plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
-        Ok(plan)
+        plan.put_entities();
+        plan.settled()
     }
 
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
-    fn put_entities(&mut self) -> Result<(), ArenaRefused> {
+    fn put_entities(&mut self) {
         let rows = self.entities;
         // The session's one table set, holding the kinds moved onto it so far.
-        self.put(
-            "session tables",
-            "MAX_DECLARED_KEYEXPRS",
-            1,
-            CoopTables::arena_bytes(&self.tables()).ok_or(ArenaRefused::TooLarge)?,
-        )?;
+        let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
+        self.put("session tables", "MAX_DECLARED_KEYEXPRS", 1, tables);
+        let filters = self.sized(rows.filters());
         self.put(
             "write filters",
             "MAX_PUBLISHERS + MAX_QUERIERS",
-            rows.filters().ok_or(ArenaRefused::TooLarge)?,
+            filters,
             EntryBytes::FILTER,
-        )?;
+        );
         self.put(
             "matching listeners",
             "MAX_MATCHING_LISTENERS",
             rows.matching_listeners,
             EntryBytes::MATCH,
-        )?;
+        );
+        let interests = self.sized(rows.interests());
         self.put(
             "interests",
             "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
-            rows.interests().ok_or(ArenaRefused::TooLarge)?,
+            interests,
             EntryBytes::INTEREST,
-        )?;
+        );
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
         // each.
-        self.put(
-            "key arena",
-            "KEY_ARENA_BYTES",
-            1,
-            KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
-        )?;
-        Ok(())
+        let keys = self.sized(KeySpace::span_bytes(self.key_bytes));
+        self.put("key arena", "KEY_ARENA_BYTES", 1, keys);
     }
 
     /// How many rows each table of the session's round of deliveries is lent.
@@ -936,23 +982,94 @@ impl ArenaPlan {
     }
 
     /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`);
-    /// a row past them is refused as an arena past what the plan can lay out.
-    fn put(
+    /// a row past them is refused as an arena past what the plan can lay out, which the plan keeps
+    /// as its refusal unless it holds an earlier one ([`Self::settled`]).
+    #[inline(never)]
+    fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
+        match self.rows.get_mut(self.len) {
+            Some(row) => {
+                *row = ArenaRow {
+                    part,
+                    basis,
+                    count,
+                    entry_bytes,
+                };
+                self.len = self.len.saturating_add(1);
+            }
+            None => self.refuse(ArenaRefused::TooLarge),
+        }
+    }
+
+    /// Add the two rows of a table of `count` entries of `entry_bytes` named `parts`: its flags,
+    /// then its entries, as an arena lends a table of cells.
+    #[inline(never)]
+    fn put_table(
         &mut self,
-        part: &'static str,
+        parts: [&'static str; 2],
         basis: &'static str,
         count: usize,
         entry_bytes: usize,
-    ) -> Result<(), ArenaRefused> {
-        let row = self.rows.get_mut(self.len).ok_or(ArenaRefused::TooLarge)?;
-        *row = ArenaRow {
-            part,
-            basis,
-            count,
-            entry_bytes,
-        };
-        self.len = self.len.saturating_add(1);
-        Ok(())
+    ) {
+        let [flags, entries] = parts;
+        self.put(flags, basis, count, LentByteCells::FLAG_BYTES);
+        self.put(entries, basis, count, entry_bytes);
+    }
+
+    /// Keep `refused` as the plan's refusal unless it holds an earlier one.
+    #[inline(never)]
+    fn refuse(&mut self, refused: ArenaRefused) {
+        if self.refused.is_none() {
+            self.refused = Some(refused);
+        }
+    }
+
+    /// The rows a table of the limit `limit` is lent (`lent_under`): `value` under `ceiling`,
+    /// the build's value of the limit. A value over it is kept as the plan's refusal, under the
+    /// limit's own name, and answers `0`.
+    #[inline(never)]
+    fn lent(&mut self, limit: &'static str, value: Quota, ceiling: usize) -> usize {
+        match lent_under(limit, value, ceiling) {
+            Ok(rows) => rows,
+            Err(refused) => {
+                self.refuse(refused);
+                0
+            }
+        }
+    }
+
+    /// `bytes`, a size `None` past the address space, which is then kept as the plan's refusal
+    /// and answers `0`.
+    #[inline(never)]
+    fn sized(&mut self, bytes: Option<usize>) -> usize {
+        match bytes {
+            Some(bytes) => bytes,
+            None => {
+                self.refuse(ArenaRefused::TooLarge);
+                0
+            }
+        }
+    }
+
+    /// What `read` gives, or its refusal kept as the plan's and the value's default.
+    #[inline]
+    fn kept<T: Default>(&mut self, read: Result<T, ArenaRefused>) -> T {
+        read.unwrap_or_else(|refused| {
+            self.refuse(refused);
+            T::default()
+        })
+    }
+
+    /// The plan, or the first refusal met while it was laid out; refused as past the address
+    /// space when the rows' spans together are.
+    #[inline(never)]
+    fn settled(self) -> Result<Self, ArenaRefused> {
+        if let Some(refused) = self.refused {
+            return Err(refused);
+        }
+        match self.reserved_bytes() {
+            Some(_) => Ok(self),
+            None => Err(ArenaRefused::TooLarge),
+        }
     }
 
     /// The plan with the places `held` names, lent after every other row: the ABI's handle of the
@@ -970,8 +1087,12 @@ impl ArenaPlan {
             }
             if handle.size() != 0 && self.handle_bytes == 0 {
                 self.handle_bytes = handle.size();
-                self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
-                self.put("session handle", "", 1, handle.size())?;
+                self.put_table(
+                    ["session handle flag", "session handle"],
+                    "",
+                    1,
+                    handle.size(),
+                );
             }
         }
         let laid = self.entity_bytes;
@@ -987,14 +1108,12 @@ impl ArenaPlan {
                 continue;
             }
             let (flags, places, basis) = place_rows(kind);
-            self.put(flags, basis, count, LentByteCells::FLAG_BYTES)?;
-            self.put(places, basis, count, place.size())?;
+            self.put_table([flags, places], basis, count, place.size());
             if let Some(bytes) = self.entity_bytes.get_mut(kind as usize) {
                 *bytes = place.size();
             }
         }
-        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
-        Ok(self)
+        self.settled()
     }
 
     /// The plan with a table of a cell for each link of each kind `bytes` sizes: the links'
@@ -1004,31 +1123,15 @@ impl ArenaPlan {
     /// memory of the heap. Laid out before the ABI's handle ([`Self::holding`]). A size of `0`
     /// adds no table, as a stack that places its links on the heap asks.
     pub fn holding_cells(mut self, bytes: LinkCells<usize>) -> Result<Self, ArenaRefused> {
-        if self.cell_bytes.driver == 0 && bytes.driver != 0 {
-            self.cell_bytes.driver = bytes.driver;
-            self.put_cells(["link cell flags", "link cells"], bytes.driver)?;
+        let mut laid = self.cell_bytes.into_array();
+        for ((laid, asked), parts) in laid.iter_mut().zip(bytes.into_array()).zip(CELL_ROWS_NAMED) {
+            if *laid == 0 && asked != 0 {
+                *laid = asked;
+                self.put_table(parts, CELL_BASIS, self.links, asked);
+            }
         }
-        if self.cell_bytes.gate == 0 && bytes.gate != 0 {
-            self.cell_bytes.gate = bytes.gate;
-            self.put_cells(["link gate flags", "link gates"], bytes.gate)?;
-        }
-        if self.cell_bytes.actions == 0 && bytes.actions != 0 {
-            self.cell_bytes.actions = bytes.actions;
-            self.put_cells(["link actions flags", "link actions"], bytes.actions)?;
-        }
-        Ok(self)
-    }
-
-    /// The two rows of a table of a cell for each link, `bytes` bytes each, named `parts`: its
-    /// flags, then its cells, as an arena lends a table of cells.
-    #[inline(never)]
-    fn put_cells(&mut self, parts: [&'static str; 2], bytes: usize) -> Result<(), ArenaRefused> {
-        let [flags, cells] = parts;
-        let basis = "MAX_FACES + MAX_ACCEPT_PENDING";
-        self.put(flags, basis, self.links, LentByteCells::FLAG_BYTES)?;
-        self.put(cells, basis, self.links, bytes)?;
-        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
-        Ok(())
+        self.cell_bytes = LinkCells::from_array(laid);
+        self.settled()
     }
 
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
@@ -1488,6 +1591,7 @@ impl EntityPlaces {
     }
 
     /// How many places of `kind` are lent, and how many the arena holds.
+    #[cfg(test)]
     pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
         self.of(kind)
             .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))
@@ -1548,20 +1652,11 @@ impl SessionArena {
     /// session's links claim as they open and give back as they go. Refused only by an arena
     /// reserved by another plan.
     pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
-        let rx = self
-            .arena
-            .lend_byte_cells(plan.link_bytes, plan.rx_buffers)
-            .map_err(ArenaRefused::Lend)?;
-        let tx = self
-            .arena
-            .lend_byte_cells(plan.link_bytes, plan.tx_slots)
-            .map_err(ArenaRefused::Lend)?;
+        let rx = self.cells(plan.link_bytes, plan.rx_buffers)?;
+        let tx = self.cells(plan.link_bytes, plan.tx_slots)?;
         #[cfg(feature = "listen")]
         {
-            let places = self
-                .arena
-                .lend_byte_cells(0, plan.links)
-                .map_err(ArenaRefused::Lend)?;
+            let places = self.cells(0, plan.links)?;
             Ok(LinkTables::pooled(rx, tx, places))
         }
         #[cfg(not(feature = "listen"))]
@@ -1575,20 +1670,7 @@ impl SessionArena {
         &mut self,
         plan: &ArenaPlan,
     ) -> Result<(NonNull<u8>, usize), ArenaRefused> {
-        let cells = self
-            .arena
-            .lend_byte_cells(plan.lane_bytes, 1)
-            .map_err(ArenaRefused::Lend)?;
-        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
-            asked: Some(plan.lane_bytes),
-            left: 0,
-        });
-        let buffer = cells.claim().ok_or(refused)?;
-        let (base, bytes) = buffer.raw();
-        // The claim is never given back: the lane holds the buffer until the session is let go, and
-        // a buffer dropped then would write its cell's flag into an arena given back before it.
-        core::mem::forget(buffer);
-        Ok((NonNull::new(base).ok_or(refused)?, bytes))
+        self.one_buffer(plan.lane_bytes)
     }
 
     /// Lend the session's reassembly buffers `plan` lays out, next after the lane: a table the
@@ -1599,9 +1681,7 @@ impl SessionArena {
         &mut self,
         plan: &ArenaPlan,
     ) -> Result<LentByteCells, ArenaRefused> {
-        self.arena
-            .lend_byte_cells(plan.reassembly_bytes, plan.reassembly_chains)
-            .map_err(ArenaRefused::Lend)
+        self.cells(plan.reassembly_bytes, plan.reassembly_chains)
     }
 
     /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
@@ -1622,17 +1702,13 @@ impl SessionArena {
         &mut self,
         plan: &ArenaPlan,
     ) -> Result<LinkCells<Option<LentByteCells>>, ArenaRefused> {
-        let mut table = |bytes: usize| {
-            (bytes != 0)
-                .then(|| self.arena.lend_byte_cells(bytes, plan.links))
-                .transpose()
-                .map_err(ArenaRefused::Lend)
-        };
-        Ok(LinkCells {
-            driver: table(plan.cell_bytes.driver)?,
-            gate: table(plan.cell_bytes.gate)?,
-            actions: table(plan.cell_bytes.actions)?,
-        })
+        let mut lent = [None, None, None];
+        for (bytes, cells) in plan.cell_bytes.into_array().into_iter().zip(&mut lent) {
+            if bytes != 0 {
+                *cells = Some(self.cells(bytes, plan.links)?);
+            }
+        }
+        Ok(LinkCells::from_array(lent))
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
@@ -1658,23 +1734,8 @@ impl SessionArena {
         if plan.handle_bytes == 0 {
             return Ok(None);
         }
-        let cells = self
-            .arena
-            .lend_byte_cells(plan.handle_bytes, 1)
-            .map_err(ArenaRefused::Lend)?;
-        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
-            asked: Some(plan.handle_bytes),
-            left: 0,
-        });
-        let buffer = cells.claim().ok_or(refused)?;
-        let (base, bytes) = buffer.raw();
-        // As the lane's: the claim is held for the session's life, and a buffer dropped then would
-        // write its cell's flag into an arena given back before it.
-        core::mem::forget(buffer);
-        Ok(Some(HandlePlace {
-            base: NonNull::new(base).ok_or(refused)?,
-            bytes,
-        }))
+        let (base, bytes) = self.one_buffer(plan.handle_bytes)?;
+        Ok(Some(HandlePlace { base, bytes }))
     }
 
     /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
@@ -1692,13 +1753,36 @@ impl SessionArena {
             if bytes == 0 {
                 continue;
             }
-            *cells = Some(
-                self.arena
-                    .lend_byte_cells(bytes, plan.entities.of_kind(kind))
-                    .map_err(ArenaRefused::Lend)?,
-            );
+            *cells = Some(self.cells(bytes, plan.entities.of_kind(kind))?);
         }
         Ok(places)
+    }
+
+    /// A table of `count` cells of `bytes` each, lent from the arena: the one body every table of
+    /// cells the session's arena lends goes through. Refused only by an arena reserved by another
+    /// plan.
+    #[inline(never)]
+    fn cells(&mut self, bytes: usize, count: usize) -> Result<LentByteCells, ArenaRefused> {
+        self.arena
+            .lend_byte_cells(bytes, count)
+            .map_err(ArenaRefused::Lend)
+    }
+
+    /// The one buffer of a table of one cell of `bytes`, claimed for the session's life: its place
+    /// and its length. The claim is never given back: what holds the buffer holds it until the
+    /// session is let go, and a buffer dropped then would write its cell's flag into an arena given
+    /// back before it.
+    #[inline(never)]
+    fn one_buffer(&mut self, bytes: usize) -> Result<(NonNull<u8>, usize), ArenaRefused> {
+        let cells = self.cells(bytes, 1)?;
+        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(bytes),
+            left: 0,
+        });
+        let buffer = cells.claim().ok_or(refused)?;
+        let (base, len) = buffer.raw();
+        core::mem::forget(buffer);
+        Ok((NonNull::new(base).ok_or(refused)?, len))
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
@@ -1740,6 +1824,7 @@ mod tests {
         ArenaPlan {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
+            refused: None,
             links: 0,
             rx_buffers: 0,
             tx_slots: 0,
@@ -1761,16 +1846,68 @@ mod tests {
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
+    /// Turned red by a row written past the table, or a plan settled with a row it could not hold.
     #[test]
     fn a_row_past_the_plan_is_refused_and_the_rows_it_holds_stay() {
         let mut plan = empty_plan();
         for _ in 0..ARENA_ROWS {
-            assert_eq!(plan.put("part", "BASIS", 1, 8), Ok(()));
+            plan.put("part", "BASIS", 1, 8);
+        }
+        assert_eq!(plan.refused, None);
+        plan.put("one more", "BASIS", 1, 8);
+        assert_eq!(plan.rows().len(), ARENA_ROWS);
+        assert_eq!(plan.settled(), Err(ArenaRefused::TooLarge));
+    }
+
+    /// The refusal a settled plan answers is the first one met, as it came: a limit over the
+    /// build's value under the limit's own name, though a row past the plan and a size past the
+    /// address space come after it. Turned red by a later refusal replacing the first, or by a
+    /// refusal that loses the limit it names.
+    #[test]
+    fn a_settled_plan_answers_the_first_refusal_with_its_limit() {
+        let mut plan = empty_plan();
+        assert_eq!(plan.lent("FIRST_LIMIT", Quota::at_most(9), 4), 0);
+        assert_eq!(plan.sized(None), 0);
+        for _ in 0..=ARENA_ROWS {
+            plan.put("part", "BASIS", 1, 8);
         }
         assert_eq!(
-            plan.put("one more", "BASIS", 1, 8),
-            Err(ArenaRefused::TooLarge)
+            plan.settled(),
+            Err(ArenaRefused::Limit {
+                limit: "FIRST_LIMIT",
+                why: UnlentRows::OverCeiling {
+                    value: 9,
+                    ceiling: 4,
+                },
+            })
         );
-        assert_eq!(plan.rows().len(), ARENA_ROWS);
+    }
+
+    /// A plan lays out each table of cells once, its flags before its cells, in the order of
+    /// `LinkCells::into_array`, and none for a size of `0`. Turned red by a table laid out twice,
+    /// or the gate's table laid out before the driver's.
+    #[test]
+    fn a_plan_lays_out_each_table_of_cells_once_in_order() {
+        let mut plan = empty_plan();
+        plan.links = 3;
+        let asked = LinkCells {
+            driver: 40,
+            gate: 0,
+            actions: 24,
+        };
+        let plan = plan.holding_cells(asked).expect("the cells fit");
+        let plan = plan.holding_cells(asked).expect("held already");
+        let parts: alloc::vec::Vec<_> = plan.rows().iter().map(|row| row.part).collect();
+        assert_eq!(
+            parts,
+            [
+                "link cell flags",
+                "link cells",
+                "link actions flags",
+                "link actions"
+            ]
+        );
+        assert_eq!(plan.rows()[1].entry_bytes, 40);
+        assert_eq!(plan.rows()[3].count, 3);
     }
 }

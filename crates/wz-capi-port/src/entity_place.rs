@@ -90,7 +90,4 @@ pub trait PlaceLender {
     /// Give back `place`, closed or not, or hand it back untouched when it is no place this
     /// session lent. What the ABI kept at the place it lets go of first.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
-
-    /// How many places of `kind` the ABI holds now, and how many the session lends at most.
-    fn place_counts(&self, kind: EntityKind) -> (usize, usize);
 }

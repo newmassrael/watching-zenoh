@@ -640,13 +640,12 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     );
 }
 
-/// A session whose one link is a stream waits for that link's input in the read of it, as
-/// zenoh-pico's read task waits in its socket's `recv`: none of its reads waits on the link's
-/// readiness first, and what a listener puts reaches it read by those waits. The CONTROL is the
-/// listener, whose port is waited on beside its link: every wait it makes is a wait on both, and
-/// none is made in a read.
+/// A session whose one link is a stream waits on that link's input with nothing of the session
+/// held, and the step after the wait reads what came: each put a listener makes reaches it after
+/// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.
+/// Turned red by a lone link whose read waits some other way, which these waits would not count.
 #[test]
-fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
+fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
     let (listener, endpoint) = listening(|_| {});
     let peer = client(&endpoint, 0xc1);
     let heard = Arc::new(AtomicUsize::new(0));
@@ -662,7 +661,6 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
         listener.faces_up() == 1
     });
     let polls = peer.takes.polls.load(Ordering::SeqCst);
-    let reads = peer.takes.owner_reads.load(Ordering::SeqCst);
     const PUTS: usize = 4;
     for n in 1..=PUTS {
         listener
@@ -677,22 +675,12 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
             heard.load(Ordering::SeqCst) == n
         });
     }
-    assert_eq!(
-        peer.takes.polls.load(Ordering::SeqCst) - polls,
-        0,
-        "the client's reads made no wait on its link's readiness"
-    );
     assert!(
-        peer.takes.owner_reads.load(Ordering::SeqCst) - reads >= PUTS,
-        "each put was read by a wait made in the read of the link"
-    );
-    assert_eq!(
-        listener.takes.owner_reads.load(Ordering::SeqCst),
-        0,
-        "CONTROL: a session that listens makes no wait in a read"
+        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS,
+        "each put was read after a wait on the link's input"
     );
     assert!(
         listener.takes.polls.load(Ordering::SeqCst) > 0,
-        "CONTROL: it waits on its port and its link together"
+        "CONTROL: the listener waits on its port and its link together"
     );
 }

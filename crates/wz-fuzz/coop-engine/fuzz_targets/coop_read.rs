@@ -95,6 +95,13 @@ impl SessionLinks for Links {
 
     type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
+    // The fed link names no handle a thread outside it could wait on.
+    type Waits = wz_runtime_coop::session_drive::NoWaits;
+
+    fn waits(&self) -> Self::Waits {
+        wz_runtime_coop::session_drive::NoWaits
+    }
+
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
     }
