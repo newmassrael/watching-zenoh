@@ -536,10 +536,7 @@ impl InboundReply {
 #[cfg(feature = "alloc")]
 fn retained_timestamp(view: &dyn ReplyView) -> Option<crate::sample::TimestampHint> {
     view.timestamp_parts()
-        .map(|stamp| crate::sample::TimestampHint {
-            time: stamp.time,
-            zid: stamp.zid.to_vec(),
-        })
+        .and_then(|stamp| crate::sample::TimestampHint::new(stamp.time, stamp.zid))
 }
 
 /// The attachment a retained reply keeps: a second reference to the storage the
@@ -2915,10 +2912,7 @@ mod tests {
         )
         .expect("no quota is stated on this table");
 
-        let ts = TimestampHint {
-            time: 0x0102_0304_0506_0708,
-            zid: alloc::vec![0xaa, 0xbb, 0xcc, 0xdd],
-        };
+        let ts = TimestampHint::new(0x0102_0304_0506_0708, &[0xaa, 0xbb, 0xcc, 0xdd]).unwrap();
         let resp = ResponseReplyBuilder::new(
             42,
             crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),

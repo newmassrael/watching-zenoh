@@ -2332,10 +2332,7 @@ mod tests {
     #[cfg(all(feature = "codec-response", feature = "pubsub-timestamp"))]
     #[test]
     fn response_reply_builder_timestamp_sets_msgput_t_flag_and_field() {
-        let ts = crate::sample::TimestampHint {
-            time: 0xDEAD_BEEF,
-            zid: vec![0xAA, 0xBB],
-        };
+        let ts = crate::sample::TimestampHint::new(0xDEAD_BEEF, &[0xAA, 0xBB]).unwrap();
         let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .timestamp(&ts)
             .build()
@@ -2518,10 +2515,7 @@ mod tests {
             packed_id: 13,
             schema: None,
         };
-        let ts = crate::sample::TimestampHint {
-            time: 0x0102_0304,
-            zid: vec![0x09],
-        };
+        let ts = crate::sample::TimestampHint::new(0x0102_0304, &[0x09]).unwrap();
         let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .encoding(&enc)
             .timestamp(&ts)

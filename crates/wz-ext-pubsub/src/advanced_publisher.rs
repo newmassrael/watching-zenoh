@@ -1008,10 +1008,10 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             DataStamp::NoClock => wall_clock_ntp64(),
             DataStamp::Withheld => return Err(PublishError::ClockUntrusted),
         };
-        Ok(TimestampHint {
-            time: self.plane.order_stamp(proposed)?,
-            zid: self.zid.to_vec(),
-        })
+        Ok(
+            TimestampHint::new(self.plane.order_stamp(proposed)?, &self.zid)
+                .expect("a session's zid is at most sixteen bytes"),
+        )
     }
 
     /// The one body of [`Self::put_with`] and `put_shm_with`: what a put stamps and

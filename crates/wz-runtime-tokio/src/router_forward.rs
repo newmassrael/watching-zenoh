@@ -25781,10 +25781,7 @@ mod tests {
         }
         sink_subscriber.reset();
         let ahead = fwd.node_hlc.stamp().expect("a router stamps").time + (1u64 << 30);
-        let stamp = wz_session_core::sample::TimestampHint {
-            time: ahead,
-            zid: vec![0xAA],
-        };
+        let stamp = wz_session_core::sample::TimestampHint::new(ahead, &[0xAA]).unwrap();
         let meta = wz_session_core::metadata::PushMetadata {
             timestamp: Some(&stamp),
             ..Default::default()

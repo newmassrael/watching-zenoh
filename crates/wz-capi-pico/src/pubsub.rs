@@ -2603,11 +2603,8 @@ pub(crate) unsafe fn timestamp_hint_of(
     if !ts.valid {
         return None;
     }
-    Some(wz_session_core::sample::TimestampHint {
-        time: ts.time,
-        // The wire form strips trailing zeros; the codec re-pads.
-        zid: ts.id.id.to_vec(),
-    })
+    // The wire form strips trailing zeros; the codec re-pads. Sixteen bytes are always an id.
+    wz_session_core::sample::TimestampHint::new(ts.time, &ts.id.id)
 }
 
 /// R311y561 — read a caller-supplied `z_source_info_t*` option field into a wz

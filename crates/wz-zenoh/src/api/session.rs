@@ -2545,10 +2545,11 @@ mod tokio_engine {
     /// The engine's hint for `timestamp`.
     fn timestamp_hint_of(timestamp: &uhlc::Timestamp) -> TimestampHint {
         let id = timestamp.get_id();
-        TimestampHint {
-            time: timestamp.get_time().as_u64(),
-            zid: id.to_le_bytes()[..id.size()].to_vec(),
-        }
+        TimestampHint::new(
+            timestamp.get_time().as_u64(),
+            &id.to_le_bytes()[..id.size()],
+        )
+        .expect("a uhlc id is at most sixteen bytes")
     }
 
     /// The timestamp a hint says, when its id is one.

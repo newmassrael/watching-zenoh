@@ -940,10 +940,7 @@ mod tests {
         let mut compared = 0usize;
         let (mut shortest, mut longest) = (usize::MAX, 0usize);
         for fields in 0u8..64 {
-            let stamp = TimestampHint {
-                time: 0x1234_5678_9abc,
-                zid: alloc::vec![7; 16],
-            };
+            let stamp = TimestampHint::new(0x1234_5678_9abc, &[7; 16]).unwrap();
             let encoded = EncodingHint {
                 packed_id: 42 << 1,
                 schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
@@ -1023,8 +1020,9 @@ mod tests {
     }
 
     /// What the owned builders refuse the writer refuses before it writes a byte, and what they
-    /// build it writes: a key past the protocol's `u16` length, a timestamp's id past 16 bytes and a
-    /// schema past 255, each refused only in a build that carries the field.
+    /// build it writes: a key past the protocol's `u16` length and a schema past 255, the schema
+    /// refused only in a build that carries the field. A timestamp's id past 16 bytes is no hint
+    /// at all: it cannot be made, so neither builder is handed one.
     #[test]
     fn a_publication_the_owned_builders_refuse_is_refused_with_nothing_written() {
         use crate::metadata::PushMetadata;
@@ -1032,15 +1030,15 @@ mod tests {
         use crate::sample::{EncodingHint, SampleKind, TimestampHint};
 
         let past = "k".repeat(usize::from(u16::MAX) + 1);
-        let stamp = |len: usize| TimestampHint {
-            time: 1,
-            zid: alloc::vec![1; len],
-        };
+        assert!(
+            TimestampHint::new(1, &[1; 17]).is_none(),
+            "an id past 16 bytes is no timestamp"
+        );
+        let stamp_at = TimestampHint::new(1, &[1; 16]).unwrap();
         let encoding = |len: usize| EncodingHint {
             packed_id: 2,
             schema: Some(alloc::vec![b's'; len]),
         };
-        let (stamp_past, stamp_at) = (stamp(17), stamp(16));
         let (encoding_past, encoding_at) = (encoding(256), encoding(255));
         let stamped = |hint| PushMetadata {
             timestamp: Some(hint),
@@ -1050,13 +1048,8 @@ mod tests {
             encoding: Some(hint),
             ..PushMetadata::default()
         };
-        let cases: [(Option<&str>, PushMetadata, bool); 5] = [
+        let cases: [(Option<&str>, PushMetadata, bool); 4] = [
             (Some(past.as_str()), PushMetadata::default(), true),
-            (
-                Some("k"),
-                stamped(&stamp_past),
-                cfg!(feature = "pubsub-timestamp"),
-            ),
             (Some("k"), stamped(&stamp_at), false),
             (
                 Some("k"),

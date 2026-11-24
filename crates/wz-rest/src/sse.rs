@@ -246,10 +246,7 @@ mod tests {
             payload: b"{\n  \"a\": 1\n}".to_vec(),
             encoding: "application/json".to_string(),
             encoding_id: Some((5, false)),
-            timestamp: Some(TimestampHint {
-                time: 42,
-                zid: vec![0x1a, 0x2b, 0x3c],
-            }),
+            timestamp: Some(TimestampHint::new(42, &[0x1a, 0x2b, 0x3c]).unwrap()),
         };
         let event = format_event(&sample);
         assert_eq!(

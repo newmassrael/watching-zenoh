@@ -674,10 +674,7 @@ async fn zenohd_converges_to_wz_replica() {
             Some(WZ_DATA_KEY),
             WZ_SEED_VALUE.as_bytes().to_vec(),
             None,
-            TimestampHint {
-                time: wall_clock_ntp64(),
-                zid: wz_zid.to_vec(),
-            },
+            TimestampHint::new(wall_clock_ntp64(), &wz_zid).unwrap(),
         )
         .expect("the in-memory backend commits");
 

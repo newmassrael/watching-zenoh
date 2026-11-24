@@ -1048,10 +1048,7 @@ mod consolidating_sink_tests {
     }
 
     fn ts(time: u64) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: alloc::vec![0x01],
-        }
+        TimestampHint::new(time, &[0x01]).unwrap()
     }
 
     fn put(keyexpr: &str, payload: &[u8], timestamp: Option<TimestampHint>) -> InboundReply {

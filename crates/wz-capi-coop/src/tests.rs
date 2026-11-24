@@ -780,10 +780,7 @@ fn run_router(
                             ADVANCED_PUBLISHER_EID,
                             u32::from(sn),
                         )),
-                        TimestampHint {
-                            time: 100 + u64::from(sn),
-                            zid: ADVANCED_PUBLISHER_ZID.to_vec(),
-                        },
+                        TimestampHint::new(100 + u64::from(sn), &ADVANCED_PUBLISHER_ZID).unwrap(),
                         SampleKind::Put,
                     ));
                 }
@@ -818,10 +815,7 @@ fn run_router(
 
 /// The time the router stamps what it is told to stamp, under its own zid.
 fn router_stamp(zid: u8) -> wz_session_core::sample::TimestampHint {
-    wz_session_core::sample::TimestampHint {
-        time: 0x6000_0000_0000_0001,
-        zid: vec![zid; 4],
-    }
+    wz_session_core::sample::TimestampHint::new(0x6000_0000_0000_0001, &[zid; 4]).unwrap()
 }
 
 /// A client's config for `router`, which redials none.
