@@ -49,8 +49,15 @@ pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
     if buf.is_null() {
         return 0;
     }
-    let out = core::slice::from_raw_parts_mut(buf, VLE_LEN);
-    encode_zint(out, v) as u8
+    encode_zint_into(&mut *buf.cast::<[u8; VLE_LEN]>(), v) as u8
+}
+
+/// Write the VLE encoding of `v` into `out`, returning the byte count: [`encode_zint`], out of
+/// line, for this export and the serializer's sequence lengths, each of which would otherwise hold
+/// the encoder unrolled over its nine rungs.
+#[inline(never)]
+pub(crate) fn encode_zint_into(out: &mut [u8; VLE_LEN], v: u64) -> usize {
+    encode_zint(out, v)
 }
 
 // The codec ITSELF is `wz_codecs::vle` — one implementation, both ABIs,
@@ -92,6 +99,22 @@ mod tests {
             assert_eq!(decoded, v, "round trip failed at {v:#x}");
             assert_eq!(used, n, "decoder consumed a different count at {v:#x}");
         }
+    }
+
+    /// The export writes the encoding the codec does, and writes nothing for a null buffer.
+    #[test]
+    fn the_export_writes_the_codecs_encoding() {
+        for v in [0, 127, 128, 1 << 40, u64::MAX] {
+            let mut expected = [0u8; VLE_LEN];
+            let n = encode_zint(&mut expected, v);
+            let mut written = [0xAAu8; VLE_LEN];
+            // SAFETY: a live local of the nine bytes the export may write.
+            let got = unsafe { _z_zint64_encode_buf(written.as_mut_ptr(), v) };
+            assert_eq!(usize::from(got), n, "count at {v:#x}");
+            assert_eq!(written[..n], expected[..n], "bytes at {v:#x}");
+        }
+        // SAFETY: a null buffer is refused before anything is written.
+        assert_eq!(unsafe { _z_zint64_encode_buf(core::ptr::null_mut(), 1) }, 0);
     }
 
     /// A truncated encoding is `None`, not a silently wrong value — the shape a

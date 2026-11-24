@@ -51,7 +51,7 @@ use crate::abi::{
     z_owned_string_t,
 };
 use crate::bytes::{bytes_ref, store_owned_bytes, store_owned_slice, store_owned_string, ByteBuf};
-use crate::codec::{decode_zint, encode_zint, VLE_LEN};
+use crate::codec::{decode_zint, encode_zint_into, VLE_LEN};
 use crate::ffi::{guard_val, guarded};
 use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
             None => return Z_ERR_NULL,
         };
         let mut vle = [0u8; VLE_LEN];
-        let n = encode_zint(&mut vle, len as u64);
+        let n = encode_zint_into(&mut vle, len as u64);
         let Some(encoded) = vle.get(..n) else {
             return Z_ERR_GENERIC;
         };
@@ -1321,7 +1321,7 @@ mod tests {
     fn a_length_past_the_hosts_size_t_is_not_read_as_its_low_bits() {
         let big: u64 = (1 << 32) + 1;
         let mut prefix = [0u8; VLE_LEN];
-        let used = encode_zint(&mut prefix, big);
+        let used = encode_zint_into(&mut prefix, big);
         let mut payload = prefix[..used].to_vec();
         payload.push(0xAB);
         unsafe {
