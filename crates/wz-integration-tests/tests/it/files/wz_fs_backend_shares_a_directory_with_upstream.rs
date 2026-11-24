@@ -140,10 +140,7 @@ fn wz_put(root: &Path, key: Option<&str>, payload: &[u8], id: u16, schema: Optio
                 packed_id: (u32::from(id) << 1) | u32::from(schema.is_some()),
                 schema: schema.map(|s| s.as_bytes().to_vec()),
             }),
-            TimestampHint {
-                time: TIME,
-                zid: ZID.to_vec(),
-            },
+            TimestampHint::new(TIME, &ZID).unwrap(),
         )
         .expect("wz writes the directory");
 }
@@ -290,13 +287,7 @@ fn fs_shared_dir_a_delete_by_wz_is_seen_by_upstream() {
     oracle_put(root.path(), "gone", b"x", 1, None);
     oracle_put(root.path(), "kept", b"y", 2, None);
     wz_storage(root.path())
-        .delete(
-            Some("gone"),
-            TimestampHint {
-                time: TIME + 1,
-                zid: ZID.to_vec(),
-            },
-        )
+        .delete(Some("gone"), TimestampHint::new(TIME + 1, &ZID).unwrap())
         .expect("wz deletes");
     assert_eq!(oracle(root.path(), &["get", "gone"]), "absent\n");
     assert_eq!(

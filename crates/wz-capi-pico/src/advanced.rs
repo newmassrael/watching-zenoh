@@ -712,7 +712,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
             if let Some(attachment) = crate::pubsub::take_moved_bytes_to_vec(embedded.attachment) {
                 put_options = put_options.with_attachment(attachment);
             }
-            if let Some(encoding) = crate::encoding::take_moved_encoding(embedded.encoding) {
+            if let Some(encoding) = crate::encoding::take_moved_encoding_copy(embedded.encoding) {
                 put_options = put_options.with_encoding(encoding);
             }
             // The timestamp and the source info are NOT read: pico overwrites

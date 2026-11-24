@@ -1411,6 +1411,29 @@ const _: LimitDomain = DeclarationSyncTxNoProgressMs::DOMAIN;
 pub type DeclarationSyncTxNoProgressMsHeld =
     Limited<DeclarationSyncTxNoProgressMs, { DeclarationSyncTxNoProgressMs::HELD }>;
 
+/// `HANDED_LEG_BYTES`: How many bytes a session holds of the droppable publishes it owes
+/// its other faces when a publish finds the session held by a send that waits on one face:
+/// the publish is dropped on that face and kept, in room the session took at open, until
+/// whoever holds the session next sends it to the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandedLegBytes;
+
+impl LimitSpec for HandedLegBytes {
+    type Value = usize;
+    const LIMIT: &'static str = "HANDED_LEG_BYTES";
+    const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = lent_capacity(caps::HANDED_LEG_BYTES);
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::HANDED_LEG_BYTES;
+}
+
+const _: LimitDomain = HandedLegBytes::DOMAIN;
+
+/// How `HANDED_LEG_BYTES` is held: in no byte when its domain is one value.
+pub type HandedLegBytesHeld = Limited<HandedLegBytes, { HandedLegBytes::HELD }>;
+
 /// `PICO_UNICAST_BATCH_BYTES`: The batch size, in bytes, a session of the zenoh-pico
 /// interface advertises when it opens a unicast session, as zenoh-pico's
 /// BATCH_UNICAST_SIZE.
@@ -1704,6 +1727,8 @@ pub struct SessionLimits {
     declaration_sync_retry_interval_ms: DeclarationSyncRetryIntervalMsHeld,
     /// `DECLARATION_SYNC_TX_NO_PROGRESS_MS`.
     declaration_sync_tx_no_progress_ms: DeclarationSyncTxNoProgressMsHeld,
+    /// `HANDED_LEG_BYTES`.
+    handed_leg_bytes: HandedLegBytesHeld,
     /// `PICO_UNICAST_BATCH_BYTES`.
     pico_unicast_batch_bytes: PicoUnicastBatchBytesHeld,
     /// `PICO_MULTICAST_BATCH_BYTES`.
@@ -1779,6 +1804,7 @@ impl SessionLimits {
             declaration_sync_rx_no_progress_ms: Limited::build_default(),
             declaration_sync_retry_interval_ms: Limited::build_default(),
             declaration_sync_tx_no_progress_ms: Limited::build_default(),
+            handed_leg_bytes: Limited::build_default(),
             pico_unicast_batch_bytes: Limited::build_default(),
             pico_multicast_batch_bytes: Limited::build_default(),
             pico_lease_ms: Limited::build_default(),
@@ -1882,6 +1908,7 @@ impl SessionLimits {
         declaration_sync_rx_no_progress_ms: Limited::build_default(),
         declaration_sync_retry_interval_ms: Limited::build_default(),
         declaration_sync_tx_no_progress_ms: Limited::build_default(),
+        handed_leg_bytes: Limited::build_default(),
         pico_unicast_batch_bytes: Limited::build_default(),
         pico_multicast_batch_bytes: Limited::build_default(),
         pico_lease_ms: Limited::build_default(),
@@ -2869,6 +2896,23 @@ impl SessionLimits {
         Ok(())
     }
 
+    /// `HANDED_LEG_BYTES` as this snapshot holds it.
+    pub const fn handed_leg_bytes(&self) -> usize {
+        self.handed_leg_bytes.get()
+    }
+
+    /// `HANDED_LEG_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn handed_leg_bytes_held(&self) -> HandedLegBytesHeld {
+        self.handed_leg_bytes
+    }
+
+    /// Selects `HANDED_LEG_BYTES`, when the build's domain holds `value`.
+    pub fn select_handed_leg_bytes(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.handed_leg_bytes = Limited::select(value)?;
+        Ok(())
+    }
+
     /// `PICO_UNICAST_BATCH_BYTES` as this snapshot holds it.
     pub const fn pico_unicast_batch_bytes(&self) -> usize {
         self.pico_unicast_batch_bytes.get()
@@ -3560,6 +3604,16 @@ impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
     }
 }
 
+impl LimitField<SessionLimits> for HandedLegBytes {
+    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_handed_leg_bytes(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> usize {
+        snapshot.handed_leg_bytes()
+    }
+}
+
 impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
     fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
         snapshot.select_pico_unicast_batch_bytes(value)
@@ -3641,7 +3695,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 61;
+pub const SESSION_LIMIT_COUNT: usize = 62;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -3699,6 +3753,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<DeclarationSyncRxNoProgressMs>(),
     LimitEntry::of::<DeclarationSyncRetryIntervalMs>(),
     LimitEntry::of::<DeclarationSyncTxNoProgressMs>(),
+    LimitEntry::of::<HandedLegBytes>(),
     LimitEntry::of::<PicoUnicastBatchBytes>(),
     LimitEntry::of::<PicoMulticastBatchBytes>(),
     LimitEntry::of::<PicoLeaseMs>(),
@@ -4079,7 +4134,7 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
 /// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
 /// stage decides it, so neither snapshot holds it and a document that states it is refused by
 /// name.
-pub static CAPACITY_LIMITS: [&str; 24] = [
+pub static CAPACITY_LIMITS: [&str; 26] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
     "HELD_SESSIONS",
@@ -4090,6 +4145,8 @@ pub static CAPACITY_LIMITS: [&str; 24] = [
     "HELD_CONFIGS",
     "HELD_HELLOS",
     "HELD_PAYLOAD_BYTES",
+    "HELD_ENCODINGS",
+    "MAX_ENCODING_SCHEMA_BYTES",
     "CONFIG_ENTRIES",
     "MAX_SCOUT_HELLOS",
     "SCOUT_HELLO_LOCATORS",

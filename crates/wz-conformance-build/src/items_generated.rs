@@ -142,6 +142,12 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ("HELD_CONFIGS", "WZ_LIMIT_HELD_CONFIGS", 8),
     ("HELD_HELLOS", "WZ_LIMIT_HELD_HELLOS", 16),
     ("HELD_PAYLOAD_BYTES", "WZ_LIMIT_HELD_PAYLOAD_BYTES", 131072),
+    ("HELD_ENCODINGS", "WZ_LIMIT_HELD_ENCODINGS", 16),
+    (
+        "MAX_ENCODING_SCHEMA_BYTES",
+        "WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES",
+        255,
+    ),
     ("CONFIG_ENTRIES", "WZ_LIMIT_CONFIG_ENTRIES", 32),
     ("MAX_SCOUT_HELLOS", "WZ_LIMIT_MAX_SCOUT_HELLOS", 16),
     ("SCOUT_HELLO_LOCATORS", "WZ_LIMIT_SCOUT_HELLO_LOCATORS", 8),
@@ -322,6 +328,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS",
         0,
     ),
+    ("HANDED_LEG_BYTES", "WZ_LIMIT_HANDED_LEG_BYTES", 4096),
     (
         "PICO_UNICAST_BATCH_BYTES",
         "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES",
@@ -550,5 +557,11 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_KEY_WIRE_FORM",
         &["declared", "shared", "literal"],
         "declared",
+    ),
+    (
+        "held-publish-drop",
+        "WZ_POLICY_HELD_PUBLISH_DROP",
+        &["held-faces", "every-face"],
+        "held-faces",
     ),
 ];

@@ -118,7 +118,7 @@ fn query_options(parameters: Option<&str>, timeout_ms: u32) -> QueryOptions {
     let mut opts = QueryOptions::get()
         .with_allowed_destination(Locality::Remote)
         .with_timeout_ms(timeout_ms);
-    opts.parameters = parameters.map(|p| p.as_bytes().to_vec());
+    opts.parameters = parameters.map(|p| std::borrow::Cow::Owned(p.as_bytes().to_vec()));
     opts
 }
 

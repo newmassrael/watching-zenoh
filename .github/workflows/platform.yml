@@ -48,9 +48,11 @@ on:
       # features, the header tree and licences it copies, and the schemas it ships.
       - ".github/actions/pico-windows-package/**"
       - "scripts/lib/pico_windows_package.py"
-      # zenoh-pico's own programs run on the package (`pico-upstream-windows`): the runner and the
-      # units it links beside them, which live under crates/wz-capi-pico below.
+      # zenoh-pico's own programs run on the package (`pico-upstream-windows`): the runner, the
+      # units it links beside them, which live under crates/wz-capi-pico below, and the integration
+      # lane's file it reads the client test's replacements from.
       - "scripts/lib/pico_upstream_programs.py"
+      - "crates/wz-integration-tests/tests/it/files/pico_upstream_api_tests_on_wz.rs"
       # The ceiling the nostd rows hold the release DLL to: its table, the rule of a row, the
       # verdict it imports, and the script that builds zenoh-pico for the reading.
       - "deploy/pico_host_ceiling.json"

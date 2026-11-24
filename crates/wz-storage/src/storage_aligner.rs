@@ -726,10 +726,8 @@ pub mod wire {
             let time = self.read_u64()?;
             let id = self.read_bytes(16)?;
             let trimmed_len = id.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-            Ok(TimestampHint {
-                time,
-                zid: id[..trimmed_len].to_vec(),
-            })
+            // Sixteen bytes read, so the trimmed id is always one.
+            TimestampHint::new(time, &id[..trimmed_len]).ok_or(AlignmentDecodeError::LengthOverflow)
         }
 
         /// Read an `Option` / `bool` tag: 0 => false, 1 => true, else error.
@@ -1136,7 +1134,7 @@ pub mod wire {
         }
 
         fn ts(time: u64, zid: Vec<u8>) -> TimestampHint {
-            TimestampHint { time, zid }
+            TimestampHint::new(time, &zid).unwrap()
         }
 
         /// THE fidelity test: wz's hand-rolled EventMetadata bytes are
@@ -1584,10 +1582,7 @@ mod tests {
     use alloc::vec;
 
     fn ts(time: u64, zid: u8) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![zid],
-        }
+        TimestampHint::new(time, &[zid]).unwrap()
     }
 
     #[test]
@@ -1675,10 +1670,7 @@ mod tests {
             1 => 1u64 << 31,
             _ => panic!("cfg2 has 2 sub-intervals"),
         };
-        TimestampHint {
-            time: (interval << 32) | frac,
-            zid: vec![0x01],
-        }
+        TimestampHint::new((interval << 32) | frac, &[0x01]).unwrap()
     }
 
     // A snapshot spanning all three eras at hot_upper = 10 (warm_lower=7,

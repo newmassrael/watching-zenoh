@@ -1956,10 +1956,7 @@ mod tests {
     use alloc::vec;
 
     fn ts(time: u64, zid: u8) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![zid],
-        }
+        TimestampHint::new(time, &[zid]).unwrap()
     }
 
     fn state() -> StorageState<MemoryStorage> {
@@ -2049,23 +2046,14 @@ mod tests {
         // trimmed-Vec lexicographic compare would WRONGLY rank
         // [0x05] < [0x05, 0x00] (shorter-is-less), flipping a newer-wins
         // decision. The zero-padded comparator treats them as equal.
-        let a = TimestampHint {
-            time: 10,
-            zid: vec![0x05],
-        };
-        let b = TimestampHint {
-            time: 10,
-            zid: vec![0x05, 0x00],
-        };
+        let a = TimestampHint::new(10, &[0x05]).unwrap();
+        let b = TimestampHint::new(10, &[0x05, 0x00]).unwrap();
         assert!(
             !timestamp_strictly_newer(&a, &b) && !timestamp_strictly_newer(&b, &a),
             "[0x05] and [0x05,0x00] are the same uhlc id — neither is newer"
         );
         // A genuinely higher 16-byte LE id IS newer at equal time.
-        let c = TimestampHint {
-            time: 10,
-            zid: vec![0x05, 0x01],
-        };
+        let c = TimestampHint::new(10, &[0x05, 0x01]).unwrap();
         assert!(
             timestamp_strictly_newer(&c, &a),
             "a higher high-byte (0x05,0x01 > 0x05 padded) is strictly newer"
@@ -3479,10 +3467,7 @@ mod tests {
 
             // A wildcard registered at exactly `secs` seconds (NTP64 word).
             fn tsecs(secs: u64, zid: u8) -> TimestampHint {
-                TimestampHint {
-                    time: secs << 32,
-                    zid: vec![zid],
-                }
+                TimestampHint::new(secs << 32, &[zid]).unwrap()
             }
             // Register a wildcard-delete at `secs` (registers, backend empty).
             fn reg_wdel(s: &mut StorageState<MemoryStorage>, ke: &str, secs: u64) {
@@ -4223,10 +4208,7 @@ mod tests {
         // +500ms (frac 2^31).
         fn at(interval: u64, sub: u64) -> TimestampHint {
             let frac = if sub == 0 { 0 } else { 1u64 << 31 };
-            TimestampHint {
-                time: (interval << 32) | frac,
-                zid: vec![0x01],
-            }
+            TimestampHint::new((interval << 32) | frac, &[0x01]).unwrap()
         }
         fn st_with(puts: &[(&str, TimestampHint)]) -> StorageState<MemoryStorage> {
             let mut s = StorageState::new(MemoryStorage::new()).unwrap();
@@ -4648,14 +4630,8 @@ mod tests {
             let config = cfg();
             let now = 11u64 << 32;
             let t = at(10, 0).time;
-            let lo = TimestampHint {
-                time: t,
-                zid: vec![0x01],
-            };
-            let hi = TimestampHint {
-                time: t,
-                zid: vec![0x02],
-            };
+            let lo = TimestampHint::new(t, &[0x01]).unwrap();
+            let hi = TimestampHint::new(t, &[0x02]).unwrap();
             let mut local = StorageState::new(MemoryStorage::new()).unwrap();
             local
                 .process_put(Some("k/x"), vec![0xAA], None, lo)

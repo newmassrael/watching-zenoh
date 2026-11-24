@@ -207,13 +207,13 @@ impl FallbackStamp {
     /// taken here, so a source switch never moves the newer-wins tie-breaker
     /// (the contract stated in the module note).
     pub fn stamp(&self) -> TimestampHint {
-        TimestampHint {
-            time: self
-                .node_hlc
+        TimestampHint::new(
+            self.node_hlc
                 .stamp()
                 .map_or_else(wall_clock_ntp64, |stamp| stamp.time),
-            zid: self.zid.clone(),
-        }
+            &self.zid,
+        )
+        .expect("a node's zid is at most sixteen bytes")
     }
 }
 

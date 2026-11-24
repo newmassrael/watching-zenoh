@@ -24,8 +24,6 @@
 //! are features of this crate; the runtime's features of the same names forward to them, so the
 //! answer in a tokio build is the answer it always was.
 
-use alloc::borrow::Cow;
-
 use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
@@ -33,7 +31,10 @@ use crate::metadata::PushMetadata;
 #[cfg(feature = "pubsub-qos")]
 use crate::qos::CongestionControl;
 use crate::qos::Priority;
-use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
+// A hint is the owned encoding the setters of a build with `pubsub-encoding` take.
+#[cfg(feature = "pubsub-encoding")]
+use crate::sample::EncodingHint;
+use crate::sample::{EncodingRef, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
 use crate::send_wire_error::SendWireError;
 
 /// Options bundle for a publish. Carries the locality routing predicate
@@ -94,9 +95,10 @@ pub struct PublishOptions<'a> {
     /// propagation is built (R233, `gated_encoding_field` on the Put body, gated
     /// `pubsub-encoding`) and foreign-proven — R311y207 (`wz_encoding_to_pico_zsub`,
     /// `text/plain` decoded by pico); loopback honours it from R232. Lent by a holder that keeps
-    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`]), or
-    /// owned ([`Self::with_encoding`]).
-    pub encoding: Option<Cow<'a, EncodingHint>>,
+    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`], an
+    /// encoding object of a C ABI, [`Self::with_encoding_ref`]), or owned
+    /// ([`Self::with_encoding`]).
+    pub encoding: Option<PublishEncoding<'a>>,
     /// R232 — body-level source identification propagated to `Sample.source_info`. Cooperates
     /// with the R231 self-echo dedup: when the dispatcher fires on a wire-arrived Push whose
     /// `source_info.zid` matches the session's own zid, the dedup suppresses the duplicate fire so
@@ -145,11 +147,88 @@ pub struct PublishOptions<'a> {
     stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
 }
 
+/// The encoding a publish carries: read where a holder keeps it for as long as the publish runs,
+/// or the options' own, which options kept past the call they were made for hold. The one carried
+/// encoding of the crate, which a query's options carry too.
+pub type PublishEncoding<'a> = crate::sample::CarriedEncoding<'a>;
+
 impl<'a> PublishOptions<'a> {
     /// These options without their attachment, and the attachment they borrowed: what a holder
     /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
     /// encoding they were lent is copied into what is kept.
     pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
+        let (mut kept, encoding, attachment) = self.apart();
+        kept.encoding = encoding.map(PublishEncoding::into_owned);
+        (kept, attachment)
+    }
+
+    /// These options without the parts they borrowed, and those parts: the encoding they were lent
+    /// and the attachment. What a holder keeps that keeps the options past the call and holds the
+    /// lent parts where they lie for as long (a C ABI's encoding object and the caller's bytes,
+    /// copied into storage of its own): nothing is copied here. An encoding the options own stays
+    /// in what is kept, since it is theirs and no holder's.
+    pub fn into_kept_parts(
+        self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<EncodingRef<'a>>,
+        Option<&'a [u8]>,
+    ) {
+        let (mut kept, encoding, attachment) = self.apart();
+        let lent = match encoding {
+            Some(PublishEncoding::Lent(lent)) => Some(lent),
+            Some(PublishEncoding::Owned(owned)) => {
+                kept.encoding = Some(PublishEncoding::Owned(owned));
+                None
+            }
+            None => None,
+        };
+        (kept, lent, attachment)
+    }
+
+    /// These options with neither an encoding nor an attachment, copied, and the two read where they
+    /// lie: the encoding, the options' own or one they were lent, and the attachment. What a holder
+    /// takes that keeps the options past the call in room of its own, copying the encoding and the
+    /// attachment into it: nothing is allocated, since no field the copy keeps holds the heap and
+    /// an owned encoding is read rather than cloned.
+    pub fn lend_apart(
+        &self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<EncodingRef<'_>>,
+        Option<&'a [u8]>,
+    ) {
+        let kept = PublishOptions {
+            allowed_destination: self.allowed_destination,
+            links: self.links,
+            admission_retry: self.admission_retry,
+            atomic_tx: self.atomic_tx,
+            reliability: self.reliability,
+            kind: self.kind,
+            timestamp: self.timestamp.clone(),
+            encoding: None,
+            source_info: self.source_info.clone(),
+            attachment: None,
+            qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.clone(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack: self.wire_ts_stack.clone(),
+            stamp_timestamp: self.stamp_timestamp,
+        };
+        let encoding = self.encoding.as_ref().map(|encoding| encoding.view());
+        (kept, encoding, self.attachment)
+    }
+
+    /// These options with neither an encoding nor an attachment, and the two apart: the one split
+    /// both ways of keeping options past their call make.
+    fn apart(
+        self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<PublishEncoding<'a>>,
+        Option<&'a [u8]>,
+    ) {
         let Self {
             allowed_destination,
             links,
@@ -177,7 +256,7 @@ impl<'a> PublishOptions<'a> {
                 reliability,
                 kind,
                 timestamp,
-                encoding: encoding.map(|encoding| Cow::Owned(encoding.into_owned())),
+                encoding: None,
                 source_info,
                 attachment: None,
                 qos,
@@ -187,6 +266,7 @@ impl<'a> PublishOptions<'a> {
                 wire_ts_stack,
                 stamp_timestamp,
             },
+            encoding,
             attachment,
         )
     }
@@ -292,7 +372,7 @@ impl<'a> PublishOptions<'a> {
     /// stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
-        self.encoding = Some(Cow::Owned(encoding));
+        self.encoding = Some(PublishEncoding::Owned(encoding));
         self
     }
 
@@ -300,7 +380,16 @@ impl<'a> PublishOptions<'a> {
     /// a publisher's declared encoding is lent to each put that names none, and copied nowhere.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding_lent(mut self, encoding: &'a EncodingHint) -> Self {
-        self.encoding = Some(Cow::Borrowed(encoding));
+        self.encoding = Some(PublishEncoding::Lent(encoding.view()));
+        self
+    }
+
+    /// [`Self::with_encoding`] with an encoding read where its holder keeps it for as long as the
+    /// publish runs, whatever holds it: an encoding object a program moved into the call is sent
+    /// from its own bytes, and nothing is allocated for it.
+    #[cfg(feature = "pubsub-encoding")]
+    pub fn with_encoding_ref(mut self, encoding: EncodingRef<'a>) -> Self {
+        self.encoding = Some(PublishEncoding::Lent(encoding));
         self
     }
 
@@ -498,7 +587,7 @@ impl<'a> PublishOptions<'a> {
     pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.as_ref()),
-            encoding: gated_encoding(self.encoding.as_deref()),
+            encoding: gated_encoding(self.encoding.as_ref().map(PublishEncoding::view)),
             source_info: gated_source_info(self.source_info.clone()),
             attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
@@ -531,7 +620,7 @@ impl<'a> PublishOptions<'a> {
         }
         if self.kind == SampleKind::Put {
             if let Some(encoding) = meta.encoding {
-                sample = sample.with_encoding(encoding.clone());
+                sample = sample.with_encoding(encoding.to_hint());
             }
         }
         if let Some(source_info) = meta.source_info {
@@ -809,7 +898,7 @@ macro_rules! metadata_gated {
 }
 
 metadata_gated!(gated_timestamp, "pubsub-timestamp", &TimestampHint);
-metadata_gated!(gated_encoding, "pubsub-encoding", &EncodingHint);
+metadata_gated!(gated_encoding, "pubsub-encoding", EncodingRef<'_>);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
 metadata_gated!(gated_attachment, "pubsub-attachment", &[u8]);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
@@ -828,13 +917,134 @@ mod plain_put_tests {
             schema: Some(alloc::vec![b's']),
         };
         let lent = PublishOptions::put().with_encoding_lent(&declared);
-        assert!(matches!(lent.encoding, Some(Cow::Borrowed(_))));
-        assert_eq!(lent.push_metadata().encoding, Some(&declared));
+        assert!(matches!(lent.encoding, Some(PublishEncoding::Lent(_))));
+        assert_eq!(lent.push_metadata().encoding, Some(declared.view()));
         let (kept, _) = lent.into_owned_parts();
-        assert!(matches!(kept.encoding, Some(Cow::Owned(_))));
-        assert_eq!(kept.encoding.as_deref(), Some(&declared));
+        assert_eq!(
+            kept.encoding,
+            Some(PublishEncoding::Owned(declared.clone()))
+        );
         let owned = PublishOptions::put().with_encoding(declared.clone());
-        assert!(matches!(owned.encoding, Some(Cow::Owned(_))));
+        assert!(matches!(owned.encoding, Some(PublishEncoding::Owned(_))));
+    }
+
+    /// An encoding read where its holder keeps it is carried as it lies: the wire's metadata reads
+    /// the holder's own bytes, and nothing is copied until the options are kept past the call.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn an_encoding_read_where_it_lies_is_sent_from_its_holders_bytes() {
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let opts = PublishOptions::put().with_encoding_ref(held);
+        let sent = opts
+            .push_metadata()
+            .encoding
+            .expect("the encoding is carried");
+        assert_eq!(sent, held);
+        assert_eq!(
+            sent.schema.map(<[u8]>::as_ptr),
+            Some(schema.as_ptr()),
+            "the metadata reads the holder's bytes, not a copy"
+        );
+        let (kept, _) = opts.into_owned_parts();
+        assert_eq!(kept.encoding, Some(PublishEncoding::Owned(held.to_hint())));
+    }
+
+    /// Options kept past their call by a holder that keeps what they borrowed where it lies hand
+    /// the lent encoding and the attachment back as they were lent, the holder's own bytes, and
+    /// keep an encoding of their own. The CONTROL is the copy `into_owned_parts` makes of the same
+    /// lent encoding.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn options_kept_with_their_lent_parts_copy_nothing_and_keep_their_own_encoding() {
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let attached = *b"attached";
+        let lent = PublishOptions::put()
+            .with_encoding_ref(held)
+            .with_attachment(&attached);
+        let (kept, encoding, attachment) = lent.clone().into_kept_parts();
+        assert_eq!(
+            kept.encoding, None,
+            "the lent encoding is not in what is kept"
+        );
+        assert_eq!(kept.attachment, None);
+        assert_eq!(encoding, Some(held));
+        assert_eq!(
+            encoding.and_then(|e| e.schema).map(<[u8]>::as_ptr),
+            Some(schema.as_ptr()),
+            "the holder's own bytes, not a copy"
+        );
+        assert_eq!(attachment.map(<[u8]>::as_ptr), Some(attached.as_ptr()));
+        let (copied, _) = lent.into_owned_parts();
+        assert_eq!(
+            copied.encoding,
+            Some(PublishEncoding::Owned(held.to_hint())),
+            "CONTROL: the owned split copies the lent encoding in"
+        );
+        let own = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's']),
+        };
+        let (kept, encoding, _) = PublishOptions::put()
+            .with_encoding(own.clone())
+            .into_kept_parts();
+        assert_eq!(encoding, None, "an encoding the options own is no holder's");
+        assert_eq!(kept.encoding, Some(PublishEncoding::Owned(own)));
+    }
+
+    /// Options read apart from where they lie copy their fixed fields and lend both the encoding,
+    /// their own one included, and the attachment where they lie: the copy holds neither. Turned red
+    /// by an owned encoding cloned into the copy, or a copy that drops a field it keeps.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn options_read_apart_lend_their_encoding_and_attachment_where_they_lie() {
+        let own = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's', b'x']),
+        };
+        let attached = *b"attached";
+        let options = PublishOptions::put()
+            .with_encoding(own.clone())
+            .with_attachment(&attached);
+        let (kept, encoding, attachment) = options.lend_apart();
+        assert_eq!(kept.encoding, None, "the copy holds no encoding");
+        assert_eq!(kept.attachment, None, "the copy holds no attachment");
+        assert_eq!(kept.kind, options.kind);
+        assert_eq!(kept.qos, options.qos);
+        let read = encoding.expect("the options' own encoding is lent");
+        assert_eq!(read.packed_id, 4);
+        assert_eq!(
+            read.schema.map(<[u8]>::as_ptr),
+            own_schema_ptr(&options),
+            "the options' own schema, read where it lies"
+        );
+        assert_eq!(attachment.map(<[u8]>::as_ptr), Some(attached.as_ptr()));
+
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let (_, lent, _) = PublishOptions::put().with_encoding_ref(held).lend_apart();
+        assert_eq!(lent, Some(held), "a lent encoding is lent on as it was");
+        let (_, none, nothing) = PublishOptions::put().lend_apart();
+        assert_eq!((none, nothing), (None, None));
+    }
+
+    /// Where the schema of the encoding `options` own lies.
+    #[cfg(feature = "pubsub-encoding")]
+    fn own_schema_ptr(options: &PublishOptions<'_>) -> Option<*const u8> {
+        match options.encoding.as_ref() {
+            Some(PublishEncoding::Owned(own)) => own.schema.as_deref().map(<[u8]>::as_ptr),
+            _ => None,
+        }
     }
 
     /// The constant the engine's tests read the build from is the answer of the function it

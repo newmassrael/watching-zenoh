@@ -80,6 +80,108 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryStorage};
 #[cfg(test)]
 use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
 
+/// The zenoh id a timestamp names its clock by: the bytes the wire carries for it, zero to sixteen
+/// (the codec's `zid_len` and its bound), held inline with their length.
+///
+/// The form [`crate::session_zid::SessionZid`] gives a session's own zid, for a value that may be
+/// shorter: a timestamp's id may come from any peer and the hint's `Default` has none. It reads as
+/// the byte slice it holds (`Deref<Target = [u8]>`), so a caller that passes it on as `&[u8]`
+/// needs no conversion, and it compares equal to the same bytes in a slice, an array or a `Vec`.
+/// The bytes past the length are always zero, which is what makes the derived equality and hash the
+/// equality and hash of the ids. Making one holds nothing on the heap: a put that carries a
+/// timestamp copies sixteen bytes and a length.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct TimestampZid {
+    bytes: [u8; crate::session_zid::ZID_MAX],
+    len: u8,
+}
+
+impl TimestampZid {
+    /// The id `src` spells, or `None` past sixteen bytes, which no zenoh id is and no timestamp
+    /// on the wire can carry.
+    pub fn new(src: &[u8]) -> Option<Self> {
+        let mut bytes = [0u8; crate::session_zid::ZID_MAX];
+        bytes.get_mut(..src.len())?.copy_from_slice(src);
+        Some(Self {
+            bytes,
+            len: u8::try_from(src.len()).ok()?,
+        })
+    }
+
+    /// The bytes the wire carries.
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+}
+
+impl core::ops::Deref for TimestampZid {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for TimestampZid {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl core::fmt::Debug for TimestampZid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+impl From<crate::session_zid::SessionZid> for TimestampZid {
+    /// A session's zid is one to sixteen bytes, so it is always a timestamp's id.
+    fn from(zid: crate::session_zid::SessionZid) -> Self {
+        Self {
+            bytes: zid.to_padded(),
+            len: zid.as_slice().len() as u8,
+        }
+    }
+}
+
+impl PartialEq<[u8]> for TimestampZid {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl PartialEq<&[u8]> for TimestampZid {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for TimestampZid {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for TimestampZid {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PartialEq<Vec<u8>> for TimestampZid {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PartialEq<TimestampZid> for Vec<u8> {
+    fn eq(&self, other: &TimestampZid) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
 /// SCE-emitted codec structs intentionally derive only `Default` so the
@@ -92,35 +194,48 @@ use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
 /// `Clone`/`Debug`/`PartialEq` derives a `Sample` field reasonably
 /// needs.
 ///
-/// The heap profile's value (`zid` is a `Vec`). The per-session slot profile reads
-/// a timestamp where its frame lies, through the codec's borrowed view.
+/// The id is held inline ([`TimestampZid`]), so a timestamp is a value of fixed size with nothing
+/// on the heap; one whose id is longer than sixteen bytes cannot be made ([`Self::new`]). The
+/// per-session slot profile reads a timestamp where its frame lies, through the codec's borrowed
+/// view.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct TimestampHint {
     /// NTP64 time word. zenoh-pico mirror: `_z_timestamp_t._time`.
     pub time: u64,
-    /// Zenoh ID prefix bytes (variable length per the wire `zid_len`
-    /// VLE; the codec stores exactly the on-wire byte count, no
-    /// 16-byte right-pad). zenoh-pico mirror: `_z_timestamp_t._id`.
-    pub zid: Vec<u8>,
+    /// Zenoh ID prefix bytes, as many as the wire carries (the `zid_len` VLE), no 16-byte
+    /// right-pad. zenoh-pico mirror: `_z_timestamp_t._id`.
+    pub zid: TimestampZid,
 }
 
 #[cfg(feature = "alloc")]
 impl TimestampHint {
+    /// The timestamp of `time` on the clock `zid` names, or `None` for an id longer than
+    /// sixteen bytes, which no timestamp carries.
+    pub fn new(time: u64, zid: &[u8]) -> Option<Self> {
+        Some(Self {
+            time,
+            zid: TimestampZid::new(zid)?,
+        })
+    }
+
+    /// The id's bytes, as many as the wire carries.
+    pub fn zid_prefix(&self) -> &[u8] {
+        self.zid.as_slice()
+    }
+
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
-    /// into a wz-owned [`TimestampHint`].
+    /// into a wz-owned [`TimestampHint`]. The codec holds the zid within the
+    /// sixteen bytes a zenoh id has, so the projection keeps every byte; a
+    /// longer one, which the codec does not make, is an empty id.
+    /// (Generic over the storage profile since R3011: both a received
+    /// message's timestamp and a transport one's are projected here.)
     pub fn from_codec<S: wz_codecs::timestamp::TimestampStorage>(
         ts: &wz_codecs::timestamp::TimestampOwned<S>,
     ) -> Self {
         Self {
             time: ts.time,
-            // The codec holds the zid in its profile's container within the
-            // zid's bound; this AP-side hint retains an alloc `Vec<u8>`
-            // (Decision 2: AP retention is alloc), so copy it out at the
-            // boundary. (Generic over the storage profile since R3011: both a
-            // received message's timestamp and a transport one's are
-            // projected here.)
-            zid: ts.zid.as_bytes().into_inner().to_vec(),
+            zid: TimestampZid::new(ts.zid.as_bytes().into_inner()).unwrap_or_default(),
         }
     }
 
@@ -130,7 +245,7 @@ impl TimestampHint {
     pub fn from_view(ts: &wz_codecs::lent::Timestamp<'_>) -> Self {
         Self {
             time: ts.time,
-            zid: ts.zid.to_vec(),
+            zid: TimestampZid::new(&ts.zid).unwrap_or_default(),
         }
     }
 
@@ -140,9 +255,8 @@ impl TimestampHint {
     /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
     /// shape (NTP64 `time` word + variable-length `zid` prefix).
     ///
-    /// `LengthOutOfRange` for a zid past the 16 bytes a zenoh id has: the
-    /// codec holds the zid within that bound, so such a timestamp has no
-    /// frame.
+    /// `LengthOutOfRange` stays the answer for an id the codec cannot hold, which a hint made by
+    /// [`Self::new`] never is.
     pub fn to_codec(&self) -> Result<wz_codecs::lent::Timestamp<'_>, CodecError> {
         Ok(wz_codecs::lent::Timestamp {
             time: self.time,
@@ -269,10 +383,53 @@ impl EncodingHint {
     /// reads it with: the codec holds the schema within that bound, so such
     /// an encoding has no frame.
     pub fn to_codec(&self) -> Result<wz_codecs::lent::Encoding<'_>, CodecError> {
-        let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
+        self.view().to_codec()
+    }
+
+    /// This encoding read where it lies, as a publish carries it.
+    pub fn view(&self) -> EncodingRef<'_> {
+        EncodingRef {
+            packed_id: self.packed_id,
+            schema: self.schema.as_deref(),
+        }
+    }
+}
+
+/// An encoding read where its bytes lie: the packed wire word and the schema, borrowed from what
+/// holds them (an [`EncodingHint`], a [`BoundedEncoding`], an object of a C ABI). A publish
+/// carries one of these, so the encoding it sends is copied nowhere on the way to the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct EncodingRef<'a> {
+    /// The packed wire word, as [`EncodingHint::packed_id`].
+    pub packed_id: u32,
+    /// The schema's bytes, as [`EncodingHint::schema`].
+    pub schema: Option<&'a [u8]>,
+}
+
+impl<'a> EncodingRef<'a> {
+    /// The encoding `hint` holds, read where it holds it.
+    #[cfg(feature = "alloc")]
+    pub fn of(hint: &'a EncodingHint) -> Self {
+        hint.view()
+    }
+
+    /// A hint of its own with this encoding, the schema copied.
+    #[cfg(feature = "alloc")]
+    pub fn to_hint(self) -> EncodingHint {
+        EncodingHint {
+            packed_id: self.packed_id,
+            schema: self.schema.map(<[u8]>::to_vec),
+        }
+    }
+
+    /// The codec's encoding over these bytes, as [`EncodingHint::to_codec`] makes it.
+    ///
+    /// `LengthOutOfRange` for a schema past the `u8` length the protocol reads it with.
+    #[cfg(feature = "alloc")]
+    pub fn to_codec(self) -> Result<wz_codecs::lent::Encoding<'a>, CodecError> {
+        let schema_len = self.schema.map(|s| s.len() as u64);
         let schema = self
             .schema
-            .as_deref()
             .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
             .transpose()?;
         Ok(wz_codecs::lent::Encoding {
@@ -280,6 +437,101 @@ impl EncodingHint {
             schema_len,
             schema,
         })
+    }
+}
+
+/// An encoding options carry: read where a holder keeps it for as long as the call runs, or the
+/// options' own, which options kept past the call they were made for hold.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarriedEncoding<'a> {
+    /// Read where its holder keeps it: nothing is copied for the call.
+    Lent(EncodingRef<'a>),
+    /// The options' own.
+    Owned(EncodingHint),
+}
+
+#[cfg(feature = "alloc")]
+impl CarriedEncoding<'_> {
+    /// The encoding, read where it lies.
+    pub fn view(&self) -> EncodingRef<'_> {
+        match self {
+            Self::Lent(encoding) => *encoding,
+            Self::Owned(encoding) => encoding.view(),
+        }
+    }
+
+    /// The encoding as a hint of its own: a lent one copied, an owned one moved.
+    pub fn into_hint(self) -> EncodingHint {
+        match self {
+            Self::Lent(encoding) => encoding.to_hint(),
+            Self::Owned(encoding) => encoding,
+        }
+    }
+
+    /// The encoding as options kept past their call hold it: a lent one copied.
+    pub fn into_owned(self) -> CarriedEncoding<'static> {
+        match self {
+            Self::Lent(encoding) => CarriedEncoding::Owned(encoding.to_hint()),
+            Self::Owned(encoding) => CarriedEncoding::Owned(encoding),
+        }
+    }
+}
+
+// The protocol writes a schema's length in one byte, so no message carries a longer one, and a
+// kept encoding holds its length in one.
+const _: () = assert!(
+    crate::caps::MAX_ENCODING_SCHEMA_BYTES <= u8::MAX as usize,
+    "MAX_ENCODING_SCHEMA_BYTES is past the longest schema a message carries"
+);
+
+/// An encoding kept to be sent later, its schema in room of its own of
+/// [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`] bytes: what a place that holds an encoding past the
+/// call that named it keeps, so that keeping one takes no allocation. A longer schema is refused
+/// when it is kept ([`Self::of`]), never cut short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedEncoding {
+    packed_id: u32,
+    /// The schema's length, `None` for an encoding that carries none (an empty schema is one).
+    len: Option<u8>,
+    /// The schema's bytes, then zeros.
+    schema: [u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES],
+}
+
+/// Why an encoding was not kept: its schema is longer than the room a kept one has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaPastBound {
+    /// The schema's length, in bytes.
+    pub len: usize,
+}
+
+impl BoundedEncoding {
+    /// A kept copy of `encoding`, or the refusal of a schema longer than
+    /// [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`].
+    pub fn of(encoding: EncodingRef<'_>) -> Result<Self, SchemaPastBound> {
+        let mut schema = [0u8; crate::caps::MAX_ENCODING_SCHEMA_BYTES];
+        let len = match encoding.schema {
+            None => None,
+            Some(bytes) => {
+                let past = SchemaPastBound { len: bytes.len() };
+                let room = schema.get_mut(..bytes.len()).ok_or(past)?;
+                room.copy_from_slice(bytes);
+                Some(u8::try_from(bytes.len()).map_err(|_| past)?)
+            }
+        };
+        Ok(Self {
+            packed_id: encoding.packed_id,
+            len,
+            schema,
+        })
+    }
+
+    /// The kept encoding, read where it lies.
+    pub fn view(&self) -> EncodingRef<'_> {
+        EncodingRef {
+            packed_id: self.packed_id,
+            schema: self.len.and_then(|len| self.schema.get(..usize::from(len))),
+        }
     }
 }
 
@@ -1058,6 +1310,51 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    /// A kept encoding reads as the one it was made from: no schema, an empty one and one that
+    /// fills the room each come back as they went in, the packed word with them.
+    #[test]
+    fn a_kept_encoding_reads_as_the_one_it_was_made_from() {
+        let full = [b's'; crate::caps::MAX_ENCODING_SCHEMA_BYTES];
+        for schema in [None, Some(&b""[..]), Some(&full[..])] {
+            let made = EncodingRef {
+                packed_id: 0x2d,
+                schema,
+            };
+            let kept = BoundedEncoding::of(made).expect("a schema within the room is kept");
+            assert_eq!(kept.view(), made);
+        }
+    }
+
+    /// A schema one byte past the room is refused with its length, not cut short.
+    #[test]
+    fn a_schema_past_the_room_of_a_kept_encoding_is_refused() {
+        let past = [b's'; crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1];
+        let refused = BoundedEncoding::of(EncodingRef {
+            packed_id: 1,
+            schema: Some(&past),
+        });
+        assert_eq!(
+            refused,
+            Err(SchemaPastBound {
+                len: crate::caps::MAX_ENCODING_SCHEMA_BYTES + 1
+            })
+        );
+    }
+
+    /// A hint read where it lies and copied back is the hint, and its codec form is the one the
+    /// view makes.
+    #[test]
+    fn a_hint_read_where_it_lies_is_the_hint() {
+        let hint = EncodingHint {
+            packed_id: 0x0b,
+            schema: Some(b"schema/x".to_vec()),
+        };
+        assert_eq!(hint.view().to_hint(), hint);
+        let codec = hint.to_codec().expect("a short schema has a frame");
+        assert_eq!(codec.packed_id, 0x0b);
+        assert_eq!(codec.schema_len, Some(8));
+    }
+
     /// A session's zid makes the same identity the checked constructor does, at both ends
     /// of the range, and a shorter zid with the same leading bytes is another identity.
     #[test]
@@ -1150,10 +1447,7 @@ mod tests {
     #[test]
     fn with_setters_chain_through_metadata_fields() {
         let sample = Sample::new_put("topic/a", b"data".to_vec())
-            .with_timestamp(TimestampHint {
-                time: 0x1234_5678_9ABC_DEF0,
-                zid: vec![0x11, 0x22, 0x33],
-            })
+            .with_timestamp(TimestampHint::new(0x1234_5678_9ABC_DEF0, &[0x11, 0x22, 0x33]).unwrap())
             .with_encoding(EncodingHint {
                 packed_id: 5,
                 schema: Some("application/json".into()),

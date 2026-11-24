@@ -133,7 +133,7 @@ use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken
 use wz_capi_port::{Refusal, ReplyCallback};
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
-use wz_session_core::query_options::QueryOptions;
+use wz_session_core::query_options::QueryOptionsOf;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
@@ -966,18 +966,21 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// thread, as pico's `_z_session_deliver_query_locally` does. See the
 /// `unsafe impl Sync for CReplyClosure` above for what each arm means for the
 /// reply callback.
+///
+/// The parameters, the value, its encoding and the attachment are lent for the call, read where
+/// the caller and the moved objects hold them, so a get copies none of them.
 #[allow(clippy::too_many_arguments)]
-fn get_options(
+fn get_options<'a>(
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
-    parameters: Vec<u8>,
+    parameters: &'a [u8],
     timeout_ms: u64,
-    payload: Option<crate::bytes::ByteBuf>,
-    attachment: Option<crate::bytes::ByteBuf>,
+    payload: Option<&'a crate::bytes::ByteBuf>,
+    attachment: Option<&'a crate::bytes::ByteBuf>,
     qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta,
-) -> QueryOptions {
-    let mut opts = QueryOptions::get()
+    value_meta: PicoQueryValueMeta<'a>,
+) -> QueryOptionsOf<'a> {
+    let mut opts = QueryOptionsOf::get()
         .with_allowed_destination(qos.destination)
         .with_timeout_ms(get_timeout_ms(timeout_ms))
         // R311y551 — the request-side QoS trio. This function's own doc, and
@@ -1001,8 +1004,8 @@ fn get_options(
     // and this crate's dependency takes that crate's DEFAULT features, which
     // carry both. A `#[cfg]` here would name a feature `wz-capi-pico` does not
     // declare, which the unexpected-cfg lint rejects outright.
-    if let Some(enc) = value_meta.encoding {
-        opts = opts.with_encoding(enc);
+    if let Some(encoding) = value_meta.encoding {
+        opts = opts.with_encoding_ref(encoding);
     }
     if let Some(si) = value_meta.source_info {
         opts = opts.with_source_info(si);
@@ -1057,18 +1060,18 @@ fn get_options(
     if let Some(requested) = requested {
         opts = opts.with_consolidation(ConsolidationMode::resolve_auto_on(
             requested,
-            parameters_has_time_selector(&parameters),
+            parameters_has_time_selector(parameters),
         ));
     }
 
     if !parameters.is_empty() {
-        opts = opts.with_parameters(parameters);
+        opts = opts.with_parameters_lent(parameters);
     }
     if let Some(payload) = payload {
-        opts = opts.with_payload(payload.to_vec());
+        opts = opts.with_payload_lent(payload.as_slice());
     }
     if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment.to_vec());
+        opts = opts.with_attachment_lent(attachment.as_slice());
     }
     opts
 }
@@ -1105,16 +1108,21 @@ fn parameters_has_time_selector(parameters: &[u8]) -> bool {
 /// The `!_anyke_in_parameters` guard is pico's own ("extra _anyke parameter only
 /// if it's not already in the parameters list"), so a caller that wrote `_anyke`
 /// by hand AND asked for ANY does not get it twice.
-fn transmit_parameters(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> Vec<u8> {
-    let mut out = parameters.to_vec();
+fn transmit_parameters(
+    parameters: &[u8],
+    accept_replies: z_reply_keyexpr_t,
+) -> alloc::borrow::Cow<'_, [u8]> {
     let anyke_option = accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
-    if anyke_option && !parameters_has_anyke(&out) {
-        if !out.is_empty() {
-            out.push(PARAM_SEPARATOR);
-        }
-        out.extend_from_slice(ANYKE_PARAM);
+    if !anyke_option || parameters_has_anyke(parameters) {
+        // What the caller wrote goes out as it is, read where the caller holds it.
+        return alloc::borrow::Cow::Borrowed(parameters);
     }
-    out
+    let mut out = parameters.to_vec();
+    if !out.is_empty() {
+        out.push(PARAM_SEPARATOR);
+    }
+    out.extend_from_slice(ANYKE_PARAM);
+    alloc::borrow::Cow::Owned(out)
 }
 
 // --- z_get -----------------------------------------------------------------
@@ -1149,18 +1157,19 @@ pub(crate) unsafe fn get_inner(
     // first for the same reason. There is no pico behaviour to mirror here
     // (pico derefs the null callback and crashes); the standard is this
     // function's own consume-on-EVERY-path contract.
-    let (payload, attachment, value_meta, token) = if options.is_null() {
-        (Ok(None), Ok(None), PicoQueryValueMeta::default(), None)
+    let (payload, attachment, (encoding, source_info), token) = if options.is_null() {
+        (Ok(None), Ok(None), (None, None), None)
     } else {
         (
             crate::pubsub::take_moved_bytes((*options).payload),
             crate::pubsub::take_moved_bytes((*options).attachment),
             // R311y562 — the moved encoding is consumed on this same
-            // every-path line, for the same reason the two byte buffers are.
-            PicoQueryValueMeta {
-                encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
-                source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
-            },
+            // every-path line, for the same reason the two byte buffers are; it is held here
+            // for the call and lent to the get.
+            (
+                crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
+                crate::pubsub::source_info_hint_of((*options).source_info()),
+            ),
             // R311y575 — the cancellation token joins the same consume-first
             // line. It is a MOVED handle upstream drops unconditionally
             // (`api.c:1783`), so taking it anywhere later would leak it on the
@@ -1243,6 +1252,10 @@ pub(crate) unsafe fn get_inner(
     let engine = crate::session::engine_ref(handle);
     let wire = wire_key_of(keyexpr, engine);
 
+    let value_meta = PicoQueryValueMeta {
+        encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),
+        source_info,
+    };
     issue_get(
         engine,
         ke,
@@ -1292,10 +1305,10 @@ pub(crate) unsafe fn adopt_reply_closure(
 /// would make `z_get` and `z_querier_get` put different bytes on the wire for
 /// the same program.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PicoQueryValueMeta {
-    /// The query's value encoding — the Query body's encoding field. Consumed
-    /// from the caller's moved `z_moved_encoding_t*`.
-    pub(crate) encoding: Option<wz_session_core::sample::EncodingHint>,
+pub(crate) struct PicoQueryValueMeta<'a> {
+    /// The query's value encoding — the Query body's encoding field. Read where the encoding the
+    /// caller moved in, or the querier's own, is held for the call.
+    pub(crate) encoding: Option<wz_session_core::sample::EncodingRef<'a>>,
     /// The query's `(zid, eid, sn)` — the Query body's source_info ext 0x01.
     /// Borrowed from the caller's `z_source_info_t*`, projected to an owned hint.
     pub(crate) source_info: Option<wz_session_core::sample::SourceInfo>,
@@ -1369,7 +1382,7 @@ pub(crate) fn issue_get(
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
     qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta,
+    value_meta: PicoQueryValueMeta<'_>,
     closure: Arc<CReplyClosure>,
     token: Option<Arc<CancellationToken>>,
     target_peer: Option<Vec<u8>>,
@@ -1391,10 +1404,10 @@ pub(crate) fn issue_get(
     let opts = get_options(
         target,
         consolidation,
-        params,
+        &params,
         timeout_ms,
-        payload,
-        attachment,
+        payload.as_ref(),
+        attachment.as_ref(),
         qos,
         value_meta,
     );
@@ -2100,7 +2113,7 @@ mod tests {
         let opts = get_options(
             Z_QUERY_TARGET_BEST_MATCHING,
             Z_CONSOLIDATION_MODE_AUTO,
-            Vec::new(),
+            &[],
             0,
             None,
             None,
@@ -2119,7 +2132,7 @@ mod tests {
         let defaulted = get_options(
             Z_QUERY_TARGET_BEST_MATCHING,
             Z_CONSOLIDATION_MODE_AUTO,
-            Vec::new(),
+            &[],
             0,
             None,
             None,
@@ -2132,6 +2145,59 @@ mod tests {
         assert_eq!(packed.congestion(), CongestionControl::Block);
         assert_eq!(packed.priority(), Priority::Data);
         assert!(!packed.is_express());
+    }
+
+    /// A get's parameters, value, encoding and attachment are read where the caller holds them:
+    /// the options lend each, and none of them is copied; parameters that need no `_anyke` are
+    /// the caller's own bytes too.
+    #[test]
+    fn a_gets_options_lend_what_the_caller_holds() {
+        let value = crate::bytes::ByteBuf::copy_of(b"value").expect("room for the value");
+        let attachment = crate::bytes::ByteBuf::copy_of(b"attached").expect("room");
+        let schema = *b"utf8";
+        let encoding = wz_session_core::sample::EncodingRef {
+            packed_id: (4 << 1) | 1,
+            schema: Some(&schema),
+        };
+        let params_in = b"a=1".as_slice();
+        let params = transmit_parameters(
+            params_in,
+            crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+        );
+        assert!(
+            matches!(params, alloc::borrow::Cow::Borrowed(_)),
+            "parameters that need no _anyke are not copied"
+        );
+        let opts = get_options(
+            Z_QUERY_TARGET_BEST_MATCHING,
+            Z_CONSOLIDATION_MODE_AUTO,
+            &params,
+            0,
+            Some(&value),
+            Some(&attachment),
+            PicoQueryQos::defaults(),
+            PicoQueryValueMeta {
+                encoding: Some(encoding),
+                source_info: None,
+            },
+        );
+        let lent = |slot: Option<&alloc::borrow::Cow<'_, [u8]>>| {
+            slot.is_some_and(|bytes| matches!(bytes, alloc::borrow::Cow::Borrowed(_)))
+        };
+        assert!(lent(opts.payload.as_ref()), "the value is lent");
+        assert_eq!(opts.payload.as_deref(), Some(&b"value"[..]));
+        assert!(lent(opts.attachment.as_ref()), "the attachment is lent");
+        assert!(lent(opts.parameters.as_ref()), "the parameters are lent");
+        assert_eq!(
+            opts.parameters.as_deref().map(<[u8]>::as_ptr),
+            Some(params_in.as_ptr())
+        );
+        assert_eq!(
+            opts.encoding
+                .as_ref()
+                .map(wz_session_core::sample::CarriedEncoding::view),
+            Some(encoding)
+        );
     }
 
     /// `accept_replies = ANY` is transmitted by APPENDING `_anyke` to the
@@ -2260,7 +2326,7 @@ mod tests {
         get_options(
             Z_QUERY_TARGET_BEST_MATCHING,
             Z_CONSOLIDATION_MODE_AUTO,
-            parameters.as_bytes().to_vec(),
+            parameters.as_bytes(),
             0,
             None,
             None,
@@ -2320,7 +2386,7 @@ mod tests {
             get_options(
                 Z_QUERY_TARGET_BEST_MATCHING,
                 mode,
-                parameters.as_bytes().to_vec(),
+                parameters.as_bytes(),
                 0,
                 None,
                 None,

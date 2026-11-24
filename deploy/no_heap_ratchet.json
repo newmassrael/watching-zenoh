@@ -78,10 +78,20 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "put-encoded": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-encoding-schema-heap"
+    },
     "put-small": {
       "allocs_per_round": 4,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
+    },
+    "put-timestamped": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-encoding-schema-heap"
     },
     "querier-declare": {
       "allocs_per_round": 14.01,

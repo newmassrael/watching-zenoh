@@ -103,10 +103,7 @@ fn encoding_id() -> u16 {
 
 /// The timestamp the full publish is set with.
 fn full_timestamp() -> TimestampHint {
-    TimestampHint {
-        time: TIMESTAMP_TIME,
-        zid: TIMESTAMP_ZID.to_vec(),
-    }
+    TimestampHint::new(TIMESTAMP_TIME, &TIMESTAMP_ZID).expect("the fixture's zid is a zid")
 }
 
 /// The encoding the full publish is set with.
@@ -122,7 +119,7 @@ fn full_encoding() -> EncodingHint {
 fn full_metadata<'a>(timestamp: &'a TimestampHint, encoding: &'a EncodingHint) -> PushMetadata<'a> {
     PushMetadata {
         timestamp: Some(timestamp),
-        encoding: Some(encoding),
+        encoding: Some(encoding.view()),
         qos: Some(QosLevel::DEFAULT.with_priority(PRIORITY)),
         ..PushMetadata::default()
     }

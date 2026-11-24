@@ -175,10 +175,7 @@ async fn wz_reply_source_info_decoded_by_pico_z_get() {
     // The reply carries a distinct source_info; a timestamp rides along
     // (reply_keyed_sourced bundles it) but only source_info is asserted.
     let reply_source_info = SourceInfo::new(&[0xF0, 0x0D], SRC_EID, SRC_SN);
-    let reply_timestamp = TimestampHint {
-        time: 1,
-        zid: vec![0xAA],
-    };
+    let reply_timestamp = TimestampHint::new(1, &[0xAA]).unwrap();
     let _queryable = session
         .declare_queryable(
             QABL_KEYEXPR,

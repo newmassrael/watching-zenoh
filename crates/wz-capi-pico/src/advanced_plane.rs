@@ -23,13 +23,14 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, Ticker, WireKey};
+use wz_capi_port::{QueryHolder, QueryRowSink, Ticker, WireKey};
 use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
+use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
 
@@ -146,9 +147,14 @@ impl AdvancedPublisherPlane for PicoPlane {
         // `PublishOptions` the composite folds its own knobs into: those reach the
         // publisher as the options of each put, and the publisher's declared QoS
         // is what it sends with (`PlainPublisher::publish`).
-        let publisher =
-            PlainPublisher::declare(&self.session, keyexpr, None, self.declared.clone())
-                .map_err(|code| Self::refusal("publisher", code))?;
+        // The composite keeps its declared QoS for each publisher it declares, so the encoding is
+        // kept again in a slot of its own for this one.
+        let declared = self
+            .declared
+            .try_clone()
+            .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
+        let publisher = PlainPublisher::declare(&self.session, keyexpr, None, declared)
+            .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.entity_id(),
             handle: publisher,
@@ -160,13 +166,14 @@ impl AdvancedPublisherPlane for PicoPlane {
         keyexpr: &str,
         store: &CacheStore,
     ) -> Result<PlainQueryable, AdvancedPublisherError> {
-        let store = store.clone();
-        // One handler per face: each is a fresh closure over the same ring, and
-        // none needs the face's session — a reply goes out on the query's own.
-        let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-            Box::new(store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64))
-                as QueryCallback
-        });
+        // One handler for the queryable, kept in its row: it needs no face's session, as a reply
+        // goes out on the query's own.
+        let answer = store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64);
+        let sink = QueryRowSink::shared(
+            move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
+                answer(query, out)
+            },
+        );
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
