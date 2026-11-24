@@ -427,6 +427,18 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         self.declared.entries().map(|(id, ke)| (id, ke.as_ref()))
     }
 
+    /// [`Self::iter_declared`] with the key of the session's key arena each key is the whole text
+    /// of, when its row keeps it there ([`crate::bounded::KeyBacking::held`]): what a holder that
+    /// reads the key past the call holds a count of rather than copy it.
+    #[cfg(feature = "storage-profile")]
+    pub fn iter_declared_held(
+        &self,
+    ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
+        self.declared
+            .entries()
+            .map(|(id, ke)| (id, ke.as_ref(), crate::bounded::KeyBacking::held(ke)))
+    }
+
     /// Hold the peer's table to the `MAX_REMOTE_DECLS` the creator of the session's tables
     /// resolved: a `DeclSubscriber` for a NEW id that would leave more declarations than
     /// `quota` admits is refused and counted as a full table refuses it ([`Self::refusals`]),

@@ -544,6 +544,21 @@ impl<P: Storage> RemoteQueryablePeer<P> {
             .map(|(id, q)| (id, q.keyexpr.as_ref()))
     }
 
+    /// [`Self::iter_declared`] with the key of the session's key arena each key is the whole text
+    /// of, when its row keeps it there ([`crate::bounded::KeyBacking::held`]).
+    #[cfg(feature = "storage-profile")]
+    pub fn iter_declared_held(
+        &self,
+    ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
+        self.declared.entries().map(|(id, q)| {
+            (
+                id,
+                q.keyexpr.as_ref(),
+                crate::bounded::KeyBacking::held(&q.keyexpr),
+            )
+        })
+    }
+
     /// R311y797 — [`Self::iter_declared`] carrying the third fact the
     /// membership table now holds: the peer's advertised
     /// `QueryableInfo::complete`. Separate from `iter_declared` rather
