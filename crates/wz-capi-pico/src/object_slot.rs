@@ -752,6 +752,23 @@ pub(crate) fn boxed<T>(value: T) -> Box<T> {
     }
 }
 
+/// A copy of `bytes` on the heap, in a place of [`heap_place`]: what `Box::<[u8]>::from` makes.
+/// One body for every copy of bytes this library keeps on the heap.
+#[inline(never)]
+pub(crate) fn boxed_bytes(bytes: &[u8]) -> Box<[u8]> {
+    let at = heap_place(Layout::for_value(bytes));
+    // SAFETY: the place is the global allocator's, of the layout of `bytes.len()` bytes, and
+    // nothing else holds it; filled with the copy, it is the allocation a `Box<[u8]>` of that
+    // length owns.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), at.as_ptr(), bytes.len());
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+            at.as_ptr(),
+            bytes.len(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,6 +853,20 @@ mod tests {
         // SAFETY: a live handle of `boxed`, released once.
         unsafe { release(object) };
         assert_eq!(drops.get(), 2, "a release lets it go once");
+    }
+
+    /// A copy of bytes on the heap holds the bytes, apart from the ones copied, and a copy of none
+    /// is empty. Turned red by a copy that keeps the caller's bytes or loses one.
+    #[test]
+    fn a_copy_of_bytes_on_the_heap_holds_them_apart_from_the_original() {
+        let original = *b"copied";
+        let copy = boxed_bytes(&original);
+        assert_eq!(&*copy, b"copied");
+        assert!(
+            !core::ptr::eq(copy.as_ptr(), original.as_ptr()),
+            "a copy, not the original"
+        );
+        assert!(boxed_bytes(&[]).is_empty(), "a copy of none is empty");
     }
 
     /// The heap body hands out a place aligned as its layout asks, past the heap's own alignment
