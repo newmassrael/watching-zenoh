@@ -6391,14 +6391,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "liveliness")]
         let live = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let (handle, prefix) = tables(&core.session.registry)
+            let (rank, handle, prefix) = tables(&core.session.registry)
                 .liveliness_subscribers()
                 .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(handle, row)| (handle, row.key().prefix()))?;
+                .enumerate()
+                .find(|(_, (_, row))| row.id() == id)
+                .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()))?;
             // The links are asked while the rows stand, which are their places in the replay's
-            // order: the subscriber's, then the declaration's its key is named by.
-            let place = core.liveliness_place(handle);
+            // order: the subscriber's, ranked by the walk that found it, then the declaration's
+            // its key is named by.
+            let place = core.place(replay::Kind::LiveSub, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
@@ -6434,9 +6436,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 let found = tables
                     .subscribers()
                     .iter()
-                    .find(|(_, row)| row.id() == id)
-                    .map(|(handle, row)| {
+                    .enumerate()
+                    .find(|(_, (_, row))| row.id() == id)
+                    .map(|(rank, (handle, row))| {
                         (
+                            rank,
                             handle,
                             row.key().prefix(),
                             // Read against the key, held past the row.
@@ -6447,11 +6451,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (handle, prefix, retraction) = found?;
+            let (rank, handle, prefix, retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
-            // order: the subscriber's, then the declaration's, which comes before every
-            // subscriber.
-            let place = core.subscriber_place(handle);
+            // order: the subscriber's, ranked by the walk that found it, then the declaration's,
+            // which comes before every subscriber.
+            let place = core.place(replay::Kind::Subscriber, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
@@ -7415,9 +7419,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 let found = tables
                     .queryables()
                     .iter()
-                    .find(|(_, row)| row.id() == id)
-                    .map(|(handle, row)| {
+                    .enumerate()
+                    .find(|(_, (_, row))| row.id() == id)
+                    .map(|(rank, (handle, row))| {
                         (
+                            rank,
                             handle,
                             row.key().prefix(),
                             // Read against the key, held past the row.
@@ -7428,10 +7434,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     });
                 found
             };
-            let (handle, prefix, retraction) = found?;
+            let (rank, handle, prefix, retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
-            // order: the queryable's, then the declaration's, which comes before every queryable.
-            let place = core.queryable_place(handle);
+            // order: the queryable's, ranked by the walk that found it, then the declaration's,
+            // which comes before every queryable.
+            let place = core.place(replay::Kind::Queryable, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
