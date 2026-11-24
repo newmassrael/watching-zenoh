@@ -23,7 +23,7 @@ use core::ops::Deref;
 
 #[cfg(feature = "session-unicast-accept")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::bounded::{push_text, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
@@ -298,8 +298,9 @@ impl EndpointTexts {
             EndpointRole::Dial => &mut self.dial,
             EndpointRole::Listen => &mut self.listen,
         };
-        let row = LocatorText::try_from(text)
-            .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
+        // One copy, all or nothing, and not heapless's append of a byte at a time.
+        let mut row = LocatorText::new();
+        push_text(&mut row, text).map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
         let at = rows.len();
         rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
         Ok(at)
