@@ -737,23 +737,12 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
         self.wait_for_datagram();
     }
 
+    // The datagram the lending receive hands over, copied out: one body reads the socket and the
+    // binding for both receives, and the buffer is idle after it as after any datagram let go of.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        let mut buf = self.rx_buf.borrow_mut();
-        let bytes = buf.bytes()?;
-        let frame = match self.kept.take() {
-            Some(len) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
-            None => match self.next_admitted(bytes) {
-                Ok(Some(len)) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
-                Ok(None) => None,
-                Err(e) => {
-                    self.rx_error.set(Some(e));
-                    None
-                }
-            },
-        };
-        // The datagram is copied out: the buffer holds nothing of the link's own.
-        buf.idle();
+        let mut frame = None;
+        self.recv_with(&mut |datagram| frame = Some(RxFrame::new(datagram.to_vec())));
         frame
     }
 
@@ -2171,6 +2160,28 @@ mod tests {
             &[(peer, b"reply".to_vec())]
         );
         assert_eq!(link.foreign().strays, 1);
+    }
+
+    /// The copying receive hands over what the lending one would, a datagram the last lend kept
+    /// first, and holds nothing once it has read the queue out. Turned red by a copying receive
+    /// that passes over a kept datagram or leaves it kept.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_copying_receive_reads_what_the_lending_one_would() {
+        let link = driver(Loop::default());
+        queued(&link.socket, b"first");
+        queued(&link.socket, b"second");
+        assert!(link.recv_with(&mut |datagram| {
+            assert_eq!(datagram, b"first");
+            link.keep();
+        }));
+        assert!(link.holds_input(), "the lent datagram is kept");
+        let kept = link.try_recv().expect("the kept datagram");
+        assert_eq!(&kept.bytes[..], b"first");
+        let next = link.try_recv().expect("the next datagram");
+        assert_eq!(&next.bytes[..], b"second");
+        assert!(link.try_recv().is_none(), "nothing is left to read");
+        assert!(!link.holds_input(), "nothing is kept after the copy");
     }
 
     /// The defect this rule exists for: one datagram from another address used to point the
