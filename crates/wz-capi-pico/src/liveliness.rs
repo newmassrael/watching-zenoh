@@ -560,9 +560,12 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
 /// Fanned across every leg the engine reaches for the reason every declaration in
 /// this crate is: one C session can be N per-face wz sessions, and a snapshot that
 /// polled only the first face would silently under-report. The C thread holds
-/// its own clone across the fan so a leg that answers and finalises early
-/// cannot complete the get while later legs are still being issued — the same
-/// `guard` discipline as [`crate::get`]'s fan, which this one is.
+/// the get's place as its owner across the fan so a leg that answers and
+/// finalises early cannot complete the get while later legs are still being
+/// issued — the discipline of [`crate::get`]'s fan, which this one is. The
+/// place is one of the session's pending liveliness gets
+/// (`MAX_PENDING_LIVELINESS_GETS`), refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+/// when every one is held.
 #[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get(
@@ -615,28 +618,32 @@ pub unsafe extern "C" fn z_liveliness_get(
         // interest by construction; the gate is carried anyway so this plane
         // uses the same admission rule as `z_get` rather than a second one that
         // could drift.
-        // The gate keeps the one copy of the key the get asks under, and the get is sent naming
-        // the gate's, as `z_get` sends its own: one text, made once.
-        let gate = Arc::new(crate::get::ReplyGate {
-            query_keyexpr: ke.to_owned(),
-            anyke: false,
-        });
-        let asked = Arc::clone(&gate);
-
-        // The cancellation, each leg's ownership and the order they drop in are the fan's, shared
-        // with `z_get` (R311y575, R2949): registered BEFORE the first leg is issued, as upstream
-        // does (`src/net/liveliness.c:341` registers it before `_z_send_n_msg`), an already
-        // cancelled token answering `Z_ERR_CANCELLED` with no Interest sent.
+        // The gate keeps the one copy of the key the get asks under, where the session keeps its
+        // keys, and the get is sent naming the gate's, as `z_get` sends its own: one text.
         let engine = engine_of(handle);
-        crate::get::fan_get(Arc::new(closure), gate, token, |fan, leg| {
-            engine.liveliness_get_on_wire(
-                &asked.query_keyexpr,
-                &WireKey::literal(),
-                timeout_ms,
-                fan,
-                leg,
-            )
-        })
+        let gate = match crate::keyexpr::KeyText::of_session(&engine, ke) {
+            Ok(query_keyexpr) => crate::get::ReplyGate {
+                query_keyexpr,
+                anyke: false,
+            },
+            Err(code) => return code,
+        };
+
+        // The place, the cancellation, each leg's ownership and the order they drop in are the
+        // fan's, shared with `z_get` (R311y575, R2949): registered BEFORE the first leg is
+        // issued, as upstream does (`src/net/liveliness.c:341` registers it before
+        // `_z_send_n_msg`), an already cancelled token answering `Z_ERR_CANCELLED` with no
+        // Interest sent.
+        crate::get::fan_get(
+            &engine,
+            crate::object_slot::Kind::LivelinessGet,
+            closure,
+            gate,
+            token,
+            |asked, fan, leg| {
+                engine.liveliness_get_on_wire(asked, &WireKey::literal(), timeout_ms, fan, leg)
+            },
+        )
     })
 }
 

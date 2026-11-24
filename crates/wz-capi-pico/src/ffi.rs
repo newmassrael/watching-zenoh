@@ -236,7 +236,9 @@ struct Open {
 }
 
 impl OpenClosures {
-    fn open_one(&self) {
+    /// One more held open here: a closure counted in the owner, or a leg of a get, which lets it
+    /// go with [`Self::close_one`].
+    pub(crate) fn open_one(&self) {
         let mut state = self.state.lock();
         debug_assert!(
             !state.retired,
@@ -247,7 +249,7 @@ impl OpenClosures {
 
     /// One closure let go of: `true` when it was the last one held and the owner has let go of
     /// its place, which this closure then gives back.
-    fn close_one(&self) -> bool {
+    pub(crate) fn close_one(&self) -> bool {
         let mut state = self.state.lock();
         state.held = state.held.saturating_sub(1);
         if state.held != 0 {

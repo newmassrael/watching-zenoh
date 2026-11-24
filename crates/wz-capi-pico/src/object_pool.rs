@@ -118,6 +118,10 @@ impl wz_ext_object_pool_counts_t {
             keyexprs: self.keyexprs,
             payload_bytes: self.payload_bytes,
             encodings: self.encodings,
+            // At the bound of the session's `MAX_PENDING_QUERIES` and
+            // `MAX_PENDING_LIVELINESS_GETS`: a get's place is held only while it is pending.
+            gets: 0,
+            liveliness_gets: 0,
         }
     }
 }
@@ -328,6 +332,8 @@ mod tests {
                 keyexprs: 15,
                 payload_bytes: 13,
                 encodings: 16,
+                gets: 0,
+                liveliness_gets: 0,
             }
         );
     }

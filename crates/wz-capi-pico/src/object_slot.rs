@@ -61,6 +61,12 @@ pub(crate) enum Kind {
     Keyexpr = 13,
     /// An encoding the program holds (`z_owned_encoding_t`), its schema in the slot.
     Encoding = 14,
+    /// A get the program issued, held until its last leg ends (`crate::get::GetPlace`).
+    #[cfg(feature = "query")]
+    Get = 15,
+    /// A liveliness get the program issued, held as a get is.
+    #[cfg(feature = "liveliness-get")]
+    LivelinessGet = 16,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -274,6 +280,16 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::Querier,
             InSession::<Answering<crate::querier::QuerierState>>::LAYOUT,
         )),
+        #[cfg(feature = "query")]
+        Kind::Get => Some((
+            EntityKind::PendingGet,
+            InSession::<crate::get::GetPlace>::LAYOUT,
+        )),
+        #[cfg(feature = "liveliness-get")]
+        Kind::LivelinessGet => Some((
+            EntityKind::PendingLivelinessGet,
+            InSession::<crate::get::GetPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -290,22 +306,29 @@ const LIVELINESS: [Option<Kind>; 2] = [
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness")))]
 const LIVELINESS: [Option<Kind>; 2] = [None, None];
 #[cfg(all(not(feature = "engine-tokio"), feature = "query"))]
-const QUERIER: Option<Kind> = Some(Kind::Querier);
+const QUERIER: [Option<Kind>; 2] = [Some(Kind::Querier), Some(Kind::Get)];
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "query")))]
-const QUERIER: Option<Kind> = None;
+const QUERIER: [Option<Kind>; 2] = [None, None];
+#[cfg(all(not(feature = "engine-tokio"), feature = "liveliness-get"))]
+const LIVELINESS_GET: Option<Kind> = Some(Kind::LivelinessGet);
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness-get")))]
+const LIVELINESS_GET: Option<Kind> = None;
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
 #[cfg(not(feature = "engine-tokio"))]
 fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
     let [token, liveliness_subscriber] = LIVELINESS;
+    let [querier, get] = QUERIER;
     [
         Some(Kind::Publisher),
         Some(Kind::Subscriber),
         QUERYABLE,
         token,
         liveliness_subscriber,
-        QUERIER,
+        querier,
+        get,
+        LIVELINESS_GET,
     ]
     .into_iter()
     .flatten()

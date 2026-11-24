@@ -31,7 +31,8 @@
 //! the reservation is made before any session opens. The build's counts are `HELD_SESSIONS`
 //! sessions, each holding as many entities as the session limits the library opens under admit
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
-//! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`), `HELD_SAMPLES`, `HELD_REPLIES`,
+//! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`, and for the gets it holds pending
+//! `MAX_PENDING_QUERIES` and `MAX_PENDING_LIVELINESS_GETS`), `HELD_SAMPLES`, `HELD_REPLIES`,
 //! `HELD_QUERIES`, `HELD_PAYLOADS` and `HELD_ENCODINGS` of the values it holds, `HELD_CONFIGS`
 //! configs, `HELD_HELLOS` kept hellos and `HELD_PAYLOAD_BYTES` bytes of payload. A program that states its
 //! own counts reserves them before its first object through the doors instead.
@@ -106,6 +107,10 @@ pub(crate) struct Counts {
     pub(crate) payload_bytes: usize,
     /// Owned encodings, each with room for a schema of `MAX_ENCODING_SCHEMA_BYTES`.
     pub(crate) encodings: usize,
+    /// Gets each session holds pending, its queriers' among them.
+    pub(crate) gets: usize,
+    /// Liveliness gets each session holds pending.
+    pub(crate) liveliness_gets: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -175,6 +180,8 @@ pub(crate) struct Bounds {
     liveliness_subscribers: Option<usize>,
     queriers: Option<usize>,
     keyexprs: Option<usize>,
+    gets: Option<usize>,
+    liveliness_gets: Option<usize>,
 }
 
 impl Bounds {
@@ -188,6 +195,8 @@ impl Bounds {
             liveliness_subscribers: limits.max_liveliness_subscriptions().most(),
             queriers: limits.max_queriers().most(),
             keyexprs: limits.max_declared_keyexprs().most(),
+            gets: limits.max_pending_queries().most(),
+            liveliness_gets: limits.max_pending_liveliness_gets().most(),
         }
     }
 }
@@ -288,12 +297,24 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
         keyexprs: planned!(bounded(true, sessions, stated.keyexprs, bounds.keyexprs)),
         payload_bytes: stated.payload_bytes,
         encodings: stated.encodings,
+        gets: planned!(bounded(
+            cfg!(feature = "query"),
+            sessions,
+            stated.gets,
+            bounds.gets,
+        )),
+        liveliness_gets: planned!(bounded(
+            cfg!(feature = "liveliness-get"),
+            sessions,
+            stated.liveliness_gets,
+            bounds.liveliness_gets,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 15;
+const KINDS: usize = 17;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,6 +386,14 @@ impl Plan {
         }
         plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
         plan = plan.with::<crate::encoding::HeldEncoding>(Kind::Encoding, objects.encodings);
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        {
+            plan = plan.with::<crate::get::GetPlace>(Kind::Get, objects.gets);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        {
+            plan = plan.with::<crate::get::GetPlace>(Kind::LivelinessGet, objects.liveliness_gets);
+        }
         let mut kind = 0;
         let mut holds = plan.area != 0;
         while kind < KINDS {
@@ -877,6 +906,10 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         ),
         queriers: each::<{ caps::MAX_QUERIERS }>(limits.max_queriers()),
         keyexprs: each::<{ caps::MAX_DECLARED_KEYEXPRS }>(limits.max_declared_keyexprs()),
+        gets: each::<{ caps::MAX_PENDING_QUERIES }>(limits.max_pending_queries()),
+        liveliness_gets: each::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+            limits.max_pending_liveliness_gets(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -900,6 +933,8 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         keyexprs: 0,
         payload_bytes: caps::HELD_PAYLOAD_BYTES,
         encodings: caps::HELD_ENCODINGS,
+        gets: 0,
+        liveliness_gets: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1141,6 +1176,8 @@ mod tests {
         liveliness_subscribers: Some(5),
         queriers: Some(6),
         keyexprs: Some(7),
+        gets: Some(8),
+        liveliness_gets: Some(9),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1150,6 +1187,8 @@ mod tests {
         queriers: None,
         keyexprs: None,
         liveliness_subscribers: None,
+        gets: None,
+        liveliness_gets: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1246,6 +1285,8 @@ mod tests {
             keyexprs: 1,
             payload_bytes: 11,
             encodings: 12,
+            gets: 1,
+            liveliness_gets: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1643,6 +1684,18 @@ mod tests {
             Kind::Encoding,
             core::mem::size_of::<crate::encoding::HeldEncoding>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        row(
+            "get",
+            Kind::Get,
+            core::mem::size_of::<crate::get::GetPlace>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        row(
+            "liveliness_get",
+            Kind::LivelinessGet,
+            core::mem::size_of::<crate::get::GetPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1822,6 +1875,10 @@ mod tests {
         check(Kind::Querier);
         check(Kind::Keyexpr);
         check(Kind::Encoding);
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        check(Kind::Get);
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
+        check(Kind::LivelinessGet);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1839,6 +1896,11 @@ mod tests {
         );
         assert_eq!(bounds.queriers, limits.max_queriers().most());
         assert_eq!(bounds.keyexprs, limits.max_declared_keyexprs().most());
+        assert_eq!(bounds.gets, limits.max_pending_queries().most());
+        assert_eq!(
+            bounds.liveliness_gets,
+            limits.max_pending_liveliness_gets().most()
+        );
     }
 
     /// The free blocks of `order`, by their offsets, first to last.
