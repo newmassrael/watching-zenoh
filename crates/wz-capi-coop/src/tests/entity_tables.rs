@@ -421,23 +421,32 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     );
 }
 
-/// The queryables' table at its limit refuses one more: no callback minted, nothing sent.
+/// The queryables' table at its limit refuses one more: its callback let go at once, nothing sent.
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
-    use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+    use wz_capi_port::{QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    /// Counts its own drop: a callback the engine let go of.
+    struct LetGo(Arc<AtomicUsize>);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
-    let sink = |minted: &Arc<AtomicUsize>| -> QueryableSink {
-        let minted = minted.clone();
-        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            minted.fetch_add(1, Ordering::SeqCst);
-            Box::new(|_query: &dyn QueryView, _out: &mut dyn ReplyOut| {}) as QueryCallback
-        })
+    let let_go = Arc::new(AtomicUsize::new(0));
+    let sink = |let_go: &Arc<AtomicUsize>| -> QueryableSink {
+        let guard = LetGo(let_go.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                let _held = &guard;
+            },
+        )
     };
     let declare = |key: &str| {
         engine.declare_queryable_on_wire(
@@ -446,7 +455,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
             false,
             Locality::Remote,
             None,
-            sink(&minted),
+            sink(&let_go),
         )
     };
     let before = router.seen(|s| s.declares);
@@ -456,12 +465,17 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     });
     let seen = router.seen(|s| s.declares);
 
+    assert_eq!(
+        let_go.load(Ordering::SeqCst),
+        0,
+        "the declared one's callback is held"
+    );
     assert_eq!(declare("demo/qbl/2"), Err(Refusal::TableFull));
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
+        let_go.load(Ordering::SeqCst),
         1,
-        "no callback for a refusal"
+        "a refusal lets its callback go at once"
     );
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 

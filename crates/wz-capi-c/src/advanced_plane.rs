@@ -26,8 +26,8 @@ use std::time::Duration;
 use wz_capi_core::drive::PeriodicJob;
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{
-    FilterId, FilterPlane, QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, Ticker,
-    TokenId, WireKey,
+    FilterId, FilterPlane, QblId, QueryHolder, QueryableSink, SessionEngine, Ticker, TokenId,
+    WireKey,
 };
 use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
@@ -163,13 +163,14 @@ impl AdvancedPublisherPlane for CPlane {
         keyexpr: &str,
         store: &CacheStore,
     ) -> Result<CacheQueryable, AdvancedPublisherError> {
-        let store = store.clone();
-        // One handler per face: each is a fresh closure over the same ring, and none needs the
-        // face's session, a reply going out on the query's own.
-        let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-            Box::new(store.query_handler(wz_runtime_tokio::timestamp_source::wall_clock_ntp64))
-                as QueryCallback
-        });
+        // One handler for the queryable, kept in its row: it needs no face's session, a reply
+        // going out on the query's own.
+        let answer = store.query_handler(wz_runtime_tokio::timestamp_source::wall_clock_ntp64);
+        let sink = QueryableSink::shared(
+            move |query: &dyn wz_runtime_tokio::query_sink::QueryView,
+                  out: &mut dyn wz_runtime_tokio::query_sink::ReplyOut,
+                  _face: &dyn QueryHolder| { answer(query, out) },
+        );
         // INCOMPLETE, which is upstream's default and the only honest answer a bounded ring can
         // give.
         let id = self

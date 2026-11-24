@@ -436,11 +436,18 @@ impl SessionEngine for RouterState {
     ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        // The node's queries are held through the node itself, which the one sink is called with.
+        let holder = self.query_holder();
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
             allowed_origin,
-            Box::new(sink(self.query_holder())),
+            Box::new(
+                move |query: &dyn wz_session_core::query_sink::QueryView,
+                      out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                    sink.call(query, out, &*holder);
+                },
+            ),
         );
         self.engine
             .queryables

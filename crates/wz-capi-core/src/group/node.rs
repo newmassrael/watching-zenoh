@@ -21,8 +21,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use wz_capi_port::{
-    QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubId,
-    SubscriberSink, Ticker, WireKey,
+    QblId, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker,
+    WireKey,
 };
 use wz_session_core::group_membership::{
     decode_member, decode_net_event, encode_member, encode_net_event, GroupNetEvent, Member,
@@ -190,14 +190,13 @@ impl NodeGroup {
         let record = encode_member(&member);
         let record_key = member_keyexpr(&gid, &member.mid);
         let served = record_key.clone();
-        let answer: QueryableSink = Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            let (record, served) = (record.clone(), served.clone());
-            Box::new(move |_view: &dyn QueryView, out: &mut dyn ReplyOut| {
+        let answer: QueryableSink = QueryableSink::shared(
+            move |_view: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                 // Declared on the very key it answers under, so every query that reaches it
                 // intersects it and the reply cannot be refused.
                 let _ = out.reply_keyed(&served, &record);
-            }) as QueryCallback
-        });
+            },
+        );
         let Ok(queryable) = engine.declare_queryable_on_wire(
             &record_key,
             WireKey::literal(),

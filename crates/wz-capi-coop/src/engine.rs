@@ -4687,7 +4687,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.qos(),
                 &mut onward,
             );
-            call.ask(query, &mut responder);
+            // The queries the callback keeps are held through the session, as the face's holder.
+            let holder = CoopHolder {
+                engine: self.this.clone(),
+            };
+            call.ask(query, &mut responder, &holder);
         }
         self.answer(generation, query.rid(), true);
     }
@@ -6726,7 +6730,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .next_entity_id()
             .ok_or(Declined::NoEntityId)?;
         let form = core.key_form(&wire, retraction.is_some());
-        let row = QueryableRow::new(id, retraction, wire);
+        let row = QueryableRow::new(id, retraction, wire, sink);
         let declared = tables_mut(&core.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -6748,14 +6752,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             declared.id, id,
             "the tables number a row as they said they would"
         );
-        // The callback `sink` mints runs when the deliveries are handed out (`query`), never under
-        // the session's lock; it is minted once the tables took the row.
-        let callback = sink(Arc::new(CoopHolder {
-            engine: self.this.clone(),
-        }));
-        if let Some(row) = tables(&core.registry).queryables().get(declared.handle) {
-            row.callback().mint(callback);
-        }
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce_queryable(declared.handle);
         #[cfg(feature = "group")]

@@ -48,7 +48,7 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryRowSink};
+use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
@@ -725,11 +725,11 @@ fn hand_query(
 
 /// A C queryable's closure as the engine holds it in the queryable's row: the closure moved into
 /// one allocation at the declaration, its address the context of a raw callback
-/// ([`QueryRowSink::raw`]). The engine calls it through a shared borrow, from any thread and from
+/// ([`QueryableSink::raw`]). The engine calls it through a shared borrow, from any thread and from
 /// inside itself, and lets go of it once, after its last call, which drops the closure: its C
 /// `drop(context)` runs and its latch opens. The subscriber's door holds its closure the same way
 /// (`crate::pubsub`).
-fn queryable_sink(closure: CQueryClosure) -> QueryRowSink {
+fn queryable_sink(closure: CQueryClosure) -> QueryableSink {
     /// # Safety
     /// `context` is the closure `queryable_sink` moved into its allocation, not yet dropped.
     unsafe fn call(
@@ -753,7 +753,7 @@ fn queryable_sink(closure: CQueryClosure) -> QueryRowSink {
     // closure admits from any thread and from inside itself (pico calls it so, and
     // `CQueryClosure` is `Sync` for this plane); `release` gives the allocation back once,
     // which the engine does after the last call.
-    unsafe { QueryRowSink::raw(call, context, Some(release)) }
+    unsafe { QueryableSink::raw(call, context, Some(release)) }
 }
 
 /// Release a boxed [`QueryMarshal`].
@@ -1298,12 +1298,12 @@ pub(crate) fn declare_queryable_on(
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
-    sink: QueryRowSink,
+    sink: QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, &keyexpr, existing)?;
     let id = session
         .engine
-        .declare_queryable_row_on_wire(
+        .declare_queryable_on_wire(
             &keyexpr,
             key.wire(Arc::as_ref(&session.engine)),
             complete,
@@ -1336,7 +1336,7 @@ impl PlainQueryable {
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         complete: bool,
-        sink: QueryRowSink,
+        sink: QueryableSink,
     ) -> Result<Self, ZResult> {
         // Declared as pico declares its own (`z_declare_queryable` with NULL options):
         // the default origin.
