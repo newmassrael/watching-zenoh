@@ -210,6 +210,17 @@ pub mod session_tables;
 /// the engine's. Unconditional, like [`session_tables`]: it is a value and needs no feature.
 pub mod session_state;
 
+/// One value placed in a span of a session's arena, owned by one owner and reached by handles that
+/// count nothing: what a session keeps in its arena that its tasks and its engine reach alike.
+/// Unconditional, like [`bounded`].
+pub mod placed;
+
+/// A place a value the session owns is lent in for the length of a step, to the tasks an executor
+/// polls with nothing but their context: the reassembly Router of a unicast receive and an
+/// engine's tables. Gated on `alloc`: the place is shared by the tasks that look in it.
+#[cfg(feature = "alloc")]
+pub mod step_lend;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.

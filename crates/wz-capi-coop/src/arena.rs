@@ -223,6 +223,7 @@ pub enum ArenaPart {
     DeliveryRecords,
     DeliveryCallbacks,
     DeliveryKeys,
+    DeliveryRound,
     ReassemblyFlags,
     ReassemblyBuffers,
     HandedLegFlags,
@@ -321,6 +322,7 @@ impl ArenaPart {
             Self::DeliveryRecords => ("delivery records", "DELIVERY_LANE_EVENTS"),
             Self::DeliveryCallbacks => ("delivery callbacks", "DELIVERY_LANE_CALLBACKS"),
             Self::DeliveryKeys => ("delivery keys", "MAX_KEYEXPR_BYTES"),
+            Self::DeliveryRound => ("delivery round", ""),
             Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
             Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
@@ -430,9 +432,9 @@ const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
-/// The round's records, the callbacks they owe and its keys: the round keeps no area, since every
-/// record is read where it lies.
-const LANE_ROWS: usize = 3;
+/// The round's records, the callbacks they owe, its keys and the round itself: the round keeps no
+/// area, since every record is read where it lies.
+const LANE_ROWS: usize = 4;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -1667,6 +1669,13 @@ impl ArenaPlan {
             CALLBACK_BYTES,
         );
         self.put(ArenaPart::DeliveryKeys, 1, self.session.round.key_bytes());
+        // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
+        // the handles of it that count nothing.
+        self.put(
+            ArenaPart::DeliveryRound,
+            1,
+            core::mem::size_of::<crate::round::Round>(),
+        );
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
             [ArenaPart::ReassemblyFlags, ArenaPart::ReassemblyBuffers],

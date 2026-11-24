@@ -703,7 +703,7 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn make_wire<K: LinkCalls<T::Clock>>(
         &self,
-        calls: &K,
+        calls: &mut K,
         face: FaceId,
         opened: OpenedLink<PumpOf<T>>,
         role: SessionRole,
