@@ -348,19 +348,20 @@ pub unsafe extern "C" fn z_id_to_string(id: *const z_id_t, out: *mut z_owned_str
 /// space, whose key expressions and documents spell every zid this way
 /// (`vendor/zenoh-pico/src/api/admin_space.c` @ `_Z_RETURN_IF_ERR(z_id_to_string(zid, &zid_str));`).
 pub(crate) fn zid_hex(id: &[u8; Z_ID_SIZE]) -> [u8; Z_ID_SIZE * 2] {
-    let mut buf = [0u8; Z_ID_SIZE * 2];
-    // The first byte fills the last pair of characters, and each pair is the byte's high digit
-    // then its low one. Every index below is in range by its type, so the rendering has no
-    // refusal path.
-    for (pair, byte) in buf.chunks_exact_mut(2).rev().zip(id) {
-        let digits = (
-            HEX.get(usize::from(byte >> 4)),
-            HEX.get(usize::from(byte & 0x0F)),
-        );
-        if let ([high, low], (Some(&high_digit), Some(&low_digit))) = (pair, digits) {
-            *high = high_digit;
-            *low = low_digit;
+    let mut buf = [b'0'; Z_ID_SIZE * 2];
+    // The bytes reversed, each high digit first, are the id read as a little-endian number written
+    // most significant digit first. It is written from the last character back and stops at its
+    // last nonzero digit, the zeros before it being the buffer's own: the count is the id's, not a
+    // constant, so the loop stays one short body rather than one copy per digit.
+    let mut rest = u128::from_le_bytes(*id);
+    for digit in buf.iter_mut().rev() {
+        if rest == 0 {
+            break;
         }
+        if let Some(&hex) = HEX.get((rest & 0x0F) as usize) {
+            *digit = hex;
+        }
+        rest >>= 4;
     }
     buf
 }
@@ -469,6 +470,26 @@ mod tests {
             b"100f0e0d0c0b0a0908070605040302ab".as_slice()
         );
         assert_eq!(zid_hex(&[0; Z_ID_SIZE]), [b'0'; Z_ID_SIZE * 2]);
+    }
+
+    /// The digits stop at the id's last nonzero one: zero bytes at the end of the id are the
+    /// leading zeros of the rendering, a zero byte inside it renders as two zeros, and an id with
+    /// every bit set fills all thirty-two characters.
+    #[test]
+    fn a_zid_renders_its_zero_bytes_as_zero_digits_wherever_they_lie() {
+        let mut id = [0u8; Z_ID_SIZE];
+        id[0] = 0x0F;
+        id[2] = 0xA0;
+        assert_eq!(
+            zid_hex(&id).as_slice(),
+            b"00000000000000000000000000a0000f".as_slice()
+        );
+        id[15] = 0x10;
+        assert_eq!(
+            zid_hex(&id).as_slice(),
+            b"10000000000000000000000000a0000f".as_slice()
+        );
+        assert_eq!(zid_hex(&[0xFF; Z_ID_SIZE]), [b'f'; Z_ID_SIZE * 2]);
     }
 
     /// The export hands the rendering back as an owned, NUL-terminated string, and refuses a null
