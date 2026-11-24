@@ -398,3 +398,46 @@ fn a_subscribers_row_is_the_one_holder_of_the_declaration_its_key_is_named_by() 
         "the callback went with it"
     );
 }
+
+/// A liveliness subscriber's row holds the declaration its Interest names the key by, as a
+/// subscriber's does: the key's own hold comes back as the subscriber is declared, the
+/// declaration outlives the program's hold while the subscriber stands, and it goes with the
+/// subscriber once nothing else holds it. Turned red by a row that keeps the key's hold and is
+/// given no declaration in the tables (two live after the declaration).
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscribers_row_holds_the_declaration_its_interest_names() {
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let id = engine
+        .acquire_keyexpr("demo/alive")
+        .expect("room for a declaration");
+    let program = KeyHold::taken(id);
+    let subscriber = engine
+        .declare_liveliness_subscriber_on_wire(
+            "demo/alive/**",
+            WireKey::aliased_tail(id, "/**".len()).holding(program.share(&*engine)),
+            false,
+            wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {}),
+        )
+        .expect("the engine has liveliness");
+    assert_eq!(
+        live_holds(&engine),
+        1,
+        "the program's hold alone: the key's came back, the row holds the declaration"
+    );
+    program.release(&*engine);
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/alive".to_owned())],
+        "the subscriber's row holds it past the program's release"
+    );
+    engine.undeclare_subscriber(subscriber);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "and lets it go with the subscriber"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+}

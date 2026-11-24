@@ -3292,16 +3292,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         // not told again: neither upstream tells a group that comes up of
                         // the entities a session already holds.
                         #[cfg(feature = "liveliness")]
-                        for (_, row) in tables(&self.session.registry)
-                            .liveliness_subscribers()
-                            .iter()
                         {
-                            face.ask_liveliness(
-                                row.id(),
-                                row.key().as_str(),
-                                row.callback().wire(),
-                                row.history(),
-                            );
+                            let tables = tables(&self.session.registry);
+                            for (_, row) in tables.liveliness_subscribers().iter() {
+                                face.ask_liveliness(
+                                    row.id(),
+                                    row.key().as_str(),
+                                    &group::wire_key_of(tables.wire_of(row.key())),
+                                    row.history(),
+                                );
+                            }
                         }
                         if let Some(ended) = self.transport.groups.get_mut(at) {
                             // A departure owed to a replaying listener outlives the join that
@@ -6204,12 +6204,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "liveliness")]
         let live = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let handle = tables(&core.session.registry)
+            let (handle, prefix) = tables(&core.session.registry)
                 .liveliness_subscribers()
                 .iter()
                 .find(|(_, row)| row.id() == id)
-                .map(|(handle, _)| handle)?;
+                .map(|(handle, row)| (handle, row.key().prefix()))?;
+            // The links are asked while the rows stand, which are their places in the replay's
+            // order: the subscriber's, then the declaration's its key is named by.
             let place = core.liveliness_place(handle);
+            let keyexpr_place = core.prefix_retraction(prefix);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
             for group in &core.transport.groups {
@@ -6217,8 +6220,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
             let undeclared =
                 tables_mut(&core.session.registry).undeclare_liveliness_subscriber(handle)?;
-            // The row went before the links are told: a send never finds the tables borrowed.
+            // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &interest_final::<C>(u64::from(id)));
+            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             Some((handle, undeclared.row.map(|row| row.into_callback())))
         });
         // The row, and its callback with it, is let go of here with no lock held; one a call of
@@ -7347,23 +7351,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = &mut guard.0;
         // The subscriber is one row of the session's tables, numbered by the id they hand out
         // next, which its Interest carries: a full table, a key the session cannot hold or no id
-        // left refuses it before anything is asked, and the sink goes with the refusal. Its
-        // Interest names its key as the ABI did, so the row holds no key expression declaration.
+        // left refuses it before anything is asked, and the sink goes with the refusal. The row
+        // holds the key expression declaration its Interest names the key by for as long as it
+        // stands, so the key's own hold of it is given back once the row stands.
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
             wire.let_go(self);
             return Err(Declined::NoEntityId);
         };
-        let form = wz_session_core::session_tables::KeyForm {
-            prefix: None,
-            names_key: false,
-        };
+        let form = core.session.key_form(wire.mapping_id, false);
+        let mut holds = wire.into_holds();
+        let mut named = holds.take_named();
         let declared = tables_mut(&core.session.registry).declare_liveliness_subscriber(
             keyexpr,
             history,
             form,
-            LivelinessRow::new(wire, sink),
+            LivelinessRow::new(holds, sink),
         );
         let declared = match declared {
             Ok(declared) => declared,
@@ -7372,6 +7376,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // what the key held goes back.
                 drop(guard);
                 let why = Declined::from(refused.why);
+                if let Some(named) = named {
+                    named.release(self);
+                }
                 self.give_back(refused.callback.into_holds());
                 return Err(why);
             }
@@ -7387,6 +7394,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // a peer's answer repeats is not handed again: the first declaration of an id wins.
         if history {
             drop(guard);
+            if let Some(named) = named.take() {
+                named.release(self);
+            }
             self.hand_history(declared.handle);
             guard = match self.live() {
                 Some(guard) => guard,
@@ -7400,29 +7410,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .liveliness_subscribers()
             .get(declared.handle)
             .is_some();
-        if !stands {
-            drop(guard);
-            self.deliver();
-            return Ok(id);
-        }
-        // Each link is asked from the row, as it stands now.
-        core.announce_liveliness(declared.handle);
-        // And each group the session joined is asked, as its declarations say.
-        #[cfg(feature = "group")]
-        {
-            let tables = tables(&core.session.registry);
-            if let Some(row) = tables.liveliness_subscribers().get(declared.handle) {
-                for group in &core.transport.groups {
-                    group.ask_liveliness(
-                        id,
-                        row.key().as_str(),
-                        row.callback().wire(),
-                        row.history(),
-                    );
+        if stands {
+            // Each link is asked from the row, as it stands now.
+            core.announce_liveliness(declared.handle);
+            // And each group the session joined is asked, as its declarations say.
+            #[cfg(feature = "group")]
+            {
+                let tables = tables(&core.session.registry);
+                if let Some(row) = tables.liveliness_subscribers().get(declared.handle) {
+                    let wire = group::wire_key_of(tables.wire_of(row.key()));
+                    for group in &core.transport.groups {
+                        group.ask_liveliness(id, row.key().as_str(), &wire, row.history());
+                    }
                 }
             }
         }
         drop(guard);
+        if let Some(named) = named {
+            named.release(self);
+        }
         self.deliver();
         Ok(id)
     }

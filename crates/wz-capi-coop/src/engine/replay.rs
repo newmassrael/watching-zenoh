@@ -292,8 +292,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     let tables = super::tables(&self.session.registry);
                     let row = tables.liveliness_subscribers().iter().nth(left);
                     let asked = row.is_none_or(|(_, row)| {
-                        row.callback()
-                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                        super::liveliness::ask(
+                            actions,
+                            row.id(),
+                            row.key().as_str(),
+                            tables.wire_of(row.key()),
+                            row.history(),
+                        )
                     });
                     asked
                 }
@@ -589,8 +594,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .liveliness_subscribers()
                     .get(handle)
                     .is_some_and(|row| {
-                        row.callback()
-                            .ask(row.id(), row.key().as_str(), row.history(), actions)
+                        super::liveliness::ask(
+                            actions,
+                            row.id(),
+                            row.key().as_str(),
+                            tables.wire_of(row.key()),
+                            row.history(),
+                        )
                     });
                 asked
             },
