@@ -271,13 +271,14 @@ impl PicoSubscriberForms {
         let Some(anchor) = self.anchor(&shared, entity, keyexpr) else {
             return EntityForm::literal();
         };
-        let wire = anchor.announced.wire(Arc::as_ref(&shared));
-        let form = if wire.mapping_id == 0 {
-            EntityForm::literal()
-        } else {
-            EntityForm::aliased(wire.mapping_id, wire.suffix)
+        let kept = Kept::lodged(anchor.clone());
+        let form = match anchor.announced.aliased_parts(Arc::as_ref(&shared)) {
+            // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
+            // unchanged, for as long as a count of it is held, and `kept` is one.
+            Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
+            None => EntityForm::literal().keeping(kept),
         };
-        let form = match entity {
+        match entity {
             Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
                 anchor
                     .key
@@ -285,8 +286,7 @@ impl PicoSubscriberForms {
             ),
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),
-        };
-        form.keeping(Kept::lodged(anchor))
+        }
     }
 }
 

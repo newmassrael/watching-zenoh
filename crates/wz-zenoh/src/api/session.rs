@@ -10213,7 +10213,7 @@ mod tests {
         let wire = tokio_engine::wire_key(&publication);
         assert!(!wire.is_literal());
         assert_eq!(wire.mapping_id, 3);
-        assert_eq!(wire.suffix.as_deref(), Some("/leaf"));
+        assert_eq!(wire.suffix(), Some("/leaf"));
     }
 
     #[test]

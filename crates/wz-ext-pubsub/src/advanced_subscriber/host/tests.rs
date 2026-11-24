@@ -871,7 +871,7 @@ fn a_background_subscriber_retracts_nothing() {
     {
         let subscriptions = script.subscriptions.lock().unwrap();
         assert_eq!(subscriptions[0].2.mapping_id, 5, "named as the host said");
-        assert_eq!(subscriptions[0].2.suffix.as_deref(), Some("/data"));
+        assert_eq!(subscriptions[0].2.suffix(), Some("/data"));
     }
     script.events.lock().unwrap().clear();
     subscriber.background();
@@ -1414,6 +1414,34 @@ fn lodged_forms_and_kept_names_take_no_memory() {
         1,
         "the last name gave the place back, once"
     );
+}
+
+/// A form whose suffix lies in what it keeps hands the key made from it that suffix lent, not
+/// copied: making the key and copying it take no memory.
+///
+/// # Control
+///
+/// A key made with the suffix copied (`WireKey::aliased` over `to_owned`) counts an allocation
+/// and points elsewhere, which reds both assertions.
+#[test]
+fn a_kept_suffix_is_lent_to_the_key_and_takes_no_memory() {
+    let text: Arc<String> = Arc::new(String::from("demo/data/rest"));
+    let rest = text.get("demo/data".len()..).expect("the rest of the key");
+    let kept = Kept::shared(text.clone());
+    let before = allocations();
+    // SAFETY: `rest` lies in the string `kept` counts, which nothing changes.
+    let form = unsafe { EntityForm::aliased_in(9, rest, kept) };
+    let wire = super::wire_of(&form);
+    let copy = wire.clone();
+    let during = allocations() - before;
+
+    assert_eq!(during, 0, "the key and its copy allocate nothing");
+    assert_eq!(
+        wire.suffix().map(str::as_ptr),
+        Some(rest.as_ptr()),
+        "lent, not copied"
+    );
+    assert_eq!((copy.mapping_id, copy.suffix()), (9, Some("/rest")));
 }
 
 /// A value lodged in a place its maker lends takes no memory, nor do its counts: the last count

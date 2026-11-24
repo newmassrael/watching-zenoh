@@ -604,6 +604,17 @@ pub struct EngineSubscriber<E: SessionEngine + ?Sized = dyn SessionEngine> {
 
 /// The wire form of an entity as the host named it.
 fn wire_of(form: &EntityForm) -> WireKey {
+    if let (true, Some(kept)) = (form.suffix_is_kept(), form.kept()) {
+        // SAFETY: the form's suffix lies in what it keeps (`EntityForm::aliased_in`), which the
+        // key keeps a count of, so it stays there, unchanged, while the key does.
+        return unsafe {
+            WireKey::aliased_in(
+                form.mapping_id(),
+                form.suffix().unwrap_or_default(),
+                kept.clone(),
+            )
+        };
+    }
     let wire = if form.is_literal() {
         WireKey::literal()
     } else {

@@ -898,7 +898,7 @@ impl QueryLeg<'_> {
         match self {
             QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
                 wire.mapping_id,
-                wire.suffix.as_deref(),
+                wire.suffix(),
                 keyexpr,
                 opts.with_allowed_destination(self.locality()),
                 on_reply,
@@ -1008,7 +1008,7 @@ fn declare_subscriber_on(
             .ok()
     } else {
         session
-            .declare_subscriber_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
+            .declare_subscriber_aliased(wire.mapping_id, wire.suffix(), options, callback)
             .ok()
     }
 }
@@ -1053,7 +1053,7 @@ fn declare_queryable_on(
             .ok()
     } else {
         session
-            .declare_queryable_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
+            .declare_queryable_aliased(wire.mapping_id, wire.suffix(), options, callback)
             .ok()
     }
 }
@@ -1070,7 +1070,7 @@ fn declare_token_on(
         session.declare_token(keyexpr.to_string(), options).ok()
     } else {
         session
-            .declare_token_aliased(wire.mapping_id, wire.suffix.as_deref(), options)
+            .declare_token_aliased(wire.mapping_id, wire.suffix(), options)
             .ok()
     }
 }
@@ -1091,12 +1091,7 @@ fn declare_liveliness_subscriber_on(
             .ok()
     } else {
         session
-            .declare_liveliness_subscriber_aliased(
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-                options,
-                sink,
-            )
+            .declare_liveliness_subscriber_aliased(wire.mapping_id, wire.suffix(), options, sink)
             .ok()
     }
 }
@@ -4663,7 +4658,7 @@ impl SharedSession {
             )
         } else {
             let mapping_id = wire.mapping_id;
-            let suffix = wire.suffix.as_deref();
+            let suffix = wire.suffix();
             self.fan_out_with(
                 opts,
                 PutKey::Declared {
@@ -4709,7 +4704,7 @@ impl SharedSession {
             self.publish_aliased_all_for(
                 Some(keyexpr),
                 wire.mapping_id,
-                wire.suffix.as_deref(),
+                wire.suffix(),
                 payload,
                 opts,
             )
@@ -4734,7 +4729,7 @@ impl SharedSession {
             PutKey::Declared {
                 literal: keyexpr,
                 mapping_id: wire.mapping_id,
-                suffix: wire.suffix.as_deref(),
+                suffix: wire.suffix(),
             }
         };
         self.fan_out(
@@ -4748,7 +4743,7 @@ impl SharedSession {
                 } else {
                     Leg::of_alias(session.publish_aliased_auto(
                         wire.mapping_id,
-                        wire.suffix.as_deref(),
+                        wire.suffix(),
                         payload,
                         leg,
                     ))
@@ -4762,7 +4757,7 @@ impl SharedSession {
                     } else {
                         Leg::of_probe_alias(session.publish_aliased_auto_probe(
                             wire.mapping_id,
-                            wire.suffix.as_deref(),
+                            wire.suffix(),
                             payload,
                             leg,
                         ))
@@ -4781,7 +4776,7 @@ impl SharedSession {
                     } else {
                         Reserved::of_reserve(session.reserve_wire_chain_aliased(
                             wire.mapping_id,
-                            wire.suffix.as_deref(),
+                            wire.suffix(),
                             payload,
                             leg,
                         ))
@@ -4802,7 +4797,7 @@ impl SharedSession {
                             session
                                 .publish_aliased_auto_reserved(
                                     wire.mapping_id,
-                                    wire.suffix.as_deref(),
+                                    wire.suffix(),
                                     payload,
                                     leg,
                                     reservation,
