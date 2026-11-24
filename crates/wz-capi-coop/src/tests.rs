@@ -2120,7 +2120,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
 #[test]
 #[should_panic(expected = "taken again on the thread that holds it")]
 fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
-    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces};
+    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces, OpenStorage};
     use crate::OpenKeyIds;
     use core::alloc::Layout;
     use wz_capi_port::PlaceLender;
@@ -2136,8 +2136,10 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        held,
+        OpenStorage {
+            memory: &AllocatorMemory,
+            held,
+        },
     )
     .expect("the session opens");
     let place = engine
