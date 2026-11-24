@@ -49,7 +49,6 @@ impl RowCallbacks for Latched {
     type LivelinessSubscriber = CClosure<u32>;
     type Matching = CClosure<u32>;
     type Reply = CClosure<u32>;
-    type WriteFilter = ();
 }
 
 /// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
@@ -77,7 +76,6 @@ impl RowCallbacks for Calls {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
-    type WriteFilter = ();
 }
 
 type Tables = SessionTables<Calls>;
@@ -272,13 +270,7 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .declare_liveliness_subscriber("l", false, KeyForm::default(), latched(2))
         .unwrap();
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "m",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "m", false)
         .unwrap()
         .handle;
     let listener = tables
@@ -477,23 +469,11 @@ fn queries_tokens_and_liveliness_reach_by_their_keys() {
 fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let mut tables = Tables::new();
     let first = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap();
     let asked = first.interest.unwrap();
     let second = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            true,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
     assert_eq!(second.interest, None);
     let listener = tables.declare_matching_listener(first.handle, 9).unwrap();
@@ -504,9 +484,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
                 complete_required: false,
             },
             "k",
-            Some(InterestForm::default()),
             false,
-            (),
         )
         .unwrap();
     assert!(querier.interest.is_some_and(|id| id != asked));
@@ -550,13 +528,7 @@ fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
 fn a_listener_on_no_filter_is_refused_with_its_callback() {
     let mut tables = Tables::new();
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
     let _ = tables.undeclare_write_filter(filter, |_, _| {});
@@ -569,13 +541,7 @@ fn a_listener_on_no_filter_is_refused_with_its_callback() {
 fn a_filter_undeclared_while_its_listener_is_called_leaves_it_to_the_last_call() {
     let mut tables = latched_tables();
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
     let listener = tables
@@ -598,13 +564,7 @@ fn a_full_listener_table_refuses_and_hands_the_callback_back() {
         ..rows()
     });
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
     let refused = tables.declare_matching_listener(filter, 4).unwrap_err();
@@ -617,13 +577,7 @@ fn a_full_listener_table_refuses_and_hands_the_callback_back() {
 fn a_write_filter_keeps_the_peers_answer_until_their_tables_change() {
     let mut tables = Tables::new();
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
     let peers = Peers::default();
@@ -644,23 +598,11 @@ fn a_write_filter_keeps_the_peers_answer_until_their_tables_change() {
 fn the_sessions_own_subscribers_count_only_where_the_filter_asks_and_their_origin_admits() {
     let mut tables = Tables::new();
     let counting = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            true,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap()
         .handle;
     let blind = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
         .handle;
     let remote_only = subscribe(&mut tables, "k", Locality::Remote, 1);
@@ -697,13 +639,7 @@ fn only_a_complete_queryable_counts_where_completeness_is_required() {
 fn a_matching_listener_is_told_each_change_once() {
     let mut tables = Tables::new();
     let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            true,
-            (),
-        )
+        .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap()
         .handle;
     let listener = tables.declare_matching_listener(filter, 3).unwrap();
@@ -1149,7 +1085,6 @@ impl RowCallbacks for Sinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
-    type WriteFilter = ();
 }
 
 #[test]
@@ -1494,7 +1429,6 @@ impl RowCallbacks for FrameSinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
-    type WriteFilter = ();
 }
 
 /// The end of a plain frame is told to every subscriber, whatever it hears.
@@ -1755,172 +1689,4 @@ fn a_token_reaches_the_table_sets_liveliness_subscribers_by_the_registrys_rule()
     assert!(!complete(&tables));
     tables.liveliness_subscribers.mark_history_complete(id);
     assert!(complete(&tables));
-}
-
-/// A write filter's Interest names its key by the declaration its form asks, holding that
-/// declaration while it is open, and says whether the peers aggregate their answer; a second
-/// filter of the kind and key shares it as its first holder asked it, and its last holder lets the
-/// declaration go.
-#[test]
-fn a_write_filters_interest_names_its_key_as_its_form_asks() {
-    let mut tables = Tables::new();
-    let declared = tables.declare_keyexpr("demo/").unwrap();
-    let ask = InterestForm {
-        form: KeyForm {
-            prefix: Some(declared.handle),
-            names_key: false,
-        },
-        aggregate: true,
-    };
-    let first = tables
-        .declare_write_filter(Plane::Subscribers, "demo/k", Some(ask), false, ())
-        .unwrap();
-    let second = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "demo/k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
-        .unwrap();
-    assert_eq!(
-        second.interest, None,
-        "the second shares the first's Interest"
-    );
-    let interest = tables.write_filters().get(first.handle).unwrap().interest();
-    let row = tables.interests().get(interest).unwrap();
-    assert!(row.aggregate());
-    assert!(row.asked());
-    assert_eq!(
-        tables.wire_of(row.key()),
-        WireForm {
-            mapping: declared.id,
-            suffix: "k",
-        }
-    );
-    assert_eq!(tables.keyexprs().get(declared.handle).unwrap().holds(), 2);
-    // The program lets its declaration go; the Interest still holds it.
-    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
-    let _ = tables.undeclare_write_filter(second.handle, |_, _| {});
-    let last = tables
-        .undeclare_write_filter(first.handle, |_, _| {})
-        .unwrap();
-    assert_eq!(last.interest_final, first.interest);
-    assert_eq!(last.keyexpr, Some(declared.id));
-}
-
-/// A filter that sends no Interest takes an entity id all the same, and keys an Interest row of
-/// its own, not sent and owing no Final, apart from a sent one of the same kind and key.
-#[test]
-fn a_filter_that_asks_nothing_takes_an_id_and_owes_no_final() {
-    let mut tables = Tables::new();
-    let unasked = tables
-        .declare_write_filter(Plane::Subscribers, "k", None, false, ())
-        .unwrap();
-    assert_eq!(unasked.interest, None);
-    let asked = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
-        .unwrap();
-    assert_eq!(
-        asked.interest,
-        Some(2),
-        "the filter that asks nothing took id 1"
-    );
-    assert_eq!(tables.interests().len(), 2);
-    let interest = tables
-        .write_filters()
-        .get(unasked.handle)
-        .unwrap()
-        .interest();
-    assert!(!tables.interests().get(interest).unwrap().asked());
-    assert_eq!(tables.interest_key(interest), Some("k"));
-    let gone = tables
-        .undeclare_write_filter(unasked.handle, |_, _| {})
-        .unwrap();
-    assert_eq!(gone.interest_final, None);
-    assert_eq!(tables.interests().len(), 1);
-}
-
-/// Callbacks whose write filters keep a number of the engine's.
-enum Extended {}
-
-impl RowCallbacks for Extended {
-    type Subscriber = u32;
-    type Queryable = u32;
-    type LivelinessSubscriber = u32;
-    type Matching = u32;
-    type Reply = u32;
-    type WriteFilter = u32;
-}
-
-/// A write filter keeps the engine's own record of it, and a refused one hands it back.
-#[test]
-fn a_write_filter_keeps_the_engines_record_and_hands_it_back_refused() {
-    let mut tables = SessionTables::<Extended>::new();
-    let filter = tables
-        .declare_write_filter(Plane::Subscribers, "k", None, false, 7)
-        .unwrap();
-    assert_eq!(
-        *tables
-            .write_filters()
-            .get(filter.handle)
-            .unwrap()
-            .extension(),
-        7
-    );
-    tables.limit_to(&TableRows {
-        write_filters: 1,
-        ..rows()
-    });
-    let refused = tables
-        .declare_write_filter(Plane::Subscribers, "j", None, false, 8)
-        .unwrap_err();
-    assert_eq!(refused.why, RegisterError::TableFull);
-    assert_eq!(refused.callback, 8);
-}
-
-/// A context that records each listener it is told of, and what.
-#[derive(Default)]
-struct Told(Vec<(MatchingListenerHandle, bool)>);
-
-impl MatchingDelivered<Told, MatchingListenerHandle> for u32 {
-    fn tell(cx: &mut Told, id: MatchingListenerHandle, _row: RowAccess<'_, u32>, matching: bool) {
-        cx.0.push((id, matching));
-    }
-}
-
-/// The listeners whose verdict changed are told it through the context the tables are handed,
-/// each change once.
-#[test]
-fn the_listeners_whose_verdict_changed_are_told_through_the_context() {
-    let mut tables = Tables::new();
-    let filter = tables
-        .declare_write_filter(
-            Plane::Subscribers,
-            "k",
-            Some(InterestForm::default()),
-            false,
-            (),
-        )
-        .unwrap()
-        .handle;
-    let listener = tables.declare_matching_listener(filter, 3).unwrap();
-    let peers = Peers::default();
-    let mut told = Told::default();
-    assert_eq!(tables.tell_matching_changes(&mut told, &peers), 0);
-    peers.declares.set(true);
-    assert_eq!(tables.tell_matching_changes(&mut told, &peers), 1);
-    assert_eq!(told.0, [(listener, true)]);
-    assert_eq!(
-        tables.tell_matching_changes(&mut told, &peers),
-        0,
-        "told once"
-    );
 }

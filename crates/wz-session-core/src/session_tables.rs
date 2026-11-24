@@ -172,10 +172,6 @@ pub trait RowCallbacks {
     type Matching: RowCallback;
     /// A pending get's: what each of its replies is handed to, and its end.
     type Reply: RowCallback;
-    /// What a write filter's row keeps besides what the tables read of it: the engine's own record
-    /// of the filter, kept with it and handed back by reference ([`WriteFilterRow::extension`]).
-    /// `()` where the engine keeps none.
-    type WriteFilter;
 }
 
 /// What the faces' tables answer about what their peers declared.
@@ -200,33 +196,6 @@ impl PeerDeclarations for NoPeers {
     fn written(&self) -> u64 {
         0
     }
-}
-
-/// How a matching listener's row is told a change of its verdict through the context `X` the tables
-/// are handed: implemented by the row's type, so a row holds its own facts and no reference to the
-/// state its verdicts go to, as [`crate::sink::SampleDelivery`] is for a subscriber's row. An
-/// associated function and not a method, so no value gains a method by an impl of it.
-///
-/// A row that is its own sink (`MatchingSink`) is told through the unit context `()`; a row of no
-/// listener's callback (`()`) is told nothing, through any context.
-pub trait MatchingDelivered<X, Id>: Sized {
-    /// Tell `row`, the row `id`, its new verdict through `cx`: `true` when what it watches is now
-    /// matched.
-    fn tell(cx: &mut X, id: Id, row: RowAccess<'_, Self>, matching: bool);
-}
-
-#[cfg(all(feature = "session-matching", feature = "alloc"))]
-impl<Row: crate::declare::matching::MatchingSink, Id> MatchingDelivered<(), Id> for Row {
-    fn tell(_cx: &mut (), _id: Id, row: RowAccess<'_, Row>, matching: bool) {
-        if let Some(row) = row.held() {
-            row.on_matching_changed(matching);
-        }
-    }
-}
-
-/// `()` is no `MatchingSink`, so this and the sinks' own never name the same pair.
-impl<X, Id> MatchingDelivered<X, Id> for () {
-    fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _matching: bool) {}
 }
 
 /// How an entity's declaration names its key on the wire.
@@ -448,16 +417,12 @@ impl<Key, Cb> LivelinessSubscriberRow<Key, Cb> {
     }
 }
 
-/// An Interest the session holds open, and how many filters and listeners hold it. One that is
-/// not asked is the key of the filters that send none, which take an entity id all the same and
-/// are held back by what the peers declare as the others are.
+/// An Interest the session holds open, and how many filters and listeners hold it.
 #[derive(Debug)]
 pub struct InterestRow<Key> {
     id: EntityId,
     kind: InterestKind,
-    key: EntityKey<Key>,
-    aggregate: bool,
-    asked: bool,
+    key: Key,
     holds: u16,
 }
 
@@ -472,20 +437,9 @@ impl<Key: KeyBacking> InterestRow<Key> {
         self.kind
     }
 
-    /// The key it asks about, named on the wire as its first holder asked
-    /// ([`SessionTables::wire_of`], [`SessionTables::named`]).
-    pub fn key(&self) -> &EntityKey<Key> {
-        &self.key
-    }
-
-    /// Whether it asks the peers to answer with one declaration for every match.
-    pub fn aggregate(&self) -> bool {
-        self.aggregate
-    }
-
-    /// Whether it is sent: `false` for the key of filters that send no Interest.
-    pub fn asked(&self) -> bool {
-        self.asked
+    /// The key it asks about.
+    pub fn key(&self) -> &str {
+        self.key.as_str()
     }
 
     /// How many filters and listeners hold it.
@@ -494,24 +448,17 @@ impl<Key: KeyBacking> InterestRow<Key> {
     }
 }
 
-/// A publisher's or a querier's write filter: whether a put or a get is sent at all. `Ext` is the
-/// engine's own record of the filter ([`RowCallbacks::WriteFilter`]).
+/// A publisher's or a querier's write filter: whether a put or a get is sent at all.
 #[derive(Debug)]
-pub struct WriteFilterRow<Ext> {
+pub struct WriteFilterRow {
     plane: Plane,
     interest: InterestHandle,
     count_local: bool,
     /// What the peers answered, with the count of [`PeerDeclarations::written`] it was read at.
     verdict: Cell<Option<(u64, bool)>>,
-    extension: Ext,
 }
 
-impl<Ext> WriteFilterRow<Ext> {
-    /// The engine's own record of the filter.
-    pub fn extension(&self) -> &Ext {
-        &self.extension
-    }
-
+impl WriteFilterRow {
     /// What it counts.
     pub fn plane(&self) -> Plane {
         self.plane
@@ -656,8 +603,7 @@ pub type LivelinessSubscribers<F, P> = SlotMap<
 /// The Interests' table.
 pub type Interests<P> = SlotMap<kind::Interest, InterestRow<<P as Storage>::Key>, INTEREST_ROWS, P>;
 /// The write filters' table.
-pub type WriteFilters<F, P> =
-    SlotMap<kind::WriteFilter, WriteFilterRow<<F as RowCallbacks>::WriteFilter>, FILTER_ROWS, P>;
+pub type WriteFilters<P> = SlotMap<kind::WriteFilter, WriteFilterRow, FILTER_ROWS, P>;
 /// A matching listener's row of a build's tables.
 pub type Matching<F> = MatchingRow<<F as RowCallbacks>::Matching>;
 /// The matching listeners' table.
@@ -762,26 +708,6 @@ pub struct Unwatched<R> {
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
-    /// The key expression declaration the Interest's key was named by, when that was its last
-    /// hold, as [`Undeclared::keyexpr`].
-    pub keyexpr: Option<ExprId>,
-}
-
-/// How a write filter's Interest is sent ([`SessionTables::declare_write_filter`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct InterestForm {
-    /// How its key is named on the wire.
-    pub form: KeyForm,
-    /// Whether the peers answer with one declaration for every match.
-    pub aggregate: bool,
-}
-
-/// What letting go of a hold of an Interest owes the wire.
-struct Released {
-    /// Its id, when it was asked and that was its last hold: its Final goes on the wire.
-    interest_final: Option<EntityId>,
-    /// The key expression declaration its key was named by, when that was its last hold.
-    keyexpr: Option<ExprId>,
 }
 
 /// What ending one leg of a get left of it.
@@ -833,7 +759,7 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     tokens: Tokens<P>,
     liveliness_subscribers: LivelinessSubscribers<F, P>,
     interests: Interests<P>,
-    write_filters: WriteFilters<F, P>,
+    write_filters: WriteFilters<P>,
     matching: MatchingListeners<F, P>,
     pending_gets: PendingGets<F, P>,
     /// What the consolidating gets hold back (`consolidate_reply`).
@@ -1447,20 +1373,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- Interests, write filters and matching listeners ------------------------------------
 
-    /// Hold an Interest of `kind` on `key`, sent as `ask` says or, with `None`, not sent: the one
-    /// of that kind, key and sending open already (its first holder's form standing), or a new
-    /// one, which takes an entity id and, when it is sent, hands it back to be sent.
+    /// Hold an Interest of `kind` on `key`: the one open already, or a new one, whose id is
+    /// handed back to be sent.
     fn hold_interest(
         &mut self,
         kind: InterestKind,
         key: &str,
-        ask: Option<InterestForm>,
     ) -> Result<(InterestHandle, Option<EntityId>), RegisterError> {
-        let asked = ask.is_some();
         let found = self
             .interests
             .iter()
-            .find(|(_, row)| row.kind == kind && row.asked == asked && text(&row.key.key) == key)
+            .find(|(_, row)| row.kind == kind && text(&row.key) == key)
             .map(|(handle, row)| (handle, row.holds));
         if let Some((handle, holds)) = found {
             let holds = holds.checked_add(1).ok_or(RegisterError::TableFull)?;
@@ -1472,100 +1395,64 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.interests.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let mut declaring = Declaring {
-            keys: &self.keys,
-            keyexprs: &mut self.keyexprs,
-            next_entity: &mut self.next_entity,
-        };
-        let key = declaring.entity_key(key, ask.map_or(KeyForm::default(), |ask| ask.form))?;
-        let id = declaring.mint()?;
-        let prefix = key.prefix;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
+        let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
+        self.next_entity = id.checked_add(1);
         let handle = self
             .interests
             .insert(InterestRow {
                 id,
                 kind,
-                key,
-                aggregate: ask.is_some_and(|ask| ask.aggregate),
-                asked,
+                key: kept,
                 holds: 1,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        declaring.hold(prefix);
-        Ok((handle, asked.then_some(id)))
+        Ok((handle, Some(id)))
     }
 
-    /// Let go of one hold of the Interest `handle` names: when that was the last, its id for its
-    /// Final to go on the wire where it was sent, and its key's hold of the declaration it names.
-    fn release_interest(&mut self, handle: InterestHandle) -> Released {
-        let gone = Released {
-            interest_final: None,
-            keyexpr: None,
-        };
-        let Some(row) = self.interests.get_mut(handle) else {
-            return gone;
-        };
+    /// Let go of one hold of the Interest `handle` names: its id when that was the last, for its
+    /// Final to go on the wire.
+    fn release_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
+        let row = self.interests.get_mut(handle)?;
         row.holds = row.holds.saturating_sub(1);
         if row.holds > 0 {
-            return gone;
+            return None;
         }
-        let (id, asked, prefix) = (row.id, row.asked, row.key.prefix);
+        let id = row.id;
         let _ = self.interests.remove(handle);
-        Released {
-            interest_final: asked.then_some(id),
-            keyexpr: prefix.and_then(|prefix| release_keyexpr(&mut self.keyexprs, prefix)),
-        }
+        Some(id)
     }
 
     /// The key of the Interest `handle` names.
     pub fn interest_key(&self, handle: InterestHandle) -> Option<&str> {
-        self.interests.get(handle).map(|row| text(&row.key.key))
+        self.interests.get(handle).map(|row| text(&row.key))
     }
 
-    /// Declare the write filter of a publisher or a querier on `key`, its Interest sent as `ask`
-    /// says or, with `None`, not sent, and `extension` the engine's own record of it. Refused with
-    /// `extension` handed back.
+    /// Declare the write filter of a publisher or a querier on `key`.
     pub fn declare_write_filter(
         &mut self,
         plane: Plane,
         key: &str,
-        ask: Option<InterestForm>,
         count_local: bool,
-        extension: F::WriteFilter,
-    ) -> Result<Watching<kind::WriteFilter>, Refused<F::WriteFilter>> {
+    ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
         if self.write_filters.is_full() {
-            return Err(Refused {
-                why: RegisterError::TableFull,
-                callback: extension,
-            });
+            return Err(RegisterError::TableFull);
         }
-        let (interest, asked) = match self.hold_interest(plane.interest_kind(), key, ask) {
-            Ok(held) => held,
-            Err(why) => {
-                return Err(Refused {
-                    why,
-                    callback: extension,
-                })
-            }
-        };
+        let (interest, asked) = self.hold_interest(plane.interest_kind(), key)?;
         let row = WriteFilterRow {
             plane,
             interest,
             count_local,
             verdict: Cell::new(None),
-            extension,
         };
         match self.write_filters.insert(row) {
             Ok(handle) => Ok(Watching {
                 handle,
                 interest: asked,
             }),
-            Err(CapacityFull(row)) => {
+            Err(_) => {
                 let _ = self.release_interest(interest);
-                Err(Refused {
-                    why: RegisterError::TableFull,
-                    callback: row.extension,
-                })
+                Err(RegisterError::TableFull)
             }
         }
     }
@@ -1578,7 +1465,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: WriteFilterHandle,
         mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
-    ) -> Option<Unwatched<WriteFilterRow<F::WriteFilter>>> {
+    ) -> Option<Unwatched<WriteFilterRow>> {
         let interest = self.write_filters.get(handle)?.interest;
         let mut cursor = 0usize;
         while let Some((listener, owned)) = self
@@ -1593,11 +1480,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             }
         }
         let removal = self.write_filters.remove(handle)?;
-        let released = self.release_interest(interest);
+        let interest_final = self.release_interest(interest);
         Some(Unwatched {
             row: removal.taken(),
-            interest_final: released.interest_final,
-            keyexpr: released.keyexpr,
+            interest_final,
         })
     }
 
@@ -1727,34 +1613,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 return Some((handle, now));
             }
         }
-    }
-
-    /// Tell every matching listener whose verdict changed its new one through `cx`, the row handed
-    /// shared where its calls read it in place and exclusively otherwise: how many were told. A
-    /// listener is declared not matching, so one declared while what it watches is matched is told
-    /// so by the next call.
-    pub fn tell_matching_changes<X>(&mut self, cx: &mut X, peers: &impl PeerDeclarations) -> usize
-    where
-        F::Matching: MatchingDelivered<X, MatchingListenerHandle>,
-    {
-        let mut cursor = 0usize;
-        let mut told = 0usize;
-        while let Some((handle, matching)) = self.next_matching_change(&mut cursor, peers) {
-            let row = if <F::Matching as RowCallback>::READS_ROW_IN_PLACE {
-                self.matching
-                    .get(handle)
-                    .map(|row| RowAccess::InPlace(&row.callback))
-            } else {
-                self.matching
-                    .get_mut(handle)
-                    .map(|row| RowAccess::Held(&mut row.callback))
-            };
-            if let Some(row) = row {
-                F::Matching::tell(cx, handle, row, matching);
-                told = told.saturating_add(1);
-            }
-        }
-        told
     }
 
     // ---- pending gets ----------------------------------------------------------------------
@@ -2103,7 +1961,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// The write filters.
-    pub fn write_filters(&self) -> &WriteFilters<F, P> {
+    pub fn write_filters(&self) -> &WriteFilters<P> {
         &self.write_filters
     }
 
@@ -2177,7 +2035,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             <Tokens<Lent>>::arena_bytes(rows.tokens),
             <LivelinessSubscribers<F, Lent>>::arena_bytes(rows.liveliness_subscribers),
             <Interests<Lent>>::arena_bytes(rows.interests()),
-            <WriteFilters<F, Lent>>::arena_bytes(rows.write_filters),
+            <WriteFilters<Lent>>::arena_bytes(rows.write_filters),
             <MatchingListeners<F, Lent>>::arena_bytes(rows.matching_listeners),
             <PendingGets<F, Lent>>::arena_bytes(rows.pending_gets),
             held_arena_bytes(rows.held_replies),

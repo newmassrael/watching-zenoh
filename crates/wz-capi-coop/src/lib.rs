@@ -115,7 +115,7 @@ mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
 // Totality debt TD-153 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::arithmetic_side_effects)]
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;

@@ -855,7 +855,7 @@ pub(crate) fn stage_queryable_interest<R: QueryableRows>(
 /// is delivered by serves either.
 pub trait LocalQueryables {
     /// What a matched queryable is asked through, with the context the dispatch is handed
-    /// ([`QueryDelivered`]): the row's own record of its queryable.
+    /// ([`QueryDelivery`]): the row's own record of its queryable.
     type Sink;
     /// The id the table gives a queryable's row, which a delivery names it by.
     type RowId: Copy;
@@ -2377,32 +2377,32 @@ impl<S> ResponderSink for S where
 {
 }
 
-/// How a queryable's row is asked a query through the context `X` the dispatch is handed:
-/// implemented by the row's type, so a row holds its own facts and no reference to the state its
-/// queries go to, as [`crate::sink::SampleDelivery`] is for a subscriber's row. Each call names
-/// the row by the id its table gives it (`Id`) and hands it as its table holds it
-/// ([`RowAccess`](crate::sink::RowAccess)). An associated function and not a method, so no value
-/// gains a method by an impl of it.
+/// What a matched queryable row is asked through: the context the dispatch is handed with the
+/// query, so a row holds its own facts and no reference to the state its queries go to. Each call
+/// names the row by the id its table gives it (`Id`) and hands it as its table holds it
+/// ([`RowAccess`](crate::sink::RowAccess)), as [`crate::sink::SampleDelivery`] does for a
+/// subscriber's row.
 ///
-/// A row that answers itself (`ResponderSink`) is asked through the unit context `()`; a row of no
-/// queryable's callback (`()`) is asked nothing, through any context.
+/// `()` is the context of a row that answers itself (`Row: ResponderSink`), which the table holds
+/// alone: the heap profile's closures and a node's closed sinks. A row read in place is asked by
+/// a context of its own; `()` asks it nothing.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-pub trait QueryDelivered<X, Id>: Sized {
-    /// Ask `row`, the row `id`, the query `query` through `cx`, its replies staged through
-    /// `responder`. Both are borrowed for the call.
+pub trait QueryDelivery<Row, Id> {
+    /// Ask `row`, the row `id`, the query `query`, its replies staged through `responder`. Both
+    /// are borrowed for the call.
     fn ask(
-        cx: &mut X,
+        &mut self,
         id: Id,
-        row: crate::sink::RowAccess<'_, Self>,
+        row: crate::sink::RowAccess<'_, Row>,
         query: &crate::query_sink::ProvenQuery<'_>,
         responder: &mut QueryResponder<'_>,
     );
 }
 
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-impl<Row: ResponderSink, Id> QueryDelivered<(), Id> for Row {
+impl<Row: ResponderSink, Id> QueryDelivery<Row, Id> for () {
     fn ask(
-        _cx: &mut (),
+        &mut self,
         _id: Id,
         row: crate::sink::RowAccess<'_, Row>,
         query: &crate::query_sink::ProvenQuery<'_>,
@@ -2414,11 +2414,14 @@ impl<Row: ResponderSink, Id> QueryDelivered<(), Id> for Row {
     }
 }
 
-/// `()` is no [`ResponderSink`], so this and the answering rows' own never name the same pair.
+/// A row that holds no queryable's callback (`()`, the row of a table set whose build keeps
+/// none) answers nothing, whatever context asks it: a sink set names such rows with any delivery
+/// context, and the context need not know whether its build keeps queryables. `()` is no
+/// [`ResponderSink`], so this and the unit context's own never name the same pair.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-impl<X, Id> QueryDelivered<X, Id> for () {
+impl<X, Id> QueryDelivery<(), Id> for X {
     fn ask(
-        _cx: &mut X,
+        &mut self,
         _id: Id,
         _row: crate::sink::RowAccess<'_, ()>,
         _query: &crate::query_sink::ProvenQuery<'_>,
@@ -3273,7 +3276,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
 }
 
 /// The session's own query on `keyexpr` asked of `queryables`, each matched row through `cx`
-/// ([`QueryDelivered`]): [`QueryableRegistry::local_query_with_value`] for a table of either kind and
+/// ([`QueryDelivery`]): [`QueryableRegistry::local_query_with_value`] for a table of either kind and
 /// a context of the caller's, so a table whose rows are asked by a context of their own answers
 /// the session's own gets by the rule its peers' queries are answered by. How many rows were asked.
 #[cfg(all(
@@ -3281,7 +3284,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     feature = "storage-profile",
     feature = "alloc"
 ))]
-pub fn ask_local_queryables<L: LocalQueryables, X, S: Storage>(
+pub fn ask_local_queryables<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
     queryables: &mut L,
     cx: &mut X,
     envelope: QueryEnvelope,
@@ -3289,10 +3292,7 @@ pub fn ask_local_queryables<L: LocalQueryables, X, S: Storage>(
     query: &QueryOwned,
     value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
     replies: &mut ReplyStage<S>,
-) -> usize
-where
-    L::Sink: QueryDelivered<X, L::RowId>,
-{
+) -> usize {
     let projection = project_owned_query(
         query,
         value,
@@ -3363,19 +3363,21 @@ impl QueryPeer {
         self.dispatch_request_with(queryables, &mut (), request, peer_keyexpr_table, replies)
     }
 
-    /// [`Self::dispatch_request`], each matched row asked through `cx` ([`QueryDelivered`]).
+    /// [`Self::dispatch_request`], each matched row asked through `cx` ([`QueryDelivery`]).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_request_with<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_request_with<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         request: &RequestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         replies: &mut ReplyStage<S>,
-    ) -> DispatchOutcome
-    where
-        L::Sink: QueryDelivered<X, L::RowId>,
-    {
+    ) -> DispatchOutcome {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // Only the Query body arm triggers application-visible
         // dispatch — see scope note above. zenoh's wire entry never enters its
@@ -3536,7 +3538,7 @@ impl QueryPeer {
     /// routed (the caller owes its final, as for one that matched nobody), so the asker's query
     /// ends with no reply and does not wait out its timeout. The one body both receive paths fire
     /// through is the one place the bound is read.
-    fn fire_projection<L: LocalQueryables, X, S: Storage>(
+    fn fire_projection<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
@@ -3544,10 +3546,7 @@ impl QueryPeer {
         keyexpr: &str,
         projection: QueryProjection<'_>,
         replies: &mut ReplyStage<S>,
-    ) -> usize
-    where
-        L::Sink: QueryDelivered<X, L::RowId>,
-    {
+    ) -> usize {
         let (max_parameters, max_attachment) = self.query_size_bounds();
         if request_past_bounds(
             projection.parameters,
@@ -3629,9 +3628,14 @@ impl QueryPeer {
         );
     }
 
-    /// [`Self::dispatch_messages`], each matched row asked through `cx` ([`QueryDelivered`]).
+    /// [`Self::dispatch_messages`], each matched row asked through `cx` ([`QueryDelivery`]).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_with<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_messages_with<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
@@ -3639,9 +3643,7 @@ impl QueryPeer {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) where
-        L::Sink: QueryDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
         // `NetworkMessage::Request` (itself a `codec-request` variant) is
@@ -3721,7 +3723,12 @@ impl QueryPeer {
     // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
-    pub fn dispatch_iteration_event<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_iteration_event<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
@@ -3729,9 +3736,7 @@ impl QueryPeer {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) where
-        L::Sink: QueryDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
             #[cfg(feature = "alloc")]
@@ -3851,9 +3856,9 @@ struct Asker {
 /// ([`QueryProjection`]): the owned query's projection and the one a Request read where its frame
 /// lies makes are fired through this one body, over the queryables of either table, so the match,
 /// the responder and the view a handler gets cannot differ between them. `cx` is what each
-/// matched row is asked through ([`QueryDelivered`]).
+/// matched row is asked through ([`QueryDelivery`]).
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-fn fire_query<L: LocalQueryables, X, S: Storage>(
+fn fire_query<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
     queryables: &mut L,
     cx: &mut X,
     asker: Asker,
@@ -3861,10 +3866,7 @@ fn fire_query<L: LocalQueryables, X, S: Storage>(
     keyexpr: &str,
     projection: QueryProjection<'_>,
     replies: &mut ReplyStage<S>,
-) -> usize
-where
-    L::Sink: QueryDelivered<X, L::RowId>,
-{
+) -> usize {
     let Asker {
         remote: is_remote,
         requester,
@@ -3952,8 +3954,7 @@ where
                     #[cfg(feature = "pubsub-ts-stack")]
                     ts_stack,
                 };
-                L::Sink::ask(
-                    cx,
+                cx.ask(
                     id,
                     row,
                     &crate::query_sink::ProvenQuery {
@@ -3963,8 +3964,7 @@ where
                     &mut responder,
                 )
             } else {
-                L::Sink::ask(
-                    cx,
+                cx.ask(
                     id,
                     row,
                     &crate::query_sink::ProvenQuery {
@@ -3978,8 +3978,7 @@ where
         // The view and the responder are handed over as their own types: a sink of one
         // closed type is called without a vtable (`ResponderSink`).
         #[cfg(not(feature = "alloc"))]
-        L::Sink::ask(
-            cx,
+        cx.ask(
             id,
             row,
             &crate::query_sink::ProvenQuery {
@@ -6690,15 +6689,15 @@ mod tests {
     /// A context that records the id of each queryable it is asked through and calls no row.
     struct AskedIds(Vec<QueryableId>);
 
-    impl QueryDelivered<AskedIds, QueryableId> for crate::query_sink::BoxedQuerySink {
+    impl QueryDelivery<crate::query_sink::BoxedQuerySink, QueryableId> for AskedIds {
         fn ask(
-            cx: &mut AskedIds,
+            &mut self,
             id: QueryableId,
             _row: crate::sink::RowAccess<'_, crate::query_sink::BoxedQuerySink>,
             _query: &crate::query_sink::ProvenQuery<'_>,
             _responder: &mut QueryResponder<'_>,
         ) {
-            cx.0.push(id);
+            self.0.push(id);
         }
     }
 

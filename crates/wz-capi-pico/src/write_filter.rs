@@ -55,7 +55,7 @@ use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
 use crate::ffi::{LatchList, ReleaseLatch};
-use crate::keyexpr::DeclaredKeyexpr;
+use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::prelude::*;
 use crate::result::{refusal_code, Door, ZResult};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
@@ -125,6 +125,11 @@ impl PicoSession {
 pub(crate) struct WriteFilter {
     shared: Arc<Engine>,
     id: FilterId,
+    /// What the filter counts, and on which key: what each of its listeners counts. The key is
+    /// the entity's own, shared: a block of the session's key arena where it keeps one.
+    plane: FilterPlane,
+    keyexpr: KeyText,
+    count_local: bool,
     listeners: Mutex<Vec<MatchId>>,
     /// The latches of the listeners' closures, which the filter's drop waits on: a listener goes
     /// with its entity, and zenoh-pico's entity is gone only once no callback of its listeners is
@@ -155,12 +160,16 @@ impl WriteFilter {
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
         let ask = interest_ask(&shared, session.mode, key, wire);
+        let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, key.literal(), wire, ask, count_local)
+            .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
             .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok(Self {
             shared,
             id,
+            plane,
+            keyexpr,
+            count_local,
             listeners: Mutex::new(Vec::new()),
             released: LatchList::default(),
         })
@@ -179,7 +188,12 @@ impl WriteFilter {
         sink: MatchingSink,
         released: Arc<ReleaseLatch>,
     ) -> Result<(Arc<Engine>, MatchId), Refusal> {
-        let id = self.shared.declare_matching_listener(self.id, sink)?;
+        let id = self.shared.declare_matching_listener(
+            self.plane,
+            self.keyexpr.as_str(),
+            sink,
+            self.count_local,
+        )?;
         self.listeners.lock().push(id);
         self.released.keep(released);
         Ok((self.shared.clone(), id))

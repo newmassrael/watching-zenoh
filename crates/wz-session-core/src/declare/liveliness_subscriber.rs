@@ -139,7 +139,7 @@ pub use crate::declare::liveliness_sample::{
 /// ([`PeerTokens`]) serves either.
 pub trait LocalLivelinessSubscribers {
     /// What a matched row is told through, with the context the fan is handed
-    /// ([`LivelinessDelivered`]): the row's own record of its subscriber.
+    /// ([`LivelinessDelivery`]): the row's own record of its subscriber.
     type Sink;
     /// The id the table gives a subscriber's row, which a delivery names it by.
     type RowId: Copy;
@@ -166,46 +166,42 @@ pub trait LocalLivelinessSubscribers {
     fn mark_history_complete(&mut self, interest_id: u64);
 }
 
-/// How a liveliness subscriber's row is told a sample through the context `X` the fan is handed:
-/// implemented by the row's type, so a row holds its own facts and no reference to the state its
-/// samples go to, as [`crate::sink::SampleDelivery`] is for a subscriber's row. An associated
-/// function and not a method, so no value gains a method by an impl of it.
+/// What a matched liveliness subscriber's row is told through: the context the fan is handed with
+/// the sample, so a row holds its own facts and no reference to the state its samples go to, as
+/// [`crate::sink::SampleDelivery`] is for a subscriber's row.
 ///
-/// A row that is its own sink (`LivelinessSampleSink`) is told through the unit context `()`; a row
-/// of no subscriber's callback (`()`) is told nothing, through any context.
-pub trait LivelinessDelivered<X, Id>: Sized {
-    /// Tell `row`, the row `id`, one sample through `cx`.
-    fn tell(cx: &mut X, id: Id, row: RowAccess<'_, Self>, sample: LivelinessSample<'_>);
+/// `()` is the context of a row that is its own sink (`Row: LivelinessSampleSink`), which the table
+/// holds alone; a row of no subscriber's callback (`()`) is told nothing by any context.
+pub trait LivelinessDelivery<Row, Id> {
+    /// Tell `row`, the row `id`, one sample.
+    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: LivelinessSample<'_>);
 }
 
-impl<Row: LivelinessSampleSink, Id> LivelinessDelivered<(), Id> for Row {
-    fn tell(_cx: &mut (), _id: Id, row: RowAccess<'_, Row>, sample: LivelinessSample<'_>) {
+impl<Row: LivelinessSampleSink, Id> LivelinessDelivery<Row, Id> for () {
+    fn deliver(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: LivelinessSample<'_>) {
         if let Some(row) = row.held() {
             row.on_sample(sample);
         }
     }
 }
 
-/// `()` is no [`LivelinessSampleSink`], so this and the sinks' own never name the same pair.
-impl<X, Id> LivelinessDelivered<X, Id> for () {
-    fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
+/// `()` is no [`LivelinessSampleSink`], so this and the unit context's own never name the same
+/// pair.
+impl<X, Id> LivelinessDelivery<(), Id> for X {
+    fn deliver(&mut self, _id: Id, _row: RowAccess<'_, ()>, _sample: LivelinessSample<'_>) {}
 }
 
 /// Tell every row of `subs` a token on `keyexpr` reaches, through `cx`: how many.
-fn tell_reached<L: LocalLivelinessSubscribers, X>(
+fn tell<L: LocalLivelinessSubscribers, X: LivelinessDelivery<L::Sink, L::RowId>>(
     subs: &mut L,
     cx: &mut X,
     kind: LivelinessSampleKind,
     keyexpr: &str,
     token_id: u64,
     historical: bool,
-) -> usize
-where
-    L::Sink: LivelinessDelivered<X, L::RowId>,
-{
+) -> usize {
     subs.fire_matching(keyexpr, historical, |id, row| {
-        L::Sink::tell(
-            cx,
+        cx.deliver(
             id,
             row,
             LivelinessSample {
@@ -1007,7 +1003,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // The BORROWED fan is the live plane by construction: it carries no
         // envelope, so there is no `interest_id` that could make it a CURRENT
         // answer. `false` is the derived value here, not a default.
-        tell_reached(self, &mut (), kind, keyexpr, token_id, false)
+        tell(self, &mut (), kind, keyexpr, token_id, false)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -1278,7 +1274,7 @@ impl<C: LivelinessSampleSink, P: Storage> LocalLivelinessSubscribers
 
 /// The token fan of ONE peer: what that peer's `Decl*Token` records, its link's loss and a
 /// history subscriber's replay do to the session's liveliness subscribers `subs`, each matched
-/// row told through `cx` ([`LivelinessDelivered`]). The subscribers are the application's, one
+/// row told through `cx` ([`LivelinessDelivery`]). The subscribers are the application's, one
 /// table for every session; the tokens are this peer's.
 impl<P: Storage> PeerTokens<P> {
     /// [`LivelinessSubscriberTable::dispatch_declare`], told whether the declaration is a
@@ -1309,16 +1305,18 @@ impl<P: Storage> PeerTokens<P> {
     /// rather than pico: the two disagree, and this gate is the side that keeps
     /// `history = false` truthful.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub fn dispatch_declare_historical<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_declare_historical<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
@@ -1367,16 +1365,19 @@ impl<P: Storage> PeerTokens<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub fn dispatch_declare_view_historical<'a, 'f, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_declare_view_historical<
+        'a,
+        'f,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         body: &DeclareVariant<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareVariant::CodecZenohDeclToken(decl) => {
@@ -1413,16 +1414,17 @@ impl<P: Storage> PeerTokens<P> {
     /// What a declared peer token does once its keyexpr is resolved, whichever
     /// form carried the declaration: bind it and fan a `Put` to the matching slots.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-    fn apply_token_declared<L: LocalLivelinessSubscribers, X>(
+    fn apply_token_declared<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         id: u64,
         resolved: &str,
         historical: bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         // R311y769 — the FIRST declaration of an id wins, and a repeat
         // is silent. zenoh wraps this whole arm in
         // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
@@ -1481,7 +1483,7 @@ impl<P: Storage> PeerTokens<P> {
         {
             return;
         }
-        tell_reached(
+        tell(
             subs,
             cx,
             LivelinessSampleKind::Put,
@@ -1501,7 +1503,7 @@ impl<P: Storage> PeerTokens<P> {
         'k,
         E: crate::ext_view::ExtEntryView,
         L: LocalLivelinessSubscribers,
-        X,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
     >(
         &mut self,
         subs: &mut L,
@@ -1510,9 +1512,7 @@ impl<P: Storage> PeerTokens<P> {
         exts: Option<&'k [E]>,
         peer_keyexpr_table: MappingSpaces<'k>,
         historical: bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         // The row's own text, taken out of the table, or the keyexpr
         // the retraction carries. `KeyText` is a `String` on the
         // growable backing and a bounded buffer on the fixed one, so
@@ -1574,7 +1574,7 @@ impl<P: Storage> PeerTokens<P> {
                 Ok(None) | Err(_) => return,
             },
         };
-        tell_reached(
+        tell(
             subs,
             cx,
             LivelinessSampleKind::Delete,
@@ -1588,15 +1588,15 @@ impl<P: Storage> PeerTokens<P> {
     /// number of samples at a time: before each token `room` says whether its `Delete` can be
     /// taken now, and the tokens left when it says no stay here for a later call, in the
     /// same order. How many were flushed, and whether none is left.
-    pub fn flush_on_link_loss_while<L: LocalLivelinessSubscribers, X>(
+    pub fn flush_on_link_loss_while<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         room: &mut dyn FnMut() -> bool,
-    ) -> (usize, bool)
-    where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) -> (usize, bool) {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
@@ -1610,7 +1610,7 @@ impl<P: Storage> PeerTokens<P> {
                 // A link loss is a LIVE event — the peer's tokens are going
                 // away NOW — so it reaches every matching slot regardless of
                 // its history flag, exactly as the live `UndeclToken` fan does.
-                tell_reached(
+                tell(
                     subs,
                     cx,
                     LivelinessSampleKind::Delete,
@@ -1671,15 +1671,15 @@ impl<P: Storage> PeerTokens<P> {
     /// same shape as the sibling flush): `peer_token_table` is the wire-side
     /// resolution state and does not exist on the no-alloc control plane, so
     /// `0` is the honest answer there — nothing is known to replay.
-    pub fn replay_known_tokens<L: LocalLivelinessSubscribers, X>(
+    pub fn replay_known_tokens<
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &self,
         subs: &mut L,
         cx: &mut X,
         interest_id: u64,
-    ) -> usize
-    where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) -> usize {
         // S9a — replayed in ascending token id, one at a time, with nothing collected: each round
         // finds the lowest matching id above the last one fired.
         let mut replayed = 0usize;
@@ -1688,8 +1688,7 @@ impl<P: Storage> PeerTokens<P> {
             let Some((id, row)) = subs.row_of(interest_id) else {
                 break;
             };
-            L::Sink::tell(
-                cx,
+            cx.deliver(
                 id,
                 row,
                 LivelinessSample {
@@ -1769,16 +1768,18 @@ impl<P: Storage> PeerTokens<P> {
     /// The two entry points share ONE body: `dispatch_messages` is this with a
     /// closure that claims nothing.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_unclaimed<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_messages_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // As the table and `claimed` below: consumed only by the `Declare` arm.
         #[cfg(not(feature = "codec-declare"))]
@@ -1875,16 +1876,18 @@ impl<P: Storage> PeerTokens<P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event_unclaimed<'a, L: LocalLivelinessSubscribers, X>(
+    pub fn dispatch_iteration_event_unclaimed<
+        'a,
+        L: LocalLivelinessSubscribers,
+        X: LivelinessDelivery<L::Sink, L::RowId>,
+    >(
         &mut self,
         subs: &mut L,
         cx: &mut X,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
-    ) where
-        L::Sink: LivelinessDelivered<X, L::RowId>,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // The two arms below consume the table, the peer and the claim filter; a
         // build with neither (no owned frame, no lent Declare) reads none of them.

@@ -1462,13 +1462,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     );
     held += 1;
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
+    let entities = plan.entities();
     assert_eq!(
-        plan.tables().write_filters,
-        preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS")
+        entities.filters(),
+        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"))
     );
     assert_eq!(
-        plan.tables().matching_listeners,
-        preset("MAX_MATCHING_LISTENERS")
+        entities.interests(),
+        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
     );
     assert_eq!(plan.gets().rows.queries, preset("MAX_PENDING_QUERIES"));
     assert_eq!(

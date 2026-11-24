@@ -1418,10 +1418,9 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
 }
 
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
-/// write filter on that plane is refused as not built, and with it every listener that would be
-/// declared on it: a listener on a filter the session does not hold is refused and its sink goes
-/// with the refusal. The CONTROL is a listener on a filter of the subscribers' plane, which every
-/// build holds.
+/// matching listener and a write filter on that plane are refused (a listener as not built, a filter
+/// as none) and the listener's sink goes with the refusal. The CONTROL is a listener on the
+/// subscribers' plane, which every build holds.
 #[cfg(not(any(feature = "query", feature = "queryable")))]
 #[test]
 fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
@@ -1433,9 +1432,8 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let (sink, told) = heard();
     let kept = Arc::downgrade(&sink);
     assert_eq!(
-        engine.declare_matching_listener(0, sink),
-        Err(wz_capi_port::Refusal::Closed),
-        "no filter, no listener"
+        engine.declare_matching_listener(plane, "demo/q", sink, false),
+        Err(wz_capi_port::Refusal::NotBuilt)
     );
     assert!(kept.upgrade().is_none(), "the refused sink is not kept");
     assert_eq!(
@@ -1453,22 +1451,11 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         Err(wz_capi_port::Refusal::NotBuilt)
     );
     let (sink, subscribers) = heard();
-    let filter = engine
-        .declare_write_filter(
-            FilterPlane::Subscribers,
-            "demo/q",
-            &WireKey::literal(),
-            Some(InterestAsk {
-                mapping_id: 0,
-                suffix: Some("demo/q"),
-                aggregate: false,
-            }),
-            false,
-        )
-        .expect("CONTROL: the subscribers' plane is held");
     assert!(
-        engine.declare_matching_listener(filter, sink).is_ok(),
-        "CONTROL: a listener on its filter"
+        engine
+            .declare_matching_listener(FilterPlane::Subscribers, "demo/q", sink, false)
+            .is_ok(),
+        "CONTROL: the subscribers' plane is held"
     );
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
@@ -1505,20 +1492,17 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let complete_plane = FilterPlane::Queryables {
         complete_required: true,
     };
-    let any_filter = engine
-        .declare_write_filter(any_plane, "demo/q", &WireKey::literal(), ask(), false)
-        .expect("a session with ids left declares");
-    let complete_filter = engine
-        .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
-        .expect("a session with ids left declares");
     let (sink, any) = heard();
     let any_id = engine
-        .declare_matching_listener(any_filter, sink)
+        .declare_matching_listener(any_plane, "demo/q", sink, false)
         .expect("a session with rows left declares");
     let (sink, complete) = heard();
     engine
-        .declare_matching_listener(complete_filter, sink)
+        .declare_matching_listener(complete_plane, "demo/q", sink, false)
         .expect("a session with rows left declares");
+    let complete_filter = engine
+        .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
+        .expect("a session with ids left declares");
     let subscriber_filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
@@ -1615,7 +1599,9 @@ fn a_listener_declared_on_a_match_is_told_once() {
     });
 
     let (sink, told) = heard();
-    assert!(engine.declare_matching_listener(filter, sink).is_ok());
+    assert!(engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/x", sink, false)
+        .is_ok());
     assert_eq!(
         *told.lock().unwrap(),
         [true],

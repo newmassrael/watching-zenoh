@@ -304,29 +304,29 @@ pub trait SessionEngine: Send + Sync + 'static {
         None
     }
 
-    /// Tell `sink` whether anything write filter `filter` counts matches, now and each time that
-    /// changes: a peer's subscriber, or its queryable (only a complete one when the filter's plane
-    /// requires it), and the session's own where the filter counts them. The listener is the
-    /// filter's, as zenoh-pico's matching listener is its entity's write filter's callback
-    /// (`vendor/zenoh-pico/src/api/api.c` @
-    /// `_z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`),
-    /// and goes with the filter ([`Self::undeclare_write_filter`]).
+    /// Tell `sink` whether anything a write filter on `plane` counts matches `keyexpr`, now and
+    /// each time that changes: a peer's subscriber, or its queryable (only a complete one when
+    /// `plane` requires it); with `count_local`, the session's own too. It counts what that
+    /// filter counts, because zenoh-pico's matching listener is its entity's write filter's
+    /// callback (`vendor/zenoh-pico/src/api/api.c` @
+    /// `_z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`)
+    /// and zenoh's querier asks for complete queryables when its target is `ALL_COMPLETE`.
     ///
     /// A refused listener answers why, with `sink` already let go of and nothing asked of a peer:
-    /// the caller has no listener to retract. One on a filter the session does not hold is
-    /// refused as one whose entity is gone ([`Refusal::Closed`]).
+    /// the caller has no listener to retract.
     fn declare_matching_listener(
         &self,
-        filter: FilterId,
+        plane: FilterPlane,
+        keyexpr: &str,
         sink: MatchingSink,
+        count_local: bool,
     ) -> Result<MatchId, Refusal>;
 
-    /// A matching listener on `plane` over `keyexpr`, held apart from any write filter, for an
-    /// entity whose `locality` says whose declarations count: the peers' (`Remote`), the session's
-    /// own (`SessionLocal`), or both (`Any`), as upstream's matching status reads an entity by the
-    /// destination it was declared with. A listener of the session's own entities alone asks no
-    /// peer. [`Refusal::NotBuilt`] from an engine with no such listener in this build, which is the
-    /// provided answer.
+    /// [`Self::declare_matching_listener`] for an entity whose `locality` says whose declarations
+    /// count: the peers' (`Remote`), the session's own (`SessionLocal`), or both (`Any`), as
+    /// upstream's matching status reads an entity by the destination it was declared with. A
+    /// listener of the session's own entities alone asks no peer. [`Refusal::NotBuilt`] from an
+    /// engine with no such listener in this build, which is the provided answer.
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
@@ -382,7 +382,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// session has no group a write must reach regardless.
     fn write_filter_holds_back(&self, id: FilterId) -> bool;
 
-    /// Drop write filter `id`, and every matching listener declared on it.
+    /// Drop write filter `id`.
     fn undeclare_write_filter(&self, id: FilterId);
 
     /// Send a plain Put through write filter `filter` on the declared key `mapping_id` (or the

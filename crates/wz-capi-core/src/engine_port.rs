@@ -341,11 +341,18 @@ impl SessionEngine for SharedSession {
     }
     fn declare_matching_listener(
         &self,
-        filter: FilterId,
+        plane: FilterPlane,
+        keyexpr: &str,
         sink: MatchingSink,
+        count_local: bool,
     ) -> Result<MatchId, Refusal> {
-        // A listener on a filter the session does not hold is refused as one whose entity is gone.
-        SharedSession::declare_filter_matching_listener(self, filter, sink).ok_or(Refusal::Closed)
+        Ok(SharedSession::declare_plane_matching_listener(
+            self,
+            plane,
+            keyexpr.to_owned(),
+            sink,
+            count_local,
+        ))
     }
 
     fn declare_matching_listener_in(

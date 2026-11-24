@@ -195,8 +195,10 @@ impl SessionEngine for Script {
     fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
-        _filter: FilterId,
+        _plane: FilterPlane,
+        _keyexpr: &str,
         _sink: MatchingSink,
+        _count_local: bool,
     ) -> Result<MatchId, Refusal> {
         Ok(0)
     }

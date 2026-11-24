@@ -278,7 +278,7 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
-| TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
+| TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
 | TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
 | TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |
 | TD-158 | `wz-capi-pico` | `config` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |

@@ -10,9 +10,9 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::os::{Mutex, MutexGuard};
+use wz_capi_port::MatchId;
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
-use wz_session_core::session_tables::MatchingListenerHandle;
 
 /// What a queue tells its word: whether it holds anything.
 pub(super) trait Pending {
@@ -92,23 +92,19 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
 /// first's row away rather than a row of its own, and the table needs a row for each listener the
 /// build admits and no more.
 pub(crate) struct MatchFlips {
-    flips: BoundedVec<(MatchingListenerHandle, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
-    /// The rows of undeclared listeners taken out of the session's tables whose drop has not
-    /// ended: an undeclaration that waits for its row reads that none is under way.
-    letting_go: usize,
+    flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
 }
 
 impl MatchFlips {
     pub(crate) fn new() -> Self {
         Self {
             flips: BoundedVec::new_static(),
-            letting_go: 0,
         }
     }
 
     /// The status of `listener` changed to `matching`. A change back takes the waiting row away;
     /// the same change again finds it already waiting and is that change, not a second one.
-    pub(crate) fn flip(&mut self, listener: MatchingListenerHandle, matching: bool) {
+    pub(crate) fn flip(&mut self, listener: MatchId, matching: bool) {
         if let Some(at) = self.flips.iter().position(|(id, _)| *id == listener) {
             if self
                 .flips
@@ -124,7 +120,7 @@ impl MatchFlips {
     }
 
     /// The change found first, to hand to its listener.
-    pub(crate) fn next(&mut self) -> Option<(MatchingListenerHandle, bool)> {
+    pub(crate) fn next(&mut self) -> Option<(MatchId, bool)> {
         if self.flips.is_empty() {
             None
         } else {
@@ -133,29 +129,13 @@ impl MatchFlips {
     }
 
     /// `listener` is gone: nothing it was owed is handed.
-    pub(crate) fn forget(&mut self, listener: MatchingListenerHandle) {
+    pub(crate) fn forget(&mut self, listener: MatchId) {
         self.flips.retain(|(id, _)| *id != listener);
     }
 
     /// Whether no change is owed.
     pub(crate) fn is_empty(&self) -> bool {
         self.flips.is_empty()
-    }
-
-    /// A listener's row is taken out of the session's tables, to be dropped after its lock.
-    pub(crate) fn letting_go(&mut self) {
-        self.letting_go += 1;
-    }
-
-    /// The row [`Self::letting_go`] counted was dropped.
-    pub(crate) fn let_go(&mut self) {
-        self.letting_go = self.letting_go.saturating_sub(1);
-    }
-
-    /// Whether no listener's row is being let go of: what an undeclaration that waits for its row
-    /// reads once the row left its table.
-    pub(crate) fn let_go_settled(&self) -> bool {
-        self.letting_go == 0
     }
 }
 
@@ -187,26 +167,19 @@ mod tests {
         assert!(!queue.is_pending());
     }
 
-    /// The listener whose rows are `n`'s, from 1.
-    fn listener(n: u32) -> MatchingListenerHandle {
-        core::num::NonZeroU32::new(n)
-            .and_then(MatchingListenerHandle::from_bits)
-            .expect("an index")
-    }
-
     /// The changes of matching statuses are handed in the order they were found; a change and the
     /// change back before the first was handed leave the listener where it stood and are handed as
     /// nothing.
     #[test]
     fn a_change_and_its_change_back_are_handed_as_nothing() {
         let mut flips = MatchFlips::new();
-        flips.flip(listener(1), true);
-        flips.flip(listener(2), true);
-        flips.flip(listener(1), false);
-        assert_eq!(flips.next(), Some((listener(2), true)));
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(1, false);
+        assert_eq!(flips.next(), Some((2, true)));
         assert_eq!(flips.next(), None, "listener 1 stands where it stood");
-        flips.flip(listener(1), true);
-        assert_eq!(flips.next(), Some((listener(1), true)));
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
     }
 
     /// The same change found twice before it was handed is that one change, handed once: a second
@@ -214,9 +187,9 @@ mod tests {
     #[test]
     fn the_same_change_found_twice_is_handed_once() {
         let mut flips = MatchFlips::new();
-        flips.flip(listener(1), true);
-        flips.flip(listener(1), true);
-        assert_eq!(flips.next(), Some((listener(1), true)));
+        flips.flip(1, true);
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
         assert_eq!(flips.next(), None);
     }
 
@@ -224,12 +197,12 @@ mod tests {
     #[test]
     fn a_listener_that_is_gone_is_handed_nothing() {
         let mut flips = MatchFlips::new();
-        flips.flip(listener(1), true);
-        flips.flip(listener(2), true);
-        flips.flip(listener(3), false);
-        flips.forget(listener(2));
-        assert_eq!(flips.next(), Some((listener(1), true)));
-        assert_eq!(flips.next(), Some((listener(3), false)));
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(3, false);
+        flips.forget(2);
+        assert_eq!(flips.next(), Some((1, true)));
+        assert_eq!(flips.next(), Some((3, false)));
         assert_eq!(flips.next(), None);
     }
 
@@ -238,27 +211,13 @@ mod tests {
     #[test]
     fn every_listener_the_build_admits_has_a_row() {
         let mut flips = MatchFlips::new();
-        let listeners = u32::try_from(caps::MAX_MATCHING_LISTENERS).expect("a count of rows");
-        for n in 1..=listeners {
-            flips.flip(listener(n), true);
+        let listeners = caps::MAX_MATCHING_LISTENERS as u64;
+        for id in 0..listeners {
+            flips.flip(id, true);
         }
-        for n in 1..=listeners {
-            assert_eq!(flips.next(), Some((listener(n), true)));
+        for id in 0..listeners {
+            assert_eq!(flips.next(), Some((id, true)));
         }
         assert_eq!(flips.next(), None);
-    }
-
-    /// A row being let go of is counted until its drop ended, and the count reads settled after.
-    #[test]
-    fn a_listener_row_let_go_of_is_counted_until_its_drop_ended() {
-        let mut flips = MatchFlips::new();
-        assert!(
-            flips.let_go_settled(),
-            "CONTROL: nothing is being let go of"
-        );
-        flips.letting_go();
-        assert!(!flips.let_go_settled(), "a row is being dropped");
-        flips.let_go();
-        assert!(flips.let_go_settled(), "its drop ended");
     }
 }

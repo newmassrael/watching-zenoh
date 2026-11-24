@@ -111,18 +111,6 @@ pub(super) struct EngineState {
     /// The program's liveliness tokens, as `queryables` holds its queryables.
     tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
-    /// The program's write filters: nothing a node holds back, but what a matching listener
-    /// declared on one counts, and the listeners that go with it.
-    filters: Mutex<HashMap<FilterId, NodeFilter>>,
-}
-
-/// A write filter of the program on a node ([`EngineState::filters`]).
-struct NodeFilter {
-    plane: FilterPlane,
-    keyexpr: String,
-    count_local: bool,
-    /// The matching listeners declared on it, undeclared with it.
-    listeners: Vec<MatchId>,
 }
 
 impl EngineState {
@@ -135,7 +123,6 @@ impl EngineState {
             queryables: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
-            filters: Mutex::new(HashMap::new()),
         }
     }
 
@@ -324,47 +311,22 @@ impl SessionEngine for RouterState {
     fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
-        filter: FilterId,
+        plane: FilterPlane,
+        keyexpr: &str,
         sink: MatchingSink,
+        count_local: bool,
     ) -> Result<MatchId, Refusal> {
-        // The listener counts what its filter counts: the filter's plane and key, and the node's
-        // own declarations where the filter counts them.
-        let watched = self
-            .engine
-            .filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&filter)
-            .map(|held| (held.plane, held.keyexpr.clone(), held.count_local));
-        let Some((plane, keyexpr, count_local)) = watched else {
-            return Err(Refusal::Closed);
-        };
         let origin = if count_local {
             Locality::Any
         } else {
             Locality::Remote
         };
-        let id = self.watch_matching(
+        Ok(self.watch_matching(
             plane_of(plane),
-            &keyexpr,
+            keyexpr,
             origin,
             Box::new(move |matching| sink(matching)),
-        );
-        // Recorded on its filter, which takes it when it goes; a filter undeclared meanwhile
-        // leaves it to be retracted here.
-        let kept = self
-            .engine
-            .filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&filter)
-            .map(|held| held.listeners.push(id))
-            .is_some();
-        if !kept {
-            self.unwatch_matching(id);
-            return Err(Refusal::Closed);
-        }
-        Ok(id)
+        ))
     }
 
     fn declare_matching_listener_in(
@@ -397,44 +359,20 @@ impl SessionEngine for RouterState {
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {
-        for held in self
-            .engine
-            .filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values_mut()
-        {
-            held.listeners.retain(|listener| *listener != id);
-        }
         self.unwatch_matching(id);
     }
 
     fn declare_write_filter(
         &self,
-        plane: FilterPlane,
-        keyexpr: &str,
+        _plane: FilterPlane,
+        _keyexpr: &str,
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
-        count_local: bool,
+        _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
-        // nothing, so the filter takes no entity id. What it counts is kept for the matching
-        // listeners declared on it.
-        let id = self.engine.local_id();
-        self.engine
-            .filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                id,
-                NodeFilter {
-                    plane,
-                    keyexpr: keyexpr.to_owned(),
-                    count_local,
-                    listeners: Vec::new(),
-                },
-            );
-        Ok(id)
+        // nothing, so the filter takes no entity id.
+        Ok(self.engine.local_id())
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {
@@ -445,18 +383,7 @@ impl SessionEngine for RouterState {
         false
     }
 
-    fn undeclare_write_filter(&self, id: FilterId) {
-        let held = self
-            .engine
-            .filters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-        // Its listeners go with it, retracted with no lock of the filters held.
-        for listener in held.map(|held| held.listeners).unwrap_or_default() {
-            self.unwatch_matching(listener);
-        }
-    }
+    fn undeclare_write_filter(&self, _id: FilterId) {}
 
     fn put_plain_filtered(
         &self,

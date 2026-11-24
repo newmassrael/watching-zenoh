@@ -4853,7 +4853,6 @@ mod tests {
             type LivelinessSubscriber = u32;
             type Matching = u32;
             type Reply = u32;
-            type WriteFilter = ();
         }
         let counter = Arc::new(AtomicUsize::new(0));
         let counted = counter.clone();
