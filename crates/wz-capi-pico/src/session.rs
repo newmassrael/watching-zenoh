@@ -1187,10 +1187,10 @@ fn pico_uuid_wire(text: &str) -> Option<SessionZid> {
             Some(hi) => *out.next()? = ((hi << 4) | nibble) as u8,
         }
     }
-    // Written up to the last non-zero byte, as zenoh writes an id.
-    let last = bytes.iter().rposition(|byte| *byte != 0)?;
+    // Written up to the last non-zero byte, as zenoh writes an id; the id of zero bytes, none
+    // long, is refused by `SessionZid::new`.
     bytes
-        .get(..=last)
+        .get(..crate::zid::id_len(bytes))
         .and_then(|wire| SessionZid::new(wire).ok())
 }
 
@@ -1218,6 +1218,11 @@ mod zid_tests {
         assert_eq!(
             pico_uuid_wire("aabbccdd-eeff-0000-0000-000000000000").expect("six bytes and zeros"),
             [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+        // A zero byte before the last non-zero one is the id's own.
+        assert_eq!(
+            pico_uuid_wire("aa00cc00-0000-0000-0000-000000000000").expect("three bytes and zeros"),
+            [0xaa, 0x00, 0xcc]
         );
     }
 
