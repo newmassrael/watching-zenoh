@@ -132,9 +132,11 @@ impl RxReassembly for () {
 }
 
 #[cfg(feature = "reassembly")]
-impl<const SLOTS: usize, const CAP: usize, S> RxReassembly for ReassemblyDispatcher<SLOTS, CAP, S>
+impl<const SLOTS: usize, const CAP: usize, S, P> RxReassembly
+    for ReassemblyDispatcher<SLOTS, CAP, S, P>
 where
     S: ChainStaging<SLOTS, CAP>,
+    P: crate::reassembly_dispatch::ChainPeers,
 {
     fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
         let mut forward = |event: IterationEvent<'_, '_>| on_event.event(event);

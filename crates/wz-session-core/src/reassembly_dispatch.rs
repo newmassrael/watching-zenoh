@@ -186,6 +186,119 @@ enum Hand {
 /// no allocation per chain.
 pub(crate) const PEER_KEY_MAX: usize = 16;
 
+/// Whose chains a Router holds: what a chain's key keeps of its peer, and whether a full pool is
+/// made room in by ending another chain ([`PoolOverflow`]).
+///
+/// [`ManyPeers`] is a Router the links of several peers share: a chain is keyed by its peer as
+/// well as its channel, each peer is held to [`ReassemblyConfig::per_peer_quota`] apart, and a
+/// full pool's policy may end the oldest open chain for a new one. [`OnePeer`] is a Router every
+/// chain of which is one peer's, as a session's is while it holds a single link: a chain is keyed
+/// by its channel alone, the quota counts every open chain, and neither the peer nor the order the
+/// chains began in is kept.
+///
+/// The two answer every fragment of one peer alike while the quota is no more than the slots, so
+/// that a full pool is the peer at its quota. Past that, [`OnePeer`] refuses a start a full pool
+/// has no slot for, under every policy, as [`PoolOverflow::Reject`] does.
+pub trait ChainPeers {
+    /// Whether a chain's key tells peers apart. A caller of a Router whose key does not need not
+    /// read the peer key it hands in.
+    const KEYED: bool;
+    /// What a chain's key keeps of its peer.
+    type Peer;
+    /// What an open chain keeps of when it began: the order [`PoolOverflow::OldestWins`] picks the
+    /// chain it ends by.
+    type Opened: Copy + Ord;
+    /// The [`Self::Opened`] of a Router's first chain.
+    const FIRST: Self::Opened;
+    /// What a chain's key keeps of `peer_key`.
+    fn peer(peer_key: &[u8]) -> Self::Peer;
+    /// Whether `peer_key` names the peer a chain's key kept as `peer`.
+    fn is(peer: &Self::Peer, peer_key: &[u8]) -> bool;
+    /// The [`Self::Opened`] of the chain begun after one that began at `opened`.
+    fn after(opened: Self::Opened) -> Self::Opened;
+}
+
+/// A Router the links of several peers share ([`ChainPeers`]), what a Router is unless its type
+/// names another.
+#[derive(Debug, Clone, Copy)]
+pub struct ManyPeers;
+
+impl ChainPeers for ManyPeers {
+    const KEYED: bool = true;
+    type Peer = PeerKey;
+    /// How many chains the Router had begun before this one: a count and not the deadline, which
+    /// chains begun on the same millisecond share.
+    type Opened = u64;
+    const FIRST: u64 = 0;
+
+    fn peer(peer_key: &[u8]) -> PeerKey {
+        PeerKey::new(peer_key)
+    }
+
+    fn is(peer: &PeerKey, peer_key: &[u8]) -> bool {
+        peer.is(peer_key)
+    }
+
+    fn after(opened: u64) -> u64 {
+        opened.wrapping_add(1)
+    }
+}
+
+/// A Router every chain of which is one peer's ([`ChainPeers`]): a session's while the session
+/// holds a single link. Nothing of the peer is kept, so every chain is the peer's and
+/// [`ReassemblyDispatcher::abort_peer`] ends them all.
+#[derive(Debug, Clone, Copy)]
+pub struct OnePeer;
+
+impl ChainPeers for OnePeer {
+    const KEYED: bool = false;
+    type Peer = ();
+    type Opened = ();
+    const FIRST: () = ();
+
+    fn peer(_peer_key: &[u8]) -> Self::Peer {}
+
+    fn is(_peer: &(), _peer_key: &[u8]) -> bool {
+        true
+    }
+
+    fn after(_opened: ()) -> Self::Opened {}
+}
+
+/// What a [`ManyPeers`] chain's key keeps of its peer: the first `PEER_KEY_MAX` bytes of the peer
+/// key, held in a fixed buffer so the Router holds no allocation per chain.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerKey {
+    bytes: [u8; PEER_KEY_MAX],
+    len: u8,
+}
+
+impl PeerKey {
+    fn new(peer_key: &[u8]) -> Self {
+        let kept = Self::kept(peer_key);
+        let mut bytes = [0u8; PEER_KEY_MAX];
+        if let Some(to) = bytes.get_mut(..kept.len()) {
+            to.copy_from_slice(kept);
+        }
+        Self {
+            bytes,
+            // At most `PEER_KEY_MAX`, which a `u8` holds.
+            len: kept.len() as u8,
+        }
+    }
+
+    /// The bytes of `peer_key` a key holds: its first `PEER_KEY_MAX`.
+    fn kept(peer_key: &[u8]) -> &[u8] {
+        peer_key.get(..PEER_KEY_MAX).unwrap_or(peer_key)
+    }
+
+    /// Compared as slices, by length and bytes: a held prefix built to compare whole would cost
+    /// an array copy at every lookup.
+    fn is(&self, peer_key: &[u8]) -> bool {
+        self.bytes.get(..usize::from(self.len)) == Some(Self::kept(peer_key))
+    }
+}
+
 /// Deploy-sourced reassembly runtime knobs (§4 `buffer_pools.reassembly_pool`).
 ///
 /// The pool DIMENSIONS (`slot_count` / `slot_size`) are the
@@ -346,7 +459,8 @@ pub enum RefuseReason {
     /// quota-first; the pool-exhaustion defence).
     PeerQuota,
     /// Every slot is occupied by another peer's in-progress chain, and the
-    /// pool's [`PoolOverflow`] policy refuses rather than evicts.
+    /// pool's [`PoolOverflow`] policy refuses rather than evicts; under
+    /// [`OnePeer`], by the peer's own chains, past a quota above the slots.
     ///
     /// Also the word for a start the free slot it found could not take: the
     /// arena had no reservation left for it, or the slot's machine did not
@@ -492,7 +606,8 @@ impl SnRing {
 #[derive(Debug, Clone, Copy)]
 pub struct Fragment<'a> {
     /// Peer identity key from the link/session context (NOT the fragment
-    /// body) — half of the §2.3 chain key. Unicast feeds the peer ZID;
+    /// body) — half of the §2.3 chain key, which a Router of one peer's chains
+    /// ([`OnePeer`]) does not read. Unicast feeds the peer ZID;
     /// multicast feeds the pool-slot index key
     /// ([`crate::multicast_dispatch::multicast_chain_key`]) — there the
     /// wire zid is attacker-chosen and the source address owns identity,
@@ -615,41 +730,25 @@ impl ReassemblySlotActions for SlotBinding {
 /// per-priority SN conduits (`[crate::sn::RxConduits]`) — reassemble
 /// independently. Under a non-QoS session every fragment is
 /// [`Priority::DEFAULT`], collapsing the key to the pre-QoS (peer, reliable)
-/// form (identical behavior).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ChainKey {
-    peer_key: [u8; PEER_KEY_MAX],
-    peer_key_len: u8,
+/// form (identical behavior). What the key keeps of the peer is the Router's
+/// [`ChainPeers::Peer`]: nothing, where every chain is one peer's.
+struct ChainKey<P: ChainPeers> {
+    peer: P::Peer,
     reliable: bool,
     priority: Priority,
 }
 
-impl ChainKey {
+impl<P: ChainPeers> ChainKey<P> {
     fn new(peer_key: &[u8], reliable: bool, priority: Priority) -> Self {
-        let kept = Self::kept(peer_key);
-        // The rest of the array stays zero, so the derived equality compares the bytes kept.
-        let mut buf = [0u8; PEER_KEY_MAX];
-        if let Some(to) = buf.get_mut(..kept.len()) {
-            to.copy_from_slice(kept);
-        }
         Self {
-            peer_key: buf,
-            // At most `PEER_KEY_MAX`, which a `u8` holds.
-            peer_key_len: kept.len() as u8,
+            peer: P::peer(peer_key),
             reliable,
             priority,
         }
     }
 
-    /// The bytes of `peer_key` a key holds: its first `PEER_KEY_MAX`.
-    fn kept(peer_key: &[u8]) -> &[u8] {
-        peer_key.get(..PEER_KEY_MAX).unwrap_or(peer_key)
-    }
-
-    /// Compared as slices, by length and bytes: a held prefix built to compare whole would cost
-    /// an array copy at every lookup.
     fn same_peer(&self, peer_key: &[u8]) -> bool {
-        self.peer_key.get(..usize::from(self.peer_key_len)) == Some(Self::kept(peer_key))
+        P::is(&self.peer, peer_key)
     }
 
     fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {
@@ -660,8 +759,8 @@ impl ChainKey {
 /// The Router's half of the chain a slot holds: everything that exists only
 /// while the slot's machine is out of `Empty`, held as one value so a slot
 /// cannot hold a key without its staging, or the reverse.
-struct OpenChain<C> {
-    key: ChainKey,
+struct OpenChain<C, P: ChainPeers> {
+    key: ChainKey<P>,
     /// The last in-order SN staged into this chain. A continuation is
     /// admitted iff it is consecutive to this on the caller's [`SnRing`]
     /// ([`crate::sn::consecutive`] at the caller-passed mask when the ring is
@@ -672,10 +771,9 @@ struct OpenChain<C> {
     last_sn: u64,
     /// Absolute monotonic-ms instant this chain times out.
     deadline_ms: u64,
-    /// How many chains the Router had begun before this one: the order
-    /// [`PoolOverflow::OldestWins`] picks its victim by. A count and not the
-    /// deadline, which chains begun on the same millisecond share.
-    opened: u64,
+    /// When this chain began among the Router's: the order
+    /// [`PoolOverflow::OldestWins`] picks its victim by ([`ChainPeers::Opened`]).
+    opened: P::Opened,
     /// R311y589 — this chain's staging handle, vended by the Router's arena
     /// ([`crate::chain_staging::ChainStaging`]);
     /// [`ChainStaging::available`](crate::chain_staging::ChainStaging::available)
@@ -689,12 +787,17 @@ struct OpenChain<C> {
 
 /// One reassembly slot: the engine-free protocol FSM plus the Router-owned
 /// chain state.
-struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
+struct Slot<
+    const SLOTS: usize,
+    const CAP: usize,
+    S: ChainStaging<SLOTS, CAP>,
+    P: ChainPeers = ManyPeers,
+> {
     engine: Engine<ReassemblySlotPolicy<SlotBinding>>,
     /// `Some` while the slot holds a chain (FSM in `Receiving`, or in
     /// `Complete` until the delivery's release); `None` when free (FSM ==
     /// Empty).
-    open: Option<OpenChain<S::Chain>>,
+    open: Option<OpenChain<S::Chain, P>>,
 }
 
 /// A slot's machine.
@@ -718,7 +821,9 @@ fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
     .unwrap_or_else(|never| match never {});
 }
 
-impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
+impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: ChainPeers>
+    Slot<SLOTS, CAP, S, P>
+{
     /// A free slot, built in `cell` where the Router keeps it. Whatever `cell` held is not
     /// dropped.
     fn init_in(cell: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
@@ -827,11 +932,19 @@ pub use crate::chain_loss::ChainLoss;
 /// The reassembly Router: a fixed pool of `SLOTS` slot FSMs, each able to
 /// reassemble a fragment chain of up to `CAP` bytes. See the module docs
 /// for the division of labour with the engine-free slot FSM.
-pub struct ReassemblyDispatcher<const SLOTS: usize, const CAP: usize, S = HeapStaging<SLOTS, CAP>>
-where
+///
+/// `P` is whose chains it holds ([`ChainPeers`]): several peers' unless the type names
+/// [`OnePeer`].
+pub struct ReassemblyDispatcher<
+    const SLOTS: usize,
+    const CAP: usize,
+    S = HeapStaging<SLOTS, CAP>,
+    P = ManyPeers,
+> where
     S: ChainStaging<SLOTS, CAP>,
+    P: ChainPeers,
 {
-    slots: [Slot<SLOTS, CAP, S>; SLOTS],
+    slots: [Slot<SLOTS, CAP, S, P>; SLOTS],
     config: ReassemblyConfig,
     /// R311y589 — the arena the chains stage into. Defaulted to
     /// [`HeapStaging`], which is byte-for-byte the pre-seam behaviour, so every
@@ -841,16 +954,17 @@ where
     /// Chains ended because a fragment would have taken them past the bound
     /// ([`AbortReason::CapacityOverflow`]); see [`Self::capacity_refusals`].
     capacity_refusals: u64,
-    /// How many chains this Router has begun: the next chain's `opened`.
-    opened: u64,
+    /// When the next chain begins among this Router's ([`ChainPeers::Opened`]).
+    opened: P::Opened,
     /// The chain the current ingest ended for a fragment not of it; see
     /// [`Self::displaced_by_last_ingest`].
     displaced: Option<DisplacedChain>,
 }
 
-impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S>
+impl<const SLOTS: usize, const CAP: usize, S, P> ReassemblyDispatcher<SLOTS, CAP, S, P>
 where
     S: ChainStaging<SLOTS, CAP>,
+    P: ChainPeers,
 {
     /// Build a Router with `SLOTS` empty slots over `config`, staging into an
     /// arena that makes its own storage.
@@ -909,18 +1023,18 @@ where
         // own address, as is every other field the list above names, so `place` is fully written
         // before it is lent back.
         unsafe {
-            let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
+            let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S, P>>();
             for index in 0..SLOTS {
-                Slot::<SLOTS, CAP, S>::init_in(
+                Slot::<SLOTS, CAP, S, P>::init_in(
                     &mut *slots
                         .add(index)
-                        .cast::<core::mem::MaybeUninit<Slot<SLOTS, CAP, S>>>(),
+                        .cast::<core::mem::MaybeUninit<Slot<SLOTS, CAP, S, P>>>(),
                 );
             }
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).staging).write(staging);
             addr_of_mut!((*at).capacity_refusals).write(0);
-            addr_of_mut!((*at).opened).write(0);
+            addr_of_mut!((*at).opened).write(P::FIRST);
             addr_of_mut!((*at).displaced).write(None);
             place.assume_init_mut()
         }
@@ -1491,7 +1605,7 @@ where
             opened,
             chain,
         });
-        self.opened = self.opened.wrapping_add(1);
+        self.opened = P::after(self.opened);
         // On `more == 0` the same transition also ran `finalize_message`,
         // which stages the one payload this chain has.
         if duties & duty::FINALIZE != 0 {
@@ -1511,7 +1625,14 @@ where
     /// [`PoolOverflow`] policy: the slot of the oldest open chain, evicted,
     /// under [`PoolOverflow::OldestWins`]; none otherwise, and the start is
     /// refused.
+    ///
+    /// None under [`OnePeer`], which keeps no order of its chains: its pool is
+    /// full past its quota only when the quota is above its slots (see
+    /// [`ChainPeers`]).
     fn make_room(&mut self) -> Option<usize> {
+        if !P::KEYED {
+            return None;
+        }
         match self.config.pool_overflow {
             PoolOverflow::Reject => None,
             PoolOverflow::DiagnosticEvent => {
@@ -1688,7 +1809,8 @@ where
     /// End every chain of `peer_key`, whatever its channel: its link is gone, and a Router that
     /// the links of a session share would otherwise hold the chains until their deadline, and
     /// splice a later link's fragments of the same peer onto them. Each is driven through the
-    /// abort arm [`Self::abort_channel`] drives. Answers how many were ended.
+    /// abort arm [`Self::abort_channel`] drives. Answers how many were ended. Under [`OnePeer`]
+    /// every open chain is the peer's.
     pub fn abort_peer(&mut self, peer_key: &[u8]) -> usize {
         let mut ended = 0usize;
         for idx in 0..SLOTS {
@@ -1740,12 +1862,13 @@ fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
 /// ([`crate::multicast_rx::sweep_multicast_reassembling`]) reuse it without a
 /// false `session-unicast` coupling.
 #[cfg(feature = "storage-profile")]
-pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, F>(
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, P, F>(
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     now_ms: u64,
     on_event: &mut F,
 ) where
     S: ChainStaging<SLOTS, CAP>,
+    P: ChainPeers,
     F: FnMut(IterationEvent<'_, '_>),
 {
     let timed_out = reasm.sweep(now_ms);
@@ -1770,11 +1893,11 @@ mod tests {
     #[test]
     fn a_chain_key_holds_a_peer_key_by_its_bounded_prefix() {
         let long = [0x11u8; PEER_KEY_MAX + 4];
-        let key = ChainKey::new(&long, true, Priority::DEFAULT);
+        let key = ChainKey::<ManyPeers>::new(&long, true, Priority::DEFAULT);
         assert!(key.same_peer(&long));
         assert!(key.same_peer(&long[..PEER_KEY_MAX]));
         assert!(!key.same_peer(&long[..PEER_KEY_MAX - 1]));
-        let short = ChainKey::new(&[1, 2, 3], false, Priority::DEFAULT);
+        let short = ChainKey::<ManyPeers>::new(&[1, 2, 3], false, Priority::DEFAULT);
         assert!(short.same_peer(&[1, 2, 3]));
         assert!(
             !short.same_peer(&[1, 2, 3, 0]),
@@ -3924,5 +4047,208 @@ mod unknown_ring_tests {
             ReassemblyDropReason::Unresolvable,
             ReassemblyDropReason::OutOfOrder
         );
+    }
+}
+
+#[cfg(test)]
+mod one_peer_tests {
+    //! A Router of one peer's chains ([`OnePeer`]) beside the Router of several
+    //! ([`ManyPeers`]): alike on one peer's fragments while the quota is within the slots,
+    //! and keeping neither the peer nor the order its chains began in.
+    use super::*;
+    use crate::extfragment::FragmentMarkers;
+    use std::{vec, vec::Vec};
+
+    const PEER: &[u8] = &[0xAA; 16];
+    const OTHER: &[u8] = &[0xBB; 16];
+
+    /// The default-resolution (0x02, 28-bit) ring every test compares at.
+    const MASK: u64 = crate::sn::mask_from_res(0x02);
+
+    type One = ReassemblyDispatcher<2, 64, HeapStaging<2, 64>, OnePeer>;
+    type Many = ReassemblyDispatcher<2, 64>;
+
+    /// What a Router answered a fragment: the ingest's outcome, the message it delivered and the
+    /// chain it ended besides.
+    type Step = (IngestOutcome, Option<Vec<u8>>, Option<DisplacedChain>);
+
+    fn frag<'a>(
+        peer_key: &'a [u8],
+        reliable: bool,
+        priority: Priority,
+        sn: u64,
+        more: u8,
+        payload: &'a [u8],
+    ) -> Fragment<'a> {
+        Fragment {
+            peer_key,
+            reliable,
+            sn,
+            more,
+            payload,
+            priority,
+            markers: FragmentMarkers::NONE,
+        }
+    }
+
+    /// `quota` chains a peer, and the policy that ends the oldest chain when the pool is full.
+    fn config(quota: u16) -> ReassemblyConfig {
+        ReassemblyConfig::new(quota, 5_000).with_pool_overflow(PoolOverflow::OldestWins)
+    }
+
+    /// One peer's fragments through every rule a start and a continuation meet (a start, a
+    /// second channel, a start past the quota, a completion, a start after it, a gap, a start
+    /// after the gap), then a channel's abort and the sweep: each step's answer, whether the
+    /// abort ended a chain and how many chains the sweep ended.
+    fn one_peers_traffic<P: ChainPeers>(
+        d: &mut ReassemblyDispatcher<2, 64, HeapStaging<2, 64>, P>,
+    ) -> (Vec<Step>, bool, usize) {
+        let fragments = [
+            frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+            frag(PEER, false, Priority::DEFAULT, 1, 1, b"b"),
+            frag(PEER, true, Priority::RealTime, 1, 1, b"c"),
+            frag(PEER, true, Priority::DEFAULT, 2, 0, b"A"),
+            frag(PEER, true, Priority::RealTime, 5, 1, b"c"),
+            frag(PEER, false, Priority::DEFAULT, 3, 1, b"x"),
+            frag(PEER, false, Priority::DEFAULT, 7, 1, b"y"),
+        ];
+        let mut steps = Vec::new();
+        for fragment in fragments {
+            let mut delivered = None;
+            let outcome = d.ingest(fragment, MASK, 0, |message| {
+                delivered = Some(message.to_vec())
+            });
+            steps.push((outcome, delivered, d.displaced_by_last_ingest()));
+        }
+        let aborted = d.abort_channel(PEER, Priority::RealTime, true);
+        let swept = d.sweep(10_000);
+        (steps, aborted, swept)
+    }
+
+    /// With the quota at the slots, as a single-link session sets it, one peer's fragments are
+    /// answered step for step as the Router of several peers answers them: the full pool is the
+    /// peer at its quota, refused as such before any policy is read. Below the slots too.
+    #[test]
+    fn one_peers_fragments_are_answered_as_the_router_of_several_answers_them() {
+        let expected: Vec<Step> = vec![
+            (IngestOutcome::Begun, None, None),
+            (IngestOutcome::Begun, None, None),
+            (IngestOutcome::Refused(RefuseReason::PeerQuota), None, None),
+            (IngestOutcome::Reassembled, Some(b"aA".to_vec()), None),
+            (IngestOutcome::Begun, None, None),
+            (IngestOutcome::Aborted(AbortReason::OutOfOrder), None, None),
+            (IngestOutcome::Begun, None, None),
+        ];
+        assert_eq!(
+            one_peers_traffic(&mut Many::new(config(2))),
+            (expected.clone(), true, 1),
+            "CONTROL: the Router of several peers"
+        );
+        assert_eq!(
+            one_peers_traffic(&mut One::new(config(2))),
+            (expected, true, 1)
+        );
+        for quota in [1, 2] {
+            assert_eq!(
+                one_peers_traffic(&mut One::new(config(quota))),
+                one_peers_traffic(&mut Many::new(config(quota))),
+                "quota {quota}"
+            );
+        }
+    }
+
+    /// A fragment continues the chain open on its channel whatever peer key it carries: the key
+    /// keeps no peer. The CONTROL is the Router of several peers, where another peer's fragment
+    /// begins a chain of its own.
+    #[test]
+    fn a_router_of_one_peer_keys_a_chain_by_its_channel_alone() {
+        let first = frag(PEER, true, Priority::DEFAULT, 1, 1, b"a");
+        let other = frag(OTHER, true, Priority::DEFAULT, 2, 1, b"b");
+        let mut one = One::new(config(2));
+        assert_eq!(one.ingest(first, MASK, 0, |_| {}), IngestOutcome::Begun);
+        assert_eq!(one.ingest(other, MASK, 0, |_| {}), IngestOutcome::Continued);
+        assert_eq!(one.active_chains(), 1);
+        let mut many = Many::new(config(2));
+        assert_eq!(many.ingest(first, MASK, 0, |_| {}), IngestOutcome::Begun);
+        assert_eq!(
+            many.ingest(other, MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "CONTROL"
+        );
+        assert_eq!(many.active_chains(), 2, "CONTROL");
+    }
+
+    /// A quota above the slots leaves a pool of one peer's chains full, and the Router of one
+    /// peer refuses the start there as a full pool, with the open chains kept and none displaced,
+    /// whatever the policy says. The CONTROL is the Router of several peers, whose `OldestWins`
+    /// ends the peer's oldest chain for the start.
+    #[test]
+    fn a_router_of_one_peer_makes_no_room_in_a_full_pool() {
+        let starts = [
+            frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+            frag(PEER, false, Priority::DEFAULT, 1, 1, b"b"),
+        ];
+        let third = frag(PEER, true, Priority::RealTime, 1, 1, b"c");
+        let mut one = One::new(config(8));
+        let mut many = Many::new(config(8));
+        for fragment in starts {
+            assert_eq!(one.ingest(fragment, MASK, 0, |_| {}), IngestOutcome::Begun);
+            assert_eq!(many.ingest(fragment, MASK, 0, |_| {}), IngestOutcome::Begun);
+        }
+        assert_eq!(
+            one.ingest(third, MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::PoolExhausted)
+        );
+        assert_eq!(one.displaced_by_last_ingest(), None);
+        assert_eq!(one.active_chains(), 2);
+        assert_eq!(
+            many.ingest(third, MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "CONTROL"
+        );
+        assert_eq!(
+            many.displaced_by_last_ingest(),
+            Some(DisplacedChain::Evicted),
+            "CONTROL"
+        );
+    }
+
+    /// Every open chain is the one peer's, so ending a peer's chains ends them all, whatever key
+    /// names it, and gives their staging back.
+    #[test]
+    fn a_router_of_one_peer_ends_every_chain_for_its_peer() {
+        let mut one = One::new(config(2));
+        assert_eq!(
+            one.ingest(
+                frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            one.ingest(
+                frag(PEER, false, Priority::DEFAULT, 1, 1, b"b"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Begun
+        );
+        assert_eq!(one.abort_peer(OTHER), 2);
+        assert_eq!(one.active_chains(), 0);
+        assert_eq!(one.staging_available(), 2);
+    }
+
+    /// The Router of one peer keeps nothing of the peer in a chain's key and nothing of the order
+    /// its chains began in, so its key is smaller by the peer key and the Router by both.
+    #[test]
+    fn a_router_of_one_peer_keeps_neither_a_peer_nor_an_order() {
+        use core::mem::size_of;
+        assert_eq!(size_of::<<OnePeer as ChainPeers>::Peer>(), 0);
+        assert_eq!(size_of::<<OnePeer as ChainPeers>::Opened>(), 0);
+        assert!(size_of::<ChainKey<OnePeer>>() + PEER_KEY_MAX <= size_of::<ChainKey<ManyPeers>>());
+        assert!(size_of::<One>() < size_of::<Many>());
     }
 }
