@@ -765,6 +765,15 @@ pub mod link;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub mod face;
 
+/// The watchers of a session's faces and the events queued for them ([`face`]), under a lock the
+/// engine names ([`plane_lock`]). Gated as [`face`] is.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod face_plane;
+
+/// The lock a plane of the session keeps its state under, named by the engine. Unconditional: it
+/// is a trait and needs no feature.
+pub mod plane_lock;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
