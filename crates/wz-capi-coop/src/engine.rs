@@ -1214,33 +1214,27 @@ impl<W: LinkWaits> LinkRooms<W> {
         }
     }
 
-    /// The handle the face at `at` of the list names for a wait for its room, read under the lock,
-    /// which goes before the caller waits on it.
-    fn room_at(&self, at: usize) -> Option<(FaceId, WaitOn)> {
-        lock(&self.rooms).get(at).copied()
-    }
-
     /// Ask each face that is up for room, within `wait_us` in all: the first face that takes none
     /// spends the wait, and the faces after it are asked without one, so the publish spends one
-    /// deadline whatever the number of faces. Each face's handle is read under the lock and the
-    /// lock let go before its wait: a wait blocks, and a face coming up must not wait behind it.
-    /// A face that comes up or goes meanwhile may be asked or passed over, a hint as every answer
-    /// is; nothing is copied out of the lock but one handle at a time.
+    /// deadline whatever the number of faces. The waits are taken out of the lock first: a wait
+    /// blocks, and a face coming up must not wait behind it.
     pub(crate) fn within(&self, wait_us: u64) -> Room {
+        let rooms: Vec<(FaceId, WaitOn)> = lock(&self.rooms).clone();
+        if rooms.is_empty() {
+            return Room::Unasked;
+        }
         let mut left_us = wait_us;
         let mut congested = Vec::new();
-        let mut at = 0;
-        while let Some((face, on)) = self.room_at(at) {
-            at += 1;
+        for (face, on) in rooms {
             if !self.waits.wait_room(on, left_us) {
                 congested.push(face);
                 left_us = 0;
             }
         }
-        match (at, congested.is_empty()) {
-            (0, _) => Room::Unasked,
-            (_, true) => Room::Free,
-            (_, false) => Room::Congested(congested),
+        if congested.is_empty() {
+            Room::Free
+        } else {
+            Room::Congested(congested)
         }
     }
 }
