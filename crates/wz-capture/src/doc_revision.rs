@@ -3048,7 +3048,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: FIELDS_R80_FAMILIES,
         planes: &[],
-        carries: FIELDS_R80_CARRIES,
+        carries: FIELDS_R81_CARRIES,
     },
     // Revision 82 ADDS `chosen_by` and `encoding_schema` to every decoding
     // that applied a format (`decoded` and `refused`), after its other keys,
@@ -5093,7 +5093,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         retiring: &[],
         families: ROW_FACTS_R20_FAMILIES,
         planes: &[],
-        carries: ROW_FACTS_R20_CARRIES,
+        carries: ROW_FACTS_R21_CARRIES,
     },
     // Revision 22 is the field document's revision 82 here: a decoding gains
     // `chosen_by` and `encoding_schema`. Two keys and one family arrive;
@@ -32143,8 +32143,9 @@ pub const FIELDS_R82_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
-/// What the field document's words decide at revision 82: revision 80's and
-/// `chosen_by`, a passenger.
+/// What the field document's words decide at revision 82: revision 81's,
+/// `chosen_by`, a passenger, and the `decoded` and `refused` blocks'
+/// `chosen_by` and `encoding_schema`.
 pub const FIELDS_R82_CARRIES: &[KeyCarries] = &[
     KeyCarries {
         key: "announced_version",
@@ -32248,7 +32249,553 @@ pub const FIELDS_R82_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "offset_space",
-        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R64),
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R81),
+    },
+    KeyCarries {
+        key: "open_ack",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "open_syn",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "qtype",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "rcode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "recognized_by",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "retransmit",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "span_of",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R82),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjudged_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "unreachable",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "what",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "witness",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// `offset_space` at field revision 81: revision 64's shapes, every row
+/// carrying `packet_comments` beside `first_byte`.
+pub const FIELD_OFFSET_SPACE_CARRIES_R81: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "packet",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "packet_comments",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "packet_comments",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+        ],
+    },
+];
+
+/// What a payload block's `state` brings at field-document revision 82:
+/// revision 59's, with `decoded` and `refused` closing on `chosen_by` and
+/// `encoding_schema`.
+pub const PAYLOAD_STATE_CARRIES_R82: &[WordCarries] = &[
+    WordCarries {
+        word: "decoded",
+        shapes: &[&[
+            "chosen_by",
+            "despite_encoding",
+            "encoding_schema",
+            "fields",
+            "format",
+            "keyexpr",
+            "matched_rule",
+            "schema",
+            "typed",
+        ]],
+    },
+    WordCarries {
+        word: "encoding_mismatch",
+        shapes: &[&[
+            "declaration_checked",
+            "declared",
+            "format",
+            "keyexpr",
+            "matched_rule",
+        ]],
+    },
+    WordCarries {
+        word: "keyexpr_unresolved",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_payload",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_rule",
+        shapes: &[&["keyexpr", "matched_rule"]],
+    },
+    WordCarries {
+        word: "no_rules",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "not_on_the_wire",
+        shapes: &[&["descriptor_bytes"]],
+    },
+    WordCarries {
+        word: "refused",
+        shapes: &[&[
+            "chosen_by",
+            "encoding_schema",
+            "format",
+            "keyexpr",
+            "matched_rule",
+            "why",
+        ]],
+    },
+    WordCarries {
+        word: "segment_piece",
+        shapes: &[&["keyexpr", "matched_rule", "profile"]],
+    },
+];
+
+/// What the field document's words decide at revision 81: revision 80's, with
+/// every row's shapes carrying `packet_comments`.
+pub const FIELDS_R81_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "answer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "client",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "completed",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "control",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "displaced",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ended_by",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ending",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "initial_sn_derivation",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_carriage",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R56),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R81),
     },
     KeyCarries {
         key: "open_ack",
@@ -36023,7 +36570,472 @@ pub const ROW_FACTS_R22_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "offset_space",
-        shape: CarriesShape::Discriminant(ROW_FACTS_OFFSET_SPACE_CARRIES_R5),
+        shape: CarriesShape::Discriminant(ROW_FACTS_OFFSET_SPACE_CARRIES_R21),
+    },
+    KeyCarries {
+        key: "open_ack",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "open_syn",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "place",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "qtype",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "rcode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "recognized_by",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "retransmit",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "size_verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "span_of",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R82),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjoined",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unjudged_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "unreachable",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "what",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "witness",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// `offset_space` at row-facts revision 21: the field document's shapes at
+/// revision 81 without the row's `fields` tree.
+pub const ROW_FACTS_OFFSET_SPACE_CARRIES_R21: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "packet",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "payload_decode",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "packet_comments",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "packet_comments",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "packet_comments",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "packet_comments",
+                "selected",
+                "seq",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "payload_decode",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "selected",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "packet_comments",
+                "sn",
+                "transport_header",
+                "unnamed_extensions",
+            ],
+        ],
+    },
+];
+
+/// What the row-facts document's words decide at revision 21: revision 20's,
+/// with every row's shapes carrying `packet_comments`.
+pub const ROW_FACTS_R21_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "answer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "batch_header",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(ROW_FACTS_CARRIED_STATE_CARRIES_R1),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "client",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "completed",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "control",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "displaced",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ended_by",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "ending",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "initial_sn_derivation",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_carriage",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_source",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(ROW_FACTS_OFFSET_SPACE_CARRIES_R21),
     },
     KeyCarries {
         key: "open_ack",
@@ -48573,7 +49585,10 @@ mod tests {
             // To 79 when each flow gained `handshake`, what its TLS,
             // WebSocket or QUIC handshake said.
             // To 80 when the document gained `dns`, the name lookups.
-            (FIELDS, 80),
+            // To 81 when each row gained `packet_comments` and each capture
+            // interface `comments`.
+            // To 82 when a decoding gained `chosen_by` and `encoding_schema`.
+            (FIELDS, 82),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -48590,7 +49605,9 @@ mod tests {
             // flow: one key, no word moves and nothing retires.
             // To 8 when `skips` gained `link_type_interfaces`, each unread
             // interface with its link type and count: nothing retires.
-            (SUMMARY, 8),
+            // To 9 when the document gained `comments`, the capture's commented
+            // packets counted and its section comments carried.
+            (SUMMARY, 9),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
             // R2184 (item 556) — to 4 when the `value_families` rows gained
@@ -48756,8 +49773,9 @@ mod tests {
             // with its 67, to 9 with its 69, to 10 with its 70, to 11 with its
             // 71, to 12 with its 72, to 13 with its 73, to 14 with its 74, to 15
             // with its 75, to 16 with its 76, to 17 with its 77, to 18 with its
-            // 78, to 19 with its 79, to 20 with its 80.
-            (ROW_FACTS, 20),
+            // 78, to 19 with its 79, to 20 with its 80, to 21 with its 81, to 22
+            // with its 82.
+            (ROW_FACTS, 22),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

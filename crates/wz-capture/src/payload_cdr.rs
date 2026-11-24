@@ -487,10 +487,18 @@ mod tests {
         TypeSet::read(&files).expect("definitions")
     }
 
-    /// Each row as (path, name, type, typed value, start, end).
-    fn rows(
-        fields: &[PayloadField],
-    ) -> Vec<(&str, Option<&str>, &str, Option<&str>, usize, usize)> {
+    /// One row as the tests read it: path, name, type, typed value, start, end.
+    type Row<'a> = (
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        Option<&'a str>,
+        usize,
+        usize,
+    );
+
+    /// Each row as a [`Row`].
+    fn rows(fields: &[PayloadField]) -> Vec<Row<'_>> {
         fields
             .iter()
             .map(|f| {
