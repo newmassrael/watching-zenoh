@@ -522,6 +522,10 @@ const OWING_WAITS: usize = {
 /// grows after. A session that only dials holds its dial role's face alone, and its table is one
 /// face with no places to walk; one that takes faces beside it keeps a place for each.
 pub trait FacePlaces<F> {
+    /// Whether the table holds faces beside the dial role's. One that does not holds that face
+    /// alone, so every face it is asked of is read in that role (`LinkSupervisor::read_face`).
+    const TAKES: bool;
+
     /// The table whose dial role's face is `dial`, at the first place, with `places` places in
     /// all (one at least) where the table keeps more than one.
     fn with_dial(dial: F, places: usize) -> Self;
@@ -573,6 +577,8 @@ pub struct ManyFaces<F> {
 }
 
 impl<F> FacePlaces<F> for ManyFaces<F> {
+    const TAKES: bool = true;
+
     fn with_dial(dial: F, places: usize) -> Self {
         let places = places.max(1);
         let mut faces = Vec::with_capacity(places);
@@ -659,6 +665,8 @@ pub struct OneFace<F> {
 }
 
 impl<F> FacePlaces<F> for OneFace<F> {
+    const TAKES: bool = false;
+
     fn with_dial(dial: F, _places: usize) -> Self {
         Self { face: dial }
     }
@@ -757,6 +765,13 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// How many places the table has, held or free.
     pub fn places(&self) -> usize {
         self.faces.places()
+    }
+
+    /// Whether the table holds faces beside the dial role's ([`FacePlaces::TAKES`]): what only
+    /// such a face does, going with its link, and what the dial role's does for a node such a face
+    /// holds, standing by, are never asked of a session whose table holds the dial role's alone.
+    pub fn takes_faces(&self) -> bool {
+        P::TAKES
     }
 
     /// The face at place `at`, while one holds it.
@@ -917,11 +932,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// since (`Signals`), and the answer of a dial under way, which is asked here and kept for the
     /// link it made. A face past the table reads as one taken besides the dial role's that waits
     /// with no time to dial again. The role is the place's: the first is the dial role's, placed
-    /// by [`Self::new`] and never taken out ([`Self::take_face`]).
+    /// by [`Self::new`] and never taken out ([`Self::take_face`]). A table of the dial role's face
+    /// alone reads every place in that role, and holds no other face to hold a node.
     // Out of line, so its caller reads the role as a value and takes one path for either role.
     #[inline(never)]
     pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
-        let role = if at == 0 {
+        let role = if at == 0 || !P::TAKES {
             FaceRole::Dial
         } else {
             FaceRole::Taken
@@ -950,7 +966,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             None => {}
         }
         if let Phase::Held { node } = &phase {
-            signals.node_held = self.node_is_held(node.as_slice(), id);
+            signals.node_held = P::TAKES && self.node_is_held(node.as_slice(), id);
         }
         FaceRead {
             role,
@@ -1530,6 +1546,31 @@ mod tests {
         assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
         assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
         assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+    }
+
+    /// A table of the dial role's face alone reads every place in that role, so a step of such a
+    /// session never names a face to remove; a dial role's face that stands by finds no node held,
+    /// as no other face is there to hold one. Turned red by a role read off the place in such a
+    /// table.
+    #[test]
+    fn a_table_of_one_face_reads_every_place_in_the_dial_role() {
+        let mut faces: LinkSupervisor<Net, TestFace, OneFace<TestFace>> = LinkSupervisor::new(
+            Net,
+            TestFace {
+                id: 100,
+                link: Link::Held { zid: held_node() },
+            },
+            2,
+            2,
+        );
+        assert!(!faces.takes_faces());
+        assert!(
+            supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
+            "CONTROL: a table of many faces takes them"
+        );
+        assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
+        assert!(!faces.read_face(0, 100).signals.node_held);
     }
 
     /// A dial that is over is let go of and hands over the endpoint it dialled, its own text

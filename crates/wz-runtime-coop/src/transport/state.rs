@@ -39,7 +39,7 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
-use crate::face_life::{FaceEffect, FaceLife, Next, Turn};
+use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
@@ -638,6 +638,13 @@ impl<T: TransportFaces> TransportState<T> {
             signals,
             answer,
         } = self.links.read_face(at, id);
+        // The face is read out of line, so its role is a value here; a table of the dial role's
+        // face alone holds no other role, which this step then knows when compiled.
+        let role = if self.links.takes_faces() {
+            role
+        } else {
+            FaceRole::Dial
+        };
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         let endpoint = match turn {

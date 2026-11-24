@@ -3194,9 +3194,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         last: OpenError,
         redial_ms: Option<u64>,
     ) -> Result<(), OpenError> {
+        // Only a face taken beside the dial role's goes, and the dial role's stands by only for a
+        // node such a face holds: a session whose table holds the dial role's face alone is asked
+        // neither (`FacePlaces::TAKES`), and carries neither.
+        let takes = self.transport.links.takes_faces();
         match then {
             Next::Remove => {
-                self.remove_face(at);
+                if takes {
+                    self.remove_face(at);
+                }
                 Ok(())
             }
             Next::EndSession => Err(last),
@@ -3206,7 +3212,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // face has the node, where dialling at once would be refused again and the handshake
             // paid each time.
             Next::StandBy { node } => {
-                self.transport.links.put_link(at, Link::Held { zid: node });
+                if takes {
+                    self.transport.links.put_link(at, Link::Held { zid: node });
+                }
                 Ok(())
             }
         }
