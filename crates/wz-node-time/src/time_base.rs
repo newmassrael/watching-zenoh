@@ -41,7 +41,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
+
+use wz_host_sync::{Mutex, MutexGuard, RwLock};
 
 /// What the program's time is read through.
 pub trait ProgramTime: Send + Sync {
@@ -86,7 +87,7 @@ struct TimeBase {
 static POOL: Mutex<Vec<&'static TimeBase>> = Mutex::new(Vec::new());
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    mutex.lock()
 }
 
 impl TimeBase {
@@ -108,10 +109,7 @@ impl TimeBase {
 
     /// Install `program` under a new lease, for its first hold; the lease.
     fn install(&self, program: Box<dyn ProgramTime>) -> u64 {
-        let mut installed = self
-            .installed
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut installed = self.installed.write();
         installed.lease = installed.lease.wrapping_add(1);
         installed.program = Some(program);
         self.last_ns.store(0, Ordering::Release);
@@ -122,10 +120,7 @@ impl TimeBase {
     /// The time under `lease`: the program's reading held monotonic, or `u64::MAX` once the lease
     /// is over.
     fn now_ns(&self, lease: u64) -> u64 {
-        let installed = self
-            .installed
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
+        let installed = self.installed.read();
         let Some(program) = installed
             .program
             .as_ref()
@@ -216,10 +211,7 @@ impl TimeBase {
     /// deadline.
     fn retire(&self) {
         let program = {
-            let mut installed = self
-                .installed
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut installed = self.installed.write();
             installed.lease = installed.lease.wrapping_add(1);
             self.last_ns.store(0, Ordering::Release);
             installed.program.take()

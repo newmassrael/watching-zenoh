@@ -10,7 +10,8 @@
 //! - on an MCU, interrupts masked, by the `critical-section` implementation the image links (the
 //!   default here: [`with`] is `critical_section::with`);
 //! - on a host (`host-lock`), a lock of the process, reentrant on its thread, which this module
-//!   takes itself: `std`'s, or the host's own calls' in a library built without `std`
+//!   takes itself: the host's (`wz-host-sync`), which takes no memory when first taken, counted
+//!   on `std`'s thread-locals or, in a library built without `std`, on the thread's number
 //!   (`host-lock-sys`). A host program then links no `critical-section` implementation at all, and a
 //!   C library built over this runtime exports no `_critical_section_1_0_*` symbol beside its C
 //!   ABI, where another library's implementation could interpose it
@@ -52,7 +53,7 @@ pub fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
 }
 
 // The host's section has two makings, each a module of its own name, and the build names the one it
-// has `host`: `std`'s, or the host's own calls' (`host-lock-sys`).
+// has `host`: on `std`'s thread-locals, or on the host's own calls alone (`host-lock-sys`).
 #[cfg(all(feature = "host-lock", not(feature = "host-lock-sys")))]
 use host_std as host;
 #[cfg(feature = "host-lock-sys")]
@@ -64,7 +65,8 @@ mod host_std {
 
     use core::cell::{Cell, RefCell, UnsafeCell};
     use core::mem::ManuallyDrop;
-    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use wz_host_sync::{Mutex, MutexGuard};
 
     use super::CriticalSection;
 
@@ -93,8 +95,8 @@ mod host_std {
             if DEPTH.with(Cell::get) == 0 {
                 // A panic inside a critical section does not leave the runtime's cells
                 // half-written in a way a later section could observe (each borrow is a
-                // `RefCell`'s), so a poisoned lock is taken as it is.
-                let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+                // `RefCell`'s), so the lock is taken as a panic left it.
+                let guard = LOCK.lock();
                 HELD.with(|held| *held.borrow_mut() = Some(guard));
             }
             DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
@@ -131,7 +133,7 @@ mod host_std {
     /// Not reentrant: the session's code never nests one value's lock in itself (the MCU's
     /// critical section forbids it too).
     pub struct HostMutex<T> {
-        lock: std::sync::Mutex<()>,
+        lock: Mutex<()>,
         value: UnsafeCell<T>,
     }
 
@@ -151,26 +153,18 @@ mod host_std {
 
     impl<'a> Held<'a> {
         #[inline(never)]
-        fn enter(lock: &'a std::sync::Mutex<()>) -> Self {
+        fn enter(lock: &'a Mutex<()>) -> Self {
             // A panic inside a cell leaves the value as the closure left it, which is all a
-            // later `with` can ask of it (the value is not a lock's invariant), so a poisoned
-            // lock is taken as it is, as the critical section above does.
-            Self(ManuallyDrop::new(
-                lock.lock().unwrap_or_else(PoisonError::into_inner),
-            ))
+            // later `with` can ask of it (the value is not a lock's invariant), so the lock is
+            // taken as a panic left it, as the critical section above does.
+            Self(ManuallyDrop::new(lock.lock()))
         }
 
         /// [`Self::enter`] that does not wait: `None` when another thread holds `lock` now (or
         /// this one does: the lock is not reentrant).
         #[inline(never)]
-        fn try_enter(lock: &'a std::sync::Mutex<()>) -> Option<Self> {
-            let guard = match lock.try_lock() {
-                Ok(guard) => guard,
-                // Poisoned, as `enter` takes it.
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return None,
-            };
-            Some(Self(ManuallyDrop::new(guard)))
+        fn try_enter(lock: &'a Mutex<()>) -> Option<Self> {
+            Some(Self(ManuallyDrop::new(lock.try_lock()?)))
         }
     }
 
@@ -186,7 +180,7 @@ mod host_std {
     impl<T> HostMutex<T> {
         pub const fn new(value: T) -> Self {
             Self {
-                lock: std::sync::Mutex::new(()),
+                lock: Mutex::new(()),
                 value: UnsafeCell::new(value),
             }
         }

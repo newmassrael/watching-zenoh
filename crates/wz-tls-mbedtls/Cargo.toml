@@ -93,8 +93,9 @@ vendored = []
 # A process-wide lock around every call into the C side, for a host whose threads reach the
 # library (a C program's read task beside its own thread, two engines of a test): Mbed TLS's arena
 # and PSA's key store are process-wide state with no lock of their own. An image that runs one
-# thread leaves it off and pays nothing (`src/lock.rs`).
-host-lock = []
+# thread leaves it off and pays nothing (`src/lock.rs`). The lock is the runtime's lock of one value
+# (`wz-runtime-coop`'s `host-lock`), which takes no memory when it is first taken on any host.
+host-lock = ["wz-runtime-coop/host-lock"]
 # RSA keys and signatures, beside the P-256 ones: a certificate authority's chain as the stock
 # zenoh-pico examples and zenoh's own tests carry it is RSA-2048 (signed with
 # `sha256WithRSAEncryption`, its keys `RSA PRIVATE KEY`), measured in Layer E (step T4 of L6), and

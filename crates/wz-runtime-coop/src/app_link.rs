@@ -104,7 +104,7 @@ use wait_turns as wait;
 /// program's calls that wake's one waker. A wait therefore allocates nothing, however often a
 /// session's read waits on its link (once a turn), and every thread that waits on the link (its
 /// read, a publisher waiting for room) is woken and looks again. The lock and the condition
-/// variable are `std`'s, or the host's own calls' in a library without `std` (`host-lock-sys`).
+/// variable are the host's (`wz-host-sync`), with `std` or without, which take no memory either.
 #[cfg(feature = "host-lock")]
 mod wait_parked {
     #[cfg(not(feature = "host-lock-sys"))]
@@ -116,9 +116,6 @@ mod wait_parked {
     use core::task::{Context, Waker};
     use core::time::Duration;
 
-    #[cfg(not(feature = "host-lock-sys"))]
-    use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-    #[cfg(feature = "host-lock-sys")]
     use wz_host_sync::{Condvar, Mutex, MutexGuard};
 
     /// The count of the wakes a link has had, the condition variable its waiters wait on, and
@@ -158,45 +155,20 @@ mod wait_parked {
         }
     }
 
-    /// The lock, a poisoned one taken as it is: a count has no state a panic can leave half made.
+    /// The lock, taken as a panic left it: a count has no state a panic can leave half made.
     fn lock(wakes: &Mutex<u64>) -> MutexGuard<'_, u64> {
-        #[cfg(not(feature = "host-lock-sys"))]
-        {
-            wakes.lock().unwrap_or_else(PoisonError::into_inner)
-        }
-        #[cfg(feature = "host-lock-sys")]
-        {
-            wakes.lock()
-        }
+        wakes.lock()
     }
 
     /// Wait, with `guard` held, until the count is no longer `seen`, or `left` has passed when
     /// it is given.
     fn wait_past(changed: &Condvar, guard: MutexGuard<'_, u64>, seen: u64, left: Option<Duration>) {
-        #[cfg(not(feature = "host-lock-sys"))]
-        {
-            match left {
-                Some(left) => drop(
-                    changed
-                        .wait_timeout_while(guard, left, |wakes| *wakes == seen)
-                        .unwrap_or_else(PoisonError::into_inner),
-                ),
-                None => drop(
-                    changed
-                        .wait_while(guard, |wakes| *wakes == seen)
-                        .unwrap_or_else(PoisonError::into_inner),
-                ),
-            }
-        }
-        #[cfg(feature = "host-lock-sys")]
-        {
-            match left {
-                Some(left) => drop(changed.wait_timeout_while(guard, left, |wakes| *wakes == seen)),
-                None => {
-                    let mut guard = guard;
-                    while *guard == seen {
-                        guard = changed.wait(guard);
-                    }
+        match left {
+            Some(left) => drop(changed.wait_timeout_while(guard, left, |wakes| *wakes == seen)),
+            None => {
+                let mut guard = guard;
+                while *guard == seen {
+                    guard = changed.wait(guard);
                 }
             }
         }

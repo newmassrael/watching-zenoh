@@ -36,9 +36,9 @@
 //! therefore not call its own sender.
 
 use core::ffi::{c_char, c_void, CStr};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use wz_app_frame::segment_sender::{Rollover, SegmentSender, Split, SplitError};
+use wz_host_sync::{Mutex, MutexGuard};
 
 use crate::abi::{z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t};
 use crate::bytes::{store_owned_string, z_bytes_copy_from_buf};
@@ -167,10 +167,10 @@ unsafe fn sender_of<'a>(
     Some(&*handle.cast::<Mutex<SegmentSender>>())
 }
 
-/// The lock, past a poison: a panic inside a call was caught at the door, and the sender's number
-/// moves only after a message is admitted.
+/// The host's lock, taken as a panic left it: a panic inside a call was caught at the door, and
+/// the sender's number moves only after a message is admitted.
 fn locked(sender: &Mutex<SegmentSender>) -> MutexGuard<'_, SegmentSender> {
-    sender.lock().unwrap_or_else(PoisonError::into_inner)
+    sender.lock()
 }
 
 /// Write the gravestone into the caller's refusal slot, when it gave one.

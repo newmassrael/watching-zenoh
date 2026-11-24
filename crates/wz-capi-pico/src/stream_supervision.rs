@@ -44,18 +44,16 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::c_void;
-// The lock, the clock and the polling task's wait: `std`'s where the library has `std`, and the
-// host's own without it (`wz-host-sync`, which both libraries that compile the doors link).
-#[cfg(all(feature = "std", feature = "multi-thread"))]
-use std::sync::Condvar;
-#[cfg(feature = "std")]
-use std::sync::{Mutex, MutexGuard, PoisonError};
+// The lock and the polling task's wait are the host's (`wz-host-sync`, which both libraries that
+// compile the doors link), with `std` or without; the clock is `std`'s where the library has
+// `std`, and the host's own without it.
 #[cfg(feature = "std")]
 use std::time::Instant;
-#[cfg(all(not(feature = "std"), feature = "multi-thread"))]
+#[cfg(feature = "multi-thread")]
 use wz_host_sync::Condvar;
 #[cfg(not(feature = "std"))]
-use wz_host_sync::{Instant, Mutex, MutexGuard};
+use wz_host_sync::Instant;
+use wz_host_sync::{Mutex, MutexGuard};
 
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::stream_supervisor::{
@@ -262,13 +260,7 @@ fn join_task(thread: TaskThread) {
 /// Wait out one period, or less when told to stop: the stop flag after the wait.
 #[cfg(feature = "multi-thread")]
 fn wait_period(stopped: &Mutex<bool>, wake: &Condvar, period: core::time::Duration) -> bool {
-    let guard = locked(stopped);
-    #[cfg(feature = "std")]
-    let (guard, _) = wake
-        .wait_timeout_while(guard, period, |stop| !*stop)
-        .unwrap_or_else(PoisonError::into_inner);
-    #[cfg(not(feature = "std"))]
-    let (guard, _) = wake.wait_timeout_while(guard, period, |stop| !*stop);
+    let (guard, _) = wake.wait_timeout_while(locked(stopped), period, |stop| !*stop);
     *guard
 }
 
@@ -278,17 +270,10 @@ struct Handle {
     task: Mutex<Option<Task>>,
 }
 
-/// The lock, past a poison: a panic inside a call was caught at the door, and the table is
-/// written a row at a time.
+/// The lock, taken as a panic left it: a panic inside a call was caught at the door, and the
+/// table is written a row at a time.
 fn locked<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    #[cfg(feature = "std")]
-    {
-        lock.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        lock.lock()
-    }
+    lock.lock()
 }
 
 /// The policies a supervisor is made under: the one place its creator decides them. The build

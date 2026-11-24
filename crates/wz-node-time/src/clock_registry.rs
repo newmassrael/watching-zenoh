@@ -23,7 +23,9 @@
 //! afresh each time, so the order of `register` and the node's construction does not matter.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
+
+use wz_host_sync::RwLock;
 
 use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
 
@@ -98,10 +100,7 @@ impl ClockRegistry {
         &self,
         source: Box<dyn EpochSource + Send + Sync>,
     ) -> Result<SourceId, RegistryFull> {
-        let mut table = self
-            .table
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self.table.write();
         if table.entries.len() >= self.capacity {
             return Err(RegistryFull);
         }
@@ -114,10 +113,7 @@ impl ClockRegistry {
 
     /// Remove a source. Whether it was registered.
     pub fn unregister(&self, id: SourceId) -> bool {
-        let mut table = self
-            .table
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self.table.write();
         let before = table.entries.len();
         table.entries.retain(|entry| entry.id != id);
         self.count.store(table.entries.len(), Ordering::Release);
@@ -136,10 +132,7 @@ impl ClockRegistry {
 
     /// The first registered source that can say what time it is. `EpochUnavailable` when none can.
     fn read_registered(&self) -> Result<SinceEpoch, EpochUnavailable> {
-        let table = self
-            .table
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let table = self.table.read();
         table
             .entries
             .iter()

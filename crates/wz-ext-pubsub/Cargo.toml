@@ -36,10 +36,11 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-# `std`: the locks are `std`'s, a wall-clock instant is `std`'s `SystemTime`, and the node clock
-# and the engine port are their `std` forms. On by default, which every build has had.
+# `std`: a wall-clock instant is `std`'s `SystemTime`, the locks are `wz-host-sync`'s in its `std`
+# build (a panicked holder's lock reads as poisoned), and the node clock and the engine port are
+# their `std` forms. On by default, which every build has had.
 default = ["std"]
-std = ["wz-node-time?/std", "wz-capi-port?/std"]
+std = ["dep:wz-host-sync", "wz-host-sync/std", "wz-node-time?/std", "wz-capi-port?/std"]
 # The host's own lock (`wz-host-sync`), for a build without `std`, and the same host calls for the
 # node clock and the engine port.
 host-sync = ["dep:wz-host-sync", "wz-node-time?/host-sync", "wz-capi-port?/os-sys"]
