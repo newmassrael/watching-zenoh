@@ -4365,8 +4365,11 @@ int main(void) {
      * 7: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
      * 8: `skips` gains `link_type_interfaces`, the unread interfaces each with
-     * its link type and count. A key arrives; nothing retires. */
-    revisioned[1].revision = 8;
+     * its link type and count. A key arrives; nothing retires.
+     * 9: the document gains `comments`, the pcapng capture's commented packets
+     * counted and its section comments carried. Eight keys arrive; nothing
+     * retires. */
+    revisioned[1].revision = 9;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -4659,8 +4662,15 @@ int main(void) {
      * and three families arrive; nothing retires.
      * 80: the document gains `dns`, the capture's name lookups and what
      * answered them. Eighteen keys and two families arrive; nothing
-     * retires. */
-    revisioned[2].revision = 80;
+     * retires.
+     * 81: each row gains `packet_comments` and each capture interface
+     * `comments`, the pcapng comments of the packet holding the row's first
+     * byte and of the interface. Four keys arrive; no family.
+     * 82: a decoding that applied a format gains `chosen_by` and
+     * `encoding_schema`: whether a rule or the sample's declared encoding
+     * chose it. Two keys and one family arrive; a json or cbor decoding is
+     * now typed. */
+    revisioned[2].revision = 82;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

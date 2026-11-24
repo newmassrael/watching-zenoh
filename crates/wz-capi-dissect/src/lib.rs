@@ -587,7 +587,7 @@ pub unsafe extern "C" fn wz_dissect_record_layout(out: *mut usize, cap: usize) -
 /// ```json
 /// {"link_types":"0 NULL, 1 ETHERNET, …",
 ///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
-///  "payload_formats":["cbor","json","protobuf"]}
+///  "payload_formats":["cbor","json","protobuf","text"]}
 /// ```
 ///
 /// (The document also carries `payload_field_types`, `value_families` and
@@ -1120,7 +1120,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
         Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y748 — the same summary, read under the BOUNDED preset, so a C caller
@@ -1175,7 +1175,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
             Ok(d) => decrypted(d, input, None),
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// The summary with a preset AND a key log beside the capture: the document
@@ -1222,7 +1222,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_keyed(
         Ok(d) => decrypted(d, input, keys),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y851 — the ANALYSIS PLANES, which this ABI could not reach at all.
@@ -6629,7 +6629,10 @@ pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
 /// The summary shape. Hand-rolled rather than via serde for the same reason
 /// [`to_json`] is: this crate must not force a serde dependency on a
 /// consumer that only wants a decode out of the library.
-fn summary_json(d: &Dissection) -> String {
+///
+/// `capture` is the container `d` was read from: the `comments` member is a
+/// fact of the container's blocks and not of the dissection.
+fn summary_json(d: &Dissection, capture: &[u8]) -> String {
     // R2100 (open-debt item 509) — this document's own revision, first key.
     let mut s = String::from("{");
     wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::SUMMARY, &mut s);
@@ -6660,6 +6663,9 @@ fn summary_json(d: &Dissection) -> String {
     s.push_str(&format!("],\"skipped\":{},", d.skipped().len()));
     s.push_str("\"health\":");
     s.push_str(&wz_capture::report::health_json(d));
+    // Summary revision 9 — the container's comments.
+    s.push_str(",\"comments\":");
+    s.push_str(&wz_capture::report::capture_comments_json(capture));
     s.push('}');
     s
 }
@@ -7588,6 +7594,45 @@ mod tests {
         assert!(
             json.contains("\"capture_reported_drops\":17"),
             "the capture tool's own admission must cross the boundary: {json}"
+        );
+    }
+
+    /// Summary revision 9 — a pcapng's comments cross the boundary: the packet
+    /// carrying two is counted once and its comments twice, by each summary
+    /// door alike, and a classic pcap says zero and none.
+    #[test]
+    fn a_pcapngs_commented_packets_are_counted_in_the_summary() {
+        use wz_capture::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let commented = PacketSpec {
+            interface: 0,
+            ticks: 1_000_000,
+            data: &[0u8; 4],
+            options: &[(OPT_COMMENT, b"first"), (OPT_COMMENT, b"second")],
+        };
+        let plain = PacketSpec {
+            interface: 0,
+            ticks: 2_000_000,
+            data: &[0u8; 4],
+            options: &[],
+        };
+        let file = write_with_options(ByteOrder::Little, &[(1, 6)], &[commented, plain]);
+        let counted = "\"comments\":{\"commented_packets\":1,\"packet_comments\":2,\
+                       \"not_utf8\":0,\"sections\":[]}";
+        for json in [
+            call_summary(&file).expect("the pcapng reads"),
+            call_summary_bounded(&file).expect("the pcapng reads"),
+            call_summary_keyed(&file, WZ_DISSECT_LIMITS_NONE, None).expect("the pcapng reads"),
+        ] {
+            assert!(json.contains(counted), "{json}");
+        }
+        let classic = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = call_summary(&classic).expect("a classic pcap still reads");
+        assert!(
+            json.contains(
+                "\"comments\":{\"commented_packets\":0,\"packet_comments\":0,\
+                 \"not_utf8\":0,\"sections\":[]}"
+            ),
+            "{json}"
         );
     }
 
@@ -11330,6 +11375,10 @@ mod tests {
                     call_summary(&stream).expect("the summary door reads a pcap"),
                     call_summary(&unread_interface_capture())
                         .expect("the summary door reads a pcapng"),
+                    // And a section that carries a comment, the only shape that
+                    // puts an entry under `comments.sections`.
+                    call_summary(&commented_section_capture())
+                        .expect("the summary door reads a pcapng"),
                 ],
             ),
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
@@ -14843,6 +14892,83 @@ mod tests {
         );
     }
 
+    /// Field document 82 — A JSON PUBLISHER IS READ WITH NO KEY RULE: one
+    /// encoding rule, and a sample declaring `application/json` comes back
+    /// decoded as json, chosen by its encoding, its number leaf carrying a
+    /// typed value. With no encoding rule the same capture asks for nothing.
+    #[test]
+    fn a_json_publisher_is_read_by_its_encoding_with_no_key_rule() {
+        const JSON: u32 = 5;
+        let file = capture_declaring(JSON, br#"{"t":21.5}"#);
+        let decoded =
+            call_fields_with_payloads(&file, 0, "demo/**=encoding").expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":null,\
+                 \"despite_encoding\":null,\"format\":\"json\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.t\",\"name\":null,\"value\":\"number 21.5\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains(
+                "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
+                 \"chosen_by\":\"encoding\",\"encoding_schema\":null}"
+            ),
+            "{decoded}"
+        );
+        let unasked = call_fields_with_payloads(&file, 0, "").expect("the capture reads");
+        assert!(!unasked.contains("\"chosen_by\""), "{unasked}");
+    }
+
+    /// A ROS 2 publisher's CDR payload is read into its fields through the
+    /// ABI by the definition the text declares and the rule that names it,
+    /// and the same capture under a rule whose type no file defines is refused
+    /// as a declaration.
+    #[test]
+    fn a_cdr_payload_is_read_by_its_declared_ros_definition() {
+        const CDR: u32 = 7;
+        // std_msgs/msg/String "hello": the little-endian header, the length
+        // counting the NUL, the bytes, the NUL and the padding to four.
+        let hello = [
+            0u8, 1, 0, 0, 6, 0, 0, 0, b'h', b'e', b'l', b'l', b'o', 0, 0, 0,
+        ];
+        let file = capture_declaring(CDR, &hello);
+        let declarations = "#@std_msgs/msg/String.msg=\"string data\"\n\
+                            demo/**=cdr@std_msgs/msg/String";
+        let decoded = call_fields_with_payloads(&file, 0, declarations).expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":\"std_msgs/msg/String\",\
+                 \"despite_encoding\":null,\"format\":\"cdr\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.data\",\"name\":\"data\",\"value\":\"\\\"hello\\\"\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"type\":\"string\",\"typed_value\":\"hello\""),
+            "{decoded}"
+        );
+        assert_eq!(
+            call_fields_with_payloads(
+                &file,
+                0,
+                "#@std_msgs/msg/String.msg=\"string data\"\ndemo/**=cdr@std_msgs/msg/Nope",
+            ),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+    }
+
     /// R311y914 (open-debt item 433) — A CBOR TOPIC CAN BE DECODED THROUGH THE
     /// ABI, and a cbor LABEL no longer silences the rule.
     ///
@@ -14872,7 +14998,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":true,\"schema\":null,\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \
@@ -16908,6 +17034,39 @@ mod tests {
     /// A pcapng with an Ethernet interface and an interface on `LINKTYPE_USER0`
     /// (147), which this build does not decapsulate: two packets on the first
     /// and three on the second, interleaved.
+    fn commented_section_capture() -> Vec<u8> {
+        let file = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 1_000, &[0u8; 4])]);
+        // The writer's Section Header Block is its first 28 bytes; this one is
+        // laid out from the format with one `opt_comment` in its option list.
+        let comment = b"bench A";
+        let mut body = 0x1A2B_3C4Du32.to_le_bytes().to_vec();
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&u64::MAX.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        body.extend_from_slice(comment);
+        body.push(0);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        let total = (12 + body.len()) as u32;
+        let mut out = 0x0A0D_0D0Au32.to_le_bytes().to_vec();
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&file[28..]);
+        out
+    }
+
+    /// The summary carries a section's comment beside the section it heads.
+    #[test]
+    fn a_section_comment_is_carried_in_the_summary() {
+        let json = call_summary(&commented_section_capture()).expect("the pcapng reads");
+        assert!(
+            json.contains("\"sections\":[{\"section\":0,\"text\":\"bench A\",\"utf8\":true}]"),
+            "{json}"
+        );
+    }
+
     fn unread_interface_capture() -> Vec<u8> {
         let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
         let own_record = [0xA5u8; 12];
