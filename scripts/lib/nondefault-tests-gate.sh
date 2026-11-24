@@ -683,6 +683,12 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
+    # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
+    # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
+    # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
+    # `tls-mbedtls` is the row above's cost and is not repeated.
+    "wz-capi-coop|hook|-default,std,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).

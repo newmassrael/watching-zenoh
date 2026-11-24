@@ -4581,14 +4581,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Run `held` while holding the session as a read step holds it: what a test of a publish that
     /// finds the session held by what is not a publish runs beside one.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
         let _core = self.live();
         held();
     }
 
     /// Run `held` while holding the session as a read working out its wait holds it.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "threads"))]
     pub(crate) fn holding_as_a_read_wait(&self, held: impl FnOnce()) {
         let _core = self.live();
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);

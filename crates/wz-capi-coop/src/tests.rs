@@ -1417,6 +1417,8 @@ fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_fr
 /// the step, blocked, and is sent once the step lets go: the holder holds no send, so the publish
 /// is no congestion drop, and it does not spin on the session while it waits. The CONTROL is the
 /// time it took: no less than the step held the session.
+// Two threads on one session at once, which a build of one thread does not have.
+#[cfg(feature = "threads")]
 #[test]
 fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
     use wz_session_core::qos::CongestionControl;
@@ -1470,6 +1472,8 @@ fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
 /// its wait tries the session again, spinning, rather than blocking on its lock, and is sent once
 /// the read lets go: the read holds no send and lets go within its take. The CONTROL is the read
 /// step's hold above, which the same publish waits for blocked, with no spin.
+// Two threads on one session at once, which a build of one thread does not have.
+#[cfg(feature = "threads")]
 #[test]
 fn a_droppable_publish_behind_a_read_working_out_its_wait_spins_and_is_sent() {
     use wz_session_core::qos::CongestionControl;
@@ -2052,6 +2056,8 @@ fn reads_in(engine: &Engine, span: Duration) -> u32 {
 /// the config says, and the read task wakes the moment a push arrives. The CONTROL is the count:
 /// a read that waited in the link's own loop took one millisecond, so the same span held hundreds
 /// of reads, and a read task woke a thousand times a second.
+// The read task's wait, which a build of one thread does not start.
+#[cfg(feature = "threads")]
 #[test]
 fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     let router = Router::start(CatchAll::None);
@@ -3044,6 +3050,8 @@ mod arena;
 mod closure_drops;
 mod congestion;
 mod decl_watch;
+// The read task's dial, stepped on a thread of its own.
+#[cfg(feature = "threads")]
 mod dial_in_flight;
 mod entity_tables;
 #[cfg(all(
@@ -3057,14 +3065,21 @@ mod face_table;
 mod faces;
 #[cfg(feature = "query")]
 mod get;
-#[cfg(all(feature = "group", feature = "app-transport"))]
+// Each member is stepped by its read task.
+#[cfg(all(feature = "group", feature = "app-transport", feature = "threads"))]
 mod group;
 mod held_keys;
-#[cfg(feature = "group-host")]
+#[cfg(all(feature = "group-host", feature = "threads"))]
 mod host_group;
 mod in_place;
 mod link_sets;
-#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+// Every session of these is stepped by its read task (`listen::Stepped`).
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "threads"
+))]
 mod listen;
 #[cfg(feature = "liveliness")]
 mod liveliness;
@@ -3072,7 +3087,12 @@ mod liveliness;
 mod local;
 #[cfg(feature = "local-queryable")]
 mod local_query;
-#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "threads"
+))]
 mod one_face;
 mod plain_put;
 mod program_clock;
@@ -3087,7 +3107,8 @@ mod runtime_tables;
     feature = "shared-key-ids",
     feature = "listen",
     feature = "query",
-    feature = "queryable"
+    feature = "queryable",
+    feature = "threads"
 ))]
 mod shared_key_ids;
 #[cfg(feature = "liveliness-get")]
@@ -3095,5 +3116,5 @@ mod snapshot;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", feature = "threads"))]
 mod tx_pool;
