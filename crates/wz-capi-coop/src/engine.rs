@@ -112,7 +112,7 @@ use wz_runtime_coop::session_drive::{
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::transport::{
-    DialRow, FaceStep, TransportFaces, TransportRefusal, TransportSession,
+    DialWalk, FaceStep, TransportFaces, TransportRefusal, TransportSession,
 };
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
@@ -2733,31 +2733,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// row of the session's endpoint texts, which holds the text.
     fn dial_from(
         &mut self,
-        from: usize,
+        mut from: usize,
         mut last: OpenError,
     ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
-        for at in from..self.transport.endpoints.dials() {
-            let row = match self.transport.dial_row(at) {
-                Ok(row) => row,
-                Err(refused) => {
-                    last = refused.into();
-                    continue;
-                }
-            };
-            // A resume past every row dials none, so one held at `usize::MAX` still means the
-            // rows are done; `at` is below the count of rows, so it is never held there.
-            let next = at.saturating_add(1);
+        // Which row is dialled next is the transport's walk to say; each turn moves `from` past
+        // the row it handed back, so the walk ends.
+        loop {
+            let walked = self.transport.walk_dials(from, &mut last);
             let deadline_us = self.open_deadline_us();
-            match row {
-                DialRow::Pending(dial) => {
+            match walked {
+                DialWalk::Dialing { dial, next } => {
                     return Ok(Link::Dialing {
                         dial,
                         next,
                         deadline_us,
                     });
                 }
-                DialRow::Answered(answer) => {
-                    let endpoint = DialEndpoint::Listed(at);
+                DialWalk::Answered {
+                    endpoint,
+                    next,
+                    answer,
+                } => {
                     match self.dial_answered(DIAL_FACE, Some(&endpoint), next, deadline_us, answer)
                     {
                         Ok(link) => return Ok(link),
@@ -2765,12 +2761,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         Err(refused @ (OpenError::EntropyUnavailable | OpenError::NoTask(_))) => {
                             return Err(refused)
                         }
-                        Err(refused) => last = refused,
+                        Err(refused) => {
+                            last = refused;
+                            from = next;
+                        }
                     }
                 }
+                DialWalk::Ended => return Err(last),
             }
         }
-        Err(last)
     }
 
     /// The dial of `endpoint` that face `face` made answered: its link's handshake begun, given
@@ -2785,12 +2784,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         deadline_us: u64,
         answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
     ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
-        let opened = answer.map_err(|refused| {
-            OpenError::Unreachable(EndpointRefusal::new(
-                self.transport.endpoint_text(endpoint),
-                Refusal::Link(refused),
-            ))
-        })?;
+        let opened = self.transport.dialled(endpoint, answer)?;
         let wire = self.open_wire(face, opened, SessionRole::Initiator, endpoint)?;
         Ok(Link::Opening {
             wire,

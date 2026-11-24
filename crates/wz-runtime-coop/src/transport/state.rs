@@ -159,6 +159,31 @@ pub enum DialRow<D, P> {
     Answered(Result<OpenedLink<P>, LinkOpenError>),
 }
 
+/// The next step of the dial role's walk over the session's endpoints
+/// ([`TransportState::walk_dials`]): what the session carries out.
+pub enum DialWalk<D, P> {
+    /// The dial of a row is under way: the face holds it, and the walk goes on from row `next`
+    /// when it fails.
+    Dialing {
+        /// The dial under way.
+        dial: Dial<D>,
+        /// The row the walk goes on from when the dial or its handshake fails.
+        next: usize,
+    },
+    /// The dial of `endpoint` answered at once: the session opens the link's session over
+    /// `answer`, and the walk goes on from row `next` when that fails for the endpoint's reason.
+    Answered {
+        /// The endpoint dialled.
+        endpoint: DialEndpoint,
+        /// The row the walk goes on from when the link's session is not opened.
+        next: usize,
+        /// The link the dial made, or why the network refused it.
+        answer: Result<OpenedLink<P>, LinkOpenError>,
+    },
+    /// No row is left: the walk ended with no link, for the last reason it met.
+    Ended,
+}
+
 impl<T: TransportFaces> TransportState<T> {
     /// The dial role's face, which the session holds for its whole life: the first of the faces,
     /// placed by the open, so `None` is a session no open made.
@@ -637,6 +662,51 @@ impl<T: TransportFaces> TransportState<T> {
         Ok(match pending.poll() {
             None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
             Some(answer) => DialRow::Answered(answer),
+        })
+    }
+
+    /// The next step of the dial role's walk over the session's endpoints from row `from` on: a
+    /// row whose dial is refused at once is passed, its refusal kept in `last`, and the first row
+    /// whose dial is under way or answered is handed back for the session to carry out
+    /// ([`DialWalk::Ended`] when no row is left, `last` then holding the last row's reason).
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub fn walk_dials<E: From<TransportRefusal>>(
+        &self,
+        from: usize,
+        last: &mut E,
+    ) -> DialWalk<DialOf<T>, PumpOf<T>> {
+        for at in from..self.endpoints.dials() {
+            // A resume past every row dials none, so one held at `usize::MAX` still means the
+            // rows are done; `at` is below the count of rows, so it is never held there.
+            let next = at.saturating_add(1);
+            match self.dial_row(at) {
+                Err(refused) => *last = refused.into(),
+                Ok(DialRow::Pending(dial)) => return DialWalk::Dialing { dial, next },
+                Ok(DialRow::Answered(answer)) => {
+                    return DialWalk::Answered {
+                        endpoint: DialEndpoint::Listed(at),
+                        next,
+                        answer,
+                    }
+                }
+            }
+        }
+        DialWalk::Ended
+    }
+
+    /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the
+    /// network's refusal.
+    pub fn dialled(
+        &self,
+        endpoint: Option<&DialEndpoint>,
+        answer: Result<OpenedLink<PumpOf<T>>, LinkOpenError>,
+    ) -> Result<OpenedLink<PumpOf<T>>, TransportRefusal> {
+        answer.map_err(|refused| {
+            TransportRefusal::Unreachable(EndpointRefusal::new(
+                self.endpoint_text(endpoint),
+                Refusal::Link(refused),
+            ))
         })
     }
 

@@ -28,7 +28,7 @@ use crate::ClockSource;
 #[cfg(feature = "reassembly")]
 mod state;
 #[cfg(feature = "reassembly")]
-pub use state::{DialRow, FaceStep, TransportFaces, TransportState};
+pub use state::{DialRow, DialWalk, FaceStep, TransportFaces, TransportState};
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
 /// given, and why.
