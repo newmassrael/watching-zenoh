@@ -468,9 +468,11 @@ pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
 }
 
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
-/// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is.
-pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
-    config.limits
+/// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, read
+/// where the config holds it: only a value that owns limits of its own (a link's parameters, a
+/// group's) takes a copy.
+pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> &SessionLimits {
+    &config.limits
 }
 
 /// Why no session was opened.
@@ -810,7 +812,7 @@ fn lend_session(
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
     let registry = Registry::new(
-        &resolve_limits(config),
+        resolve_limits(config),
         arena.arena_mut(),
         keys,
         // The session's tokens are rows of its one table set, which answers a peer's Interest
@@ -2486,7 +2488,7 @@ pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
     links: &impl SessionLinks,
     config: &CoopConfig<E>,
 ) -> Result<ArenaPlan, ArenaRefused> {
-    ArenaPlan::of(config, &resolve_limits(config)).and_then(|plan| {
+    ArenaPlan::of(config, resolve_limits(config)).and_then(|plan| {
         plan.holding_cells(LinkCells {
             driver: links.link_cell_bytes(),
             gate: CellRc::<LinkGate<C>>::cell_bytes(),
@@ -2742,16 +2744,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             policy: self.policy,
             // The snapshot the registry's tables were held to: the open decides it from the
             // config alone.
-            limits: resolve_limits(&self.config),
+            limits: *resolve_limits(&self.config),
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        let limits = resolve_limits(&self.config);
         // The link's session is the transport's to make; what the session's tables keep of the
         // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).
         let calls = LinkMaking {
             session: &self.session,
-            limits: &limits,
+            limits: resolve_limits(&self.config),
         };
         self.transport
             .make_wire(
@@ -3236,7 +3237,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.config.tx_queue,
             self.config.link_rx,
             self.policy,
-            resolve_limits(&self.config),
+            *resolve_limits(&self.config),
         );
         // A member's query is held, and answered, under the group's own generation, as a link's
         // is under its; each join of the group is a generation of its own.
@@ -3256,7 +3257,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let record_room = crate::round::read_room::<
             { caps::MAX_SUBSCRIPTIONS },
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-        >(&resolve_limits(&self.config));
+        >(resolve_limits(&self.config));
         // SAFETY: a group's transport is driven by the session's step alone, under its lock.
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
             crate::round::takes_a_group_read(self.session.lane.clone(), record_room)
@@ -3271,7 +3272,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 lane: self.session.lane.clone(),
                 params,
                 policy: self.policy,
-                limits: resolve_limits(&self.config),
+                limits: *resolve_limits(&self.config),
                 // A message the session puts on the group waits for room by running the session's
                 // tasks, the group's among them, on the session's clock.
                 pace: Rc::new(group::SessionPace {
@@ -3459,7 +3460,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn retract_owed(&mut self) {
         // A token's record owes a callback to each liveliness subscriber the session admits.
         let callbacks = crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
-            &resolve_limits(&self.config),
+            resolve_limits(&self.config),
         )
         .max(1);
         // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
@@ -3790,7 +3791,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let OpenStorage { memory, held } = storage;
         let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
-        let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
+        let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let plan = arena_plan::<C, _>(&links, &config)
@@ -3850,7 +3851,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let local = CoopLocalSet::new(&runtime);
         let session_time = CoopTime::new(&runtime);
         let wait_room = read_wait_room(&config);
-        let limits = resolve_limits(&config);
         #[cfg(feature = "time-base")]
         let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
             let wake = links.waits().wake()?;
@@ -3924,7 +3924,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // From 0, and `()` without `local-queryable`.
                 local_requests: Default::default(),
                 matching: MatchingRead::default(),
-                replay_pacing: ReplayPacing::of_snapshot(&policy, &limits),
+                replay_pacing: ReplayPacing::of_snapshot(&policy, resolve_limits(&config)),
                 #[cfg(feature = "queryable")]
                 plane: lent.plane,
                 #[cfg(not(feature = "queryable"))]
