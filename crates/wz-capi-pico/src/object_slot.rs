@@ -528,6 +528,19 @@ pub(crate) unsafe fn hold_entity<T, K>(object: *const T) -> crate::ffi::HeldIn {
     unsafe { count_of::<T, K>(object) }.hold()
 }
 
+/// Keep the place of the entity whose object is at `object` for what lies in it past the object and
+/// is reached apart from its owner: the place stands until the keep is dropped, which gives it back
+/// if its owner and every closure went first, and the owner's wait does not wait for it
+/// ([`crate::ffi::KeptIn`]).
+///
+/// # Safety
+/// As [`count_in_entity`].
+#[cfg(any(test, feature = "advanced"))]
+pub(crate) unsafe fn keep_entity<T, K>(object: *const T) -> crate::ffi::KeptIn {
+    // SAFETY: the caller's.
+    unsafe { count_of::<T, K>(object) }.keep()
+}
+
 /// The count of the entity whose object is at `object`, and how its place is given back.
 ///
 /// # Safety
@@ -907,6 +920,51 @@ mod tests {
         unsafe { retire_entity::<_, ()>(object) };
         assert_eq!(drops.get(), 2);
         assert_eq!(free(&engine), places, "the owner gave it back itself");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// A keep of an entity's place holds it past its owner's release, and the owner's wait does not
+    /// wait for it, as it is no closure; the keep's drop gives the place back. Turned red by a wait
+    /// that waits for a keep (the test hangs), or a release that gives the place back under one.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer", feature = "query"))]
+    #[test]
+    fn a_kept_place_outlives_its_owner_and_is_not_waited_for() {
+        use crate::session::{
+            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        // How many querier places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<crate::session::Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Querier)).collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+
+        let drops = core::cell::Cell::new(0);
+        let object = Slot::take_entity(&engine, Kind::Querier)
+            .expect("a querier's place")
+            .fill(Answering::new(Counted(&drops)))
+            .cast::<Counted<'_>>();
+        // SAFETY: `object` was filled for an `Answering` just above, and its owner holds it.
+        let kept = unsafe { keep_entity::<_, ()>(object) };
+        // SAFETY: as above; the owner lets go of `object` once, here.
+        unsafe {
+            closures_of::<_, ()>(object).wait_none();
+            retire_entity::<_, ()>(object);
+        }
+        assert_eq!(drops.get(), 1, "the owner's release drops the object");
+        assert_eq!(free(&engine), places - 1, "the keep holds the place");
+        drop(kept);
+        assert_eq!(free(&engine), places, "the keep's drop gave it back");
 
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.

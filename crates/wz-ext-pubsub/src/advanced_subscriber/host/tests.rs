@@ -36,8 +36,8 @@ use super::super::options::{
     SubscriberDetection,
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
-use super::lodge::{Lodging, Strong};
 use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
+use wz_capi_port::lodge::{Lodging, Strong};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
 const ZID: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x01];

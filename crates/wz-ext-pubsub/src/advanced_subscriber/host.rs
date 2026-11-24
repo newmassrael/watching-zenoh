@@ -77,9 +77,7 @@ use super::state::{
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
-mod lodge;
-
-use lodge::{Lodging, Strong, WeakRef};
+use wz_capi_port::lodge::{Lodging, Strong, WeakRef};
 
 /// Why declaring an advanced subscriber on an engine failed.
 #[derive(Debug, PartialEq, Eq)]

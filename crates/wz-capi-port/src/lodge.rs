@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A value shared by counts as an `Arc` shares one, lying where its maker put it: in a box of its
-//! own, or in a place a holder lent ([`Strong::lodge`]), so a host that keeps its objects in places
-//! of its own takes no memory for it.
+//! own, or in a place a holder lent ([`Strong::lodge`]), so an ABI that keeps its objects in places
+//! of its session's takes no memory for what its objects share.
 //!
 //! Two counts, as `Arc`'s: of the value, which is dropped with the last, and of the place, which
 //! every count of the value holds once together and each weak count once more; the place is given
@@ -16,11 +16,11 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
-use crate::prelude::*;
+use alloc::boxed::Box;
 
 /// Where a value lies and its two counts. Written once, when the value is lodged, and read through
 /// the counts until the place is given back.
-pub(crate) struct Lodging<T> {
+pub struct Lodging<T> {
     /// The counts of the value.
     strong: AtomicUsize,
     /// The counts of the place: each weak count, and one for every count of the value together.
@@ -33,18 +33,18 @@ pub(crate) struct Lodging<T> {
 
 impl<T> Lodging<T> {
     /// A place for one value, holding none.
-    pub(crate) const fn vacant() -> MaybeUninit<Self> {
+    pub const fn vacant() -> MaybeUninit<Self> {
         MaybeUninit::uninit()
     }
 }
 
 /// A count of a lodged value; dropped, it lets go of it.
-pub(crate) struct Strong<T> {
+pub struct Strong<T> {
     at: NonNull<Lodging<T>>,
 }
 
 /// A count of a lodged value's place, which reads the value only by upgrading ([`Self::upgrade`]).
-pub(crate) struct WeakRef<T> {
+pub struct WeakRef<T> {
     at: NonNull<Lodging<T>>,
 }
 
@@ -59,7 +59,7 @@ unsafe impl<T: Send + Sync> Sync for WeakRef<T> {}
 
 impl<T> Strong<T> {
     /// `value` in a box of its own, given back to the heap with the last count of it.
-    pub(crate) fn boxed(value: T) -> Self {
+    pub fn boxed(value: T) -> Self {
         let place = NonNull::from(Box::leak(Box::new(Lodging::<T>::vacant())));
         // SAFETY: the box is this value's alone and is given back by `free_box`, once.
         unsafe { Self::lodge(place, value, free_box::<T>, place.as_ptr().cast::<c_void>()) }
@@ -72,7 +72,7 @@ impl<T> Strong<T> {
     /// `place` is valid for writes of a `Lodging<T>`, holds none, and stands until
     /// `give_back(context)` runs; `give_back` may be called from any thread that lets go of the
     /// last count.
-    pub(crate) unsafe fn lodge(
+    pub unsafe fn lodge(
         place: NonNull<MaybeUninit<Lodging<T>>>,
         value: T,
         give_back: unsafe fn(*mut c_void),
@@ -98,13 +98,13 @@ impl<T> Strong<T> {
     }
 
     /// A weak count of the place.
-    pub(crate) fn downgrade(this: &Self) -> WeakRef<T> {
+    pub fn downgrade(this: &Self) -> WeakRef<T> {
         this.lodging().weak.fetch_add(1, Ordering::Relaxed);
         WeakRef { at: this.at }
     }
 
     /// Give this count up as a pointer, let go of later by [`Self::from_raw`].
-    pub(crate) fn into_raw(this: Self) -> *mut c_void {
+    pub fn into_raw(this: Self) -> *mut c_void {
         let at = this.at;
         core::mem::forget(this);
         at.as_ptr().cast::<c_void>()
@@ -112,7 +112,7 @@ impl<T> Strong<T> {
 
     /// Where this count's value is lodged, as [`Self::into_raw`] names it, with no count given up:
     /// what [`Self::value_of`] reads while another count is held.
-    pub(crate) fn as_raw(this: &Self) -> *const c_void {
+    pub fn as_raw(this: &Self) -> *const c_void {
         this.at.as_ptr().cast_const().cast::<c_void>()
     }
 
@@ -120,7 +120,7 @@ impl<T> Strong<T> {
     ///
     /// # Safety
     /// `raw` is a count given up by [`Self::into_raw`] for a `T`, taken back once.
-    pub(crate) unsafe fn from_raw(raw: *mut c_void) -> Self {
+    pub unsafe fn from_raw(raw: *mut c_void) -> Self {
         // SAFETY: the caller's: the pointer is a lodging's, never null.
         Self {
             at: unsafe { NonNull::new_unchecked(raw.cast::<Lodging<T>>()) },
@@ -131,14 +131,13 @@ impl<T> Strong<T> {
     ///
     /// # Safety
     /// `raw` is such a count, not yet taken back, held for `'a`.
-    pub(crate) unsafe fn value_of<'a>(raw: *const c_void) -> &'a T {
+    pub unsafe fn value_of<'a>(raw: *const c_void) -> &'a T {
         // SAFETY: the caller's: the count holds the value.
         unsafe { (*(*raw.cast::<Lodging<T>>()).value.get()).assume_init_ref() }
     }
 
     /// How many counts of the value are held.
-    #[cfg(test)]
-    pub(crate) fn strong_count(this: &Self) -> usize {
+    pub fn strong_count(this: &Self) -> usize {
         this.lodging().strong.load(Ordering::Acquire)
     }
 }
@@ -177,7 +176,7 @@ impl<T> Drop for Strong<T> {
 
 impl<T> WeakRef<T> {
     /// A count of the value, while one is still held.
-    pub(crate) fn upgrade(&self) -> Option<Strong<T>> {
+    pub fn upgrade(&self) -> Option<Strong<T>> {
         // SAFETY: a weak count holds the place, so its counts stand.
         let strong = unsafe { &self.at.as_ref().strong };
         let mut seen = strong.load(Ordering::Relaxed);
@@ -194,7 +193,7 @@ impl<T> WeakRef<T> {
     }
 
     /// Give this count up as a pointer, let go of later by [`Self::from_raw`].
-    pub(crate) fn into_raw(this: Self) -> *mut c_void {
+    pub fn into_raw(this: Self) -> *mut c_void {
         let at = this.at;
         core::mem::forget(this);
         at.as_ptr().cast::<c_void>()
@@ -204,7 +203,7 @@ impl<T> WeakRef<T> {
     ///
     /// # Safety
     /// `raw` is a count given up by [`Self::into_raw`] for a `T`, taken back once.
-    pub(crate) unsafe fn from_raw(raw: *mut c_void) -> Self {
+    pub unsafe fn from_raw(raw: *mut c_void) -> Self {
         // SAFETY: the caller's: the pointer is a lodging's, never null.
         Self {
             at: unsafe { NonNull::new_unchecked(raw.cast::<Lodging<T>>()) },
