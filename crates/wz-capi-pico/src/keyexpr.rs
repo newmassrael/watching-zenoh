@@ -1345,13 +1345,16 @@ unsafe fn store_canonized(
     parts: &[&[u8]],
     refusal: CanonRefusal,
 ) -> Result<usize, ZResult> {
-    let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
-    let written = match wz_session_core::keyexpr_canon::canonize_parts_into(
+    // Left unfilled: the walk writes the form from the room's first byte and reads no further than
+    // it wrote, and a room of the bound filled first is a write of the whole bound at every call.
+    let mut room =
+        [core::mem::MaybeUninit::<u8>::uninit(); wz_session_core::caps::MAX_KEYEXPR_BYTES];
+    let form = match wz_session_core::keyexpr_canon::canonize_parts_uninit(
         parts,
-        &mut form,
+        &mut room,
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     ) {
-        Ok(written) => written,
+        Ok(form) => form,
         Err(KeyexprCanonError::ExceedsCapacity) => {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         }
@@ -1363,11 +1366,11 @@ unsafe fn store_canonized(
         }
     };
     // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
-    let Some(canon) = form.get(..written).and_then(crate::abi::text_of) else {
+    let Some(canon) = crate::abi::text_of(form) else {
         return Err(Z_ERR_INVALID);
     };
     store_owned_keyexpr(key, extended_from(left, canon)?);
-    Ok(written)
+    Ok(form.len())
 }
 
 /// How a door that canonizes a text answers one no canonizing makes a key of.
