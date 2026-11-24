@@ -1063,8 +1063,10 @@ pub struct TableRows {
     pub tokens: usize,
     /// `MAX_LIVELINESS_SUBSCRIPTIONS`.
     pub liveliness_subscribers: usize,
-    /// `MAX_PUBLISHERS` and `MAX_QUERIERS` together.
-    pub write_filters: usize,
+    /// `MAX_PUBLISHERS`: the publishers' write filters.
+    pub publishers: usize,
+    /// `MAX_QUERIERS`: the queriers' write filters.
+    pub queriers: usize,
     /// `MAX_MATCHING_LISTENERS`.
     pub matching_listeners: usize,
     /// `MAX_PENDING_QUERIES`.
@@ -1074,10 +1076,47 @@ pub struct TableRows {
 }
 
 impl TableRows {
+    /// The write filters' one table: a publisher's and a querier's each.
+    pub fn write_filters(&self) -> usize {
+        self.publishers.saturating_add(self.queriers)
+    }
+
     /// The Interests: one for each write filter and each matching listener at most, so a filter or
     /// a listener the tables have room for always finds room for its Interest.
     pub fn interests(&self) -> usize {
-        self.write_filters.saturating_add(self.matching_listeners)
+        self.write_filters().saturating_add(self.matching_listeners)
+    }
+}
+
+/// The most write filters of each plane's kind the tables hold, in the one table lent for both:
+/// a publisher's are held to `MAX_PUBLISHERS` and a querier's to `MAX_QUERIERS`.
+#[derive(Clone, Copy, Debug)]
+struct PlaneBounds {
+    publishers: usize,
+    queriers: usize,
+}
+
+impl PlaneBounds {
+    /// No bound but the table's own.
+    const UNBOUND: Self = Self {
+        publishers: usize::MAX,
+        queriers: usize::MAX,
+    };
+
+    /// The bounds `rows` gives.
+    fn of(rows: &TableRows) -> Self {
+        Self {
+            publishers: rows.publishers,
+            queriers: rows.queriers,
+        }
+    }
+
+    /// The bound of `plane`'s kind.
+    fn of_plane(self, plane: Plane) -> usize {
+        match plane {
+            Plane::Subscribers => self.publishers,
+            Plane::Queryables { .. } => self.queriers,
+        }
     }
 }
 
@@ -1205,6 +1244,8 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     liveliness_subscribers: LivelinessSubscribersKept<F, P>,
     interests: InterestsKept<F, P>,
     write_filters: WriteFiltersKept<F, P>,
+    /// What holds a plane's write filters to its own bound in the table the two planes share.
+    plane_bounds: PlaneBounds,
     matching: MatchingListenersKept<F, P>,
     pending_gets: PendingGetsKept<F, P>,
     /// What the consolidating gets hold back (`consolidate_reply`).
@@ -1517,6 +1558,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             >(),
             interests: <F::FilterPresence as Presence>::empty::<Interests<P>>(),
             write_filters: <F::FilterPresence as Presence>::empty::<WriteFilters<P>>(),
+            plane_bounds: PlaneBounds::UNBOUND,
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
             pending_gets: <F::GetPresence as Presence>::empty::<PendingGets<F, P>>(),
             #[cfg(feature = "storage-profile")]
@@ -1541,6 +1583,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// Hold each table to the rows `rows` gives it, under the build's bound.
     pub fn limit_to(&mut self, rows: &TableRows) {
+        self.plane_bounds = PlaneBounds::of(rows);
         self.keyexprs.limit_to(rows.keyexprs);
         self.subscribers.limit_to(rows.subscribers);
         if let Some(queryables) = self.kept_queryables_mut() {
@@ -1565,7 +1608,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if let Some(table) =
             <F::FilterPresence as Presence>::get_mut::<WriteFilters<P>>(&mut self.write_filters)
         {
-            table.limit_to(rows.write_filters);
+            table.limit_to(rows.write_filters());
         }
         if let Some(table) =
             <F::FilterPresence as Presence>::get_mut::<MatchingListeners<F, P>>(&mut self.matching)
@@ -2054,6 +2097,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.declare_write_filter_as(plane, key, count_local, Some(InterestName::whole(key)))
     }
 
+    /// Whether a write filter of `plane` finds room under its plane's bound in `filters`, the table
+    /// the two planes share: the filters of its kind it holds are fewer than the bound.
+    fn plane_has_room(&self, filters: &WriteFilters<P>, plane: Plane) -> bool {
+        let kind = plane.interest_kind();
+        let held = filters
+            .iter()
+            .filter(|(_, row)| row.plane.interest_kind() == kind)
+            .count();
+        held < self.plane_bounds.of_plane(plane)
+    }
+
     /// Declare the write filter of a publisher or a querier on `key`, holding an Interest named as
     /// `ask` says, or none for a filter that asks the peers nothing.
     pub fn declare_write_filter_as(
@@ -2063,9 +2117,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         count_local: bool,
         ask: Option<InterestName<'_>>,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
-        // Tables that keep no write filter have no room for one.
+        // Tables that keep no write filter have no room for one, nor has a plane at its own bound,
+        // whatever room the table the two planes share has left.
         match self.kept_write_filters() {
-            Some(filters) if !filters.is_full() => {}
+            Some(filters) if !filters.is_full() && self.plane_has_room(filters, plane) => {}
             _ => return Err(RegisterError::TableFull),
         }
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
@@ -3011,8 +3066,9 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             ),
             write_filters: <F::FilterPresence as Presence>::lent_from::<WriteFilters<Lent>>(
                 &mut lend,
-                rows.write_filters,
+                rows.write_filters(),
             ),
+            plane_bounds: PlaneBounds::of(rows),
             matching: <F::FilterPresence as Presence>::lent_from::<MatchingListeners<F, Lent>>(
                 &mut lend,
                 rows.matching_listeners,
@@ -3040,7 +3096,9 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
                 rows.liveliness_subscribers,
             ),
             <F::FilterPresence as Presence>::arena_bytes::<Interests<Lent>>(rows.interests()),
-            <F::FilterPresence as Presence>::arena_bytes::<WriteFilters<Lent>>(rows.write_filters),
+            <F::FilterPresence as Presence>::arena_bytes::<WriteFilters<Lent>>(
+                rows.write_filters(),
+            ),
             <F::FilterPresence as Presence>::arena_bytes::<MatchingListeners<F, Lent>>(
                 rows.matching_listeners,
             ),

@@ -99,7 +99,8 @@ fn rows() -> TableRows {
         queryables: caps::MAX_QUERYABLES,
         tokens: caps::MAX_LOCAL_TOKENS,
         liveliness_subscribers: caps::MAX_LIVELINESS_SUBSCRIPTIONS,
-        write_filters: FILTER_ROWS,
+        publishers: caps::MAX_PUBLISHERS,
+        queriers: caps::MAX_QUERIERS,
         matching_listeners: caps::MAX_MATCHING_LISTENERS,
         pending_gets: caps::MAX_PENDING_QUERIES,
         held_replies: caps::MAX_PENDING_REPLIES,
@@ -1044,7 +1045,8 @@ fn small_rows() -> TableRows {
         queryables: 1,
         tokens: 1,
         liveliness_subscribers: 1,
-        write_filters: 1,
+        publishers: 1,
+        queriers: 0,
         matching_listeners: 1,
         pending_gets: 1,
         held_replies: 1,
@@ -2692,5 +2694,50 @@ fn each_table_of_declarations_is_read_through_its_own_slots() {
     assert_eq!(
         DeclaredRow::of(subscribers[0].handle).table,
         DeclaredTable::Subscribers
+    );
+}
+
+/// A plane's write filters are held to its own bound in the table the two planes share: a
+/// publisher's filter past the publishers' bound is refused while the table has room, asking
+/// nothing and spending no id, and a querier's is still taken up to the queriers' bound. The
+/// CONTROL is tables given no bound, which take a second publisher's filter. Turned red by a plane
+/// bound that is not read, or one read for the other plane.
+#[test]
+fn a_planes_write_filters_are_held_to_its_own_bound() {
+    let querier = Plane::Queryables {
+        complete_required: false,
+    };
+    let mut tables = Tables::new();
+    tables.limit_to(&TableRows {
+        publishers: 1,
+        queriers: 2,
+        ..rows()
+    });
+    assert!(tables
+        .declare_write_filter(Plane::Subscribers, "p0", false)
+        .is_ok());
+    let before = tables.next_entity_id();
+    assert!(matches!(
+        tables.declare_write_filter(Plane::Subscribers, "p1", false),
+        Err(RegisterError::TableFull)
+    ));
+    assert_eq!(tables.next_entity_id(), before, "no id spent");
+    assert_eq!(tables.interests().len(), 1, "no Interest held for it");
+    assert!(tables.declare_write_filter(querier, "q0", false).is_ok());
+    assert!(tables.declare_write_filter(querier, "q1", false).is_ok());
+    assert!(matches!(
+        tables.declare_write_filter(querier, "q2", false),
+        Err(RegisterError::TableFull)
+    ));
+
+    let mut unbound = Tables::new();
+    assert!(unbound
+        .declare_write_filter(Plane::Subscribers, "p0", false)
+        .is_ok());
+    assert!(
+        unbound
+            .declare_write_filter(Plane::Subscribers, "p1", false)
+            .is_ok(),
+        "CONTROL: tables given no bound hold a plane to the table's alone"
     );
 }
