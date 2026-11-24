@@ -51,8 +51,9 @@ pub trait FaceSession {
     /// Whether the link's handshake has completed.
     fn established(&self) -> bool;
 
-    /// The node the link reaches, as far as the link knows it; `None` before it is told.
-    fn node(&self) -> Option<Vec<u8>>;
+    /// The node the link reaches, as far as the link knows it; `None` before it is told. Read in
+    /// place: a link is taken, and its node asked, after the session's open.
+    fn node(&self) -> Option<SessionZid>;
 
     /// The link ends: an established peer is told so.
     fn end(&self);
@@ -649,7 +650,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                     .link()
                     .wire()
                     .and_then(|wire| wire.node())
-                    .is_some_and(|node| same_zid(&node, zid))
+                    .is_some_and(|node| same_zid(node.as_slice(), zid))
         })
     }
 
@@ -699,10 +700,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// handshake is over. Read before the link's task is ended.
     pub fn held_node(&self, at: usize, id: FaceId) -> Option<SessionZid> {
         let node = self.faces.get(at)?.link().wire()?.node()?;
-        if !self.node_is_held(&node, id) {
+        if !self.node_is_held(node.as_slice(), id) {
             return None;
         }
-        SessionZid::new(&node).ok()
+        Some(node)
     }
 
     /// Why the handshake of the face at `at` ended: the Close its peer sent, its task's end, or
@@ -938,7 +939,7 @@ mod tests {
     /// it was ended.
     struct Session {
         established: bool,
-        node: Option<Vec<u8>>,
+        node: Option<SessionZid>,
         ended: Rc<Cell<u32>>,
         closed: Option<CloseReason>,
     }
@@ -948,8 +949,8 @@ mod tests {
             self.established
         }
 
-        fn node(&self) -> Option<Vec<u8>> {
-            self.node.clone()
+        fn node(&self) -> Option<SessionZid> {
+            self.node
         }
 
         fn end(&self) {
@@ -1056,7 +1057,7 @@ mod tests {
     fn session(established: bool, node: Option<&[u8]>) -> Session {
         Session {
             established,
-            node: node.map(<[u8]>::to_vec),
+            node: node.map(|zid| SessionZid::new(zid).expect("a zid")),
             ended: Rc::new(Cell::new(0)),
             closed: None,
         }

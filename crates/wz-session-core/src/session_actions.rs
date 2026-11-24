@@ -11153,11 +11153,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// refused at the InitAck has not taken the Init that carried the zid). `None` before the
     /// question, and for a link with no admission.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    pub fn link_admission_node(&self) -> Option<alloc::vec::Vec<u8>> {
+    pub fn link_admission_node(&self) -> Option<SessionZid> {
         R::with_mutex_mut(&self.link.link_lease, |slot| {
             slot.as_ref()
                 .and_then(|lease| lease.node())
-                .map(<[u8]>::to_vec)
+                .and_then(|node| SessionZid::new(node).ok())
         })
     }
 
