@@ -48,6 +48,8 @@ use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+#[cfg(not(any(feature = "listen", feature = "group", test)))]
+use wz_session_core::slot_observer::NoOtherPeers;
 #[cfg(not(feature = "query"))]
 use wz_session_core::slot_observer::NoRequesters;
 #[cfg(not(any(
@@ -268,6 +270,7 @@ impl<'a> Iterator for HeldMut<'a> {
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the entries of the index of held sets that
 /// name them.
+#[cfg(any(feature = "listen", feature = "group", test))]
 struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
@@ -277,6 +280,7 @@ struct Others<'a> {
     after_at: usize,
 }
 
+#[cfg(any(feature = "listen", feature = "group", test))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let (before, after, after_at) = (self.before, self.after, self.after_at);
@@ -291,6 +295,7 @@ impl Others<'_> {
     }
 }
 
+#[cfg(any(feature = "listen", feature = "group", test))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -433,13 +438,21 @@ pub(super) struct Registry {
     pushes: (usize, usize, usize),
 }
 
+/// The faces other than the one a call acts on, as the build holds them. A build that adds no face
+/// beside its dial role's (`listen`, `group`) holds that one alone, so its calls count no other.
+#[cfg(any(feature = "listen", feature = "group", test))]
+type OtherFaces<'a> = Others<'a>;
+/// See the form of a build that adds faces.
+#[cfg(not(any(feature = "listen", feature = "group", test)))]
+type OtherFaces<'a> = NoOtherPeers;
+
 /// The application's part, one face's tables and the other faces', apart so each can be used as
 /// its call needs.
 struct Split<'a> {
     app: &'a mut App,
     delivery: &'a mut RoundDelivery,
     face: &'a mut FaceTables,
-    others: Others<'a>,
+    others: OtherFaces<'a>,
 }
 
 impl Registry {
@@ -726,19 +739,26 @@ impl Registry {
         let held: &[HeldSet] = &held[..];
         let place = held.iter().position(|face| face.id == id)?;
         let at = held[place].at;
-        let (before, rest) = sets.split_at_mut(at);
-        let (face, after) = rest.split_first_mut()?;
-        Some(Split {
-            app,
-            delivery,
-            face,
-            others: Others {
+        #[cfg(any(feature = "listen", feature = "group", test))]
+        let (face, others) = {
+            let (before, rest) = sets.split_at_mut(at);
+            let (face, after) = rest.split_first_mut()?;
+            let others = Others {
                 before: &*before,
                 after: &*after,
                 held_before: &held[..place],
                 held_after: &held[place + 1..],
                 after_at: at + 1,
-            },
+            };
+            (face, others)
+        };
+        #[cfg(not(any(feature = "listen", feature = "group", test)))]
+        let (face, others) = (sets.get_mut(at)?, NoOtherPeers);
+        Some(Split {
+            app,
+            delivery,
+            face,
+            others,
         })
     }
 
