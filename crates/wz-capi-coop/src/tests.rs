@@ -2774,11 +2774,7 @@ mod queryable;
 mod redial_heap;
 mod redial_wait;
 mod replay;
-// The round's own tests write parts into its area, which a lent-only build keeps none of.
-#[cfg(not(feature = "rx-lent-only"))]
 mod round;
-#[cfg(feature = "rx-lent-only")]
-mod round_lent;
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

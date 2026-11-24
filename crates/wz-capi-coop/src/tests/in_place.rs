@@ -170,13 +170,13 @@ fn a_reply_read_in_place_answers_its_get() {
 }
 
 /// The engine's tables are handed an owned record only where its receive projects one: the build
-/// that lends only (`rx-lent-only`), with no counter that reads owned messages, hands them none,
-/// so their readers of owned messages are left out of its text; any other build hands them the
-/// batch it was given.
+/// whose session core lends only (`RX_LENT_ONLY`), with no counter that reads owned messages, hands
+/// them none, so their readers of owned messages are left out of its text; any other build hands
+/// them the batch it was given.
 #[test]
 fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
-    use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS};
-    let lends_only = cfg!(feature = "rx-lent-only") && !cfg!(feature = "transport-stats");
+    use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS, RX_LENT_ONLY};
+    let lends_only = RX_LENT_ONLY && !cfg!(feature = "transport-stats");
     assert_eq!(OWNED_RECORDS, !lends_only);
     assert_eq!(
         owned_records(&[]).is_some(),
@@ -188,7 +188,8 @@ fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
 /// The walk of a frame this engine reads in place lends every record (`rx-lent-control`): in the
 /// build whose tables take no owned record (the C library's, `rx-lent-only` with no counters), the
 /// walk's one-record buffer is a marker of no size too, so the build links no drop of an owned
-/// message for a list that is always empty. Run with `--features rx-lent-only` to build that form.
+/// message for a list that is always empty. Run with `--features wz-session-core/rx-lent-only` to
+/// build that form.
 #[test]
 fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_record() {
     use wz_session_core::driver_loop::OWNED_RECORDS;
@@ -206,7 +207,7 @@ fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_reco
 /// The records an outcome carries are a list of no size in the build whose tables take no owned
 /// record, so an outcome dropped there links no drop of an owned message; in either form a frame
 /// with no record reads as an empty batch, and the tables are handed it only where they read owned
-/// records. Run with `--features rx-lent-only` to build the form of no size.
+/// records. Run with `--features wz-session-core/rx-lent-only` to build the form of no size.
 #[test]
 fn an_outcome_holds_a_batch_of_no_size_where_the_tables_take_no_owned_record() {
     use wz_session_core::driver_loop::{
