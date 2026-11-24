@@ -2216,11 +2216,7 @@ pub mod declaration_sync;
 /// [`session_actions`] (it names the FSM engine + the action bundle).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-036 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod drive;
 
 /// The unicast session's own timers (handshake, lease, keep-alive, the application layer's wake),

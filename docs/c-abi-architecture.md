@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (78) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (77) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -266,7 +266,7 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
-| TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
+| TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
 | TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
@@ -314,6 +314,10 @@ fills a list of `N` zids from the text a build states. It reads the text by slic
 it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
 that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
 (`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
+
+TD-036 (`drive`) keeps `indexing_slicing` and `arithmetic_side_effects` for the reassembly path
+(`fragment_in_place`, `dispatch_datagram_reassembling`), which the reassembly sizing work is changing
+now; the rest of the module reads its units by `get` and adds its offsets saturating.
 
 TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
 (`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
