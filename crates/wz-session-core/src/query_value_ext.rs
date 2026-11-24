@@ -132,6 +132,15 @@ pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     crate::encoding::split_value_body(bytes)
 }
 
+/// [`decode_query_value_ext`] with the encoding read where it lies too: its packed id, its
+/// schema's bytes and the payload, all ranges of `extensions`
+/// ([`decode_query_value_ext_parts_in`]).
+pub fn decode_query_value_ext_parts<E: ExtEntryView>(
+    extensions: &[E],
+) -> Option<(u32, Option<&[u8]>, &[u8])> {
+    decode_query_value_ext_parts_in(extensions)
+}
+
 /// [`decode_query_value_ext_in`] with the encoding read where it lies too: its packed id, its
 /// schema's bytes and the payload, all ranges of the chain for as long as `'c`
 /// ([`crate::encoding::split_value_body_parts`]).
@@ -240,7 +249,7 @@ mod tests {
         };
         let chain = [encode_query_value_ext::<Wire>(&enc, b"payload-bytes").unwrap()];
         let (packed_id, schema, payload) =
-            decode_query_value_ext_parts_in(&chain[..]).expect("schema-encoding value ext decodes");
+            decode_query_value_ext_parts(&chain).expect("schema-encoding value ext decodes");
         assert_eq!(packed_id, 0x0B);
         assert_eq!(schema, Some(&b"json"[..]));
         assert_eq!(payload, b"payload-bytes");
