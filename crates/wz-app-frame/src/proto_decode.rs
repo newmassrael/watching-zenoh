@@ -542,26 +542,41 @@ fn scalar_wire(kind: ScalarKind) -> u64 {
 
 /// A scalar read from a varint or a fixed-width value already known to be of
 /// the kind's wire type.
-fn scalar_number(kind: ScalarKind, v: u64) -> Value {
+fn scalar_item(kind: ScalarKind, v: u64) -> Item<'static> {
     match kind {
         // An `int32` is written sign-extended and read back truncated, as
         // protobuf's own parsers read it.
-        ScalarKind::Int32 | ScalarKind::Sfixed32 => Value::Signed(i64::from(v as u32 as i32)),
-        ScalarKind::Int64 | ScalarKind::Sfixed64 => Value::Signed(v as i64),
-        ScalarKind::Uint32 | ScalarKind::Fixed32 => Value::Unsigned(u64::from(v as u32)),
-        ScalarKind::Uint64 | ScalarKind::Fixed64 => Value::Unsigned(v),
+        ScalarKind::Int32 | ScalarKind::Sfixed32 => Item::Signed(i64::from(v as u32 as i32)),
+        ScalarKind::Int64 | ScalarKind::Sfixed64 => Item::Signed(v as i64),
+        ScalarKind::Uint32 | ScalarKind::Fixed32 => Item::Unsigned(u64::from(v as u32)),
+        ScalarKind::Uint64 | ScalarKind::Fixed64 => Item::Unsigned(v),
         ScalarKind::Sint32 => {
             let n = v as u32;
-            Value::Signed(i64::from((n >> 1) as i32 ^ -((n & 1) as i32)))
+            Item::Signed(i64::from((n >> 1) as i32 ^ -((n & 1) as i32)))
         }
-        ScalarKind::Sint64 => Value::Signed((v >> 1) as i64 ^ -((v & 1) as i64)),
-        ScalarKind::Bool => Value::Bool(v != 0),
-        ScalarKind::Float => Value::Float(f32::from_bits(v as u32)),
-        ScalarKind::Double => Value::Double(f64::from_bits(v)),
+        ScalarKind::Sint64 => Item::Signed((v >> 1) as i64 ^ -((v & 1) as i64)),
+        ScalarKind::Bool => Item::Bool(v != 0),
+        ScalarKind::Float => Item::Float(f32::from_bits(v as u32)),
+        ScalarKind::Double => Item::Double(f64::from_bits(v)),
         // Never reached: a string or bytes is a length-delimited value, which
         // `Reader::field` reads before it asks for a number.
-        ScalarKind::String | ScalarKind::Bytes => Value::Bytes(Vec::new()),
+        ScalarKind::String | ScalarKind::Bytes => Item::Bytes(&[]),
     }
+}
+
+/// One value of a field the schema knows, as the walk reads it: [`Value`]'s scalars, borrowing a
+/// string or bytes from the bytes read and naming an enum value by its number alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Item<'b> {
+    Signed(i64),
+    Unsigned(u64),
+    Float(f32),
+    Double(f64),
+    Bool(bool),
+    Text(&'b str),
+    Bytes(&'b [u8]),
+    /// The value on the wire, read as an `int32`.
+    Enum(i32),
 }
 
 // ---- the reader ----------------------------------------------------------
@@ -600,8 +615,20 @@ struct Spec<'s> {
     name: &'s str,
     holds: Holds,
     repeated: bool,
+    /// What the field's full name is made of before its own name: the message's full name, and,
+    /// for a field of a map's entry, the map field's name. The full name is written only when a
+    /// problem inside the field is reported.
+    prefix: (&'s str, Option<&'s str>),
+}
+
+impl Spec<'_> {
     /// The full name a problem inside the field is blamed on.
-    full_name: String,
+    fn full_name(&self) -> String {
+        match self.prefix {
+            (message, None) => format!("{message}.{}", self.name),
+            (message, Some(map)) => format!("{message}.{map}.{}", self.name),
+        }
+    }
 }
 
 /// The message whose fields are being read: a message of the schema, or the
@@ -612,9 +639,27 @@ enum Owner<'s> {
     Entry {
         key: ScalarKind,
         value: MapHolds,
-        /// The map field's full name.
-        field: &'s str,
+        /// The full name of the message the map field is declared in.
+        holder: &'s str,
+        /// The map field's name.
+        map: &'s str,
     },
+}
+
+/// What a walk of a message's wire meets, in the order the bytes hold it. The walk reads and
+/// refuses the bytes the one way the module documentation states; what is kept of them is the
+/// visitor's, so a listing and a reading of one field take the same walk.
+trait Visit<'b> {
+    /// A value of a field the schema knows, at `span`: one per occurrence, and one per element of
+    /// a packed run.
+    fn known(&mut self, number: u64, spec: &Spec<'_>, item: Item<'b>, span: (usize, usize));
+    /// A field the schema does not know, or a known number under a wire type its type is never
+    /// written with; `raw` indexes `bytes`, the message it was read in.
+    fn unknown(&mut self, number: u64, raw: Raw, bytes: &'b [u8], span: (usize, usize));
+    /// A message field, or a map's entry, begins: what follows until its [`Self::leave`] is in it.
+    fn enter(&mut self, number: u64);
+    /// The message field `enter` began was read whole, at `span`.
+    fn leave(&mut self, number: u64, spec: &Spec<'_>, span: (usize, usize));
 }
 
 /// The reader borrows the schema's TYPE TABLES and nothing else: the messages
@@ -663,29 +708,34 @@ impl<'s> Reader<'s> {
                     name: &f.name,
                     holds,
                     repeated: f.label == Label::Repeated,
-                    full_name: format!("{}.{}", msg.full_name, f.name),
+                    prefix: (&msg.full_name, None),
                 })
             }
-            Owner::Entry { key, value, field } => match number {
+            Owner::Entry {
+                key,
+                value,
+                holder,
+                map,
+            } => match number {
                 1 => Some(Spec {
                     name: "key",
                     holds: Holds::Scalar(key),
                     repeated: false,
-                    full_name: format!("{field}.key"),
+                    prefix: (holder, Some(map)),
                 }),
                 2 => Some(Spec {
                     name: "value",
                     holds: value.into(),
                     repeated: false,
-                    full_name: format!("{field}.value"),
+                    prefix: (holder, Some(map)),
                 }),
                 _ => None,
             },
         }
     }
 
-    /// The fields of one message of `owner`'s type, in `bytes`, which sit at
-    /// `base` in the bytes the reader was handed.
+    /// The fields of one message of `owner`'s type, in `bytes`, which sit at `base` in the bytes
+    /// the reader was handed, as a listing ([`DecodedField`]).
     fn message(
         &self,
         owner: Owner<'s>,
@@ -693,7 +743,24 @@ impl<'s> Reader<'s> {
         base: usize,
         depth: usize,
     ) -> Result<Vec<DecodedField>, WireError> {
-        let mut out = Vec::new();
+        let mut listing = Listing {
+            reader: self,
+            open: alloc::vec![Vec::new()],
+        };
+        self.walk(owner, bytes, base, depth, &mut listing)?;
+        Ok(listing.open.pop().unwrap_or_default())
+    }
+
+    /// Walk one message of `owner`'s type, in `bytes`, which sit at `base` in the bytes the
+    /// reader was handed, telling `visit` what it meets.
+    fn walk<'b, V: Visit<'b>>(
+        &self,
+        owner: Owner<'s>,
+        bytes: &'b [u8],
+        base: usize,
+        depth: usize,
+        visit: &mut V,
+    ) -> Result<(), WireError> {
         let mut at = 0usize;
         while at < bytes.len() {
             let start = at;
@@ -715,51 +782,43 @@ impl<'s> Reader<'s> {
             let raw = raw_value(bytes, &mut at, wire, base)?;
             let span = (base + start, base + at);
             match self.spec(owner, number) {
-                Some(spec) => self.field(&spec, number, raw, bytes, base, span, depth, &mut out)?,
-                None => out.push(unknown(number, raw, bytes, span)),
+                Some(spec) => self.field(&spec, number, raw, bytes, base, span, depth, visit)?,
+                None => visit.unknown(number, raw, bytes, span),
             }
         }
-        Ok(out)
+        Ok(())
     }
 
-    /// One occurrence of a field the schema knows: one entry, or one per element
-    /// of a packed run, or an unknown entry when the wire type is not one the
+    /// One occurrence of a field the schema knows: one value, or one per element
+    /// of a packed run, or an unknown field when the wire type is not one the
     /// field's type is written with.
     #[allow(clippy::too_many_arguments)]
-    fn field(
+    fn field<'b, V: Visit<'b>>(
         &self,
         spec: &Spec<'s>,
         number: u64,
         raw: Raw,
-        bytes: &[u8],
+        bytes: &'b [u8],
         base: usize,
         span: (usize, usize),
         depth: usize,
-        out: &mut Vec<DecodedField>,
+        visit: &mut V,
     ) -> Result<(), WireError> {
         let blame = |mut e: WireError| {
-            e.field.get_or_insert_with(|| spec.full_name.clone());
+            e.field.get_or_insert_with(|| spec.full_name());
             e
-        };
-        let entry = |value: Value, span: (usize, usize)| DecodedField {
-            number,
-            name: Some(String::from(spec.name)),
-            ty: Some(self.type_name(spec.holds)),
-            start: span.0,
-            end: span.1,
-            value,
         };
         match (spec.holds, raw) {
             (Holds::Scalar(ScalarKind::String), Raw::Len(a, b)) => {
                 let text = core::str::from_utf8(&bytes[a..b]).map_err(|e| WireError {
                     offset: base + a + e.valid_up_to(),
-                    field: Some(spec.full_name.clone()),
+                    field: Some(spec.full_name()),
                     reason: String::from("a `string` field holds bytes that are not UTF-8"),
                 })?;
-                out.push(entry(Value::Text(String::from(text)), span));
+                visit.known(number, spec, Item::Text(text), span);
             }
             (Holds::Scalar(ScalarKind::Bytes), Raw::Len(a, b)) => {
-                out.push(entry(Value::Bytes(bytes[a..b].to_vec()), span));
+                visit.known(number, spec, Item::Bytes(&bytes[a..b]), span);
             }
             (Holds::Scalar(kind), Raw::Len(a, b))
                 if spec.repeated && scalar_wire(kind) != WIRE_LEN =>
@@ -774,22 +833,26 @@ impl<'s> Reader<'s> {
                         _ => fixed(run, &mut at, 4, base + a),
                     }
                     .map_err(blame)?;
-                    out.push(entry(
-                        scalar_number(kind, v),
+                    visit.known(
+                        number,
+                        spec,
+                        scalar_item(kind, v),
                         (base + a + element, base + a + at),
-                    ));
+                    );
                 }
             }
-            (Holds::Enum(e), Raw::Len(a, b)) if spec.repeated => {
+            (Holds::Enum(_), Raw::Len(a, b)) if spec.repeated => {
                 let run = &bytes[a..b];
                 let mut at = 0usize;
                 while at < run.len() {
                     let element = at;
                     let v = varint(run, &mut at, base + a, "a packed varint").map_err(blame)?;
-                    out.push(entry(
-                        self.enum_value(e, v),
+                    visit.known(
+                        number,
+                        spec,
+                        Item::Enum(v as u32 as i32),
                         (base + a + element, base + a + at),
-                    ));
+                    );
                 }
             }
             (Holds::Scalar(kind), raw) if raw.wire_type() == scalar_wire(kind) => {
@@ -799,59 +862,220 @@ impl<'s> Reader<'s> {
                     // A length-delimited scalar is a string or bytes, read above.
                     Raw::Len(..) => 0,
                 };
-                out.push(entry(scalar_number(kind, v), span));
+                visit.known(number, spec, scalar_item(kind, v), span);
             }
-            (Holds::Enum(e), Raw::Varint(v)) => out.push(entry(self.enum_value(e, v), span)),
+            (Holds::Enum(_), Raw::Varint(v)) => {
+                visit.known(number, spec, Item::Enum(v as u32 as i32), span);
+            }
             (Holds::Message(m), Raw::Len(a, b)) => {
-                let fields = self
-                    .nested(Owner::Message(m), &bytes[a..b], base + a, depth)
+                visit.enter(number);
+                self.nested(Owner::Message(m), &bytes[a..b], base + a, depth, visit)
                     .map_err(blame)?;
-                out.push(entry(Value::Message(fields), span));
+                visit.leave(number, spec, span);
             }
             (Holds::Map { key, value }, Raw::Len(a, b)) => {
+                // A map field is declared in a message, whose full name its prefix holds.
                 let owner = Owner::Entry {
                     key,
                     value,
-                    field: &spec.full_name,
+                    holder: spec.prefix.0,
+                    map: spec.name,
                 };
-                let fields = self
-                    .nested(owner, &bytes[a..b], base + a, depth)
+                visit.enter(number);
+                self.nested(owner, &bytes[a..b], base + a, depth, visit)
                     .map_err(blame)?;
-                out.push(entry(Value::Message(fields), span));
+                visit.leave(number, spec, span);
             }
             // A known number under a wire type its type is never written with:
             // a protobuf parser files it with the unknown fields, and so does
-            // this listing.
-            _ => out.push(unknown(number, raw, bytes, span)),
+            // this reader.
+            _ => visit.unknown(number, raw, bytes, span),
         }
         Ok(())
     }
 
     /// One level down, or the refusal that the bytes nest too deep.
-    fn nested(
+    fn nested<'b, V: Visit<'b>>(
         &self,
         owner: Owner<'s>,
-        bytes: &[u8],
+        bytes: &'b [u8],
         base: usize,
         depth: usize,
-    ) -> Result<Vec<DecodedField>, WireError> {
+        visit: &mut V,
+    ) -> Result<(), WireError> {
         if depth + 1 >= MAX_DECODE_DEPTH {
             return Err(wire_error(
                 base,
                 format!("messages nest deeper than {MAX_DECODE_DEPTH} levels"),
             ));
         }
-        self.message(owner, bytes, base, depth + 1)
+        self.walk(owner, bytes, base, depth + 1, visit)
     }
 
-    fn enum_value(&self, e: usize, v: u64) -> Value {
-        let number = v as u32 as i32;
-        let name = self.enums[e]
-            .values
-            .iter()
-            .find(|(_, n)| *n == i128::from(number))
-            .map(|(name, _)| name.clone());
-        Value::Enum { number, name }
+    /// The value `item` of a field that holds `holds`, as a listing holds it.
+    fn value_of(&self, holds: Holds, item: Item<'_>) -> Value {
+        match item {
+            Item::Signed(v) => Value::Signed(v),
+            Item::Unsigned(v) => Value::Unsigned(v),
+            Item::Float(v) => Value::Float(v),
+            Item::Double(v) => Value::Double(v),
+            Item::Bool(v) => Value::Bool(v),
+            Item::Text(text) => Value::Text(String::from(text)),
+            Item::Bytes(bytes) => Value::Bytes(bytes.to_vec()),
+            Item::Enum(number) => {
+                let name = match holds {
+                    Holds::Enum(e) => self.enums[e]
+                        .values
+                        .iter()
+                        .find(|(_, n)| *n == i128::from(number))
+                        .map(|(name, _)| name.clone()),
+                    _ => None,
+                };
+                Value::Enum { number, name }
+            }
+        }
+    }
+}
+
+/// The walk that lists every field ([`DecodedField`]): the listing of each message the walk is
+/// inside, the outermost first.
+struct Listing<'r, 's> {
+    reader: &'r Reader<'s>,
+    open: Vec<Vec<DecodedField>>,
+}
+
+impl Listing<'_, '_> {
+    fn push(&mut self, field: DecodedField) {
+        if let Some(listing) = self.open.last_mut() {
+            listing.push(field);
+        }
+    }
+}
+
+impl<'b> Visit<'b> for Listing<'_, '_> {
+    fn known(&mut self, number: u64, spec: &Spec<'_>, item: Item<'b>, span: (usize, usize)) {
+        let field = DecodedField {
+            number,
+            name: Some(String::from(spec.name)),
+            ty: Some(self.reader.type_name(spec.holds)),
+            start: span.0,
+            end: span.1,
+            value: self.reader.value_of(spec.holds, item),
+        };
+        self.push(field);
+    }
+
+    fn unknown(&mut self, number: u64, raw: Raw, bytes: &'b [u8], span: (usize, usize)) {
+        self.push(unknown(number, raw, bytes, span));
+    }
+
+    fn enter(&mut self, _number: u64) {
+        self.open.push(Vec::new());
+    }
+
+    fn leave(&mut self, number: u64, spec: &Spec<'_>, span: (usize, usize)) {
+        let fields = self.open.pop().unwrap_or_default();
+        let field = DecodedField {
+            number,
+            name: Some(String::from(spec.name)),
+            ty: Some(self.reader.type_name(spec.holds)),
+            start: span.0,
+            end: span.1,
+            value: Value::Message(fields),
+        };
+        self.push(field);
+    }
+}
+
+/// Where one field path of a message stands in its bytes, as a protobuf parser reads it: the last
+/// occurrence of the field wins, and the occurrences of a message field are one message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum AtPath<'b> {
+    /// The field is there, with this value.
+    Found(Item<'b>),
+    /// Every message along the path is there, and the field is not.
+    LeafMissing,
+    /// A message field along the path is not there.
+    HolderMissing,
+}
+
+/// The walk that reads one field path ([`SchemaSet::read_path`]) and keeps nothing else.
+struct PathRead<'p, 'b> {
+    /// The field numbers along the path, the outermost first.
+    path: &'p [u64],
+    /// How many messages deep the walk is.
+    depth: usize,
+    /// How many of the messages the walk is inside are the path's holders, from the outermost.
+    matched: usize,
+    /// Whether every holder of the path was met.
+    holders_met: bool,
+    found: Option<Item<'b>>,
+}
+
+impl<'b> Visit<'b> for PathRead<'_, 'b> {
+    fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
+        if self.matched == self.depth
+            && self.depth + 1 == self.path.len()
+            && self.path.get(self.depth) == Some(&number)
+        {
+            self.found = Some(item);
+        }
+    }
+
+    fn unknown(&mut self, _number: u64, _raw: Raw, _bytes: &'b [u8], _span: (usize, usize)) {}
+
+    fn enter(&mut self, number: u64) {
+        if self.matched == self.depth
+            && self.depth + 1 < self.path.len()
+            && self.path.get(self.depth) == Some(&number)
+        {
+            self.matched = self.depth + 1;
+            if self.matched + 1 == self.path.len() {
+                self.holders_met = true;
+            }
+        }
+        self.depth += 1;
+    }
+
+    fn leave(&mut self, _number: u64, _spec: &Spec<'_>, _span: (usize, usize)) {
+        self.depth = self.depth.saturating_sub(1);
+        self.matched = self.matched.min(self.depth);
+    }
+}
+
+impl SchemaSet {
+    /// The value at the field path `numbers` (the outermost field's number first) of `bytes` read
+    /// as `message`, as [`AtPath`] says a parser reads it. The bytes are read and refused as
+    /// [`Self::decode`] reads and refuses them, and nothing is allocated unless they are refused:
+    /// a string or bytes value borrows `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// The [`WireError`] [`Self::decode`] gives for the same bytes.
+    pub(crate) fn read_path<'b>(
+        &self,
+        message: SchemaMessage,
+        bytes: &'b [u8],
+        numbers: &[u64],
+    ) -> Result<AtPath<'b>, WireError> {
+        let mut read = PathRead {
+            path: numbers,
+            depth: 0,
+            matched: 0,
+            // The message read is the one holder of a field of its own.
+            holders_met: numbers.len() <= 1,
+            found: None,
+        };
+        Reader {
+            msgs: &self.msgs,
+            enums: &self.enums,
+        }
+        .walk(Owner::Message(message.0), bytes, 0, 0, &mut read)?;
+        Ok(match read.found {
+            Some(item) => AtPath::Found(item),
+            None if read.holders_met => AtPath::LeafMissing,
+            None => AtPath::HolderMissing,
+        })
     }
 }
 
@@ -869,5 +1093,220 @@ fn unknown(number: u64, raw: Raw, bytes: &[u8], span: (usize, usize)) -> Decoded
             Raw::Fixed32(v) => Unknown::Fixed32(v),
             Raw::Len(a, b) => Unknown::Len(bytes[a..b].to_vec()),
         }),
+    }
+}
+
+// The reading of one field path against the listing it must agree with: every payload is read
+// both ways, and the field the old lookup over the listing finds is the one the walk finds. The
+// schema and every byte are synthetic, laid by hand.
+#[cfg(test)]
+mod read_path_tests {
+    use alloc::vec::Vec;
+
+    use super::{AtPath, DecodedField, Item, SchemaSet, Value};
+    use crate::proto_schema::ProtoFile;
+
+    const SCHEMA: &str = r#"
+syntax = "proto3";
+package syn.path;
+message Leaf {
+  sint32 tilt = 1;
+  string tag = 2;
+}
+message Holder {
+  Leaf leaf = 1;
+  uint32 bay = 2;
+}
+message Root {
+  Holder holder = 1;
+  optional uint32 serial = 2;
+  map<string, uint32> table = 3;
+  repeated uint32 many = 4;
+}
+"#;
+
+    /// Where a path stands, as either reading tells it, the found value compared as the listing
+    /// holds it.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Refused,
+        Found(Value),
+        LeafMissing,
+        HolderMissing,
+    }
+
+    /// The lookup a listing was read by before the walk: the last occurrence of the field, and the
+    /// occurrences of a message field read as one.
+    fn listed(fields: &[DecodedField], numbers: &[u64]) -> Seen {
+        let Some((&first, rest)) = numbers.split_first() else {
+            return Seen::LeafMissing;
+        };
+        if rest.is_empty() {
+            return fields
+                .iter()
+                .rev()
+                .find(|f| f.number == first && !matches!(f.value, Value::Unknown(_)))
+                .map_or(Seen::LeafMissing, |f| Seen::Found(f.value.clone()));
+        }
+        let mut found = None;
+        let mut leaf_missing = false;
+        for f in fields.iter().filter(|f| f.number == first) {
+            if let Value::Message(inner) = &f.value {
+                match listed(inner, rest) {
+                    Seen::Found(value) => found = Some(value),
+                    Seen::LeafMissing => leaf_missing = true,
+                    Seen::HolderMissing | Seen::Refused => {}
+                }
+            }
+        }
+        match found {
+            Some(value) => Seen::Found(value),
+            None if leaf_missing => Seen::LeafMissing,
+            None => Seen::HolderMissing,
+        }
+    }
+
+    /// A value the walk read, as the listing holds it (an enum's name aside, which no path here
+    /// reads).
+    fn as_listed(item: Item<'_>) -> Value {
+        match item {
+            Item::Signed(v) => Value::Signed(v),
+            Item::Unsigned(v) => Value::Unsigned(v),
+            Item::Float(v) => Value::Float(v),
+            Item::Double(v) => Value::Double(v),
+            Item::Bool(v) => Value::Bool(v),
+            Item::Text(text) => Value::Text(text.into()),
+            Item::Bytes(bytes) => Value::Bytes(bytes.to_vec()),
+            Item::Enum(number) => Value::Enum { number, name: None },
+        }
+    }
+
+    fn walked(schema: &SchemaSet, bytes: &[u8], numbers: &[u64]) -> Seen {
+        let root = schema.message("syn.path.Root").expect("the root");
+        match schema.read_path(root, bytes, numbers) {
+            Err(_) => Seen::Refused,
+            Ok(AtPath::Found(item)) => Seen::Found(as_listed(item)),
+            Ok(AtPath::LeafMissing) => Seen::LeafMissing,
+            Ok(AtPath::HolderMissing) => Seen::HolderMissing,
+        }
+    }
+
+    fn by_listing(schema: &SchemaSet, bytes: &[u8], numbers: &[u64]) -> Seen {
+        let root = schema.message("syn.path.Root").expect("the root");
+        match schema.decode(root, bytes) {
+            Err(_) => Seen::Refused,
+            Ok(fields) => listed(&fields, numbers),
+        }
+    }
+
+    fn schema() -> SchemaSet {
+        let files = [ProtoFile {
+            name: "syn/path.proto",
+            text: SCHEMA.as_bytes(),
+        }];
+        SchemaSet::read(&files).expect("the synthetic schema reads")
+    }
+
+    /// Payloads laid by hand: a tag is `number << 3 | wire type`.
+    fn payloads() -> Vec<(&'static str, Vec<u8>)> {
+        alloc::vec![
+            ("empty", alloc::vec![]),
+            ("serial 150", alloc::vec![0x10, 0x96, 0x01]),
+            ("tilt -3", alloc::vec![0x0A, 0x04, 0x0A, 0x02, 0x08, 0x05]),
+            (
+                "two holders, the second's tilt 5",
+                alloc::vec![0x0A, 0x04, 0x0A, 0x02, 0x08, 0x05, 0x0A, 0x04, 0x0A, 0x02, 0x08, 0x0A],
+            ),
+            (
+                "a later holder without the leaf",
+                alloc::vec![0x0A, 0x04, 0x0A, 0x02, 0x08, 0x05, 0x0A, 0x02, 0x10, 0x07],
+            ),
+            ("a holder with no leaf", alloc::vec![0x0A, 0x02, 0x10, 0x07]),
+            ("an empty leaf", alloc::vec![0x0A, 0x02, 0x0A, 0x00]),
+            (
+                "the tag x",
+                alloc::vec![0x0A, 0x05, 0x0A, 0x03, 0x12, 0x01, 0x78]
+            ),
+            (
+                "serial under a fixed32",
+                alloc::vec![0x15, 0x01, 0x00, 0x00, 0x00]
+            ),
+            (
+                "a map entry, then serial 2",
+                alloc::vec![0x1A, 0x05, 0x0A, 0x01, 0x61, 0x10, 0x09, 0x10, 0x02],
+            ),
+            ("a packed run", alloc::vec![0x22, 0x02, 0x01, 0x02]),
+            ("an unknown field", alloc::vec![0x48, 0x01, 0x10, 0x03]),
+            ("cut inside a varint", alloc::vec![0x10]),
+            (
+                "a tag that is no UTF-8",
+                alloc::vec![0x0A, 0x05, 0x0A, 0x03, 0x12, 0x01, 0xFF],
+            ),
+            ("field number zero", alloc::vec![0x00, 0x01]),
+        ]
+    }
+
+    #[test]
+    fn a_path_reads_as_the_listing_of_the_same_bytes_does() {
+        let schema = schema();
+        let paths: [&[u64]; 5] = [&[], &[2], &[1, 2], &[1, 1, 1], &[1, 1, 2]];
+        for (what, bytes) in payloads() {
+            for path in paths {
+                assert_eq!(
+                    walked(&schema, &bytes, path),
+                    by_listing(&schema, &bytes, path),
+                    "{what}, the path {path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_last_occurrence_is_found_and_a_missing_holder_is_told_apart() {
+        let schema = schema();
+        let all = payloads();
+        let bytes = |what: &str| {
+            all.iter()
+                .find(|(name, _)| *name == what)
+                .map(|(_, bytes)| bytes.clone())
+                .expect("a payload of the list")
+        };
+        assert_eq!(
+            walked(
+                &schema,
+                &bytes("two holders, the second's tilt 5"),
+                &[1, 1, 1]
+            ),
+            Seen::Found(Value::Signed(5))
+        );
+        assert_eq!(
+            walked(
+                &schema,
+                &bytes("a later holder without the leaf"),
+                &[1, 1, 1]
+            ),
+            Seen::Found(Value::Signed(-3))
+        );
+        assert_eq!(
+            walked(&schema, &bytes("a holder with no leaf"), &[1, 1, 1]),
+            Seen::HolderMissing
+        );
+        assert_eq!(
+            walked(&schema, &bytes("an empty leaf"), &[1, 1, 1]),
+            Seen::LeafMissing
+        );
+        assert_eq!(
+            walked(&schema, &bytes("serial under a fixed32"), &[2]),
+            Seen::LeafMissing
+        );
+        assert_eq!(
+            walked(&schema, &bytes("the tag x"), &[1, 1, 2]),
+            Seen::Found(Value::Text("x".into()))
+        );
+        assert_eq!(
+            walked(&schema, &bytes("a tag that is no UTF-8"), &[2]),
+            Seen::Refused,
+            "a payload the listing refuses is refused whatever path is read"
+        );
     }
 }

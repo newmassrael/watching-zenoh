@@ -251,10 +251,10 @@ pub(crate) struct QuerierState {
     /// `&querier->_encoding);  // it is safe to use alias`). Kept as it was moved in, and lent
     /// to each get that names none.
     encoding: Option<crate::encoding::OwnedEncoding>,
-    /// The release latches of the gets issued through this querier. Undeclaring it waits for
-    /// their reply callbacks to finish and their closures to be dropped, as pico's
-    /// `_z_sync_group_wait` does.
-    gets: crate::ffi::LatchList,
+    /// The closures of the gets issued through this querier, counted while they are held.
+    /// Undeclaring it waits for their reply callbacks to finish and their closures to be dropped,
+    /// as pico's `_z_sync_group_wait` does, with no latch kept for each get.
+    gets: Arc<crate::ffi::OpenClosures>,
     /// Cancels the gets this querier still has pending when it is undeclared, as pico's
     /// `_z_unregister_pending_queries_from_querier` does. Every get takes it, unless the program
     /// gave that get a token of its own.
@@ -264,7 +264,7 @@ pub(crate) struct QuerierState {
 impl Drop for QuerierState {
     fn drop(&mut self) {
         self.cancel.cancel();
-        self.gets.wait_all();
+        self.gets.wait_none();
     }
 }
 
@@ -457,7 +457,7 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
-            gets: crate::ffi::LatchList::default(),
+            gets: Arc::default(),
             cancel: wz_capi_port::cancellation::CancellationToken::new(),
         });
         (*state).bind();
@@ -542,7 +542,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         if callback.is_null() {
             return Z_ERR_NULL;
         }
-        let closure = crate::get::adopt_reply_closure(callback);
+        let mut closure = crate::get::adopt_reply_closure(callback);
         // A payload or an attachment the program moved out of a callback's sample is copied, and
         // with no room for the copy the get is refused; `closure` drops, reporting it over.
         let (payload, attachment) = match (payload, attachment) {
@@ -555,7 +555,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             // `closure` drops here, running the caller's `drop(context)`.
             None => return Z_ERR_NULL,
         };
-        state.gets.keep(closure.release_latch());
+        closure.count_in(&state.gets);
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
@@ -601,7 +601,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             attachment,
             state.qos,
             value_meta,
-            closure,
+            Arc::new(closure),
             token,
             None,
         )

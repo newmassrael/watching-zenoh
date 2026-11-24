@@ -1187,7 +1187,7 @@ pub(crate) unsafe fn get_inner(
     // `CReplyClosure` owns the C `drop(context)`, so every early return below
     // frees it — and, because the drop IS the completion signal, an early error
     // also correctly reports "this get is over".
-    let cclosure = adopt_reply_closure(callback);
+    let mut cclosure = adopt_reply_closure(callback);
     // A payload or an attachment the program moved out of a callback's sample is copied, and with
     // no room for the copy the get is refused; the closure adopted above reports it over.
     let (payload, attachment) = match (payload, attachment) {
@@ -1208,7 +1208,7 @@ pub(crate) unsafe fn get_inner(
         Err(code) => return code,
     };
     // The session's close waits for this get's closure to finish and be dropped.
-    handle.keep_background(cclosure.release_latch());
+    cclosure.count_in(&handle.open);
     // A non-canonical / pico-unsafe keyexpr is refused up front, as the declare
     // paths refuse it: the fan is best-effort per face, so a per-face reject
     // would be swallowed and the call would report Z_OK.
@@ -1269,7 +1269,7 @@ pub(crate) unsafe fn get_inner(
         attachment,
         qos,
         value_meta,
-        cclosure,
+        Arc::new(cclosure),
         token,
         target_peer,
     )
@@ -1279,18 +1279,18 @@ pub(crate) unsafe fn get_inner(
 /// (`_z_closure_reply_t closure = callback->_this._val;
 /// z_internal_closure_reply_null(&callback->_this);`).
 ///
-/// From here the returned `Arc` owns the C `drop(context)`, and because that
+/// From here the returned closure owns the C `drop(context)`, and because that
 /// drop IS the get's completion signal, releasing it on an error path correctly
-/// reports "this get is over". Shared with `z_querier_get`
-/// (`crate::querier`), which has the same contract.
+/// reports "this get is over". It is counted in no owner yet: the caller counts it
+/// in the one that waits for it ([`CReplyClosure::count_in`]) once it has one.
+/// Shared with `z_querier_get` and `z_liveliness_get`, which have the same
+/// contract.
 ///
 /// # Safety
 /// `callback` must be a non-null, valid moved reply closure.
-pub(crate) unsafe fn adopt_reply_closure(
-    callback: *mut z_moved_closure_reply_t,
-) -> Arc<CReplyClosure> {
+pub(crate) unsafe fn adopt_reply_closure(callback: *mut z_moved_closure_reply_t) -> CReplyClosure {
     let owned = &mut (*callback)._this;
-    let adopted = Arc::new(CReplyClosure::new(owned.context, owned.call, owned.drop));
+    let adopted = CReplyClosure::uncounted(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_reply_t::null_value();
     adopted
 }

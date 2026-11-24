@@ -1085,7 +1085,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
                 let body = SampleBody {
                     keyexpr: &self.keyexpr,
                     payload: match &payload {
-                        SamplePayload::Bytes(bytes) => *bytes,
+                        SamplePayload::Bytes(bytes) => bytes,
                         #[cfg(feature = "transport-shm")]
                         SamplePayload::Chunk(_) => &[],
                     },

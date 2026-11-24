@@ -56,7 +56,18 @@ pub(crate) struct CClosure<C> {
     pub(crate) context: SendPtr,
     pub(crate) call: C,
     pub(crate) drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
-    released: Arc<ReleaseLatch>,
+    released: Released,
+}
+
+/// What a closure tells when its `drop(context)` has run: a latch of its own, which an owner keeps
+/// to wait on, or the count of open closures of the owner it was adopted under
+/// ([`OpenClosures`]), which takes no memory of its own.
+enum Released {
+    /// A latch of the closure's own ([`CClosure::new`]).
+    Latch(Arc<ReleaseLatch>),
+    /// The count of the owner it is counted in, none while it is counted in none
+    /// ([`CClosure::uncounted`], [`CClosure::count_in`]).
+    Counted(Option<Arc<OpenClosures>>),
 }
 
 impl<C> CClosure<C> {
@@ -72,15 +83,50 @@ impl<C> CClosure<C> {
             context: SendPtr(context),
             call,
             drop,
-            released: Arc::new(ReleaseLatch::default()),
+            released: Released::Latch(Arc::new(ReleaseLatch::default())),
+        }
+    }
+
+    /// Adopt a moved C closure's fields, as [`Self::new`] does, with no latch: counted in no owner
+    /// until [`Self::count_in`], so a closure dropped before it (a call refused before its session
+    /// is read) runs its `drop(context)` and tells nobody.
+    pub(crate) fn uncounted(
+        context: *mut core::ffi::c_void,
+        call: C,
+        drop: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+    ) -> Self {
+        Self {
+            context: SendPtr(context),
+            call,
+            drop,
+            released: Released::Counted(None),
+        }
+    }
+
+    /// Count this closure in `open` until its `drop(context)` has run, so the owner of `open`
+    /// waits for it ([`OpenClosures::wait_none`]). A closure made with a latch of its own, or
+    /// counted already, is left as it is.
+    pub(crate) fn count_in(&mut self, open: &Arc<OpenClosures>) {
+        if let Released::Counted(counted @ None) = &mut self.released {
+            open.open_one();
+            *counted = Some(Arc::clone(open));
         }
     }
 
     /// The latch that opens once this closure's `drop(context)` has run. An entity that owns the
     /// closure takes it before the closure moves into the engine, and waits on it after the
-    /// engine let go, which is how an undeclare returns only when the callback is finished.
+    /// engine let go, which is how an undeclare returns only when the callback is finished. A
+    /// closure an owner counts ([`Self::count_in`]) is waited on through the count, and its latch
+    /// is open from the start.
     pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
-        self.released.clone()
+        match &self.released {
+            Released::Latch(latch) => latch.clone(),
+            Released::Counted(_) => {
+                let latch = Arc::new(ReleaseLatch::default());
+                latch.open();
+                latch
+            }
+        }
     }
 }
 
@@ -94,7 +140,51 @@ impl<C> Drop for CClosure<C> {
                 dropfn(ctx);
             });
         }
-        self.released.open();
+        match &self.released {
+            Released::Latch(latch) => latch.open(),
+            Released::Counted(Some(open)) => open.close_one(),
+            Released::Counted(None) => {}
+        }
+    }
+}
+
+/// How many closures an owner answers for are still held: counted up as each is adopted under the
+/// owner ([`CClosure::count_in`]) and down as each runs its `drop(context)`, so the owner waits
+/// until none is open, as zenoh-pico's close waits for the callbacks in flight
+/// (`_z_sync_group_wait`), with no latch and no allocation for each closure. Shared by the
+/// closures it counts, so a closure let go of after its owner stopped waiting (a close made from
+/// inside a callback) still has its count to tell.
+#[derive(Default)]
+pub(crate) struct OpenClosures {
+    open: Mutex<usize>,
+    none_open: Condvar,
+}
+
+impl OpenClosures {
+    fn open_one(&self) {
+        let mut open = self.open.lock();
+        *open = open.saturating_add(1);
+    }
+
+    fn close_one(&self) {
+        let mut open = self.open.lock();
+        *open = open.saturating_sub(1);
+        if *open == 0 {
+            self.none_open.notify_all();
+        }
+    }
+
+    /// Block until no closure counted here is held, unless this thread is inside one of the
+    /// program's callbacks: that callback holds a closure, so waiting would wait for itself, as
+    /// [`ReleaseLatch::wait`] says.
+    pub(crate) fn wait_none(&self) {
+        if InCallback::here() {
+            return;
+        }
+        let mut open = self.open.lock();
+        while *open != 0 {
+            open = self.none_open.wait(open);
+        }
     }
 }
 
@@ -310,5 +400,73 @@ mod tests {
         assert!(callback_table::here(), "the outer callback still runs");
         drop(outer);
         assert!(!callback_table::here());
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    //! A closure counted in an owner is open there from its count to its drop.
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The C drop the closures of these tests run: counts how often it ran.
+    unsafe extern "C" fn counted_drop(context: *mut core::ffi::c_void) {
+        // SAFETY: each test hands the address of its own counter, which outlives the closure.
+        unsafe { (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst) };
+    }
+
+    type Closure = CClosure<Option<unsafe extern "C" fn()>>;
+
+    fn closure(dropped: &AtomicUsize) -> Closure {
+        Closure::uncounted(
+            core::ptr::from_ref(dropped).cast_mut().cast(),
+            None,
+            Some(counted_drop),
+        )
+    }
+
+    /// An owner's count is open while a closure counted in it is held and none once its drop ran;
+    /// a closure counted twice counts once, and one counted in no owner tells none.
+    #[test]
+    fn a_counted_closure_is_open_until_its_drop_ran() {
+        let dropped = AtomicUsize::new(0);
+        let open = Arc::new(OpenClosures::default());
+        let mut first = closure(&dropped);
+        first.count_in(&open);
+        first.count_in(&open);
+        let mut second = closure(&dropped);
+        second.count_in(&open);
+        assert_eq!(*open.open.lock(), 2, "each closure counts once");
+        drop(closure(&dropped));
+        assert_eq!(
+            *open.open.lock(),
+            2,
+            "a closure counted nowhere tells no owner"
+        );
+        drop(first);
+        drop(second);
+        assert_eq!(*open.open.lock(), 0);
+        open.wait_none();
+        assert_eq!(dropped.load(Ordering::SeqCst), 3, "every drop ran");
+    }
+
+    /// A wait returns once the last closure counted is let go of on another thread.
+    #[test]
+    fn a_wait_returns_when_the_last_closure_goes() {
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        let open = Arc::new(OpenClosures::default());
+        let mut held = closure(&DROPPED);
+        held.count_in(&open);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(held);
+        });
+        open.wait_none();
+        assert_eq!(
+            DROPPED.load(Ordering::SeqCst),
+            1,
+            "the wait outlasted the drop"
+        );
+        release.join().expect("the releasing thread ends");
     }
 }
