@@ -14075,6 +14075,13 @@ mod tests {
             )),
             // Revision 5 — a key binding.
             crate::diagnose_json::declarations_diagnose_json("#%7=demo/fixed"),
+            // Revision 6 — ROS definition files of each kind, whose lines carry
+            // `types` beside `line`.
+            crate::diagnose_json::declarations_diagnose_json(
+                "#@demo/msg/Point.msg=\"float64 x\"\n\
+                 #@demo/srv/Add.srv=\"int64 a\\n---\\nint64 sum\"\n\
+                 #@demo/action/Fib.action=\"int32 order\\n---\\nint32[] seq\\n---\\nint32[] part\""
+            ),
         ];
         let mut keyexpr_verdicts: Vec<String> =
             alloc::vec![crate::diagnose_json::keyexpr_diagnose_json("demo/**")];
