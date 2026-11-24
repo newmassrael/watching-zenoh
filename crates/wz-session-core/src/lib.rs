@@ -2266,7 +2266,7 @@ pub mod lifecycle_node;
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-109 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::unreachable)]
+#[allow(clippy::unreachable)]
 pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of

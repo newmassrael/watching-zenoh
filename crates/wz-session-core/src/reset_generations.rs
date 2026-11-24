@@ -125,13 +125,11 @@ impl<const N: usize, S: MapStorage> ResetGenerations<N, S> {
 /// A zid's high zero bytes are part of no spelling of it (`credential_identity::canonical_zid`),
 /// so every spelling of one zid reads to the same number.
 fn peer(zid: &Zid) -> Peer {
-    let mut low = [0u8; 8];
-    let mut high = [0u8; 8];
-    low.copy_from_slice(&zid[..8]);
-    high.copy_from_slice(&zid[8..]);
+    let key = u128::from_le_bytes(*zid);
+    // Each half is a 64-bit truncation of the number by design.
     Peer {
-        low: u64::from_le_bytes(low),
-        high: u64::from_le_bytes(high),
+        low: key as u64,
+        high: (key >> 64) as u64,
     }
 }
 
