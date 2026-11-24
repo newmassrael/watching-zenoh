@@ -101,8 +101,6 @@ pub mod get_mailbox;
 pub mod group_drive;
 // R2828 (§5.23 `adminspace-write`) — the node hosts upstream's
 // `connect/endpoints` config write on that application layer.
-// Totality debt TD-216 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "adminspace-write")]
 pub mod admin_host;
 // How a node of the slot profile opens a session out of the tables its image declared,
