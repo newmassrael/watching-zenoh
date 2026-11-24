@@ -1,0 +1,20 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+The pico C ABI's release form (no_std, coop engine, no heap after open) is integrated across the six lanes of int12 and its size ratchet is met without raising it (owner 2026-11-24). Measured on the size gate's case pico-client-coop-nostd: sessions 106,679 -> 96,350 B (3.37 -> 3.04x zenoh-pico), doors 81,938 -> 61,570, whole image 379,112 -> 328,519 B (2.22 -> 1.93x); codec and language now WIN and are locked. Each size step was measured by symbol diff and kept only when the image shrank. Allocation after open stays 0 in all 23 C1nh families. zenoh-pico's own API tests pass on the library in their namespace sandbox, batching and client included, at upstream's buffer sizes.
+'''
+changes = '''
+wz-session-core: tables of a kind the build never uses are absent (Presence), one lender per session region with sticky refusal, peer Interest answers only under interest-answer, fan-out turn joins delivery records, total multicast_peer_rows and passive_messages.
+wz-capi-coop: open in stages (lend_session, core_of, engine_of), one announce and one retract body, no gets table without query, one-face builds hold no hand-off queue, matching watches swept by one body.
+wz-runtime-coop: one cell claim body, a link's room and read waits named apart.
+wz-capi-pico: one endpoint text body; integration arm at upstream buffer sizes; Layer Z pico tests in a netns sandbox.
+Gates: size ledger rows, reason pins, limit-read, sn-res-words, discard-site, ext-identity, feature surface, accessor reach, own-space witness.
+'''
+verification = '''
+int12 lane union (120 lanes: crate tests and clippy per feature form) green but a face_table timeout that passed 10 of 10 in isolation; C1nh no-heap ratchet 23/23 at 0; pico upstream API tests 17 with batching and client in the sandbox; pre-push hook gate list (119) green on the tree merged with main dc898a1e1; size_ledger_gate --check green; capture and capi-coop clippy and tests after the main merge.
+'''
+carry = '''
+Performance matrix of the no_std form against zenoh-pico (scripts/pico-compare.sh perf) running on int12; out-of-line size steps on the publish and delivery paths must be re-measured for speed.
+Size to 1.0x by area: sessions 3.04x, doors 2.93x, transport 3.40x, driver 1.87x.
+Hand-off queue heap in listen/group builds (branch l0-handoff-noheap, red test).
+session-close-ingress reason: correction that not every witness test carries the atom prefix (needs a store primitive).
+'''
