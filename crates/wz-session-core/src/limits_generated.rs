@@ -1091,9 +1091,9 @@ impl LimitSpec for AppLinkQueueBytes {
     const LIMIT: &'static str = "APP_LINK_QUEUE_BYTES";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
-    const CAPACITY: Option<usize> = None;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::APP_LINK_QUEUE_BYTES);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
-    const DEFAULT: Quota = Quota::from_build(caps::APP_LINK_QUEUE_BYTES, false);
+    const DEFAULT: Quota = Quota::at_most(caps::APP_LINK_QUEUE_BYTES);
 }
 
 const _: LimitDomain = AppLinkQueueBytes::DOMAIN;

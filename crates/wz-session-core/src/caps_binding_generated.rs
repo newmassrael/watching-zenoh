@@ -867,10 +867,10 @@ pub const APP_LINK_QUEUE_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
-    storage: Storage::Quota,
+    storage: Storage::Both,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Timing,
 };
 
