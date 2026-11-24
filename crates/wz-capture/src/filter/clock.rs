@@ -199,7 +199,7 @@ fn date(text: &str) -> Option<u64> {
 /// The days of `month` (1 to 12) of `year`.
 fn days_in(year: u64, month: u64) -> u64 {
     const DAYS: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     if month == 2 && leap {
         29
     } else {
@@ -253,7 +253,7 @@ fn clock(text: &str) -> Option<u64> {
 /// `text` split into the clock before its offset and the offset in
 /// milliseconds ahead of UTC, `None` for the offset where the text has none.
 fn zoned(text: &str) -> Option<(&str, Option<i64>)> {
-    match text.find(|c: char| matches!(c, 'Z' | 'z' | '+' | '-')) {
+    match text.find(['Z', 'z', '+', '-']) {
         None => Some((text, None)),
         Some(at) => Some((&text[..at], Some(offset(&text[at..])?))),
     }
