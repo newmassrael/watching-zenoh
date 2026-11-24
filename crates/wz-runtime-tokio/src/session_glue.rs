@@ -4728,6 +4728,58 @@ mod rx_sn_gate_tests {
         assert_eq!(reported, 2, "each outcome reported once");
     }
 
+    /// The receive in place that reassembles ends the chain of a channel whose `Frame` or
+    /// `Fragment` the SN gate drops, where the gate drops it, and reports each drop once.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_reassembling_receive_in_place_ends_the_chain_of_a_dropped_head() {
+        use wz_session_core::drive::dispatch_datagram_reassembling;
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::network_message::new_record_buf;
+        use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
+        let mut engine = super::new_session_engine(&actions);
+        engine.initialize().unwrap_or_else(|never| match never {});
+        let mut reasm: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        let mut record = new_record_buf();
+        // A reliable Fragment with more to come (`0x06 | R | M`) of one payload byte, and a
+        // reliable Frame with no record (`0x05 | R`), each at a one-byte SN.
+        let fragment = |sn: u8| vec![0x66, sn, 0x01];
+        let frame = |sn: u8| vec![0x25, sn];
+        let mut rejected = 0usize;
+        let mut chains = Vec::new();
+        for unit in [fragment(10), frame(9), fragment(11), fragment(9)] {
+            let mut sink = |e: IterationEvent<'_, '_>| {
+                if matches!(
+                    e,
+                    IterationEvent::Poll(DriverLoopOutcome::RxSnRejected { .. })
+                ) {
+                    rejected += 1;
+                }
+            };
+            dispatch_datagram_reassembling(
+                &unit,
+                &actions,
+                &mut engine,
+                &mut record,
+                &mut reasm,
+                0,
+                &mut sink,
+            );
+            chains.push(reasm.active_chains());
+        }
+        assert_eq!(
+            chains,
+            [1, 0, 1, 0],
+            "a chain begun, ended by the dropped Frame, begun again, ended by the dropped Fragment"
+        );
+        assert_eq!(rejected, 2, "each drop reported once");
+    }
+
     /// The unicast reporter raises the chain an ingest evicted, beside the
     /// fragment's own admission: under oldest-wins a one-slot pool gives the
     /// slot of the open chain to the next chain start, and the observer is told
