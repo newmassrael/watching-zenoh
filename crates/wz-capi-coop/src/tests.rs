@@ -1327,7 +1327,9 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
 fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_free() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let handed: Arc<Mutex<Vec<(u8, Vec<u8>)>>> = Arc::default();
+    // What each subscriber was handed: its tag and the payload.
+    type Handed = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+    let handed: Handed = Arc::default();
     let published: Arc<Mutex<Vec<bool>>> = Arc::default();
     let session = Arc::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
