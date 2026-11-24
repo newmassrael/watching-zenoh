@@ -115,6 +115,8 @@ use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
 use crate::ext_chain::ExtChainBuf;
 use crate::ext_chain_role::ExtChainRole;
+#[cfg(not(feature = "session-slot"))]
+use crate::link::ShareValues;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
 // A4 — the CachedDeclaration / ReplayDeclarationsError types stay ungated
@@ -4419,7 +4421,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         driver: R::LinkSink,
         params: SessionInitParams,
         clock: T,
-    ) -> R::ActionsHandle<T> {
+    ) -> R::ActionsHandle<T>
+    where
+        R: ShareValues,
+    {
         R::wrap_actions(Self::build(driver, params, clock))
     }
 
@@ -4438,7 +4443,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
     /// refcount-1 pointers, behavior-identical to the pre-split struct.
     #[cfg(not(feature = "session-slot"))]
-    pub fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
+    pub fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self
+    where
+        R: ShareValues,
+    {
         let seed = LinkSeed::open::<R>(&driver);
         let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
         let mut core = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
@@ -4771,13 +4779,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (Under `session-slot` the half is the bundle's own field and is written
     /// there by `build_in`.)
     #[cfg(not(feature = "session-slot"))]
-    fn hold_link(link: LinkState<R>) -> R::Shared<LinkState<R>> {
+    fn hold_link(link: LinkState<R>) -> R::Shared<LinkState<R>>
+    where
+        R: ShareValues,
+    {
         R::share(link)
     }
 
     /// The kernel half of the bundle as it holds it; see `hold_link`.
     #[cfg(not(feature = "session-slot"))]
-    fn hold_core(core: SessionCore<R, T>) -> R::Shared<SessionCore<R, T>> {
+    fn hold_core(core: SessionCore<R, T>) -> R::Shared<SessionCore<R, T>>
+    where
+        R: ShareValues,
+    {
         R::share(core)
     }
 

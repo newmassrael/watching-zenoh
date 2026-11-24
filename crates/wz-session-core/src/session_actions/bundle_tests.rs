@@ -23,7 +23,7 @@ use wz_codecs::whatami::WhatAmI;
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 use super::SessionLinkActions;
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime};
+use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, ShareValues};
 use crate::reliability::Reliability;
 use crate::session_init_params::{
     cookie_bytes, KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -94,16 +94,18 @@ impl crate::entropy::EntropySource for NoEntropy {
     }
 }
 
+impl ShareValues for PlainRuntime {
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Arc::new(value)
+    }
+}
+
 impl SessionRuntime for PlainRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
     type Driver = dyn BoxedLinkDriver;
     type Shared<U> = Arc<U>;
     type IterationWork = ();
     type EntropyDraw = NoEntropy;
-
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Arc::new(value)
-    }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
