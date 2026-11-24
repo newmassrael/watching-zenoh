@@ -1356,6 +1356,16 @@ impl<C: RoundCalls> Round<C> {
         }
     }
 
+    /// The records one message makes at most: a token's appearance or retraction is held for the
+    /// liveliness subscribers and, as a record of its own, for the declaration watches, where the
+    /// round keeps both.
+    const MESSAGE_RECORDS: usize =
+        if <C::Tokens as Presence>::KEPT && <C::Watches as Presence>::KEPT {
+            2
+        } else {
+            1
+        };
+
     /// Whether `table` takes one more record, owing `callbacks` callbacks.
     fn takes(table: &Table<C>, callbacks: usize) -> bool {
         table.entries.free_slots() > 0 && table.callbacks.free_slots() >= callbacks
@@ -2141,7 +2151,9 @@ impl<C: RoundCalls> Round<C> {
                 // A record's parts lie where the round reads them, apart from a key the session
                 // composed, which the keys take.
                 let keys = table.keys.free_slots() >= table.longest_key;
-                Self::takes(table, room.callbacks) && keys
+                Self::takes(table, room.callbacks)
+                    && table.entries.free_slots() >= Self::MESSAGE_RECORDS
+                    && keys
             }
             _ => false,
         }

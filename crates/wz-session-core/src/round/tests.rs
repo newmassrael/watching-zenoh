@@ -624,3 +624,43 @@ fn a_round_that_keeps_no_watch_gives_its_record_no_size() {
     type Record = <<Lean as RoundCalls>::Watches as Presence>::Record<HeldWatch>;
     assert_eq!(core::mem::size_of::<Record>(), 0);
 }
+
+/// A round that keeps tokens and declaration watches asks a link for the room of two records
+/// before each message, since a token's appearance is held for the liveliness subscribers and for
+/// the watches apart; one that keeps either alone asks for one.
+#[test]
+fn a_round_of_tokens_and_watches_asks_for_two_records_a_message() {
+    assert_eq!(Round::<Kept>::MESSAGE_RECORDS, 2);
+    assert_eq!(Round::<Lean>::MESSAGE_RECORDS, 1);
+    let log = Arc::new(Log::default());
+    let kept = round::<Kept>();
+    let one = crate::round::ReadRoom { callbacks: 1 };
+    let event = |id| DeclEvent {
+        kind: DeclEventKind::Undeclared,
+        id,
+        keyexpr: "",
+        peer: None,
+    };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        for id in 1..=2 {
+            let call = Call {
+                row: 1,
+                log: log.clone(),
+            };
+            assert!(kept.offer_decl_watch(call, event(id), None));
+        }
+        assert!(kept.has_room(one), "two of four records are free");
+        let call = Call {
+            row: 1,
+            log: log.clone(),
+        };
+        assert!(kept.offer_decl_watch(call, event(3), None));
+        assert!(
+            !kept.has_room(one),
+            "one record is free, and a message may make two"
+        );
+        kept.seal();
+    }
+    assert!(kept.deliver());
+}

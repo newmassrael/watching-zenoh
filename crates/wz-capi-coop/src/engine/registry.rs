@@ -476,7 +476,7 @@ pub(super) struct Registry {
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
     /// The program's watches of what the peers declare, which the application layer's observers
-    /// stage into while a frame is dispatched (`decl_watch`).
+    /// hold events in the round for while a link's frame is dispatched (`decl_watch`).
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -612,6 +612,12 @@ impl Registry {
         // after the faces' takes the bytes the plan counts for them wherever it lends them.
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
+        // The watches hold what the peers declare in the round the application's deliveries go to.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        let decl_watches = DeclWatches::under(limits, &delivery.round)?;
         Ok(Self {
             app,
             delivery,
@@ -627,7 +633,7 @@ impl Registry {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            decl_watches: DeclWatches::under(limits)?,
+            decl_watches,
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
@@ -862,13 +868,6 @@ impl Registry {
         if super::lent_push(&event) {
             self.pushes.2 += 1;
         }
-        // What an earlier dispatch staged for the watches and nobody settled is a group's, whose
-        // members are not watched.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ))]
-        self.decl_watches.drop_staged();
         #[cfg(feature = "declarations-synced-event")]
         let was_final = self.declarations_final(id);
         if let Some(Split {
@@ -882,8 +881,16 @@ impl Registry {
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(id) {
-            self.decl_watches.stage_synced();
+            // SAFETY: a face's frame is dispatched under the session's lock.
+            unsafe { self.decl_watches.heard_synced() };
         }
+        // What the observers are told after this frame is a group's until a link's frame says
+        // otherwise, so a group's members are never told as a link's peer.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        self.decl_watches.heard_all();
     }
 
     /// Hand `sample`, which the session itself published, to each of its subscribers that hears
@@ -930,18 +937,18 @@ impl Registry {
             .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
     }
 
-    /// Owe the watches what the last [`Self::dispatch_event`] staged, as the events of the peer
-    /// of the link it dispatched, whose zid `peer` reads: what a link's dispatch does after each
-    /// frame, and a group's does not.
+    /// The next [`Self::dispatch_event`] is of a link whose peer's zid `peer` reads: what the
+    /// watches are told of it is held as that peer's events (`DeclWatches::hear_link`). A group's
+    /// dispatch says nothing, and what it tells is held for no one.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    pub(super) fn settle_decl_events(
+    pub(super) fn hear_decl_link(
         &self,
         peer: impl FnOnce() -> Option<wz_session_core::session_zid::SessionZid>,
     ) {
-        self.decl_watches.settle(peer);
+        self.decl_watches.hear_link(peer);
     }
 
     /// Stage for the peer of face `id` what the application did to its subscriptions since the

@@ -220,6 +220,11 @@ mod decl_watch;
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
+pub(crate) use decl_watch::WatchCall;
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
 use {
     decl_watch::DeclWatches,
     wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchSink},
@@ -2394,12 +2399,13 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             // form.
             #[cfg(feature = "shared-key-ids")]
             actions.note_requests(&event);
-            registry.dispatch_event(face, event);
+            // What the declaration watches are told of this frame is this link's peer's.
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            registry.settle_decl_events(|| actions.peer_session_zid());
+            registry.hear_decl_link(|| actions.peer_session_zid());
+            registry.dispatch_event(face, event);
             registry.flush_pending_replies(face, actions);
             registry.take_pending_final_rids(face)
         };
@@ -2425,12 +2431,13 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             registry.dispatch_push(face, event, actions);
             return;
         }
-        registry.dispatch(face, event, actions);
+        // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        registry.settle_decl_events(|| actions.peer_session_zid());
+        registry.hear_decl_link(|| actions.peer_session_zid());
+        registry.dispatch(face, event, actions);
     }
 
     /// A rejoined message's records are read where its chain's buffer lies, which the round keeps
@@ -3460,6 +3467,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.session
                 .retract_owed(crate::round::ReadRoom { callbacks })
         };
+    }
+
+    /// Hold in the round what the declaration watches are owed and it has room for now
+    /// (`DeclWatches::tell_owed`): each new watch's catch-up from the peers of the links up now,
+    /// each declaration named as its link's peer, and the events a watch lost.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn tell_decl_watches_owed(&self) {
+        let registry = self.session.registry.borrow();
+        let tables = &*registry;
+        let links = &self.transport.links;
+        let faces = move || {
+            links.faces().filter_map(move |face| {
+                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                    return None;
+                };
+                let peer = decl_watch::named(|| wire.actions.peer_session_zid());
+                Some((tables.tables_of(face.id)?, peer))
+            })
+        };
+        // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
+        unsafe { registry.decl_watches.tell_owed(faces) };
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -4527,6 +4558,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         while self.hand_out() {}
         // The subscribers undeclared while a call of theirs ran, whose last call has ended now.
         self.let_go_of_released();
+        // What the declaration watches are owed and the round had no room for when it came (the
+        // catch-up of a watch declared while a round was handed out, the events a watch lost),
+        // held now the round is handed out, each round sealed as the session is let go of and
+        // handed out in turn.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        while self.decl_watches.owes() {
+            let Some(core) = self.live() else {
+                break;
+            };
+            core.0.tell_decl_watches_owed();
+            drop(core);
+            if !self.hand_out() {
+                break;
+            }
+        }
         // The tokens of a lost link the round had no room for, retracted now the round is handed
         // out, each round sealed as the session is let go of and handed out in turn.
         #[cfg(feature = "liveliness")]
@@ -4594,20 +4643,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "connectivity")]
         while self.faces.hand_out_next() {
             handed = true;
-        }
-        // What a peer declared or retracted, told to the watch it is owed to.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ))]
-        if let Some(mut turn) = self.decl_watches.begin_handing() {
-            while let Some((id, sink, told)) = turn.next() {
-                sink.call(told.event());
-                // Put back in its row, or let go of here, with no lock held, when the watch went
-                // during the call.
-                let gone = self.decl_watches.put_back(id, sink);
-                drop(gone);
-            }
         }
         // Each listener owed its verdict, one at a time: its callback is taken out of its row
         // under the session's lock and called after it, and put back under the lock that looks
@@ -6120,7 +6155,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     /// The watch is told first what each link's peer holds now, then what the links' dispatch
-    /// stages from here on (`decl_watch`). A refused sink is let go of with no lock held.
+    /// holds for it from here on (`decl_watch`): at once when the round takes the catch-up, or by
+    /// the next round when it is handed out now, as it is to a watch declared from inside a
+    /// callback. A refused sink is let go of with no lock held.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -6137,26 +6174,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::Closed);
         };
         let core = &guard.0;
-        // What the peers hold now is told first, so the ring must have the rows for it before
-        // the watch is declared.
-        let mut held: usize = 0;
-        {
-            let registry = core.session.registry.borrow();
-            for face in core.transport.links.faces() {
-                if !matches!(&face.link, Link::Up(_) | Link::Opening { .. }) {
-                    continue;
-                }
-                if let Some(tables) = registry.tables_of(face.id) {
-                    held = held.saturating_add(decl_watch::held(plane, tables));
-                }
-            }
-        }
-        let added = self.decl_watches.add(
-            &mut core.session.registry.borrow_mut().app,
-            plane,
-            sink,
-            held,
-        );
+        let added = self
+            .decl_watches
+            .add(&mut core.session.registry.borrow_mut().app, plane, sink);
         let id = match added {
             Ok(id) => id,
             Err((refused, sink)) => {
@@ -6165,16 +6185,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 return Err(refused);
             }
         };
-        let registry = core.session.registry.borrow();
-        for face in core.transport.links.faces() {
-            let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
-                continue;
-            };
-            if let Some(tables) = registry.tables_of(face.id) {
-                self.decl_watches
-                    .tell_held(id, plane, tables, || wire.actions.peer_session_zid());
-            }
-        }
+        core.tell_decl_watches_owed();
         Ok(id)
     }
 
