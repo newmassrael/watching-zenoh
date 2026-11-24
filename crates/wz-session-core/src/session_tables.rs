@@ -3091,19 +3091,16 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets)),
             held_arena_bytes(rows.held_replies),
         ];
-        let mut sum = 0_usize;
+        let mut sum = Some(0_usize);
         let mut at = 0;
         while at < parts.len() {
-            let Some(part) = parts[at] else {
-                return None;
+            sum = match (sum, parts[at]) {
+                (Some(sum), Some(part)) => sum.checked_add(part),
+                _ => None,
             };
-            let Some(next) = sum.checked_add(part) else {
-                return None;
-            };
-            sum = next;
             at += 1;
         }
-        Some(sum)
+        sum
     }
 }
 
