@@ -479,8 +479,19 @@ pub struct KeyForm {
     /// of the key. One that names no live declaration, or one the key does not start with, is not
     /// used: the key goes on the wire whole.
     pub prefix: Option<KeyexprHandle>,
+    /// The declaration of the entity's own key, when the declaring ABI states one besides the one
+    /// its key is named by: the row holds it while it stands, as zenoh-pico's subscription keeps
+    /// its own declared key. One that names no live declaration is not held.
+    pub own: Option<KeyexprHandle>,
     /// What the retraction names beside the id.
     pub retraction: Retraction,
+}
+
+impl KeyForm {
+    /// This form, its row holding `own`, the declaration of the entity's own key, as well.
+    pub fn owning(self, own: Option<KeyexprHandle>) -> Self {
+        Self { own, ..self }
+    }
 }
 
 /// What an entity's retraction names beside its id: the one record of it, read off the entity's
@@ -504,8 +515,9 @@ pub enum Retraction {
 pub struct EntityKey<Key> {
     key: Key,
     prefix: Option<KeyexprHandle>,
-    /// The declaration a named retraction names, which the row holds as it holds `prefix`: the
-    /// entity's retraction names it after every other holder may have let it go.
+    /// The declaration of the entity's own key, which the row holds as it holds `prefix`: the one
+    /// the form states, or else the one a named retraction names, which the entity's retraction
+    /// names after every other holder may have let it go.
     named: Option<KeyexprHandle>,
     retraction: Retraction,
 }
@@ -533,8 +545,8 @@ impl<Key: KeyBacking> EntityKey<Key> {
 }
 
 impl<Key> EntityKey<Key> {
-    /// The declarations the row holds, each once: the one the key is named by, and the one a
-    /// named retraction names when that is another.
+    /// The declarations the row holds, each once: the one the key is named by, and the one of the
+    /// entity's own key when that is another.
     pub fn holds(&self) -> (Option<KeyexprHandle>, Option<KeyexprHandle>) {
         (
             self.prefix,
@@ -1179,8 +1191,8 @@ pub struct Undeclared<T> {
     /// The key expression declaration the entity's key was named by, when the entity held it
     /// last, retracted with it: its id goes on the wire after the entity's retraction.
     pub keyexpr: Option<ExprId>,
-    /// The other declaration its retraction named, when the entity held it last: retracted as
-    /// [`Self::keyexpr`] is, after it.
+    /// The declaration of its own key ([`KeyForm::own`]), when that was another and the entity
+    /// held it last: retracted as [`Self::keyexpr`] is, after it.
     pub named: Option<ExprId>,
 }
 
@@ -1484,16 +1496,22 @@ impl<P: Storage> Declaring<'_, P> {
                 row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
             })
         });
-        // A named retraction's declaration is found by its id once, here, and held by handle from
-        // here on: one no longer declared is not named, and the key is retracted whole.
-        let named = match form.retraction {
+        // The declaration of the entity's own key: the one the form states, or else the one a
+        // named retraction names, found by its id once, here, and held by handle from here on.
+        // One no longer declared is not held, and a retraction that named it names the key whole.
+        let stated = form.own.filter(|&own| {
+            self.keyexprs
+                .get(own)
+                .is_some_and(|row| row.holds < u16::MAX)
+        });
+        let named = stated.or_else(|| match form.retraction {
             Retraction::Named(named) if named.mapping_id != 0 => self
                 .keyexprs
                 .iter()
                 .find(|(_, row)| row.id == named.mapping_id && row.holds < u16::MAX)
                 .map(|(handle, _)| handle),
             _ => None,
-        };
+        });
         Ok(EntityKey {
             key,
             prefix,
@@ -1760,7 +1778,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         } else {
             self.keyexpr_by_id(mapping_id)
         };
-        KeyForm { prefix, retraction }
+        KeyForm {
+            prefix,
+            own: None,
+            retraction,
+        }
     }
 
     /// The next key expression id: from 1, past any still declared and any `usable` refuses;
@@ -1834,7 +1856,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             Retraction::Named(named) => {
                 let (mapping, rest) = named.names(text(&key.key));
                 Some(match key.named.and_then(|held| self.keyexprs.get(held)) {
-                    Some(row) if mapping != 0 => RetractionKey::declared(row.id, rest),
+                    Some(row) if mapping == row.id => RetractionKey::declared(row.id, rest),
                     _ => RetractionKey::literal(),
                 })
             }

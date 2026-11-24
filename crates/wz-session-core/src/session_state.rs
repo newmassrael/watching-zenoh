@@ -572,6 +572,7 @@ mod tests {
             state.key_form(declared.id, Retraction::AsAnnounced),
             KeyForm {
                 prefix: Some(declared.handle),
+                own: None,
                 retraction: Retraction::AsAnnounced
             }
         );
