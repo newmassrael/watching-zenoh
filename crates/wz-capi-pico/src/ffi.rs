@@ -23,6 +23,8 @@ use alloc::sync::Arc;
 
 use wz_capi_port::os::{Condvar, Mutex};
 
+// What the list of latches the advanced plane waits on is made of.
+#[cfg(feature = "advanced")]
 use crate::prelude::*;
 
 // The guard and the thread-crossing pointer are compiled by every library of the ABI for itself.
@@ -184,6 +186,7 @@ impl<C> CClosure<C> {
     /// engine let go, which is how an undeclare returns only when the callback is finished. A
     /// closure an owner counts ([`Self::count_in`]) is waited on through the count, and its latch
     /// is open from the start.
+    #[cfg(feature = "advanced")]
     pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
         match &self.released {
             Released::Latch(latch) => latch.clone(),
@@ -307,6 +310,7 @@ impl ReleaseLatch {
     /// Block until the closure is released, unless this thread is inside one of the program's
     /// callbacks: that callback holds the closure, so waiting would wait for itself. The
     /// closure is then released when the callback returns, as it was before there was a wait.
+    #[cfg(feature = "advanced")]
     pub(crate) fn wait(&self) {
         if InCallback::here() {
             return;
@@ -318,6 +322,7 @@ impl ReleaseLatch {
     }
 }
 
+#[cfg(feature = "advanced")]
 impl ReleaseLatch {
     fn is_open(&self) -> bool {
         *self.open.lock()
@@ -349,12 +354,14 @@ impl Drop for AwaitRelease {
     }
 }
 
-/// The latches of the closures an owner is answerable for, to wait on together. An owner that
-/// hands out many (a querier's gets, a session's background declarations) keeps only the ones
-/// still closed, so the list is as long as what is still running and not as what ever ran.
+/// The latches of the closures an owner is answerable for, to wait on together, keeping only the
+/// ones still closed, so the list is as long as what is still running and not as what ever ran.
+/// Its one holder is [`AwaitRelease`], so it exists where that does.
+#[cfg(feature = "advanced")]
 #[derive(Default)]
 pub(crate) struct LatchList(Mutex<Vec<Arc<ReleaseLatch>>>);
 
+#[cfg(feature = "advanced")]
 impl LatchList {
     pub(crate) fn keep(&self, latch: Arc<ReleaseLatch>) {
         let mut list = self.0.lock();
