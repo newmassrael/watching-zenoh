@@ -3126,6 +3126,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
+        // What the lost link's peer was told went with it: the next link's peer holds nothing.
+        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+            face.replay.discard();
+        }
         self.rooms.forget(id);
         self.lose_link(id);
     }
@@ -3454,21 +3458,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// What a lost link of face `id` takes with it: what its peer was told, and what the session
-    /// holds of it (`SessionState::lose_face`).
+    /// What a lost link of face `id` takes with it: what the session holds of it
+    /// (`SessionState::lose_face`). What the peer was told is the caller's, which holds the face's
+    /// place: a group keeps no replay.
     /// Out of line: a lost face and a group that ended each take what the peer declared.
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
-        // What the lost link's peer was told went with it: the next link's peer holds nothing.
-        if let Some(face) = self
-            .transport
-            .links
-            .faces_mut()
-            .iter_mut()
-            .find(|face| face.id == id)
-        {
-            face.replay.discard();
-        }
         self.session.lose_face(id);
         #[cfg(feature = "liveliness")]
         self.retract_owed();
