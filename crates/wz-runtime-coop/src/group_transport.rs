@@ -199,6 +199,68 @@ pub enum GroupSend {
     Failed,
 }
 
+/// The buffer a group transport receives into: one of its own, or one its session lent from the
+/// memory it reserved when it opened (`LinkTables::group_rx`), which goes back to the session as
+/// the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
+/// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
+/// it cut one past a buffer of the transport's own.
+#[cfg(feature = "alloc")]
+pub enum GroupRx {
+    /// The transport's own, made when the group was joined.
+    Own(alloc::vec::Vec<u8>),
+    /// A buffer the session lent.
+    Lent(ByteBuf),
+    /// The lent buffer, given back: the group was left and receives nothing more.
+    GivenBack,
+}
+
+#[cfg(feature = "alloc")]
+impl GroupRx {
+    /// The buffer `lent` names, when the session lent one, or one of the transport's own of
+    /// `own_len` bytes.
+    pub fn lent_or_own(lent: Option<ByteBuf>, own_len: usize) -> Self {
+        match lent {
+            Some(buf) => Self::Lent(buf),
+            None => Self::Own(alloc::vec![0; own_len]),
+        }
+    }
+
+    /// The buffer's bytes; none once given back.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Own(bytes) => bytes,
+            Self::Lent(buf) => buf.as_slice(),
+            Self::GivenBack => &[],
+        }
+    }
+
+    /// The buffer's bytes, to receive into; none once given back.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Own(bytes) => bytes,
+            Self::Lent(buf) => buf.as_mut_slice(),
+            Self::GivenBack => &mut [],
+        }
+    }
+
+    /// Whether the buffer is one the session lent and has not been given back.
+    pub fn is_lent(&self) -> bool {
+        matches!(self, Self::Lent(_))
+    }
+
+    /// The lent buffer, once: what [`GroupTransport::give_back_rx`] answers. `None` for a buffer
+    /// of the transport's own, which stays where it is.
+    pub fn give_back(&mut self) -> Option<ByteBuf> {
+        match core::mem::replace(self, Self::GivenBack) {
+            Self::Lent(buf) => Some(buf),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+}
+
 /// A transport a stack handed out boxed (`SessionLinks::open_group` on the heap profile) is the
 /// transport it boxes, so the group loop runs over it as over the stack's own type.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -275,10 +337,13 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 ))]
 pub trait GroupJoiner {
     /// The group `endpoint` names, joined: the transport a group session runs over. The endpoint
-    /// is the text the config states (a `udp/` locator naming an interface).
+    /// is the text the config states (a `udp/` locator naming an interface). `rx` is the buffer
+    /// the transport receives into when its session lent one (`LinkTables::group_rx`); `None`
+    /// and the transport makes its own.
     fn join(
         &self,
         endpoint: &str,
+        rx: Option<ByteBuf>,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError>;
 }
 
@@ -302,8 +367,9 @@ impl GroupJoiner for NoGroups {
     fn join(
         &self,
         endpoint: &str,
+        rx: Option<ByteBuf>,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError> {
-        let _ = endpoint;
+        let _ = (endpoint, rx);
         Err(crate::session_drive::LinkOpenError::Unsupported)
     }
 }
@@ -312,6 +378,33 @@ impl GroupJoiner for NoGroups {
 mod tests {
     use super::*;
     use core::net::Ipv6Addr;
+
+    /// A buffer of the transport's own stays with it; a lent one is the session's, read and
+    /// written as the transport's own is, and given back once, after which it reads as empty.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_lent_group_buffer_is_given_back_once_and_an_own_one_never() {
+        use wz_session_core::byte_cells::{ByteCells, ByteSource};
+
+        static CELLS: ByteCells<4, 1> = ByteCells::new();
+        let mut own = GroupRx::lent_or_own(None, 6);
+        assert!(!own.is_lent());
+        assert_eq!(own.as_mut_slice().len(), 6, "its own, as long as asked");
+        assert!(own.give_back().is_none(), "its own is not given back");
+        assert_eq!(own.as_slice().len(), 6, "and stays");
+
+        let mut lent = GroupRx::lent_or_own(CELLS.claim(), 6);
+        assert!(lent.is_lent());
+        lent.as_mut_slice().copy_from_slice(b"abcd");
+        assert_eq!(lent.as_slice(), b"abcd", "the lent cell, as long as it is");
+        let back = lent.give_back().expect("the lent cell");
+        assert!(!lent.is_lent());
+        assert!(lent.give_back().is_none(), "given back once");
+        assert!(lent.as_slice().is_empty() && lent.as_mut_slice().is_empty());
+        assert_eq!(CELLS.in_use(), 1, "held by whoever it was given back to");
+        drop(back);
+        assert_eq!(CELLS.in_use(), 0);
+    }
 
     /// An interface is named to a group in the group's own family, and the routing's choice to
     /// either: an address to an IPv6 group, or an index to an IPv4 one, names nothing.
