@@ -1060,8 +1060,6 @@ pub mod json5_lex;
 /// moved from wz-runtime-tokio so the MCU connection manager re-dials on the
 /// same arithmetic the AP's re-dial substrates use. Unconditional: it needs
 /// nothing but `core`.
-// Totality debt TD-049 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod retry_period;
 
 /// The list of endpoints a node holds sessions with, with no allocator. Filled by upstream's
