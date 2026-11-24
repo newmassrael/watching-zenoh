@@ -10772,7 +10772,7 @@ fn a_subscriber_retraction_names_its_key_only_when_the_declaring_abi_asks() {
     use wz_session_core::declare_build::{
         build_undeclare_subscriber, build_undeclare_subscriber_on_wire,
     };
-    let names = RetractionKey {
+    let names = RetractionName {
         mapping_id: 8,
         suffix: "/**".to_owned(),
     };
@@ -10828,7 +10828,7 @@ fn a_queryable_retraction_names_its_key_only_when_the_declaring_abi_asks() {
     use wz_session_core::declare_build::{
         build_undeclare_queryable, build_undeclare_queryable_on_wire,
     };
-    let names = RetractionKey {
+    let names = RetractionName {
         mapping_id: 7,
         suffix: "/*/x".to_owned(),
     };
