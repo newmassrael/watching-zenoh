@@ -16241,7 +16241,10 @@ mod tests {
             3,
             "the three requests are open: {first}"
         );
-        assert!(first.contains("\"revision\":5"), "{first}");
+        assert!(
+            first.contains("\"name\":\"selection_since\",\"revision\":6}"),
+            "{first}"
+        );
         let cursor = through_seq_of(&first);
         assert!(cursor > 3, "{first}");
 

@@ -4488,8 +4488,10 @@ int main(void) {
      * byte's M bit names. Values move under stationary keys.
      * 27: an unresolved alias says where it first missed and whether it was
      * declared after; the exchange plane gains `maybe_other_link`; a reply
-     * pairs with its request across a named session's links. */
-    revisioned[0].revision = 27;
+     * pairs with its request across a named session's links.
+     * 28: `dropped_by_limits.caps` gains `chain_bytes`, the bytes one fragment
+     * chain may join. A key arrives; nothing retires. */
+    revisioned[0].revision = 28;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4514,8 +4516,10 @@ int main(void) {
      * 7: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
      * 8: `skips` gains `link_type_interfaces`, the unread interfaces each with
-     * its link type and count. A key arrives; nothing retires. */
-    revisioned[1].revision = 8;
+     * its link type and count. A key arrives; nothing retires.
+     * 9: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires. */
+    revisioned[1].revision = 9;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -4808,8 +4812,10 @@ int main(void) {
      * and three families arrive; nothing retires.
      * 80: the document gains `dns`, the capture's name lookups and what
      * answered them. Eighteen keys and two families arrive; nothing
-     * retires. */
-    revisioned[2].revision = 80;
+     * retires.
+     * 81: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
+     * nothing retires. */
+    revisioned[2].revision = 81;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4835,8 +4841,10 @@ int main(void) {
      * the instant of the packet that carried the oldest message's first
      * byte; a precision and a value move under a stationary key.
      * 4: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
-    revisioned[4].revision = 4;
+     * flow. A key arrives; nothing retires.
+     * 5: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires. */
+    revisioned[4].revision = 5;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;
@@ -4852,8 +4860,9 @@ int main(void) {
     /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
      * same `health` object; 4 on the summary's move to 7, `caps` gaining
      * `frames_total`; 5 on the summary's move to 8, `skips` gaining
-     * `link_type_interfaces`. */
-    revisioned[5].revision = 5;
+     * `link_type_interfaces`; 6 on the summary's move to 9, `caps` gaining
+     * `chain_bytes`. */
+    revisioned[5].revision = 6;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;
@@ -4979,9 +4988,12 @@ int main(void) {
      * opened it came from), and `reason` gains `not_encrypted`,
      * `not_yet_known` and `not_opened`. Keys and two families arrive, two
      * families gain words; nothing retires.
-     * 14: model 7, as the field document's 68. No key moves. */
+     * 14: model 7, as the field document's 68. No key moves.
+     * 15: each flow gains `direction_basis`, what named its directions.
+     * 16: `dropped_by_limits.caps` gains `chain_bytes`. Keys arrive; nothing
+     * retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 14;
+    revisioned[12].revision = 16;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -5048,9 +5060,11 @@ int main(void) {
      * flow. A key arrives; nothing retires.
      * 4: every row is judged. Values move; no key arrives.
      * 5: a query reply carrying a put is read as a published sample is (its
-     * CRC judged, its counter and timeout not). Values move; no key arrives. */
+     * CRC judged, its counter and timeout not). Values move; no key arrives.
+     * 6: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
+     * retires. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 5;
+    revisioned[18].revision = 6;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;
