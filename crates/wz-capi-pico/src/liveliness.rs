@@ -681,33 +681,6 @@ unsafe fn sample_sink_at<T>(object: *mut T) -> LivelinessSink {
     unsafe { LivelinessSink::raw(call::<T>, object.cast::<c_void>(), Some(release::<T>)) }
 }
 
-/// A C liveliness subscriber's closure moved into one allocation of its own, its address the
-/// context of a raw callback, for the one liveliness subscriber no place of a session keeps (an
-/// advanced subscriber's background detection, `declare_background_liveliness_subscriber`):
-/// called through a shared borrow from any thread and from inside itself, and let go of once,
-/// after its last call, which runs its C `drop(context)`.
-#[cfg(feature = "advanced")]
-fn sample_sink(cclosure: CClosure) -> LivelinessSink {
-    /// # Safety
-    /// `context` is the closure `sample_sink` moved into its allocation, not yet dropped.
-    unsafe fn call(context: *mut c_void, sample: LivelinessSample<'_>) {
-        // SAFETY: the caller's contract.
-        let closure = unsafe { &*context.cast::<CClosure>().cast_const() };
-        crate::pubsub::hand_liveliness(closure, sample);
-    }
-    /// # Safety
-    /// As `call`'s, and nothing calls it again.
-    unsafe fn release(context: *mut c_void) {
-        // SAFETY: the caller's contract: the allocation is `sample_sink`'s, given back once.
-        drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
-    }
-    let context = Box::into_raw(Box::new(cclosure)).cast::<c_void>();
-    // SAFETY: `call` reads the closure through a shared borrow, which a C closure admits from any
-    // thread and from inside itself, and `release` gives the allocation back once, after the last
-    // call.
-    unsafe { LivelinessSink::raw(call, context, Some(release)) }
-}
-
 /// The pico sample kind for a wz liveliness event.
 pub(crate) fn liveliness_kind_of(kind: LivelinessSampleKind) -> crate::pubsub::z_sample_kind_t {
     match kind {
@@ -723,61 +696,6 @@ pub(crate) unsafe fn token_state<'a>(
     ptr: *const z_loaned_liveliness_token_t,
 ) -> Option<&'a TokenState> {
     handle_ref::<z_loaned_liveliness_token_t, TokenState>(ptr)
-}
-
-/// Declare a liveliness subscription on `engine` that lives for an advanced subscriber's session
-/// (R311y559), the body of
-/// [`crate::advanced::ze_advanced_subscriber_detect_publishers_background`]. Consumes the moved
-/// closure on every path.
-///
-/// No handle undeclares it, and nothing waits for its closure: an advanced subscriber's state
-/// keeps the engine and not the session handle the close waits through, so the closure is moved
-/// into an allocation of its own (`sample_sink`) rather than a place of the session's, which the
-/// session's close would have to wait for. `z_close` still tears it down, because closing ends
-/// every entity the engine holds.
-///
-/// Its key is declared whole and its Interest names that declaration, as the
-/// handle form's does; the engine's entry is the only holder a background
-/// subscriber has, so the key it is announced on keeps the declaration alive.
-///
-/// # Safety
-/// `keyexpr` must be a valid keyexpr string; `existing` must be the caller's own
-/// key when it is already a declaration; `callback` must be a valid moved
-/// closure; `options` must be null or valid.
-#[cfg(feature = "advanced")]
-pub(crate) unsafe fn declare_background_liveliness_subscriber(
-    engine: &Arc<Engine>,
-    keyexpr: &str,
-    existing: Option<&DeclaredKeyexpr>,
-    callback: *mut z_moved_closure_sample_t,
-    options: *const z_liveliness_subscriber_options_t,
-) -> ZResult {
-    guarded(|| {
-        if callback.is_null() {
-            return Z_ERR_NULL;
-        }
-        // Consume the moved closure FIRST (consume-on-all-paths).
-        let owned = &mut (*callback)._this;
-        let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
-        *owned = z_owned_closure_sample_t::null_value();
-
-        let history = !options.is_null() && (*options).history;
-        let key = match DeclaredKeyexpr::declare(engine, keyexpr, existing) {
-            Ok(key) => key,
-            Err(rc) => return rc,
-        };
-        let anchor: Arc<dyn Send + Sync> = Arc::new(key.share());
-        let wire = key.wire(Arc::as_ref(engine)).keeping(anchor);
-        match engine.declare_liveliness_subscriber_on_wire(
-            keyexpr,
-            wire,
-            history,
-            sample_sink(cclosure),
-        ) {
-            Ok(_) => Z_OK,
-            Err(refused) => refusal_code(refused, Door::Entity),
-        }
-    })
 }
 
 /// Declare a session-lifetime liveliness subscriber with no handle (pico

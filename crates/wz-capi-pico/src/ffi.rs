@@ -320,13 +320,11 @@ impl ReleaseLatch {
 
 /// Waits for a closure's release when it is dropped. A struct that holds what the closure's
 /// callbacks run through declares this LAST: fields drop in declaration order, so the wait comes
-/// after everything before it has let go, which a `Drop::drop` body cannot say. The default waits
-/// for nothing, which is what an owner whose callbacks are not the program's holds.
+/// after everything before it has let go, which a `Drop::drop` body cannot say.
 ///
-/// Its holders are the advanced publisher's and subscriber's states, so it exists where they do;
-/// a build without `advanced` (the client-only and reduced builds) would carry it unused.
+/// Its holder is an advanced subscriber's sample-miss listener, so it exists where that does; a
+/// build without `advanced` (the client-only and reduced builds) would carry it unused.
 #[cfg(feature = "advanced")]
-#[derive(Default)]
 pub(crate) struct AwaitRelease(LatchList);
 
 #[cfg(feature = "advanced")]
@@ -335,17 +333,6 @@ impl AwaitRelease {
         let list = LatchList::default();
         list.keep(latch);
         Self(list)
-    }
-
-    /// Wait for one more closure as well, one the owner came to hold after it was made.
-    pub(crate) fn add(&self, latch: Arc<ReleaseLatch>) {
-        self.0.keep(latch);
-    }
-
-    /// Take the latches, so that dropping this waits for nothing: the owner hands them to
-    /// whoever will wait (a session's close) because the state outlives the handle.
-    pub(crate) fn disarm(&mut self) -> Vec<Arc<ReleaseLatch>> {
-        self.0.take_all()
     }
 }
 

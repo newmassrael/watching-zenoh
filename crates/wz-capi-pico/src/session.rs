@@ -714,11 +714,6 @@ pub(crate) struct PicoSessionHandle {
     pub(crate) drive: HeldDrive,
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
-    /// The release latches of the closures of an advanced subscriber run in the background
-    /// (`ze_declare_background_advanced_subscriber`). A close waits on them, as an undeclare waits
-    /// on its own; the gets the session issued and the background entities whose closures lie in
-    /// a place of the session's are counted beside the handle instead ([`SessionTail`]).
-    background: crate::ffi::LatchList,
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
@@ -729,7 +724,6 @@ impl PicoSessionHandle {
         Self {
             drive,
             ext,
-            background: crate::ffi::LatchList::default(),
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -746,17 +740,6 @@ impl PicoSessionHandle {
     /// `_Z_ERR_SESSION_CLOSED`, and the closure the call consumed runs its `drop(context)`.
     pub(crate) fn is_closed(&self) -> bool {
         self.drive.is_closed()
-    }
-
-    /// Keep the latch of a closure with no handle to undeclare it by, for the close to wait on.
-    #[cfg(feature = "advanced")]
-    pub(crate) fn keep_background(&self, latch: alloc::sync::Arc<crate::ffi::ReleaseLatch>) {
-        self.background.keep(latch);
-    }
-
-    /// Block until every such closure has run its `drop(context)`.
-    fn wait_background(&self) {
-        self.background.wait_all();
     }
 }
 
@@ -2362,7 +2345,6 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         handle.ext.close_listeners();
         // The close let go of every closure the session held; a callback still running on a
         // dispatch thread finishes before this returns, and then the drops have run.
-        handle.wait_background();
         session_tail(zs).open.wait_none();
         Z_OK
     })

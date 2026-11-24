@@ -420,6 +420,10 @@ impl Plan {
                 Kind::AdvancedPublisher,
                 objects.advanced_publishers,
             );
+            plan = plan.with::<crate::advanced::AdvSubPlace>(
+                Kind::AdvancedSubscriber,
+                objects.advanced_subscribers,
+            );
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -1743,6 +1747,12 @@ mod tests {
             Kind::AdvancedPublisher,
             core::mem::size_of::<crate::advanced::AdvPubState>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_subscriber",
+            Kind::AdvancedSubscriber,
+            core::mem::size_of::<crate::advanced::AdvSubPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1928,6 +1938,8 @@ mod tests {
         check(Kind::LivelinessGet);
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         check(Kind::AdvancedPublisher);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedSubscriber);
         assert_eq!(pools.held(), 0);
     }
 
