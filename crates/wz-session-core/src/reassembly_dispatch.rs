@@ -1152,37 +1152,48 @@ where
             slot.release_or_replace(staging);
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
-        if hand != Hand::Borrow {
-            if let Some(OpenChain {
-                key,
-                last_sn,
-                deadline_ms,
-                opened,
-                chain,
-            }) = slot.open.take()
-            {
-                match Self::hand_up(staging, chain, hand) {
-                    Ok(bytes) => {
-                        slot.release_or_replace(staging);
-                        deliver(bytes);
-                        return IngestOutcome::Reassembled;
-                    }
-                    Err(chain) => {
-                        slot.open = Some(OpenChain {
-                            key,
-                            last_sn,
-                            deadline_ms,
-                            opened,
-                            chain,
-                        })
-                    }
+        let taken = if hand == Hand::Borrow {
+            None
+        } else {
+            slot.open.take()
+        };
+        let handed_up = taken.and_then(
+            |OpenChain {
+                 key,
+                 last_sn,
+                 deadline_ms,
+                 opened,
+                 chain,
+             }| match Self::hand_up(staging, chain, hand) {
+                Ok(bytes) => Some(bytes),
+                Err(chain) => {
+                    slot.open = Some(OpenChain {
+                        key,
+                        last_sn,
+                        deadline_ms,
+                        opened,
+                        chain,
+                    });
+                    None
                 }
-            }
+            },
+        );
+        let released_first = handed_up.is_some();
+        if released_first {
+            slot.release_or_replace(staging);
         }
-        if let Some(open) = slot.open.as_ref() {
-            deliver(ChainBytes::Borrowed(staging.bytes(&open.chain)));
+        // One call of `deliver` for both hands, so the delivery is compiled in here once.
+        let bytes = handed_up.or_else(|| {
+            slot.open
+                .as_ref()
+                .map(|open| ChainBytes::Borrowed(staging.bytes(&open.chain)))
+        });
+        if let Some(bytes) = bytes {
+            deliver(bytes);
         }
-        slot.release_or_replace(staging);
+        if !released_first {
+            slot.release_or_replace(staging);
+        }
         IngestOutcome::Reassembled
     }
 
