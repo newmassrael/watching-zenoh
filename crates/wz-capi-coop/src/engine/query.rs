@@ -616,8 +616,26 @@ pub(super) struct QueryPlane {
 
 /// The calls begun on the queryables of the session one of its own gets reached, as many as the
 /// session can declare.
+///
+/// A fixed array the get takes out of the plane whole and holds in its own frame while it hands
+/// the calls out with no lock held ([`QueryPlane::take_asked`]), so it takes no heap after the
+/// open; its cost is stack. One is `MAX_QUERYABLES` calls of at most 16 bytes (a row's address and
+/// a 4-byte handle: 16 on a 64-bit target, 8 on a 32-bit one) and a length: at the build's default
+/// of 100 queryables, 1,608 bytes on a 64-bit target and 804 on a 32-bit one. A queryable's
+/// callback that asks a get of its own session from inside the call holds a second one in a frame
+/// above the first, and so on: each get nested so holds a row of the plane's held Finals until
+/// its calls are handed ([`FinalHolds`]), so the nesting is at most the session's
+/// `MAX_PENDING_FINALS` deep (8 at the build's default, 12,864 bytes of these arrays on a 64-bit
+/// target), and the get past it is refused before it asks. Shared rows of the arena would hand a
+/// nested get's calls to the round when they overflow, which reorders the calls zenoh-pico makes
+/// inline, so the frame keeps its own.
 #[cfg(feature = "local-queryable")]
 pub(super) type Asked = BoundedVec<QueryableCall, { caps::MAX_QUERYABLES }, Static>;
+
+// A call is a row's address and a handle; the stack cost stated on `Asked` holds while it stays
+// so small.
+#[cfg(feature = "local-queryable")]
+const _: () = assert!(core::mem::size_of::<QueryableCall>() <= 16);
 
 /// A row of an undeclared queryable being let go of, counted from before it leaves its table,
 /// under the session's lock, until this is dropped, after the row was ([`QueryPlane::letting_go`]).
