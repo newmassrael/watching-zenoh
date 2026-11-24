@@ -60,7 +60,7 @@
 
 use sce_forge_runtime::codec::{Bounded, CodecError};
 #[cfg(feature = "codec-declare")]
-use sce_forge_runtime::codec::{SceSink, SliceSink};
+use sce_forge_runtime::codec::{InlineBytes, SceSink, SliceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::lent::{
@@ -84,20 +84,12 @@ use crate::interest_build::{
 use crate::sample::QosLevel;
 
 /// The chain a control message carries when it carries one extension: the one
-/// entry, in the codec's own fixed-capacity list. The capacity of that list is
-/// eight, so one entry always fits and the push cannot fail.
+/// entry, in the codec's own fixed-capacity list of eight. The build checks that
+/// the list and the chain's bounds hold one entry.
 fn chain_of<'a, const MAX: usize, const MIN: usize>(
     entry: ExtEntry<'a>,
 ) -> Bounded<HeaplessVec<ExtEntry<'a>, 8>, MAX, MIN> {
-    const { assert!(MAX >= 1, "a list of one entry needs a bound of one or more") };
-    const { assert!(MIN <= 1, "a list of one entry holds at most one entry") };
-    let mut chain = HeaplessVec::new();
-    // One entry in the eight a node holds of a chain.
-    let _ = chain.push(entry);
-    match Bounded::new(chain) {
-        Some(chain) => chain,
-        None => unreachable!("the bounds are checked when this is compiled"),
-    }
+    Bounded::one(entry)
 }
 
 /// An `ext_qos` entry carrying `qos`: `zextz64!(0x1, false)`, terminal (no
@@ -131,8 +123,7 @@ pub(crate) const fn with_z(header: u8) -> u8 {
 #[cfg(feature = "codec-declare")]
 #[derive(Clone)]
 pub struct NamedKeyexpr {
-    body: [u8; NAMED_KEYEXPR_BYTES],
-    len: usize,
+    body: Bounded<InlineBytes<NAMED_KEYEXPR_BYTES>, NAMED_KEYEXPR_BYTES>,
 }
 
 /// The longest `ext_keyexpr` body a [`NamedKeyexpr`] holds: the inner header, a
@@ -172,8 +163,10 @@ impl NamedKeyexpr {
         sink.write_u8(crate::declare_ext_keyexpr::INNER_IS_LOCAL | has_suffix)?;
         sink.write_vle_u64(u64::from(mapping_id))?;
         sink.write_bytes(suffix.as_bytes())?;
-        let len = sink.position();
-        Ok(Self { body, len })
+        // Held within the bound its buffer is sized by, so the entry lends it
+        // to the `ZBuf` with no check.
+        let body = Bounded::from_slice(sink.into_written())?;
+        Ok(Self { body })
     }
 
     /// The body for a LITERAL keyexpr (mapping id `0`), the form a sourced
@@ -188,15 +181,12 @@ impl NamedKeyexpr {
     /// The extension entry, borrowing this body. The borrowed twin of the entry
     /// [`crate::declare_ext_keyexpr::build_ext_wireexpr`] makes.
     fn entry(&self) -> ExtEntry<'_> {
+        let value = self.body.as_bytes();
         ExtEntry {
             header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
             body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
-                value_len: self.len as u64,
-                value: self
-                    .body
-                    .get(..self.len)
-                    .and_then(Bounded::new)
-                    .expect("the length is the sink's position, in a body within the u32 length"),
+                value_len: value.len() as u64,
+                value: Bounded::widened(value),
             }),
         }
     }
@@ -1456,6 +1446,21 @@ mod tests {
             compared,
             4 + 5 + IDS.len() * (3 + 3 * 5 + 2 * infos().len())
         );
+    }
+
+    /// The entry of a named key lends the whole body the key was written into, and says
+    /// its length.
+    #[test]
+    fn a_named_keyexprs_entry_is_its_body() {
+        let body = crate::declare_ext_keyexpr::ext_wireexpr_body(7, "x/y/**");
+        let key = NamedKeyexpr::new(7, "x/y/**", build_keys()).unwrap();
+        match key.entry().body {
+            ExtEntryVariant::CodecZenohExtZbuf(zbuf) => {
+                assert_eq!(zbuf.value_len, body.len() as u64);
+                assert_eq!(*zbuf.value, body.as_slice());
+            }
+            _ => panic!("an ext_keyexpr entry is a ZBuf"),
+        }
     }
 
     /// A retraction that names its key carries the `Z` flag and the extension; one by its id
