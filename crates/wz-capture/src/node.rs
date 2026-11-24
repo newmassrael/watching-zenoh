@@ -264,6 +264,9 @@ pub struct ListContext<'a> {
     /// (`crate::field_path::FrameEnvelope`). `None` where the walk did not
     /// read them, and then a path through the `Frame` is undecidable.
     message: Option<&'a [u8]>,
+    /// The produced-index of the frame being walked in its list, where the
+    /// walk was placed: what a selector's `row` term looks the row up by.
+    produced: Option<u64>,
 }
 
 impl<'a> ListContext<'a> {
@@ -284,14 +287,22 @@ impl<'a> ListContext<'a> {
         self.list
     }
 
-    /// This context, for a frame of `flow` whose first byte the packet
-    /// `packet` carried. A walk in capture order knows both; one that does not
-    /// leaves the row terms undecidable rather than guessing.
-    pub fn placed(self, flow: crate::link::FlowKey, packet: Option<usize>) -> Self {
+    /// This context, for the frame at produced-index `produced` of the list,
+    /// of `flow`, whose first byte the packet `packet` carried. A walk in
+    /// capture order knows all three; one that does not leaves the row terms
+    /// undecidable rather than guessing.
+    pub fn placed(self, flow: crate::link::FlowKey, packet: Option<usize>, produced: u64) -> Self {
         Self {
             place: Some((flow, packet)),
+            produced: Some(produced),
             ..self
         }
+    }
+
+    /// The produced-index [`Self::placed`] gave, for a plane that keeps the
+    /// row's place past the frame beside it.
+    pub fn produced(self) -> Option<u64> {
+        self.produced
     }
 
     /// The flow and packet [`Self::placed`] gave, for a plane that must keep
@@ -316,7 +327,13 @@ impl<'a> ListContext<'a> {
     ) -> Option<crate::filter::RowFacts<'m>> {
         let (flow, packet) = self.place?;
         Some(crate::filter::RowFacts::of(
-            messages, packet, self.list, &flow, direction, self.zenoh,
+            messages,
+            packet,
+            self.produced,
+            self.list,
+            &flow,
+            direction,
+            self.zenoh,
         ))
     }
 
@@ -339,6 +356,7 @@ impl<'a> ListContext<'a> {
             place: None,
             zenoh: None,
             message: None,
+            produced: None,
         }
     }
 }
@@ -1488,6 +1506,7 @@ impl SessionGrouping {
             place: None,
             zenoh: self.words.get(list).copied().flatten(),
             message: None,
+            produced: None,
         }
     }
 

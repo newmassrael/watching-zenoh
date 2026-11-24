@@ -190,14 +190,33 @@ pub(crate) fn judged_by(
     if filter.is_any() {
         return None;
     }
-    Some(match coordinates {
+    let read = read_against_the_documents(d, filter, coordinates);
+    Some(RowJudgement::of(d, &read, grouping, map))
+}
+
+/// `filter` read against the numbers the documents print, before any row is
+/// judged: a `flow` term against the caller's list numbers where it numbers
+/// its lists itself ([`crate::filter::Filter::numbered_by`]), and a `row`
+/// term against the places [`row_ordinals`] gives the rows of `d`
+/// ([`crate::filter::Filter::rows_numbered_by`]). The places are counted only
+/// for a selector that names `row`.
+pub(crate) fn read_against_the_documents(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    coordinates: Option<&dyn RowCoordinates>,
+) -> crate::filter::Filter {
+    let numbered = match coordinates {
         Some(c) => {
             let lists = d.message_lists_with_origin().count();
-            let numbered = filter.numbered_by(lists, &|list| c.list_id(list));
-            RowJudgement::of(d, &numbered, grouping, map)
+            filter.numbered_by(lists, &|list| c.list_id(list))
         }
-        None => RowJudgement::of(d, filter, grouping, map),
-    })
+        None => filter.clone(),
+    };
+    if numbered.reads_row_ordinal() {
+        numbered.rows_numbered_by(&row_ordinals(d))
+    } else {
+        numbered
+    }
 }
 
 /// The selector's document, with each row carrying the
@@ -2244,6 +2263,50 @@ pub(crate) struct RenderedLists {
     /// after it USE, and folding them is what keeps this document's answer to
     /// "does this id resolve" the same as the census plane's.
     sub: alloc::vec::Vec<alloc::vec::Vec<usize>>,
+}
+
+/// THE PLACE OF EVERY ROW in the order the documents write rows: what a
+/// selector's `row` terms compare ([`crate::filter::RowOrdinals`]).
+///
+/// The order is the selection document's, which is the field document's: the
+/// stream flows, each in capture order (`FlowDissection::capture_order_from`,
+/// the order both walk), then each datagram flow's transport rows and its
+/// scouting rows. A list contributes every row it ever PRODUCED, the ones a
+/// ceiling has taken from its front included, so the place of a held row is the
+/// rows produced before it in the order and no trim moves it. A scouting row is
+/// never judged and holds its place all the same; a list no document writes (a
+/// recovered QUIC stream, a serial line) has no places.
+pub(crate) fn row_ordinals(d: &crate::Dissection) -> crate::filter::RowOrdinals {
+    let lists = RenderedLists::of(d);
+    let mut ordinals = crate::filter::RowOrdinals::default();
+    let mut next = 0u64;
+    for (i, flow) in d.flows().iter().enumerate() {
+        let produced = flow.frames.produced();
+        let first = produced - flow.frames.len() as u64;
+        if let Some(&list) = lists.stream.get(i) {
+            ordinals.write_list(list);
+            let order = flow
+                .capture_order_from(0, 0, None, usize::MAX)
+                .into_iter()
+                .flat_map(|(order, _, _)| order);
+            for (rank, position) in order.enumerate() {
+                ordinals.place(list, first + position as u64, next + first + rank as u64);
+            }
+        }
+        next += produced;
+    }
+    for (i, flow) in d.datagram_flows().iter().enumerate() {
+        let produced = flow.frames.produced();
+        let first = produced - flow.frames.len() as u64;
+        if let Some(&list) = lists.datagram.get(i) {
+            ordinals.write_list(list);
+            for at in first..produced {
+                ordinals.place(list, at, next + at);
+            }
+        }
+        next += produced + flow.scouting().produced();
+    }
+    ordinals.sorted()
 }
 
 impl RenderedLists {

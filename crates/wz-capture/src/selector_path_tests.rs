@@ -40,6 +40,7 @@ fn record(tree: Option<&RecordTree>) -> RecordView<'_> {
         source_delay_ms: None,
         outcome: None,
         zid: None,
+        receiver_zid: None,
         tree,
         row: None,
         e2e: None,

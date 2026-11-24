@@ -987,6 +987,17 @@ ONLY_CAPI = {
         "is no earlier answer for a later one to be relative to.",
         (),
     ),
+    # (ABI 60) -- the binder with the zone a list shows times in. Filed in the
+    # round that added the symbol.
+    "the offset a list shows times in, written onto a selector's clock times": (
+        "wz_dissect_selector_bind_in_zone",
+        "DELIBERATE. A `time` literal with no offset is read in UTC by both "
+        "surfaces, through the one parser. The door is for a list whose zone is "
+        "a setting the reader chose and not text the reader typed; a person at "
+        "the command line types the offset into the literal (`12:04+09:00`), "
+        "and `--select` reads it as every door does.",
+        (),
+    ),
     # (ABI 59) -- the same values, bounded to a window of sequence numbers.
     # Filed in the round that added the symbol.
     "a WINDOW of the typed values of a few payload field paths after a cursor": (

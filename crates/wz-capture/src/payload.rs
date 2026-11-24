@@ -1514,6 +1514,7 @@ impl PayloadCensus {
             // R2757 (open debt 790) — the node plane's answer, asked with the
             // same `direction` this record already carries.
             zid: ctx.zid(direction),
+            receiver_zid: ctx.zid(direction.peer()),
             unit_offset: crate::agg::record_unit_offset(frame, span),
             // R311y644 (§1.1p) — the census of clock-offset witnesses belongs
             // to the throughput plane, so this one reads the axis and does not
@@ -2152,7 +2153,7 @@ impl PayloadFold {
             // around a record.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.spaces,
             sink,

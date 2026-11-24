@@ -479,6 +479,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 59, for `wz_dissect_live_field_values_since_window`: the values document
     // for the records of at most `max_rows` sequence numbers, so the document
     // and its string are as large as a window. The document does not move.
+    // 60, for `wz_dissect_selector_bind_in_zone`: the binder with the offset a
+    // caller shows times in, written onto every `time` literal that has none.
+    // The `selector_bind` document does not move.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -496,7 +499,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 59;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 60;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3501,6 +3504,53 @@ pub unsafe extern "C" fn wz_dissect_selector_bind(
         }
     };
     write_string(wz_capture::filter::bind_json(expr, names), out)
+}
+
+/// ABI 60 -- [`wz_dissect_selector_bind`], with the offset from UTC the caller
+/// shows times in written onto every `time` literal of the selector that has
+/// none.
+///
+/// A `time` literal with no offset is read in UTC by every door, because which
+/// zone a reader's clock shows is not a fact a capture carries. The document is
+/// the binder's own, `selector_bind`, written by
+/// `wz_capture::filter::bind_json_in_zone`: the bound selector with the offset
+/// after each such literal, or the same refusals at the same positions.
+/// `utc_offset_minutes` is minutes east of UTC; past 23:59 either way it is
+/// `WZ_DISSECT_ERR_INVALID_ARG` and no string, as a null `selector` or `out`
+/// is.
+///
+/// # Safety
+/// As for [`wz_dissect_selector_bind`]: `selector` must be a NUL-terminated C
+/// string, `names_json` null or one, and `out` a writable pointer to a
+/// `*mut c_char`. `selector` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_bind_in_zone(
+    selector: *const c_char,
+    names_json: *const c_char,
+    utc_offset_minutes: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let names = if names_json.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(names_json) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    match wz_capture::filter::bind_json_in_zone(expr, names, utc_offset_minutes) {
+        Some(document) => write_string(document, out),
+        None => WZ_DISSECT_ERR_INVALID_ARG,
+    }
 }
 
 /// ABI 52 -- the selector a field document's node offers.
@@ -7176,7 +7226,8 @@ mod tests {
         // only be about the comparison.
         let sample = |field: &str| match field {
             "key" => "demo",
-            "zid" => "a1a1a1a1",
+            "zid" | "zids" => "a1a1a1a1",
+            "session" => "a1a1a1a1/b2b2b2b2",
             "dir" => "a",
             "kind" => "put",
             "closed" => "yes",
@@ -9849,7 +9900,7 @@ mod tests {
         // revision 10 the four `e2e` fields joining.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
@@ -9869,7 +9920,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":12},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -9979,6 +10030,84 @@ mod tests {
             },
             WZ_DISSECT_ERR_INVALID_ARG
         );
+        assert!(out.is_null());
+    }
+
+    /// (ABI 60) A `time` LITERAL WITH NO OFFSET GAINS THE CALLER'S, and nothing
+    /// else of the text moves: the zone binder writes the offset after each such
+    /// literal, inside the quotes of a quoted one, leaves a literal that has one
+    /// and an integer as written, binds node names as the binder does with its
+    /// refusals at positions in the text typed, and refuses an offset no zone
+    /// has with no string.
+    #[test]
+    fn the_zone_binder_writes_the_callers_offset_onto_each_unzoned_time() {
+        let typed = "time > 12:04 and time < \"2026-11-23 13:00\" or time == 5 or time > 1:00Z";
+        let bound = call_selector_bind_in_zone(typed, None, 540).expect("a readable text");
+        assert!(
+            bound.contains(
+                "\"ok\":true,\"selector\":\"time > 12:04+09:00 and time < \
+                 \\\"2026-11-23 13:00+09:00\\\" or time == 5 or time > 1:00Z\""
+            ),
+            "{bound}"
+        );
+        let west = call_selector_bind_in_zone("time >= 2026-11-23", None, -330).expect("readable");
+        assert!(
+            west.contains("\"selector\":\"time >= 2026-11-23-05:30\""),
+            "{west}"
+        );
+        let listed =
+            call_selector_bind_in_zone("time in {12:00, 13:00}", None, 0).expect("readable");
+        assert!(
+            listed.contains("\"selector\":\"time in {12:00+00:00, 13:00+00:00}\""),
+            "{listed}"
+        );
+
+        // Names are bound as the binder binds them, and a refusal points into
+        // the text typed, not the text with offsets written.
+        const CAM: &str = "ff0eedd0c0b0a0908070605040302011";
+        let table = format!(r#"{{"front camera":"{CAM}"}}"#);
+        let both = call_selector_bind_in_zone(
+            r#"node == "front camera" and time > 9:30"#,
+            Some(&table),
+            60,
+        )
+        .expect("readable");
+        assert!(
+            both.contains(&format!(
+                "\"selector\":\"zid == {CAM} and time > 9:30+01:00\""
+            )),
+            "{both}"
+        );
+        let unknown =
+            call_selector_bind_in_zone(r#"time > 9:30 and node == "radar""#, Some(&table), 60)
+                .expect("readable");
+        assert!(
+            unknown.contains("\"refusal\":\"unknown_node\"")
+                && unknown.contains("\"start\":16,\"end\":31"),
+            "{unknown}"
+        );
+
+        // What the binder hands back is a selector the doors take.
+        let file = census_capture();
+        assert!(call_census_where(&file, "time > 12:04+09:00").is_ok());
+        assert!(call_census_where(&file, "time > 12:04").is_ok());
+
+        // An offset past 23:59 is no zone's, and a null is refused; neither
+        // hands back a string.
+        for minutes in [1440, -1440, c_int::MAX, c_int::MIN] {
+            assert_eq!(
+                call_selector_bind_in_zone("time > 9:30", None, minutes),
+                Err(WZ_DISSECT_ERR_INVALID_ARG),
+                "{minutes}"
+            );
+        }
+        assert!(call_selector_bind_in_zone("time > 9:30", None, 1439).is_ok());
+        assert!(call_selector_bind_in_zone("time > 9:30", None, -1439).is_ok());
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_zone(core::ptr::null(), core::ptr::null(), 0, &mut out)
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
         assert!(out.is_null());
     }
 
@@ -10442,7 +10571,10 @@ mod tests {
         // 59, for `wz_dissect_live_field_values_since_window`: one symbol, the
         // values door with one more integer in, a `char*` released by
         // `wz_dissect_string_free` out; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 59);
+        // 60, for `wz_dissect_selector_bind_in_zone`: one symbol, the binder
+        // with one integer more in, a `char*` released by
+        // `wz_dissect_string_free` out; no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 60);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -11871,6 +12003,36 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         s
+    }
+
+    /// Drive the zone binder the way C does: the document on OK, the code on
+    /// anything else.
+    fn call_selector_bind_in_zone(
+        selector: &str,
+        names: Option<&str>,
+        minutes: c_int,
+    ) -> Result<String, c_int> {
+        let text = CString::new(selector).expect("no interior NUL");
+        let table = names.map(|n| CString::new(n).expect("no interior NUL"));
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_zone(
+                text.as_ptr(),
+                table.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                minutes,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refused call handed back a string");
+            return Err(rc);
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
     }
 
     /// Every shape the binder's verdict takes, success first.
