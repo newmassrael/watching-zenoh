@@ -51,6 +51,16 @@ pub enum RedeclareRefusal {
     Closed,
 }
 
+/// Who a declaration is reachable by: the localities its origin may be (`allowed_origin`) and the
+/// links it is declared on (`links`).
+#[derive(Debug, Clone, Copy)]
+pub struct DeclarationReach {
+    /// The localities a matching message may come from.
+    pub allowed_origin: Locality,
+    /// The links the declaration is made on.
+    pub links: LinkRestriction,
+}
+
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
 ///
 /// Every method takes `&self`: an engine is shared between the C session handle and every entity
@@ -608,33 +618,33 @@ pub trait SessionEngine: Send + Sync + 'static {
         self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink)
     }
 
-    /// [`Self::declare_queryable_on_wire`] limited to the links of `links`, as
+    /// [`Self::declare_queryable_on_wire`] limited to the links of `reach.links`, as
     /// [`Self::declare_subscriber_on_link_set`] limits a subscriber.
-    #[allow(clippy::too_many_arguments)]
     fn declare_queryable_on_link_set(
         &self,
         keyexpr: &str,
         wire: WireKey,
         complete: bool,
-        allowed_origin: Locality,
-        links: LinkRestriction,
+        reach: DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Result<QblId, Refusal> {
+        let DeclarationReach {
+            allowed_origin,
+            links,
+        } = reach;
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_queryable_on_wire(keyexpr, wire, complete, allowed_origin, retraction, sink)
     }
 
     /// [`Self::declare_queryable_row_on_wire`] limited to the links of `links`, as
     /// [`Self::declare_queryable_on_link_set`] limits the minting form. Provided as that form.
-    #[allow(clippy::too_many_arguments)]
     fn declare_queryable_row_on_link_set(
         &self,
         keyexpr: &str,
         wire: WireKey,
         complete: bool,
-        allowed_origin: Locality,
-        links: LinkRestriction,
+        reach: DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: QueryRowSink,
     ) -> Result<QblId, Refusal> {
@@ -642,8 +652,7 @@ pub trait SessionEngine: Send + Sync + 'static {
             keyexpr,
             wire,
             complete,
-            allowed_origin,
-            links,
+            reach,
             retraction,
             sink.into_minted(),
         )
