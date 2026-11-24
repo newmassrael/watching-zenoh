@@ -275,8 +275,9 @@ def parse_table(doc: object) -> tuple[float, dict[str, Row]]:
     """The tolerance and the rows of a table document; Refused with every finding when it is not
     one this gate can use."""
     if not isinstance(doc, dict) or not TABLE_KEYS <= set(doc) <= TABLE_KEYS | {CAPABILITIES_KEY}:
-        raise Refused(f"the table is an object with the keys {', '.join(sorted(TABLE_KEYS))} and, "
-                      f"besides, {CAPABILITIES_KEY}")
+        keys = ", ".join(sorted(TABLE_KEYS))
+        raise Refused(f"the table is an object with exactly the keys {keys}, and "
+                      f"{CAPABILITIES_KEY} besides them or not")
     findings: list[str] = []
     if doc["schema"] != SCHEMA:
         findings.append(f"the schema is not {SCHEMA}")
@@ -717,6 +718,7 @@ def selftest() -> int:
         (_table(**{"put-small": {"allocs_per_round": 1}}), "exactly the keys"),
         (_table(), "holds no family"),
         (json.dumps({"schema": SCHEMA}), "exactly the keys"),
+        (json.dumps({**json.loads(_table()), "extra": 1}), "exactly the keys"),
         ('{"about": 1, "about": 2}', "written twice"),
     ):
         status, shown = _run(_line("put-small", 0), doc)
