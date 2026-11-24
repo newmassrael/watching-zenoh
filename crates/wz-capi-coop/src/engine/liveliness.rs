@@ -29,26 +29,11 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-#[cfg(feature = "group")]
-use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 use wz_session_mcu::dial::McuActions;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
-
-/// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
-/// entity it names.
-#[cfg(feature = "group")]
-fn wire_key_of(form: WireForm<'_>) -> WireKey {
-    if form.mapping == 0 {
-        return WireKey::literal();
-    }
-    WireKey::aliased(
-        form.mapping,
-        (!form.suffix.is_empty()).then(|| String::from(form.suffix)),
-    )
-}
 
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
@@ -75,7 +60,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
             return;
         };
         let form = tables.wire_of(row.key());
-        let wire = wire_key_of(form);
+        let wire = super::group::wire_key_of(form);
         let retraction = row
             .key()
             .names_key()

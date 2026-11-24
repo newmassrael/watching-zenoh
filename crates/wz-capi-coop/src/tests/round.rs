@@ -51,7 +51,7 @@ impl Row {
             row: Box::new(SubscriberRow::new(
                 u32::from(tag),
                 None,
-                WireKey::literal(),
+                WireKey::literal().into_holds(),
                 sink,
                 true,
             )),
