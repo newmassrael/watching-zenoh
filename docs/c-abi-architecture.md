@@ -273,7 +273,7 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing` | 1 | open |
 | TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
-| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | open |
+| TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
@@ -297,6 +297,13 @@ is how a misspelt build value stops the build that holds it: the refusal of a `W
 no choice spells. Its indexing is the `ALL[index]` of `policy_generated.rs`, which `wz_config.py`
 writes. A generated key table is checked the other way: the library answers `try_new`, and the
 image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
+
+TD-109 (`reset_generations`) is SCE output: its one `unreachable!` is the `proven_duplicate`
+accessor the generator emits for each case of a tagged result
+(`out/wz-session-core/take_generation_result.rs:58`), which the module includes and never calls,
+since it matches the result's cases itself. The hand-written module holds no site; the row is
+paid by the generator (step 7), with an accessor that answers an `Option` or none for a case
+nothing reads.
 
 TD-137 (`held_list::one_entry`) is an `unreachable!` behind a fallible constructor: the
 bounds of a one-entry list are checked when the build is compiled, but `Bounded::new` answers an
