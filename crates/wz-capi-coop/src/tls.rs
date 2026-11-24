@@ -26,9 +26,10 @@
 use std::cell::Cell;
 use std::ffi::CString;
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use wz_capi_port::os::Mutex;
 use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
@@ -109,7 +110,7 @@ fn c_string(pem: &[u8]) -> Result<CString, HostTlsError> {
 fn identity(chain: &[u8], key: &[u8]) -> Result<&'static Identity, HostTlsError> {
     type Entry = (Vec<u8>, Vec<u8>, &'static Kept<Identity>);
     static MADE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
-    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut made = MADE.lock();
     if let Some((_, _, kept)) = made.iter().find(|(c, k, _)| c == chain && k == key) {
         return Ok(&kept.0);
     }
@@ -123,7 +124,7 @@ fn identity(chain: &[u8], key: &[u8]) -> Result<&'static Identity, HostTlsError>
 fn trust(roots: &[u8]) -> Result<&'static Trust, HostTlsError> {
     type Entry = (Vec<u8>, &'static Kept<Trust>);
     static MADE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
-    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut made = MADE.lock();
     if let Some((_, kept)) = made.iter().find(|(r, _)| r == roots) {
         return Ok(&kept.0);
     }

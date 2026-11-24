@@ -18,7 +18,7 @@
 //! ([`crate::runtime_limits`]), which its first door takes.
 
 use std::ffi::c_void;
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use wz_session_core::policy::SessionPolicy;
@@ -26,6 +26,7 @@ use wz_session_core::supervision::SupervisionState;
 use wz_session_core::supervisor::{BuildSupervisor, StartRefused, Stop, MAX_CHECKPOINTS};
 
 use super::Refusal;
+use crate::os::{Mutex, MutexGuard};
 
 /// The program's hook, run once for each checkpoint that expires, with the checkpoint's number.
 pub type HookFn = unsafe extern "C" fn(context: *mut c_void, checkpoint: u8);
@@ -85,7 +86,7 @@ fn doors() -> &'static Mutex<Doors> {
 }
 
 fn locked() -> MutexGuard<'static, Doors> {
-    doors().lock().unwrap_or_else(PoisonError::into_inner)
+    doors().lock()
 }
 
 /// Set the hook [`check`] calls for a checkpoint that missed its deadline, or clear it with

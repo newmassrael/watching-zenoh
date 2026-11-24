@@ -24,15 +24,9 @@
 
 use alloc::boxed::Box;
 use core::ffi::{c_char, c_void, CStr};
-// The doors' lock: `std`'s where the library has `std`, and the host's own without it
-// (`wz-host-sync`, the leaf both libraries that compile the doors link).
-#[cfg(feature = "std")]
-pub(crate) use std::sync::Mutex;
-#[cfg(feature = "std")]
-use std::sync::{MutexGuard, PoisonError};
-#[cfg(not(feature = "std"))]
+// The doors' lock: the host's (`wz-host-sync`, the leaf both libraries that compile the doors
+// link), with `std` or without, which takes no memory when it is first taken on any host.
 pub(crate) use wz_host_sync::Mutex;
-#[cfg(not(feature = "std"))]
 use wz_host_sync::MutexGuard;
 
 use crate::abi::z_owned_string_t;
@@ -77,30 +71,16 @@ pub(crate) unsafe fn bytes_arg<'a>(bytes: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// The lock, past a poison: a panic inside a call was caught at the door, and the state behind
-/// the lock moves only once a call has succeeded.
+/// The lock, taken as a panic left it: a panic inside a call was caught at the door, and the state
+/// behind the lock moves only once a call has succeeded.
 pub(crate) fn locked<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
-    #[cfg(feature = "std")]
-    {
-        value.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        value.lock()
-    }
+    value.lock()
 }
 
-/// The value a lock held, the lock gone, past a poison as [`locked`] reads it.
+/// The value a lock held, the lock gone, as [`locked`] reads it.
 #[cfg(feature = "replay-cache")]
 pub(crate) fn unlocked<T>(value: Mutex<T>) -> T {
-    #[cfg(feature = "std")]
-    {
-        value.into_inner().unwrap_or_else(PoisonError::into_inner)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        value.into_inner()
-    }
+    value.into_inner()
 }
 
 /// The value behind a loaned handle; `None` for a null pointer or the gravestone.

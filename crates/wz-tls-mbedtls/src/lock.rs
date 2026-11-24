@@ -18,13 +18,14 @@
 
 #[cfg(feature = "host-lock")]
 pub(crate) fn locked<R>(call: impl FnOnce() -> R) -> R {
-    use std::sync::{Mutex, PoisonError};
+    use wz_runtime_coop::cs::HostMutex;
 
-    static LIBRARY: Mutex<()> = Mutex::new(());
+    // The runtime's lock of one value, which takes no memory when it is first taken on any host:
+    // the first call may come after a session opened.
+    static LIBRARY: HostMutex<()> = HostMutex::new(());
     // A call that panicked (a transport's callback, say) leaves the library as it left it: the
     // state is the C side's, which a panic in Rust does not corrupt.
-    let _held = LIBRARY.lock().unwrap_or_else(PoisonError::into_inner);
-    call()
+    LIBRARY.with(|_| call())
 }
 
 #[cfg(not(feature = "host-lock"))]

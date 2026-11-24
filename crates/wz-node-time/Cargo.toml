@@ -31,15 +31,17 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-# `std`: the wall clock is `std`'s `SystemTime`, the clock's standing is under `std`'s lock and its
-# bound reads the environment (`UHLC_MAX_DELTA_MS`). On by default, which every host build has had.
+# `std`: the wall clock is `std`'s `SystemTime` and the clock's bound reads the environment
+# (`UHLC_MAX_DELTA_MS`). On by default, which every host build has had. The locks (the standing,
+# the event log, the clock registry, the time base) are `wz-host-sync`'s in its `std` build, which
+# take no memory when first taken on any host.
 # Without it the crate is `no_std` with `alloc`, for the pico C ABI's host library without `std`:
 # the wall clock and the lock are the host's own (`host-sync`), and the bound is the build's
 # `CLOCK_MAX_FORWARD_STEP_MS`, the same default, since a library has no environment of its own.
 # With neither the crate has no clock: the per-role switch and a node that holds none, and
 # `time-hlc` asks for one of the two.
 default = ["std"]
-std = []
+std = ["dep:wz-host-sync", "wz-host-sync/std"]
 # The host's wall clock and lock over its own calls (`wz-host-sync`), for a build without `std`.
 host-sync = ["dep:wz-host-sync"]
 # The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
@@ -76,7 +78,7 @@ time-base = ["std"]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The node's role, which the per-role switch reads.
 wz-codecs = { path = "../wz-codecs", default-features = false }
-# The host's wall clock and lock without `std` (`host-sync`).
+# The host's lock, and its wall clock without `std` (`host-sync`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 [dev-dependencies]
 # zenoh's own Hybrid Logical Clock crate, at the pin zenoh uses. The node clock is no longer built

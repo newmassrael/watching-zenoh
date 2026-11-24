@@ -14,7 +14,7 @@
 //! with its own layout version and size, so a reader of an older build can tell a newer one.
 
 use std::ffi::c_void;
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use wz_session_core::resource_snapshot::{
@@ -23,6 +23,7 @@ use wz_session_core::resource_snapshot::{
 };
 
 use super::Refusal;
+use crate::os::{Mutex, MutexGuard};
 
 /// The snapshot this build takes: `SNAPSHOT_HISTOGRAM_BUCKETS` buckets.
 type BuildSnapshot = Snapshot<{ wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>;
@@ -153,7 +154,7 @@ fn doors() -> &'static Mutex<Doors> {
 }
 
 fn locked() -> MutexGuard<'static, Doors> {
-    doors().lock().unwrap_or_else(PoisonError::into_inner)
+    doors().lock()
 }
 
 /// Set the source [`poll`] asks for the platform's readings, or clear it with `None`. With none

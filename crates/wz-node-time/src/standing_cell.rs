@@ -9,9 +9,6 @@
 //! whether the clock is trusted, so the stamping path reads a single load and never the lock.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "std")]
-use std::sync::{Mutex, MutexGuard, PoisonError};
-#[cfg(not(feature = "std"))]
 use wz_host_sync::{Mutex, MutexGuard};
 
 use wz_session_core::clock_quality::ClockQualityState;
@@ -55,16 +52,9 @@ impl StandingCell {
         self.report(ClockStanding::holdover_expired)
     }
 
-    /// The standing, under its lock (`std`'s, past a poison, or the host's own without `std`).
+    /// The standing, under the host's lock, as a holder that panicked left it.
     fn locked(&self) -> MutexGuard<'_, ClockStanding> {
-        #[cfg(feature = "std")]
-        {
-            self.standing.lock().unwrap_or_else(PoisonError::into_inner)
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            self.standing.lock()
-        }
+        self.standing.lock()
     }
 
     fn report(&self, event: impl FnOnce(&mut ClockStanding) -> bool) -> bool {

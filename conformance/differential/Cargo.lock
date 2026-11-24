@@ -3627,6 +3627,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "log",
  "wz-capi-port",
+ "wz-host-sync",
  "wz-node-time",
  "wz-session-core",
 ]
@@ -3708,6 +3709,7 @@ name = "wz-node-time"
 version = "0.1.0"
 dependencies = [
  "wz-codecs",
+ "wz-host-sync",
  "wz-session-core",
 ]
 

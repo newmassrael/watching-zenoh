@@ -19,10 +19,11 @@
 //! dispatches a message: masking interrupts for that long would hold off the network driver that
 //! delivers the next one. It is the kernel's blocking mutex, and a thread that waits on it sleeps.
 //!
-//! What `std` gives is what the engine had before this seam, so a host build behaves as it did:
-//! the same `std::sync::Mutex` (a poisoned one recovered, as the engine always did), the same
-//! `std::thread`. On macOS the lock is the one a host library without `std` holds instead, as
-//! `std`'s boxes a pthread object the first time it is taken and the port's lock takes no memory.
+//! On a host the mutex and the condition variable are `wz-host-sync`'s typed forms, with `std` or
+//! without: one lock that takes no memory when it is made, taken, waited on or notified, on every
+//! host (`std`'s own where it lies in its own bytes, the in-place one where `std`'s is a pthread
+//! object `std` boxes on its first take). A lock a panic let go is taken as it was left, as the
+//! engine always took it. The threads are `std::thread`'s with `std`.
 //!
 //! The functions an image provides without `std`:
 //!
@@ -51,18 +52,10 @@ pub use host::*;
 #[cfg(not(feature = "std"))]
 pub use system::*;
 
-// `std`'s lock and condition variable lie in their own bytes where the system waits on an address
-// (Linux's futex, Windows' slim lock). On macOS they are pthread objects, which must not move once
-// used, so `std` boxes each the first time it is taken: an object made after a session opened
-// would allocate on its first lock. There a `std` build holds the in-place lock a host library
-// without `std` holds, so taking a lock takes no memory on every host.
-#[cfg(any(
-    all(feature = "std", target_os = "macos"),
-    all(not(feature = "std"), feature = "os-sys")
-))]
-pub use in_place::{Condvar, Mutex, MutexGuard};
-#[cfg(all(feature = "std", not(target_os = "macos")))]
-pub use std_lock::{Condvar, Mutex, MutexGuard};
+// The host's lock and condition variable, with `std` and without (`os-sys`): the one that takes no
+// memory on any host.
+#[cfg(any(feature = "std", feature = "os-sys"))]
+pub use wz_host_sync::{Condvar, Mutex, MutexGuard};
 
 // Without `std` the same names are a kernel's, through the functions an image links, or a host's
 // own calls' in a host library built without `std` (`os-sys`): the feature chooses how the names
@@ -119,115 +112,6 @@ mod host {
     /// Sleep the calling thread for `ms` milliseconds.
     pub fn sleep_ms(ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
-    }
-}
-
-/// The host's lock and condition variable where `std`'s lie in their own bytes: `std`'s.
-#[cfg(all(feature = "std", not(target_os = "macos")))]
-mod std_lock {
-    use std::sync::PoisonError;
-
-    /// The process's mutex, as the engine held it before this seam.
-    pub struct Mutex<T>(std::sync::Mutex<T>);
-
-    /// What [`Mutex::lock`] hands back; the mutex is released when it is dropped.
-    pub type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
-
-    impl<T> Mutex<T> {
-        /// `value`, behind a new mutex.
-        pub const fn new(value: T) -> Self {
-            Self(std::sync::Mutex::new(value))
-        }
-
-        /// A new mutex written in `place` around the value `make` writes in the place it is
-        /// handed and lends back. The host's mutex is not written field by field, so the value is
-        /// made in a place of this frame and moved into the mutex once: a host's stack holds it.
-        /// A maker that lends back anything but the place it was handed has not written it there,
-        /// and is refused with a panic. `place` is overwritten without dropping what it held.
-        pub fn new_in(
-            place: &mut core::mem::MaybeUninit<Self>,
-            make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
-        ) -> &mut Self {
-            let mut value = core::mem::MaybeUninit::uninit();
-            let cell: *const T = value.as_ptr();
-            let made: *const T = make(&mut value);
-            assert!(
-                core::ptr::eq(made, cell),
-                "the value is written in the place it was handed"
-            );
-            // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing
-            // a `T` there (`MaybeUninit::write`).
-            place.write(Self::new(unsafe { value.assume_init() }))
-        }
-
-        /// Wait until the mutex is this thread's. A mutex poisoned by a panic still holds a
-        /// consistent value (every critical section of an engine leaves it so), and is recovered.
-        pub fn lock(&self) -> MutexGuard<'_, T> {
-            self.0.lock().unwrap_or_else(PoisonError::into_inner)
-        }
-
-        /// The mutex, when no thread holds it: `None` without waiting when one does. A poisoned
-        /// one is recovered, as [`Self::lock`] recovers it.
-        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-            match self.0.try_lock() {
-                Ok(guard) => Some(guard),
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => None,
-            }
-        }
-
-        /// The value, through the only reference there is.
-        pub fn get_mut(&mut self) -> &mut T {
-            self.0.get_mut().unwrap_or_else(PoisonError::into_inner)
-        }
-    }
-
-    impl<T: Default> Default for Mutex<T> {
-        fn default() -> Self {
-            Self::new(T::default())
-        }
-    }
-
-    /// The process's condition variable, waited on with a [`Mutex`]'s guard.
-    #[derive(Default)]
-    pub struct Condvar(std::sync::Condvar);
-
-    impl Condvar {
-        /// A condition variable no thread waits on.
-        pub fn new() -> Self {
-            Self(std::sync::Condvar::new())
-        }
-
-        /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
-        /// come without a notification, so the caller waits in a loop on its own condition.
-        pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
-            self.0.wait(guard).unwrap_or_else(PoisonError::into_inner)
-        }
-
-        /// [`Self::wait`] for at most `ms` milliseconds: the guard, and whether the time ran out
-        /// with no notification. A wake may come early, so the caller waits in a loop on its own
-        /// condition and its own deadline.
-        pub fn wait_timeout_ms<'a, T>(
-            &self,
-            guard: MutexGuard<'a, T>,
-            ms: u64,
-        ) -> (MutexGuard<'a, T>, bool) {
-            let (guard, waited) = self
-                .0
-                .wait_timeout(guard, std::time::Duration::from_millis(ms))
-                .unwrap_or_else(PoisonError::into_inner);
-            (guard, waited.timed_out())
-        }
-
-        /// Wake one waiting thread, if one waits.
-        pub fn notify_one(&self) {
-            self.0.notify_one();
-        }
-
-        /// Wake every waiting thread.
-        pub fn notify_all(&self) {
-            self.0.notify_all();
-        }
     }
 }
 
@@ -523,7 +407,7 @@ mod kernel {
 
 /// A host's, over its own calls (`os-sys`): for a host library built without `std`, which runs on
 /// a system with threads but has no `std::thread` or `std::sync` to reach them by. Its lock and
-/// condition variable are the in-place ones (`in_place`); a thread is the system's, its body and
+/// condition variable are `wz-host-sync`'s typed forms; a thread is the system's, its body and
 /// the word its end sets (which the system answers only by joining it) in a record of
 /// `wz-host-sync`'s static pool. Nothing here allocates.
 #[cfg(any(
@@ -587,7 +471,7 @@ mod sys {
         use core::sync::atomic::{AtomicBool, Ordering};
 
         use super::*;
-        use crate::os::in_place::{Condvar, Mutex};
+        use crate::os::{Condvar, Mutex};
 
         /// A spawned thread runs under an identity of its own, which is the one its spawn gave; it
         /// reads as running until its body has returned, and as finished after.
@@ -643,250 +527,6 @@ mod sys {
             }
             drop(ready);
             handle.join();
-        }
-    }
-}
-
-/// The host's lock and condition variable in place: `wz-host-sync`'s one word each, the value in
-/// the lock's own bytes, so making, taking, waiting on and notifying one take no memory. A host
-/// library without `std` holds them (`os-sys`), and so does a `std` build on macOS, whose own lock
-/// boxes a pthread object the first time it is taken. Every host's test build tests them.
-#[cfg(any(
-    all(feature = "std", target_os = "macos"),
-    all(not(feature = "std"), feature = "os-sys"),
-    all(test, feature = "os-sys"),
-    all(test, feature = "std", any(unix, windows))
-))]
-mod in_place {
-    use core::cell::UnsafeCell;
-    use core::mem::MaybeUninit;
-    use core::ops::{Deref, DerefMut};
-    use core::ptr::addr_of_mut;
-
-    use wz_host_sync::{RawCondvar, RawLock};
-
-    /// The host's lock around a value.
-    pub struct Mutex<T> {
-        raw: RawLock,
-        value: UnsafeCell<T>,
-    }
-
-    // SAFETY: the value is reached only through a guard, and the lock lets one thread hold a guard
-    // at a time.
-    unsafe impl<T: Send> Sync for Mutex<T> {}
-
-    impl<T> Mutex<T> {
-        /// `value`, behind a new mutex.
-        pub const fn new(value: T) -> Self {
-            Self {
-                raw: RawLock::new(),
-                value: UnsafeCell::new(value),
-            }
-        }
-
-        /// A new mutex written in `place` around the value `make` writes in the place it is
-        /// handed and lends back: neither the value nor the mutex is a value of its own on a
-        /// stack. A maker that lends back anything but the place it was handed has not written it
-        /// there, and is refused with a panic. `place` is overwritten without dropping what it
-        /// held.
-        pub fn new_in(
-            place: &mut MaybeUninit<Self>,
-            make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
-        ) -> &mut Self {
-            let at = place.as_mut_ptr();
-            // SAFETY: `at` is valid for writes of a `Self`, and each field is written once
-            // through a pointer to it: the value in its cell (`UnsafeCell<T>` and
-            // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back
-            // and so wrote it, then the lock.
-            unsafe {
-                let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
-                let field: *const T = cell.as_ptr();
-                let made: *const T = make(cell);
-                assert!(
-                    core::ptr::eq(made, field),
-                    "the value is written in the place it was handed"
-                );
-                addr_of_mut!((*at).raw).write(RawLock::new());
-                &mut *at
-            }
-        }
-
-        /// Wait until the mutex is this thread's.
-        pub fn lock(&self) -> MutexGuard<'_, T> {
-            self.raw.lock();
-            MutexGuard { mutex: self }
-        }
-
-        /// The mutex, when no thread holds it: `None` without waiting when one does (this one
-        /// included: the lock is not reentrant).
-        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-            if self.raw.try_lock() {
-                Some(MutexGuard { mutex: self })
-            } else {
-                None
-            }
-        }
-
-        /// The value, through the only reference there is.
-        pub fn get_mut(&mut self) -> &mut T {
-            self.value.get_mut()
-        }
-    }
-
-    impl<T: Default> Default for Mutex<T> {
-        fn default() -> Self {
-            Self::new(T::default())
-        }
-    }
-
-    /// What [`Mutex::lock`] hands back; the mutex is released when it is dropped.
-    pub struct MutexGuard<'a, T> {
-        mutex: &'a Mutex<T>,
-    }
-
-    impl<T> Deref for MutexGuard<'_, T> {
-        type Target = T;
-        fn deref(&self) -> &T {
-            // SAFETY: the guard holds the mutex, so no other reference to the value is live.
-            unsafe { &*self.mutex.value.get() }
-        }
-    }
-
-    impl<T> DerefMut for MutexGuard<'_, T> {
-        fn deref_mut(&mut self) -> &mut T {
-            // SAFETY: as for `deref`, and `&mut self` makes this the only one.
-            unsafe { &mut *self.mutex.value.get() }
-        }
-    }
-
-    impl<T> Drop for MutexGuard<'_, T> {
-        fn drop(&mut self) {
-            // SAFETY: this guard holds the mutex it unlocks.
-            unsafe { self.mutex.raw.unlock() }
-        }
-    }
-
-    /// The host's condition variable, waited on with a [`Mutex`]'s guard.
-    #[derive(Default)]
-    pub struct Condvar {
-        raw: RawCondvar,
-    }
-
-    impl Condvar {
-        /// A condition variable no thread waits on.
-        pub fn new() -> Self {
-            Self {
-                raw: RawCondvar::new(),
-            }
-        }
-
-        /// Release the guard's mutex, sleep until notified, and take the mutex again. A wake may
-        /// come without a notification, so the caller waits in a loop on its own condition.
-        pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
-            // SAFETY: the guard holds its mutex, which the wait releases and takes again before it
-            // returns, so the guard still holds it after.
-            unsafe { self.raw.wait(&guard.mutex.raw) };
-            guard
-        }
-
-        /// [`Self::wait`] for at most `ms` milliseconds of the host's monotonic clock: the guard,
-        /// and whether the time ran out with no notification. A wake may come early, so the caller
-        /// waits in a loop on its own condition and its own deadline.
-        pub fn wait_timeout_ms<'a, T>(
-            &self,
-            guard: MutexGuard<'a, T>,
-            ms: u64,
-        ) -> (MutexGuard<'a, T>, bool) {
-            let deadline =
-                wz_host_sync::monotonic_ns().saturating_add(ms.saturating_mul(1_000_000));
-            // SAFETY: as for `wait`.
-            let notified = unsafe { self.raw.wait_until(&guard.mutex.raw, deadline) };
-            (guard, !notified)
-        }
-
-        /// Wake one waiting thread, if one waits.
-        pub fn notify_one(&self) {
-            self.raw.notify_one();
-        }
-
-        /// Wake every waiting thread.
-        pub fn notify_all(&self) {
-            self.raw.notify_all();
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        extern crate std;
-
-        use alloc::sync::Arc;
-
-        use super::*;
-
-        /// A mutex made in its place holds the value its maker wrote there, and its lock is the
-        /// lock a mutex made by value has.
-        #[test]
-        fn a_mutex_made_in_its_place_holds_what_its_maker_wrote() {
-            let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
-            let mutex = Mutex::new_in(&mut place, |value| value.write(7));
-            let guard = mutex.lock();
-            assert!(mutex.try_lock().is_none(), "a held mutex is not given");
-            drop(guard);
-            assert_eq!(mutex.try_lock().map(|value| *value), Some(7));
-            // SAFETY: `new_in` wrote the whole mutex into `place`, and it is dropped once.
-            unsafe { place.assume_init_drop() };
-        }
-
-        /// A held mutex is not given to a try, by this thread or another, and is once let go;
-        /// `get_mut` reaches the value with no lock.
-        #[test]
-        fn a_held_mutex_is_tried_without_waiting() {
-            let mut mutex = Mutex::new(5);
-            *mutex.get_mut() = 6;
-            let guard = mutex.lock();
-            assert!(mutex.try_lock().is_none(), "a held mutex is not given");
-            drop(guard);
-            assert_eq!(mutex.try_lock().map(|value| *value), Some(6));
-        }
-
-        /// A waiter on the condition variable sees what its notifier wrote under the mutex, by
-        /// `notify_one` and by `notify_all`, and a timed wait no notification ends runs out.
-        /// Turned red by a wait that misses a notification (the test does not end) or a timed
-        /// wait that reads the time running out as a notification.
-        #[test]
-        fn a_waiter_sees_what_its_notifier_wrote_and_a_timed_wait_runs_out() {
-            let shared = Arc::new((Mutex::new(false), Condvar::new()));
-            let (guard, timed_out) = shared.1.wait_timeout_ms(shared.0.lock(), 20);
-            assert!(timed_out, "nothing notified");
-            drop(guard);
-            for all in [false, true] {
-                *shared.0.lock() = false;
-                let notifier = Arc::clone(&shared);
-                let thread = std::thread::spawn(move || {
-                    std::thread::sleep(core::time::Duration::from_millis(20));
-                    *notifier.0.lock() = true;
-                    if all {
-                        notifier.1.notify_all();
-                    } else {
-                        notifier.1.notify_one();
-                    }
-                });
-                let mut ready = shared.0.lock();
-                if all {
-                    let mut ran_out = false;
-                    while !*ready && !ran_out {
-                        (ready, ran_out) = shared.1.wait_timeout_ms(ready, 5_000);
-                    }
-                    assert!(!ran_out, "the notification ended the wait");
-                } else {
-                    while !*ready {
-                        ready = shared.1.wait(ready);
-                    }
-                }
-                assert!(*ready, "the wait ends once the flag is set");
-                drop(ready);
-                thread.join().expect("the notifier");
-            }
         }
     }
 }
@@ -1109,7 +749,8 @@ mod tests {
     }
 
     /// The in-place lock, which a host library without `std` and a `std` build on macOS hold,
-    /// takes no memory when first taken, waited on or notified, on the host the test runs on.
+    /// takes no memory when first taken, waited on or notified, on the host the test runs on,
+    /// whichever form the build chose for the port's own.
     ///
     /// # Control
     ///
@@ -1118,7 +759,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn the_in_place_lock_takes_no_memory_when_first_taken() {
-        use super::in_place::{Condvar as InPlaceCondvar, Mutex as InPlaceMutex};
+        use wz_host_sync::in_place::{Condvar as InPlaceCondvar, Mutex as InPlaceMutex};
         assert_eq!(
             allocations(first_use!(InPlaceMutex, InPlaceCondvar)),
             0,

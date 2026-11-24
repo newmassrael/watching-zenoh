@@ -1217,6 +1217,7 @@ dependencies = [
  "wz-codecs",
  "wz-conformance-build",
  "wz-ext-pubsub",
+ "wz-host-sync",
  "wz-node-time",
  "wz-runtime-posix",
  "wz-session-core",
@@ -1276,6 +1277,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "log",
  "wz-capi-port",
+ "wz-host-sync",
  "wz-node-time",
  "wz-session-core",
 ]
@@ -1367,6 +1369,7 @@ name = "wz-node-time"
 version = "0.1.0"
 dependencies = [
  "wz-codecs",
+ "wz-host-sync",
  "wz-session-core",
 ]
 
@@ -1406,6 +1409,7 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
+ "wz-host-sync",
  "wz-runtime-core",
  "wz-session-core",
 ]
