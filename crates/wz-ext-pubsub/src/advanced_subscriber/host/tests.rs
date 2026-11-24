@@ -1009,7 +1009,7 @@ fn shared_on_key(
     Arc::new(super::Shared::new(
         Arc::downgrade(&engine(script)),
         state,
-        base.into(),
+        super::fixed_key(base).expect("a key a session stores"),
         Locality::SessionLocal,
         1_000,
     ))
@@ -1313,4 +1313,26 @@ fn lent_callbacks_take_no_memory_and_are_let_go_once() {
         2,
         "the machine's drop let the sink go"
     );
+}
+
+/// A subscriber's key is kept inline in its shared part, so making the part takes no memory for
+/// it; a key longer than a session stores is refused before anything is declared.
+#[test]
+fn a_subscribers_key_is_kept_inline_and_one_too_long_is_refused() {
+    let before = allocations();
+    let key = super::fixed_key("demo/data");
+    let during = allocations() - before;
+    assert_eq!(during, 0, "keeping the key allocates nothing");
+    assert_eq!(key.map(|key| key.prefix() == "demo/data"), Some(true));
+
+    let script = Script::new(1);
+    let long = "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES + 1);
+    let refused = EngineSubscriber::declare(
+        &engine(&script),
+        long.as_str(),
+        AdvancedSubscriberOptions::new(),
+        |_| {},
+    );
+    assert!(matches!(refused, Err(HostError::Refused(_))));
+    assert!(script.events().is_empty(), "nothing was declared");
 }
