@@ -6664,7 +6664,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(wire.mapping_id, retraction.is_some());
-        let row = QueryableRow::new(id, retraction, wire, sink);
+        // The tables' row holds the declaration the key is named by, so the key's own hold of it
+        // is given back once the row stands, and the entity holds it once; the row keeps what
+        // else the key held.
+        let mut holds = wire.into_holds();
+        let named = holds.take_named();
+        let row = QueryableRow::new(id, retraction, holds, sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -6679,6 +6684,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // held goes back.
                 drop(guard);
                 let why = Declined::from(refused.why);
+                if let Some(named) = named {
+                    named.release(self);
+                }
                 self.give_back(refused.callback.into_holds());
                 return Err(why);
             }
@@ -6689,17 +6697,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         );
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce_queryable(declared.handle);
+        // So is each group.
         #[cfg(feature = "group")]
         {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.queryables().get(declared.handle) {
+                let wire = group::wire_key_of(tables.wire_of(row.key()));
                 core.transport.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Queryable {
                         complete: row.complete(),
                     },
                     entity: id,
                     keyexpr: row.key().as_str(),
-                    wire: row.callback().wire(),
+                    wire: &wire,
                     retraction: row.callback().retraction(),
                     allowed_origin,
                 });
@@ -6708,11 +6718,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A matching listener that counts the session's own queryables may now match: it is told,
         // outside the lock.
         #[cfg(feature = "local-queryable")]
-        {
-            self.read_matching(core);
-            drop(guard);
-            self.deliver();
+        self.read_matching(core);
+        drop(guard);
+        if let Some(named) = named {
+            named.release(self);
         }
+        #[cfg(feature = "local-queryable")]
+        self.deliver();
         Ok(id)
     }
 

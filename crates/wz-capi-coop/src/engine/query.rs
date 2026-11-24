@@ -47,7 +47,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey};
+use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -71,7 +71,8 @@ use super::{key_on_link, CoopEngine};
 
 /// One of the session's own queryables, as a row of the session's tables holds it: the row keeps
 /// the key the queryable answers for, whether it answers for the whole of it and the declaration
-/// its key is named by, and this everything else the session knows of it, its callback among it.
+/// its key is named by, which it holds, and this everything else the session knows of it, its
+/// callback among it.
 /// The queryable is that one row (`docs/c-abi-architecture.md`, P1), and so is its callback's life
 /// (P11): a call is begun on the row's latch as a query arrives, under the session's lock, and
 /// ended once the query was handed to the callback, or dropped unhanded, with no lock held; an
@@ -79,16 +80,10 @@ use super::{key_on_link, CoopEngine};
 pub(crate) struct QueryableRow {
     id: QblId,
     retraction: Option<RetractionKey>,
-    /// The key as the ABI named it: what a group is told it by, and what it keeps alive (the
-    /// declaration the ABI made it on), which goes with the row, let go of with no lock of the
-    /// session held.
-    #[cfg(feature = "group")]
-    wire: WireKey,
-    /// The key as the ABI named it, held for what it keeps alive alone (the declaration the ABI
-    /// made it on): a build without groups tells no one the key, and the declaration goes with
-    /// the row, let go of with no lock of the session held.
-    #[cfg(not(feature = "group"))]
-    keeps: WireKey,
+    /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
+    /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
+    /// of the session held.
+    holds: WireHolds,
     /// The program's callback, called where the row lies through a shared borrow, with the holder
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
@@ -98,30 +93,23 @@ pub(crate) struct QueryableRow {
 
 impl super::RowHolds for QueryableRow {
     fn into_holds(self) -> WireHolds {
-        #[cfg(feature = "group")]
-        let wire = self.wire;
-        #[cfg(not(feature = "group"))]
-        let wire = self.keeps;
-        wire.into_holds()
+        self.holds
     }
 }
 
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
-    /// answering through `sink`.
+    /// Queryable `id`, retracted as `retraction` names it, keeping `holds`, answering through
+    /// `sink`.
     pub(crate) fn new(
         id: QblId,
         retraction: Option<RetractionKey>,
-        wire: WireKey,
+        holds: WireHolds,
         sink: QueryableSink,
     ) -> Self {
         Self {
             id,
             retraction,
-            #[cfg(feature = "group")]
-            wire,
-            #[cfg(not(feature = "group"))]
-            keeps: wire,
+            holds,
             sink,
             latch: CallLatch::new(),
         }
@@ -130,12 +118,6 @@ impl QueryableRow {
     /// What its retraction names its key by, when its declaration asked to.
     pub(super) fn retraction(&self) -> Option<&RetractionKey> {
         self.retraction.as_ref()
-    }
-
-    /// The key as the ABI named it, which a group is told.
-    #[cfg(feature = "group")]
-    pub(super) fn wire(&self) -> &WireKey {
-        &self.wire
     }
 
     /// Hand `query` to the callback, its replies made through `responder` and its holds taken
@@ -515,6 +497,7 @@ mod round_tests {
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
     use crate::round::AnswersQueries;
+    use wz_capi_port::WireKey;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
     /// where they lie, the generation it came in under, and its encoding's packed id with where
@@ -581,7 +564,7 @@ mod round_tests {
         Box::new(QueryableRow::new(
             1,
             None,
-            WireKey::literal(),
+            WireKey::literal().into_holds(),
             QueryableSink::shared(|_, _, _| {}),
         ))
     }
