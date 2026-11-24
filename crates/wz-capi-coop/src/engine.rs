@@ -65,8 +65,8 @@ use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    kind, InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle,
-    MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, SessionTables,
+    kind, DeclaredRow, DeclaredTable, InterestHandle, InterestKind, InterestName, InterestRow,
+    KeyexprHandle, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, SessionTables,
     SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
@@ -3330,7 +3330,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .get(prefix)
                 .is_some_and(|row| row.holds() <= 1)
         })?;
-        Some(self.keyexpr_place(prefix))
+        Some(self.place_of(DeclaredRow::of(prefix)))
     }
 
     /// Tell the links whose peers were told of it, and each group the session joined, that the
@@ -5721,7 +5721,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // A new Interest is asked of each link from its row; one held already was asked.
         if let Some(opened) = watching.interest {
-            core.announce_interest(opened.handle);
+            core.announce(DeclaredRow::of(opened.handle));
         }
         // A listener that matches already is told so as it is declared, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
@@ -6349,7 +6349,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             "the tables number a row as they said they would"
         );
         // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce_subscriber(declared.handle);
+        core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
         #[cfg(feature = "group")]
         {
@@ -6396,7 +6396,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's
             // its key is named by.
-            let place = core.place(replay::Kind::LiveSub, rank);
+            let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
@@ -6451,7 +6451,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, ranked by the walk that found it, then the declaration's,
             // which comes before every subscriber.
-            let place = core.place(replay::Kind::Subscriber, rank);
+            let place = core.place(DeclaredTable::Subscribers, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
@@ -6513,7 +6513,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
         // refuses one it cannot carry.
-        let place = core.keyexpr_place(declared.handle);
+        let place = core.place_of(DeclaredRow::of(declared.handle));
         let taken = core.announce_or_undo_at(
             place,
             &|actions: &McuActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
@@ -6662,7 +6662,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // first to hold it, or the one taken for a filter that sends none.
         let spent = if ask.is_some() {
             if let Some(opened) = watching.interest {
-                core.announce_interest(opened.handle);
+                core.announce(DeclaredRow::of(opened.handle));
             }
             watching.interest.map(|opened| u64::from(opened.id))
         } else {
@@ -6880,7 +6880,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             "the tables number a row as they said they would"
         );
         // Each link is told it from the row, which names the key as the tables keep it.
-        core.announce_queryable(declared.handle);
+        core.announce(DeclaredRow::of(declared.handle));
         // So is each group.
         #[cfg(feature = "group")]
         {
@@ -7434,7 +7434,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the queryable's, ranked by the walk that found it, then the declaration's,
             // which comes before every queryable.
-            let place = core.place(replay::Kind::Queryable, rank);
+            let place = core.place(DeclaredTable::Queryables, rank);
             let keyexpr_place = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
@@ -7485,7 +7485,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let form = core.session.key_form(wire.mapping_id, named);
             let declared = tables_mut(&core.session.registry).declare_token(keyexpr, form)?;
-            core.announce_token(declared.handle);
+            core.announce(DeclaredRow::of(declared.handle));
             // A token takes no traffic of its own, so every group that is told tokens is told it.
             // It is held before it is announced (its row, which a peer's and a group member's
             // Interest are answered from), so a member that asks right after it hears the
@@ -7525,7 +7525,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         // The links are asked while the rows stand, which are their places in the replay's order:
         // the token's, then the declaration's, which comes before every token.
-        let token_place = core.token_place(handle);
+        let token_place = core.place_of(DeclaredRow::of(handle));
         let keyexpr_place = core.prefix_retraction(prefix);
         let Some(undeclared) = tables_mut(&core.session.registry).undeclare_token(handle) else {
             return;
@@ -7620,7 +7620,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .is_some();
         if stands {
             // Each link is asked from the row, as it stands now.
-            core.announce_liveliness(declared.handle);
+            core.announce(DeclaredRow::of(declared.handle));
             // And each group the session joined is asked, as its declarations say.
             #[cfg(feature = "group")]
             {

@@ -65,7 +65,7 @@ use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::row_callback::RowCallback;
 use crate::sink::RowAccess;
-use crate::slot_map::{Handle, Removal, SlotMap};
+use crate::slot_map::{Handle, Removal, SlotMap, Slots};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 use crate::wire_key::MappedId;
 
@@ -118,6 +118,76 @@ pub type WriteFilterHandle = Handle<kind::WriteFilter>;
 pub type MatchingListenerHandle = Handle<kind::MatchingListener>;
 /// A pending get's row.
 pub type PendingGetHandle = Handle<kind::PendingGet>;
+
+/// The tables of the declarations a session tells its peers, each named apart from its rows'
+/// type: what a walk of them in one order reads through [`SessionTables::slots_of`], and what a
+/// row of any of them is named by as data ([`DeclaredRow`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclaredTable {
+    /// The key expression declarations.
+    Keyexprs,
+    /// The subscribers.
+    Subscribers,
+    /// The Interests held open.
+    Interests,
+    /// The queryables.
+    Queryables,
+    /// The liveliness tokens.
+    Tokens,
+    /// The liveliness subscribers.
+    LivelinessSubscribers,
+}
+
+/// A kind of row kept in one of the tables of declarations ([`DeclaredTable`]).
+pub trait DeclaredKind {
+    /// The table its rows are kept in.
+    const TABLE: DeclaredTable;
+}
+
+impl DeclaredKind for kind::Keyexpr {
+    const TABLE: DeclaredTable = DeclaredTable::Keyexprs;
+}
+
+impl DeclaredKind for kind::Subscriber {
+    const TABLE: DeclaredTable = DeclaredTable::Subscribers;
+}
+
+impl DeclaredKind for kind::Interest {
+    const TABLE: DeclaredTable = DeclaredTable::Interests;
+}
+
+impl DeclaredKind for kind::Queryable {
+    const TABLE: DeclaredTable = DeclaredTable::Queryables;
+}
+
+impl DeclaredKind for kind::Token {
+    const TABLE: DeclaredTable = DeclaredTable::Tokens;
+}
+
+impl DeclaredKind for kind::LivelinessSubscriber {
+    const TABLE: DeclaredTable = DeclaredTable::LivelinessSubscribers;
+}
+
+/// A row of one of the tables of declarations, named as data: its table and the bits of its
+/// handle ([`Handle::to_bits`]). One value for every kind, so a caller that tells a peer of a
+/// declaration of any kind is one body that reads the kind, not one body for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclaredRow {
+    /// The table the row is kept in.
+    pub table: DeclaredTable,
+    /// The bits of the row's handle.
+    pub row: core::num::NonZeroU32,
+}
+
+impl DeclaredRow {
+    /// The row `handle` names.
+    pub fn of<K: DeclaredKind>(handle: Handle<K>) -> Self {
+        Self {
+            table: K::TABLE,
+            row: handle.to_bits(),
+        }
+    }
+}
 
 /// A face of the session, as its engine names it: the link a get was asked on.
 pub type FaceId = u64;
@@ -2781,6 +2851,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// The pending gets, as the tables keep them.
     pub fn pending_gets(&self) -> &PendingGetsKept<F, P> {
         &self.pending_gets
+    }
+
+    /// The slots of the table of declarations `table`, apart from its rows ([`Slots`]): none
+    /// where the tables keep no table of the kind.
+    pub fn slots_of(&self, table: DeclaredTable) -> Slots<'_> {
+        match table {
+            DeclaredTable::Keyexprs => self.keyexprs.slots(),
+            DeclaredTable::Subscribers => self.subscribers.slots(),
+            DeclaredTable::Interests => self.kept_interests().map_or(Slots::NONE, |t| t.slots()),
+            DeclaredTable::Queryables => self.kept_queryables().map_or(Slots::NONE, |t| t.slots()),
+            DeclaredTable::Tokens => self.kept_tokens().map_or(Slots::NONE, |t| t.slots()),
+            DeclaredTable::LivelinessSubscribers => self
+                .kept_liveliness_subscribers()
+                .map_or(Slots::NONE, |t| t.slots()),
+        }
     }
 
     /// The liveliness tokens' table, where the tables keep one.

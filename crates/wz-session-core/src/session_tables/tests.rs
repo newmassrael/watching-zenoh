@@ -2624,3 +2624,73 @@ fn a_variant_of_a_kind_not_kept_takes_no_room() {
     );
     assert!(core::mem::size_of::<Owes<Present>>() > core::mem::size_of::<&u8>());
 }
+
+/// Each table of declarations is read through its own slots, and a row of any of them named as
+/// data has the rank its table's walk gives it. Turned red by a table read through another
+/// kind's slots, each table holding a count of rows no other holds.
+#[test]
+fn each_table_of_declarations_is_read_through_its_own_slots() {
+    let mut tables = Tables::new();
+    let keyexpr = tables.declare_keyexpr("k").unwrap();
+    let subscribers = [
+        subscribe(&mut tables, "s0", Locality::Any, 0),
+        subscribe(&mut tables, "s1", Locality::Any, 1),
+    ];
+    let mut interests = Vec::new();
+    for key in ["i0", "i1", "i2"] {
+        let filter = tables
+            .declare_write_filter(Plane::Subscribers, key, false)
+            .unwrap();
+        interests.push(filter.interest.unwrap().handle);
+    }
+    let mut queryables = Vec::new();
+    for (n, key) in (0u32..).zip(["q0", "q1", "q2", "q3"]) {
+        let declared = tables
+            .declare_queryable(key, Locality::Any, false, KeyForm::default(), n)
+            .unwrap();
+        queryables.push(declared.handle);
+    }
+    let mut tokens = Vec::new();
+    for key in ["t0", "t1", "t2", "t3", "t4"] {
+        tokens.push(
+            tables
+                .declare_token(key, KeyForm::default())
+                .unwrap()
+                .handle,
+        );
+    }
+    let mut lives = Vec::new();
+    for (n, key) in (0u32..).zip(["l0", "l1", "l2", "l3", "l4", "l5"]) {
+        let declared = tables
+            .declare_liveliness_subscriber(key, false, KeyForm::default(), n)
+            .unwrap();
+        lives.push(declared.handle);
+    }
+    let lens = [
+        DeclaredTable::Keyexprs,
+        DeclaredTable::Subscribers,
+        DeclaredTable::Interests,
+        DeclaredTable::Queryables,
+        DeclaredTable::Tokens,
+        DeclaredTable::LivelinessSubscribers,
+    ]
+    .map(|table| tables.slots_of(table).len());
+    assert_eq!(lens, [1, 2, 3, 4, 5, 6]);
+    let last = [
+        DeclaredRow::of(keyexpr.handle),
+        DeclaredRow::of(subscribers[1].handle),
+        DeclaredRow::of(interests[2]),
+        DeclaredRow::of(queryables[3]),
+        DeclaredRow::of(tokens[4]),
+        DeclaredRow::of(lives[5]),
+    ];
+    for (declared, len) in last.into_iter().zip(lens) {
+        let slots = tables.slots_of(declared.table);
+        assert_eq!(slots.rank_of(declared.row), Some(len - 1));
+        assert_eq!(slots.nth_live(len - 1), Some(declared.row));
+    }
+    assert_eq!(
+        DeclaredRow::of(subscribers[0].handle).table,
+        DeclaredTable::Subscribers
+    );
+}
