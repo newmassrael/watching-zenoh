@@ -1264,6 +1264,14 @@ impl<T: GroupTransport> GroupTransport for GroupLink<T> {
     fn keep(&mut self) {
         self.0.transport.borrow_mut().keep();
     }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.0.transport.borrow().lends_until_next_receive()
+    }
+
+    fn give_back_rx(&mut self) -> Option<wz_session_core::byte_cells::ByteBuf> {
+        self.0.transport.borrow_mut().give_back_rx()
+    }
 }
 
 #[cfg(test)]

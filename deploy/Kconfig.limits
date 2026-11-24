@@ -973,6 +973,21 @@ config WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS
 	  the link itself ends. The tokio engine, the cooperative engine and the
 	  fixed-memory slot client read it alike.
 
+config WZ_LIMIT_HANDED_LEG_BYTES
+	int "HANDED_LEG_BYTES"
+	range 1 4294967295
+	default 4096
+	help
+	  How many bytes a session holds of the droppable publishes it owes its other
+	  faces when a publish finds the session held by a send that waits on one face:
+	  the publish is dropped on that face and kept, in room the session took at open,
+	  until whoever holds the session next sends it to the others. The room is cut
+	  into places of the batch the session advertises, one publish to a place, its key,
+	  payload and attachment together; a publish longer than a place, or one that
+	  finds every place held, is dropped on every face. The room is reserved only
+	  when the held-publish-drop policy keeps such publishes for the other faces. At
+	  least 1; a session may lower it and never raise it.
+
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
 	range 1 65535

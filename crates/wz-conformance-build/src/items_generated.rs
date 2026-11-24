@@ -334,6 +334,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_DECLARATION_SYNC_TX_NO_PROGRESS_MS",
         0,
     ),
+    ("HANDED_LEG_BYTES", "WZ_LIMIT_HANDED_LEG_BYTES", 4096),
     (
         "PICO_UNICAST_BATCH_BYTES",
         "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES",
@@ -562,5 +563,11 @@ pub const POLICIES: &[(&str, &str, &[&str], &str)] = &[
         "WZ_POLICY_KEY_WIRE_FORM",
         &["declared", "shared", "literal"],
         "declared",
+    ),
+    (
+        "held-publish-drop",
+        "WZ_POLICY_HELD_PUBLISH_DROP",
+        &["held-faces", "every-face"],
+        "held-faces",
     ),
 ];

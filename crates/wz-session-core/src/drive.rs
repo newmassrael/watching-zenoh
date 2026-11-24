@@ -2467,7 +2467,9 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         }
     };
     let facts = message.facts();
-    actions.observe_control(&facts.unchained());
+    // The facts every reader below that takes no chain reads, made once.
+    let unchained = facts.unchained();
+    actions.observe_control(&unchained);
     // R2825 — one transport message read off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
     note_rx_transport_message(actions);
@@ -2477,7 +2479,7 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
         unit.len()
     };
     let mut decided = None;
-    let outcome = match crate::inbound::control_event(message.ext_admission(), &facts.unchained()) {
+    let outcome = match crate::inbound::control_event(message.ext_admission(), &unchained) {
         Some(event) => decide_admitted(event, &facts, &mut decided, actions, engine),
         None => match facts {
             #[cfg(feature = "codec-keep-alive")]

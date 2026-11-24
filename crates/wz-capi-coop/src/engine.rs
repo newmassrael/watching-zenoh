@@ -29,8 +29,6 @@
 //! steps its session, or its read task, is what brings the link back.
 
 use alloc::borrow::Cow;
-#[cfg(any(feature = "listen", feature = "group"))]
-use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
@@ -45,10 +43,12 @@ use portable_atomic::AtomicU64;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(any(feature = "listen", feature = "group"))]
+use crate::arena::HandedTable;
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, EntityKind, EntityPlace,
-    EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables, SessionArena,
-    SessionRows, TransportTables,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
+    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables,
+    SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent, TableLender};
@@ -421,7 +421,7 @@ fn clock_beside(
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
 /// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
-fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
+pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
@@ -684,6 +684,9 @@ struct SessionLent {
     ended: EndedLegs,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
+    /// The places of the publishes the session keeps for its other faces, the engine's.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    handed: HandedTable,
     arena: SessionArena,
 }
 
@@ -739,6 +742,8 @@ fn lend_session(
         cells,
         reassembly,
         endpoints,
+        #[cfg(any(feature = "listen", feature = "group"))]
+        handed,
     } = plan.transport().lent_from(&mut lend);
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
@@ -810,6 +815,8 @@ fn lend_session(
         ended: EndedLegs::over(legs),
         handle_place,
         places,
+        #[cfg(any(feature = "listen", feature = "group"))]
+        handed,
         arena,
     })
 }
@@ -909,11 +916,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// timer or the drive, which it waits for.
     sending_on: AtomicU64,
     /// The droppable publishes that found the session held and were dropped on the faces its
-    /// holder waits on, owed to the session's other faces ([`HandedLeg`]), in the order they
+    /// holder waits on, owed to the session's other faces ([`HandedTable`]), in the order they
     /// were handed. A build of the dial face alone owes a dropped publish to no face, and keeps
     /// no queue.
     #[cfg(any(feature = "listen", feature = "group"))]
-    handed: Mutex<VecDeque<HandedLeg>>,
+    handed: Mutex<HandedTable>,
     /// Whether `handed` holds a leg, written under its lock: a publish that reads it clear takes
     /// no lock for the queue, which is otherwise two lock round trips on every put of a stream for
     /// what is almost always nothing. A publish that reads it stale leaves the leg to the next
@@ -1084,10 +1091,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_,
 /// up names for a wait for its room, kept outside [`Core`] so that a publish that finds the
 /// session held asks them with nothing of it held, and a read waits with them with nothing of it
 /// held. A face's handle is a value, held from the face's coming up until its link is lost or the
-/// face goes; one asked after its link went is a hint, as every answer is.
+/// face goes; one asked after its link went is a hint, as every answer is. Each face keeps its
+/// place in the table for as long as it holds one, so a publish dropped on a face names it by its
+/// place ([`DroppedOn`]).
 pub(crate) struct LinkRooms<W> {
     waits: W,
-    rooms: Mutex<Vec<(FaceId, WaitOn)>>,
+    rooms: Mutex<RoomTable>,
+}
+
+/// The faces that are up and what each names for a wait for its room, each at a place it keeps
+/// until it goes, and the mark of the last face that took a place: a set of places read at one
+/// mark names no face that took its place after it.
+struct RoomTable {
+    places: Vec<Option<RoomPlace>>,
+    mark: u64,
+}
+
+/// A face's place in the table of rooms.
+#[derive(Clone, Copy)]
+struct RoomPlace {
+    face: FaceId,
+    on: WaitOn,
+    /// The table's mark when the face took the place.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    since: u64,
+}
+
+impl RoomTable {
+    /// The place `face` holds, if it holds one.
+    fn place_of(&self, face: FaceId) -> Option<(usize, RoomPlace)> {
+        self.places
+            .iter()
+            .enumerate()
+            .find_map(|(at, place)| place.filter(|place| place.face == face).map(|p| (at, p)))
+    }
 }
 
 /// What a droppable publish that found the session held is told of the faces it would be sent
@@ -1105,7 +1142,7 @@ pub(crate) enum Room {
     /// holder does not hold would not stop pico's put.
     Stepping,
     /// These faces took no bytes within the wait.
-    Congested(Vec<FaceId>),
+    Congested(DroppedOn),
     /// No face that is up gives a wait to ask.
     Unasked,
     /// Nothing was asked: this face is held by another publish sending on it, and the queue
@@ -1216,7 +1253,10 @@ impl<W: LinkWaits> LinkRooms<W> {
     pub(crate) fn new(waits: W, faces: usize) -> Self {
         Self {
             waits,
-            rooms: Mutex::new(Vec::with_capacity(faces)),
+            rooms: Mutex::new(RoomTable {
+                places: Vec::with_capacity(faces),
+                mark: 0,
+            }),
         }
     }
 
@@ -1226,21 +1266,70 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 
     /// Hold `on`, what a wait for room on `face` waits on, in place of what the face named
-    /// before (the dial role's face, whose link is made again).
+    /// before (the dial role's face, whose link is made again), at the place the face holds, or
+    /// at the first free one.
     pub(crate) fn hold(&self, face: FaceId, on: WaitOn) {
-        let mut rooms = lock(&self.rooms);
-        rooms.retain(|(held, _)| *held != face);
-        rooms.push((face, on));
+        let mut guard = lock(&self.rooms);
+        let rooms = &mut *guard;
+        if let Some((at, held)) = rooms.place_of(face) {
+            if let Some(place) = rooms.places.get_mut(at) {
+                *place = Some(RoomPlace { on, ..held });
+            }
+            return;
+        }
+        rooms.mark = rooms.mark.wrapping_add(1);
+        let place = Some(RoomPlace {
+            face,
+            on,
+            #[cfg(any(feature = "listen", feature = "group"))]
+            since: rooms.mark,
+        });
+        if let Some(free) = rooms.places.iter_mut().find(|free| free.is_none()) {
+            *free = place;
+        } else {
+            rooms.places.push(place);
+        }
     }
 
-    /// Let go of what `face` named: its link is lost, or the face has gone.
+    /// Let go of what `face` named: its link is lost, or the face has gone. Its place is free.
     pub(crate) fn forget(&self, face: FaceId) {
-        lock(&self.rooms).retain(|(held, _)| *held != face);
+        let mut rooms = lock(&self.rooms);
+        if let Some((at, _)) = rooms.place_of(face) {
+            if let Some(place) = rooms.places.get_mut(at) {
+                *place = None;
+            }
+        }
     }
 
     /// Let go of what every face named: the faces' links are ended.
     pub(crate) fn forget_all(&self) {
-        lock(&self.rooms).clear();
+        lock(&self.rooms).places.clear();
+    }
+
+    /// The set of `face`'s place alone, as the table stands now: every face when it holds none,
+    /// since a publish dropped on a face no place names is dropped on all.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(crate) fn dropped_on(&self, face: FaceId) -> DroppedOn {
+        let rooms = lock(&self.rooms);
+        let mut set = DroppedOn::none(rooms.mark);
+        match rooms.place_of(face) {
+            Some((at, _)) => set.insert(at),
+            None => set.insert(usize::MAX),
+        }
+        set
+    }
+
+    /// Whether a publish dropped on `set` passes over `face`: one of the set, or one that took
+    /// its place after the set was read, as a transport that opened after a publish is not sent
+    /// it ([`DroppedOn::owes`]). A face with no place, which names no wait for its room, is sent
+    /// it: when it came is not known, and a droppable publish sent to a face that came after it
+    /// costs that face one message it could have missed, where passing it over could lose one the
+    /// face was owed.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(crate) fn skips(&self, set: &DroppedOn, face: FaceId) -> bool {
+        lock(&self.rooms)
+            .place_of(face)
+            .is_some_and(|(at, place)| !set.owes(at, place.since))
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
@@ -1262,10 +1351,15 @@ impl<W: LinkWaits> LinkRooms<W> {
         }
     }
 
-    /// The handle the face at `at` of the list names for a wait for its room, read under the lock,
-    /// which goes before the caller waits on it.
-    fn room_at(&self, at: usize) -> Option<(FaceId, WaitOn)> {
-        lock(&self.rooms).get(at).copied()
+    /// The place `at` of the table, read under the lock, which goes before the caller waits on
+    /// what it names: `None` past the table, and a free place as `Some(None)`.
+    fn room_at(&self, at: usize) -> Option<Option<RoomPlace>> {
+        lock(&self.rooms).places.get(at).copied()
+    }
+
+    /// The table's mark now.
+    fn mark(&self) -> u64 {
+        lock(&self.rooms).mark
     }
 
     /// Ask each face that is up for room, within `wait_us` in all: the first face that takes none
@@ -1273,39 +1367,33 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// deadline whatever the number of faces. Each face's handle is read under the lock and the
     /// lock let go before its wait: a wait blocks, and a face coming up must not wait behind it.
     /// A face that comes up or goes meanwhile may be asked or passed over, a hint as every answer
-    /// is; nothing is copied out of the lock but one handle at a time.
+    /// is; nothing is copied out of the lock but one handle at a time, and the faces that took no
+    /// bytes are named by their places, with nothing of the heap.
     pub(crate) fn within(&self, wait_us: u64) -> Room {
         let mut left_us = wait_us;
-        let mut congested = Vec::new();
-        let mut at = 0;
-        while let Some((face, on)) = self.room_at(at) {
-            at += 1;
+        let mut congested = DroppedOn::none(self.mark());
+        let mut asked = false;
+        let mut any = false;
+        let mut at = 0usize;
+        while let Some(place) = self.room_at(at) {
+            let here = at;
+            at = at.wrapping_add(1);
+            let Some(RoomPlace { on, .. }) = place else {
+                continue;
+            };
+            asked = true;
             if !self.waits.wait_room(on, left_us) {
-                congested.push(face);
+                congested.insert(here);
+                any = true;
                 left_us = 0;
             }
         }
-        match (at, congested.is_empty()) {
-            (0, _) => Room::Unasked,
-            (_, true) => Room::Free,
-            (_, false) => Room::Congested(congested),
+        match (asked, any) {
+            (false, _) => Room::Unasked,
+            (true, false) => Room::Free,
+            (true, true) => Room::Congested(congested),
         }
     }
-}
-
-/// A droppable publish that found the session held, dropped on the faces its holder waits on
-/// (`dropped_on`) and owed to the session's other faces: what zenoh's transports, each with a
-/// queue of its own, would still take, where this engine has one lock for every face (D8). Owned,
-/// since its caller has returned by the time it is sent ([`CoopEngine::send_handed`]).
-#[cfg(any(feature = "listen", feature = "group"))]
-struct HandedLeg {
-    keyexpr: String,
-    wire: WireKey,
-    payload: Vec<u8>,
-    /// The options without the attachment they borrowed, which the leg keeps beside them.
-    opts: PublishOptions<'static>,
-    attachment: Option<Vec<u8>>,
-    dropped_on: Vec<FaceId>,
 }
 
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
@@ -1328,7 +1416,7 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the dial face alone names no face: the one it holds is the one the publish is dropped on.
     DroppedOn {
         #[cfg(any(feature = "listen", feature = "group"))]
-        faces: Vec<FaceId>,
+        faces: DroppedOn,
         told: bool,
     },
 }
@@ -3943,9 +4031,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "shared-key-ids")]
             key_forms,
         };
+        // The publishes kept for the faces they were not dropped on are the engine's, which a
+        // publish reaches with the session held by another.
+        #[cfg(any(feature = "listen", feature = "group"))]
+        let handed = core::mem::take(&mut lent.handed);
         let (core, handle_place) =
             Self::core_of(links, clock, entropy, config, decided, &plan, lent);
-        Ok(Self::engine_of(core, handle_place))
+        #[cfg(any(feature = "listen", feature = "group"))]
+        let engine = Self::engine_of(core, handle_place, handed);
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        let engine = Self::engine_of(core, handle_place);
+        Ok(engine)
     }
 
     /// The session's state over `links`, on `clock` and `entropy`, out of `config`, what its open
@@ -4073,7 +4169,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The engine over `core`, held where its own handle (`this`) reaches it, with the ABI's
     /// handle's place `handle_place`. Out of line, so the open's measure shows it apart.
     #[inline(never)]
-    fn engine_of(core: Core<L, C>, handle_place: Option<HandlePlace>) -> Arc<Self> {
+    fn engine_of(
+        core: Core<L, C>,
+        handle_place: Option<HandlePlace>,
+        #[cfg(any(feature = "listen", feature = "group"))] handed: HandedTable,
+    ) -> Arc<Self> {
         let samples = core.lane.clone();
         let wire = core.wire_zid;
         #[cfg(feature = "queryable")]
@@ -4100,7 +4200,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             held_drop,
             sending_on: AtomicU64::new(NOT_SENDING),
             #[cfg(any(feature = "listen", feature = "group"))]
-            handed: Mutex::new(VecDeque::new()),
+            handed: Mutex::new(handed),
             #[cfg(any(feature = "listen", feature = "group"))]
             owed: AtomicBool::new(false),
             input_held: AtomicBool::new(false),
@@ -4482,7 +4582,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Room::Congested(faces) => ToPublish::DroppedOn { faces, told: false },
                 #[cfg(any(feature = "listen", feature = "group"))]
                 Room::Held(face) => ToPublish::DroppedOn {
-                    faces: vec![face],
+                    faces: self.rooms.dropped_on(face),
                     told: true,
                 },
                 // The dial face alone: the face congested, or held by another publish's send, is
@@ -4819,17 +4919,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 told,
             } => {
                 #[cfg(any(feature = "listen", feature = "group"))]
-                {
-                    let (kept, attachment) = opts.clone().into_owned_parts();
-                    self.hand_off(HandedLeg {
-                        keyexpr: String::from(keyexpr),
-                        wire: wire.clone(),
-                        payload: payload.to_vec(),
-                        opts: kept,
-                        attachment: attachment.map(<[u8]>::to_vec),
-                        dropped_on: faces,
-                    });
-                }
+                self.hand_off(keyexpr, payload, opts, faces);
                 return if told {
                     Err(FanoutError::HeldConduit)
                 } else {
@@ -4844,7 +4934,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // What was handed to the session before this publish leaves before it, and what was
         // handed while this publish held the session leaves after it.
         #[cfg(any(feature = "listen", feature = "group"))]
-        let before = self.send_handed(&core.0);
+        self.send_handed(&core.0);
         let put = Publication {
             keyexpr,
             wire,
@@ -4864,7 +4954,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         #[cfg(not(feature = "listen"))]
         let pass = EVERY_FACE;
-        let (outcome, stuck) = self.fan_out_in(&core.0, &put, &[], pass);
+        let (outcome, stuck) = self.fan_out_in(&core.0, &put, None, pass);
         #[cfg(feature = "listen")]
         let waiting = stuck.map(|face| {
             let wait_us = core.0.config.tx_queue.wait_before_close_us;
@@ -4874,13 +4964,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "listen"))]
         let _ = stuck;
         #[cfg(any(feature = "listen", feature = "group"))]
-        let after = self.send_handed(&core.0);
+        self.send_handed(&core.0);
         drop(publishing);
         drop(core);
-        // Let go of with nothing of the session held: a key a leg names may keep a declaration
-        // that is retracted as it drops, which takes the session (`WireKey`).
-        #[cfg(any(feature = "listen", feature = "group"))]
-        drop((before, after));
         #[cfg(feature = "listen")]
         if let Some(waiting) = waiting {
             return self.wait_for_slots(&put, waiting, outcome);
@@ -4922,7 +5008,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 from: order_key(stuck),
                 probe: waited && now_us < deadline_us,
             };
-            let (more, again) = self.fan_out_in(&core.0, put, &[], pass);
+            let (more, again) = self.fan_out_in(&core.0, put, None, pass);
             if more.is_err() {
                 outcome = more;
             }
@@ -4930,10 +5016,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Some(_) => core.0.links.owing_waits(),
                 None => Vec::new(),
             };
-            let handed = self.send_handed(&core.0);
+            self.send_handed(&core.0);
             drop(publishing);
             drop(core);
-            drop(handed);
             match again {
                 Some(face) => stuck = face,
                 None => return outcome,
@@ -4952,7 +5037,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         core: &Core<L, C>,
         put: &Publication<'_>,
-        skip: &[FaceId],
+        skip: Option<&DroppedOn>,
     ) -> Result<usize, FanoutError> {
         self.fan_out_in(core, put, skip, EVERY_FACE).0
     }
@@ -4966,7 +5051,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         core: &Core<L, C>,
         put: &Publication<'_>,
-        skip: &[FaceId],
+        skip: Option<&DroppedOn>,
         pass: Pass,
     ) -> (Result<usize, FanoutError>, Option<FaceId>) {
         let Publication {
@@ -4987,8 +5072,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut outcome = Ok(0);
         #[cfg(not(feature = "listen"))]
         let _ = pass;
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        let _ = skip;
         for (face, actions) in core.ups_by_id() {
-            if skip.contains(&face) {
+            #[cfg(any(feature = "listen", feature = "group"))]
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, face)) {
                 continue;
             }
             #[cfg(feature = "listen")]
@@ -5072,7 +5160,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // And each group the session joined, which its task frames and sends.
         #[cfg(feature = "group")]
         for group in &core.groups {
-            if skip.contains(&group.id()) {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.id())) {
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, group.id());
@@ -5092,92 +5180,97 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         (outcome, None)
     }
 
-    /// Owe `leg` to the session's faces it was not dropped on: it is sent by whoever next holds
-    /// the session for a publish or a read, ahead of what that holder sends, and here at once
-    /// when the session is free by now. Past the legs of its priority the session holds at most
-    /// it is dropped on the other faces too, as a message that finds its queue full is, and
-    /// counted as the one drop it already is.
-    // Out of line: the copy of a dropped leg is taken only when a holder drops the publish.
+    /// Owe the publish of `payload` on `keyexpr` with `opts` to the session's faces it was not
+    /// dropped on (`dropped_on`): it is kept in a place the session took at open and sent by
+    /// whoever next holds the session for a publish or a read, ahead of what that holder sends, and
+    /// here at once when the session is free by now. Past the publishes of its priority the session
+    /// keeps at most, or with no place for it, it is dropped on the other faces too, as a message
+    /// that finds its queue full is, and counted as the one drop it already is.
+    // Out of line: the copy of a dropped publish is taken only when a holder drops it.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(never)]
-    fn hand_off(&self, leg: HandedLeg) {
-        let priority = leg.opts.priority_band();
-        let refused = {
+    fn hand_off(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: &PublishOptions<'_>,
+        dropped_on: DroppedOn,
+    ) {
+        let priority = opts.priority_band();
+        {
             let mut handed = self.handed();
-            let held = handed
-                .iter()
-                .filter(|owed| owed.opts.priority_band() == priority)
-                .count();
-            if held < self.handed_at_most[priority as usize] {
-                handed.push_back(leg);
+            let room = self
+                .handed_at_most
+                .get(priority as usize)
+                .is_some_and(|most| handed.held_at(priority) < *most);
+            if room && handed.keep(keyexpr, payload, opts, dropped_on) {
                 self.owed.store(true, Ordering::SeqCst);
-                None
-            } else {
-                Some(leg)
             }
-        };
-        // Let go of outside the lock, as a leg that was sent is (`Self::publish_to_link`).
-        drop(refused);
+        }
         // The holder may have let go of the session since the publish found it held, with
         // nobody left to send what was handed.
         if let Some(core) = self.core.try_lock() {
             if !self.closed.load(Ordering::Acquire) {
-                let sent = self.send_handed(&core.0);
-                drop(core);
-                drop(sent);
+                self.send_handed(&core.0);
             }
         }
     }
 
     /// Send what was handed to the session ([`Self::hand_off`]), in the order it was handed, each
-    /// leg to the faces it was not dropped on. The legs are given back to be let go of once the
-    /// session is: a key a leg names may keep a declaration that is retracted as it drops.
-    /// The queue is taken whole, not drained into another collection: the legs leave in the order
-    /// they were handed either way, and a drain links the queue's drain and drop-guard code into
-    /// every cooperative build for nothing it needs (measured 2026-11-21).
+    /// publish to the faces it was not dropped on.
     // Out of line: four sends of a publish and of its hand-off ask it, each a copy inlined.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(never)]
-    fn send_handed(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
-        if !self.owed.load(Ordering::SeqCst) {
-            return VecDeque::new();
+    fn send_handed(&self, core: &Core<L, C>) {
+        if self.owed.load(Ordering::SeqCst) {
+            self.send_handed_now(core);
         }
-        self.send_handed_now(core)
     }
 
-    /// [`Self::send_handed`], looking at the queue under its lock whatever `owed` says: what a
-    /// read step sends, so a leg a publish passed over on a stale reading leaves on the next step.
+    /// [`Self::send_handed`], looking at the table under its lock whatever `owed` says: what a
+    /// read step sends, so a publish a holder passed over on a stale reading leaves on the next
+    /// step. Each publish is taken out under the table's lock, sent with the lock let go, since a
+    /// send may wait for room and a publish that finds the session held must not wait behind it,
+    /// and given back under the lock, so its place is free for the next. It is sent by its whole
+    /// key, which holds no declaration the session might retract meanwhile.
     #[cfg(any(feature = "listen", feature = "group"))]
-    fn send_handed_now(&self, core: &Core<L, C>) -> VecDeque<HandedLeg> {
-        let legs = {
-            let mut handed = self.handed();
-            self.owed.store(false, Ordering::SeqCst);
-            core::mem::take(&mut *handed)
-        };
-        for leg in &legs {
-            // The options the leg kept, over the attachment it kept beside them.
-            let mut opts: PublishOptions<'_> = leg.opts.clone();
-            opts.attachment = leg.attachment.as_deref();
-            let meta = opts.push_metadata();
-            // The caller was answered when the leg was handed.
-            let _ = self.fan_out(
-                core,
-                &Publication {
-                    keyexpr: &leg.keyexpr,
-                    wire: &leg.wire,
-                    payload: &leg.payload,
-                    opts: &opts,
-                    meta: &meta,
-                },
-                &leg.dropped_on,
-            );
+    fn send_handed_now(&self, core: &Core<L, C>) {
+        let whole = WireKey::literal();
+        loop {
+            let taken = {
+                let mut handed = self.handed();
+                let leg = handed.take_first();
+                if leg.is_none() {
+                    self.owed.store(false, Ordering::SeqCst);
+                }
+                leg
+            };
+            let Some(leg) = taken else {
+                return;
+            };
+            {
+                let opts = leg.options();
+                let meta = opts.push_metadata();
+                // The caller was answered when the publish was kept.
+                let _ = self.fan_out(
+                    core,
+                    &Publication {
+                        keyexpr: leg.keyexpr(),
+                        wire: &whole,
+                        payload: leg.payload(),
+                        opts: &opts,
+                        meta: &meta,
+                    },
+                    Some(leg.dropped_on()),
+                );
+            }
+            self.handed().give_back(leg);
         }
-        legs
     }
 
-    /// The queue of handed legs, held.
+    /// The table of handed publishes, held.
     #[cfg(any(feature = "listen", feature = "group"))]
-    fn handed(&self) -> MutexGuard<'_, VecDeque<HandedLeg>> {
+    fn handed(&self) -> MutexGuard<'_, HandedTable> {
         #[cfg(test)]
         self.takes.handed.fetch_add(1, Ordering::Relaxed);
         lock(&self.handed)
@@ -7654,8 +7747,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // whether a periodic job is due by the clock reading the step made.
         // What publishes handed to the session while it was held leaves on this step too, so a
         // program that only reads its session sends it; let go of once the session is.
-        #[cfg(any(feature = "listen", feature = "group"))]
-        let mut handed = VecDeque::new();
         let (stepped, jobs_due_ms) = match self.live() {
             Some(mut core) => {
                 core.0.links.waited(wait);
@@ -7664,15 +7755,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                     .store(stepped.is_some() && core.0.holds_input(), Ordering::Relaxed);
                 let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                {
-                    handed = self.send_handed_now(&core.0);
-                }
+                self.send_handed_now(&core.0);
                 (stepped.is_some(), jobs_due_ms)
             }
             None => (false, None),
         };
-        #[cfg(any(feature = "listen", feature = "group"))]
-        drop(handed);
         self.deliver();
         if let Some(started_ms) = jobs_due_ms {
             self.run_due_tickers(started_ms);
@@ -7860,6 +7947,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.dropping().end_links();
+        // The kept publishes' places lie in the session's arena, which the state's drop gives
+        // back: they are given back first.
+        #[cfg(any(feature = "listen", feature = "group"))]
+        lock(&self.handed).clear();
         // The round's tables lie in the session's arena, which the state's drop gives back: they
         // are let go of first, with the callbacks their records owe, each call ended before the
         // row it reads is dropped with the tables.

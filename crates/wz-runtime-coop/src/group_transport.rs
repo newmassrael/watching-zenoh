@@ -25,6 +25,8 @@
 
 use core::net::{Ipv4Addr, SocketAddr};
 
+use wz_session_core::byte_cells::ByteBuf;
+
 /// The interface a group is joined on and sent out of, in the form the group's family names one:
 /// IPv4 by an address the interface holds (`IP_ADD_MEMBERSHIP`'s `imr_interface`,
 /// `IP_MULTICAST_IF`), IPv6 by its index (`IPV6_JOIN_GROUP`'s `ipv6mr_interface`,
@@ -146,8 +148,9 @@ pub trait GroupTransport {
     }
 
     /// Lend the next inbound datagram and its source address to `f` WHERE THE
-    /// TRANSPORT HOLDS IT, and let it go once `f` returns; `false` when nothing
-    /// is queued. The source is the §3.2 peer key: an opaque equality key, so the
+    /// TRANSPORT HOLDS IT, and let it go once `f` returns, or, on a transport that
+    /// lends until its next receive ([`Self::lends_until_next_receive`]), once it
+    /// is next asked to receive; `false` when nothing is queued. The source is the §3.2 peer key: an opaque equality key, so the
     /// only requirement is that one peer's datagrams always carry the same one.
     /// `f` must not call back into the transport.
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
@@ -165,6 +168,24 @@ pub trait GroupTransport {
     /// bytes, from the same source, before any other datagram. Called after the lend returned.
     /// Does nothing on a transport that does not keep ([`Self::keeps_input`]).
     fn keep(&mut self) {}
+
+    /// Whether the bytes [`Self::recv_with`] lent stay where they lie until the transport is next
+    /// asked to receive: nothing it does meanwhile, its service included, writes them. A session
+    /// that holds what it was lent past the call then reads it there and asks for no other
+    /// datagram until it no longer does. The provided form answers `false`: the bytes are let go
+    /// of as the lend returns, and a session copies what it holds of them.
+    fn lends_until_next_receive(&self) -> bool {
+        false
+    }
+
+    /// The buffer the transport receives into, given back as the group is left, when it is one
+    /// its session lent it (`LinkTables`): the session keeps the buffer while it still reads a
+    /// datagram there, and its table has the buffer again once that ends. Asked after
+    /// [`Self::close`]; the transport receives nothing after it. `None`, the provided answer,
+    /// from a transport whose buffer is its own.
+    fn give_back_rx(&mut self) -> Option<ByteBuf> {
+        None
+    }
 }
 
 /// What a group's socket did with a datagram it was offered ([`GroupTransport::try_send_to_group`]).
@@ -230,6 +251,14 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 
     fn keep(&mut self) {
         (**self).keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        (**self).lends_until_next_receive()
+    }
+
+    fn give_back_rx(&mut self) -> Option<ByteBuf> {
+        (**self).give_back_rx()
     }
 }
 
@@ -383,5 +412,64 @@ mod tests {
             GroupSend::Sent,
             "CONTROL: a stack that cannot tell"
         );
+    }
+
+    /// A transport that says nothing of its buffer lends a datagram for the call only and gives
+    /// no buffer back; one that receives into a buffer its session lent says both through the box
+    /// a session holds it in, and gives the buffer back once. Turned red by a box that does not
+    /// pass either answer on, which would leave the session copying or the buffer with the
+    /// transport.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_lent_buffer_is_told_and_given_back_through_the_box() {
+        use wz_session_core::byte_cells::{ByteCells, ByteSource};
+
+        static CELLS: ByteCells<8, 1> = ByteCells::new();
+
+        struct Lent(Option<ByteBuf>);
+
+        impl GroupTransport for Lent {
+            fn open(&mut self) -> bool {
+                true
+            }
+
+            fn close(&mut self) {}
+
+            fn service(&self) {}
+
+            fn carrier_up(&self) -> bool {
+                true
+            }
+
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+
+            fn lends_until_next_receive(&self) -> bool {
+                true
+            }
+
+            fn give_back_rx(&mut self) -> Option<ByteBuf> {
+                self.0.take()
+            }
+        }
+
+        let mut own = Socket::default();
+        assert!(!own.lends_until_next_receive(), "lent for the call only");
+        assert!(own.give_back_rx().is_none(), "its buffer is its own");
+        let mut boxed: alloc::boxed::Box<dyn GroupTransport> =
+            alloc::boxed::Box::new(Lent(CELLS.claim()));
+        assert!(boxed.lends_until_next_receive());
+        let buf = boxed.give_back_rx().expect("the lent buffer");
+        assert!(boxed.give_back_rx().is_none(), "given back once");
+        assert_eq!(
+            CELLS.in_use(),
+            1,
+            "the buffer is the session's to let go of"
+        );
+        drop(buf);
+        assert_eq!(CELLS.in_use(), 0);
     }
 }

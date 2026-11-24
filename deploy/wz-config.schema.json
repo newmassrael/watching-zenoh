@@ -411,6 +411,18 @@
               "x-wz-binding": "open",
               "x-wz-mutability": "fixed",
               "x-wz-wire": "visible"
+            },
+            "held-publish-drop": {
+              "description": "What a droppable publish is dropped on when it finds the session held by a send that waits on one of its faces, in an engine that holds every face under one lock.",
+              "enum": [
+                "held-faces",
+                "every-face"
+              ],
+              "default": "held-faces",
+              "x-wz-scope": "session",
+              "x-wz-binding": "open",
+              "x-wz-mutability": "fixed",
+              "x-wz-wire": "visible"
             }
           },
           "additionalProperties": false
@@ -1386,6 +1398,19 @@
               "default": 0,
               "x-wz-kind": "parameter",
               "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "HANDED_LEG_BYTES": {
+              "description": "How many bytes a session holds of the droppable publishes it owes its other faces when a publish finds the session held by a send that waits on one face: the publish is dropped on that face and kept, in room the session took at open, until whoever holds the session next sends it to the others.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 4096,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "open",

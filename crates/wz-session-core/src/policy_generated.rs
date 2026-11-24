@@ -1000,6 +1000,53 @@ impl Default for KeyWireForm {
     }
 }
 
+/// `held-publish-drop`: What a droppable publish is dropped on when it finds the session
+/// held by a send that waits on one of its faces, in an engine that holds every face under
+/// one lock. `held-faces` drops it on the faces the send waits on and keeps it, in
+/// HANDED_LEG_BYTES of room the session reserves when it opens, until whoever holds the
+/// session next sends it to the other faces, as each of upstream's transports drops only on
+/// its own queue. `every-face` drops it on every face at once and reserves no room, as
+/// zenoh-pico, whose peers share one transmit lock, does.
+/// Upstream: Gives each transport a transmission queue of its own, so a droppable message
+/// that one transport's full queue drops is still queued on the session's other transports:
+/// `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a
+/// droppable message that finds it held is dropped for all of them (`vendor/zenoh-
+/// pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl ==
+/// Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldPublishDrop {
+    /// `held-faces`.
+    HeldFaces,
+    /// `every-face`.
+    EveryFace,
+}
+
+impl HeldPublishDrop {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::HeldFaces => "held-faces",
+            Self::EveryFace => "every-face",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["held-faces", "every-face"];
+    const ALL: [Self; 2] = [Self::HeldFaces, Self::EveryFace];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_HELD_PUBLISH_DROP");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for HeldPublishDrop {
+    /// The build default; a machine reads the value of the snapshot it is handed instead.
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// The value of every policy, as one snapshot: what a creator resolved and handed the machines of
 /// its scope. A machine reads a policy only through the accessor of its field, never from the
 /// build. Each value lies inside the build's domain of its policy ([`PolicyValue::DOMAIN`]), and a
@@ -1135,6 +1182,14 @@ pub struct SessionPolicy {
     /// declared to that peer first, or by the whole key; a peer reads an id only when it
     /// was declared to it, and refuses one it never was.
     key_wire_form: KeyWireFormBound,
+    /// `held-publish-drop`. Upstream: Gives each transport a transmission queue of its own,
+    /// so a droppable message that one transport's full queue drops is still queued on the
+    /// session's other transports: `held-faces`. zenoh-pico's peers of one unicast
+    /// transport share one transmit lock, and a droppable message that finds it held is
+    /// dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret =
+    /// _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-
+    /// face`.
+    held_publish_drop: HeldPublishDropBound,
 }
 
 impl SessionPolicy {
@@ -1174,6 +1229,7 @@ impl SessionPolicy {
             handshake_stray_message: Bound::build_default(),
             handshake_cookie: Bound::build_default(),
             key_wire_form: Bound::build_default(),
+            held_publish_drop: Bound::build_default(),
         }
     }
 
@@ -1625,6 +1681,20 @@ impl SessionPolicy {
         value: KeyWireForm,
     ) -> Result<(), OutsideDomain<KeyWireForm>> {
         self.key_wire_form = Bound::select(value)?;
+        Ok(())
+    }
+
+    /// `held-publish-drop` as this snapshot holds it.
+    pub const fn held_publish_drop(&self) -> HeldPublishDrop {
+        self.held_publish_drop.get()
+    }
+
+    /// Selects `held-publish-drop`, when the build's domain holds `value`.
+    pub fn select_held_publish_drop(
+        &mut self,
+        value: HeldPublishDrop,
+    ) -> Result<(), OutsideDomain<HeldPublishDrop>> {
+        self.held_publish_drop = Bound::select(value)?;
         Ok(())
     }
 }
@@ -3674,9 +3744,51 @@ impl PolicyField for KeyWireForm {
     }
 }
 
+/// How `held-publish-drop` is held: in no byte when its domain is one value.
+type HeldPublishDropBound = Bound<HeldPublishDrop, { HeldPublishDrop::HELD }>;
+
+impl PolicyValue for HeldPublishDrop {
+    const POLICY: &'static str = "held-publish-drop";
+    const ALL: &'static [Self] = &[Self::HeldFaces, Self::EveryFace];
+    const IDS: &'static [&'static str] = &["held-faces", "every-face"];
+    const DOMAIN: Domain<Self> = Domain::from_stated(
+        &[
+            option_env!("WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_HELD_FACES"),
+            option_env!("WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_EVERY_FACE"),
+        ],
+        Self::DEFAULT as usize,
+        DEFAULTS_ONLY,
+    );
+    const DEFAULT: Self = Self::stated();
+    const SCOPE: Scope = Scope::Session;
+    const BINDING: Binding = Binding::Open;
+    const MUTABILITY: Mutability = Mutability::Fixed;
+    const WIRE: Wire = Wire::Visible;
+    const BOUNDARY: Option<&'static str> = None;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const _: () = assert!(
+    default_is_allowed::<HeldPublishDrop>(HeldPublishDrop::DEFAULT as usize),
+    "the default of held-publish-drop is outside its WZ_POLICY_*_ALLOWS_*"
+);
+
+impl PolicyField for HeldPublishDrop {
+    fn select_in(policy: &mut SessionPolicy, value: Self) -> Result<(), OutsideDomain<Self>> {
+        policy.select_held_publish_drop(value)
+    }
+
+    fn held_in(policy: &SessionPolicy) -> Self {
+        policy.held_publish_drop.get()
+    }
+}
+
 /// How many policies the declaration states: the length of [`POLICIES`] and of every table kept
 /// per policy.
-pub const POLICY_COUNT: usize = 32;
+pub const POLICY_COUNT: usize = 33;
 
 /// Every policy as a reader that names it by its id sees it, in the order of the fields of
 /// [`SessionPolicy`].
@@ -3713,6 +3825,7 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<HandshakeStrayMessage>(),
     PolicyEntry::of::<HandshakeCookie>(),
     PolicyEntry::of::<KeyWireForm>(),
+    PolicyEntry::of::<HeldPublishDrop>(),
 ];
 
 /// The profile `upstream`: Every policy at upstream's behaviour, stated explicitly, so a
@@ -3754,6 +3867,7 @@ const PROFILE_UPSTREAM: Profile = Profile {
         Statement::new("handshake-stray-message", "fail"),
         Statement::new("handshake-cookie", "stateless"),
         Statement::new("key-wire-form", "declared"),
+        Statement::new("held-publish-drop", "held-faces"),
     ],
 };
 

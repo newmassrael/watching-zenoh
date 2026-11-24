@@ -430,6 +430,10 @@ pub struct LinkTables {
     /// buffer for each link.
     places: Option<LentByteCells>,
     slot_len: usize,
+    /// The receive buffers of the multicast groups the session may join, one for each, which a
+    /// group claims when it is joined; `None` when the session lent none, and a group's stack
+    /// then gives it a buffer of its own.
+    group_rx: Option<LentByteCells>,
 }
 
 impl LinkTables {
@@ -441,6 +445,7 @@ impl LinkTables {
             tx,
             places: None,
             slot_len,
+            group_rx: None,
         }
     }
 
@@ -452,7 +457,25 @@ impl LinkTables {
             tx,
             places: Some(places),
             slot_len: tx.size(),
+            group_rx: None,
         }
+    }
+
+    /// These tables with `group_rx`, a receive buffer for each multicast group the session may
+    /// join: a group joined claims one, and gives it back when it is left.
+    #[must_use]
+    pub const fn with_group_rx(self, group_rx: LentByteCells) -> Self {
+        Self {
+            group_rx: Some(group_rx),
+            ..self
+        }
+    }
+
+    /// The table a group the session joins claims its receive buffer from: `None` when the
+    /// session lent none, and a joined group's stack gives it a buffer of its own. A group that
+    /// finds every buffer of a lent table held is refused, as a link that finds no storage is.
+    pub const fn group_rx(&self) -> Option<LentByteCells> {
+        self.group_rx
     }
 
     /// The receive and the outbound storage of one link ([`LinkRx`], [`LinkTxStore`]), or `None`
@@ -1012,5 +1035,26 @@ mod tests {
             "its own stays"
         );
         assert!(!none.lends(), "a link of no slots lends nothing");
+    }
+
+    /// Tables lent a group receive table hand it on, each buffer claimed once until given back,
+    /// and tables lent none have none. Turned red by a table the tables lose, or one they hand
+    /// out to a group past its buffers.
+    #[test]
+    fn the_group_receive_table_is_the_one_the_tables_were_lent() {
+        let plain = tables(1, 16, 1, 1, 16);
+        assert!(plain.group_rx().is_none(), "tables lent no group table");
+        let mut arena = arena_of(Arena::byte_cells_bytes(32, 1).expect("fits"));
+        let groups = arena.lend_byte_cells(32, 1).expect("the group table");
+        let lent = plain.with_group_rx(groups);
+        let table = lent.group_rx().expect("the group table");
+        assert_eq!(table.size(), 32);
+        let held = table.claim().expect("the one buffer");
+        assert!(table.claim().is_none(), "a second group finds none");
+        drop(held);
+        assert!(
+            table.claim().is_some(),
+            "the buffer given back is claimed again"
+        );
     }
 }
