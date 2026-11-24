@@ -204,6 +204,8 @@ pub fn zenoh_initial_sn(sender_zid: &[u8], receiver_zid: &[u8], sn_mask: u64) ->
 pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    // Out of line: the byte loop is unrolled, and the two zids would carry a copy each.
+    #[inline(never)]
     fn absorb(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = (hash ^ bytes.len() as u64).wrapping_mul(FNV_PRIME);
         for &byte in bytes {
