@@ -13,7 +13,7 @@ use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_core::plane_lock::LockFamily;
-use wz_session_core::round::{RoundCall, RoundCalls, SampleCall};
+use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
 use wz_session_core::sink::SampleView;
 
 #[cfg(feature = "query")]
@@ -145,6 +145,14 @@ impl RoundCalls for CoopCalls {
     type Tally = Handed;
     #[cfg(not(all(test, feature = "std")))]
     type Tally = ();
+}
+
+impl PlaneCalls for CoopCalls {
+    #[cfg(feature = "local-queryable")]
+    type LocalAnswers = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "local-queryable"))]
+    type LocalAnswers = wz_session_core::session_tables::Absent;
+    type Queues = crate::engine::CoopLocks;
 }
 
 /// The port's lock, as the lock the round keeps what answers its queries under.

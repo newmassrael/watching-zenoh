@@ -6,7 +6,7 @@
 //! What the session's registry hands a leg's pending entry happens under the session's lock, and a
 //! callback of the program never runs there, so the entry's sink ([`LegSink`]) hands each reply
 //! on to be called after the lock: to the thread that made it, for an answer of the session's own
-//! queryables ([`GetCalls::LocalAnswers`]); to the session's round of deliveries
+//! queryables ([`PlaneCalls::LocalAnswers`]); to the session's round of deliveries
 //! ([`crate::round`]) otherwise. What the entry's consolidation held to its end waits in the rows
 //! it was held in, due ([`LegHold`]), and what the entry gave up whole in the plane's held table;
 //! the leg's end is said when the entry is dropped (its Final, its deadline, its cancellation, the
@@ -43,22 +43,17 @@ use crate::plane_lock::{LockFamily, Pending, Queued};
 use crate::reply::InboundReply;
 use crate::reply_hold::{HeldReplies, HeldReply, HoldRefused, ReplyHold};
 use crate::reply_sink::{ReplySink, ReplyView};
-use crate::round::{LegHolders, Round, RoundCalls};
+use crate::round::{LegHolders, PlaneCalls, Round};
 use crate::session_tables::Presence;
 use crate::timestamp_visibility::HiddenReplyTimestamp;
 use crate::wire_id::RequestId;
 
-/// What the get plane is made of in an engine's own types, beyond what its round owes: a leg is
-/// the place of its callback's row ([`LegId`]), and the engine names how a callback is called,
-/// whether the session's own queryables answer its gets, and the locks of the plane's queues.
-pub trait GetCalls: RoundCalls<Leg = LegId> {
-    /// Whether the session's own queryables answer a get of the session on the thread that holds
-    /// the session's lock, which takes the callback of the leg the answer reaches
-    /// ([`GetPlane::capture`]).
-    type LocalAnswers: Presence;
-    /// The locks of the plane's queues, which every delivery looks at ([`Queued`]).
-    type Queues: LockFamily;
-
+/// What the get plane is made of in an engine's own types, beyond what its planes share: a leg is
+/// the place of its callback's row ([`LegId`]), and the engine names how a callback is called.
+/// Whether the session's own queryables answer its gets, which takes the callback of the leg the
+/// answer reaches ([`GetPlane::capture`]), and the locks of the plane's queues ([`Queued`]) are
+/// the planes' ([`PlaneCalls`]).
+pub trait GetCalls: PlaneCalls<Leg = LegId> {
     /// Hand `reply` to `callback`.
     fn call(callback: &Self::ReplyCallback, reply: &dyn ReplyView);
 

@@ -1335,7 +1335,7 @@ impl ArenaPlan {
             0
         };
         // The Finals held for those queries and the requests a dispatch refused for want of a
-        // row, a row of each for each query held (`engine::query::FinalHolds`).
+        // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`).
         #[cfg(feature = "queryable")]
         {
             let held = plan.session.held_queries;
