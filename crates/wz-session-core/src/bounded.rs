@@ -722,6 +722,18 @@ pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
 }
 
 impl<T, const N: usize> BoundedVec<T, N, Lent> {
+    /// The `room` rows at `base`, a span an arena lent, none of them holding a value yet: the
+    /// table `Arena::lend` hands out, made by the caller that lent the span itself.
+    ///
+    /// # Safety
+    /// `base` is aligned for `T`, and the `room` rows of `T` from it are valid for reads and
+    /// writes, hold no value and are used by nothing else for as long as the table lives.
+    pub(crate) const unsafe fn lent_over(base: NonNull<T>, room: u32) -> Self {
+        // SAFETY: the caller's contract, which is `LentSeq::lent`'s.
+        let inner = unsafe { LentSeq::lent(base, room) };
+        Self { inner }
+    }
+
     /// The next row, for `write` to build a value in where the table keeps it, counted as held
     /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
     /// every row it was lent. For a value too large to be one of its own in a frame, which
@@ -1442,16 +1454,16 @@ impl Arena {
         // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
-        let inner = unsafe { LentSeq::lent(at.cast::<T>(), room) };
-        Ok(BoundedVec { inner })
+        Ok(unsafe { BoundedVec::lent_over(at.cast::<T>(), room) })
     }
 
     /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
     /// rows taking `bytes` (`None` past the address space), at most `ceiling`, and the rows
     /// counted in 32 bits. Refused, taking nothing, past the ceiling, past what is left or past a
-    /// 32-bit count.
+    /// 32-bit count. A table of several columns lends each through this, in one body of its own
+    /// for every row type (`slot_map`).
     #[inline(never)]
-    fn lend_rows(
+    pub(crate) fn lend_rows(
         &mut self,
         rows: usize,
         ceiling: usize,
