@@ -15,6 +15,7 @@
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::ObserverCell;
 
 use crate::slot_client::DocumentSinks;
@@ -28,7 +29,7 @@ pub struct PlaneContext<'a, C: ClockSource + 'static> {
     /// The observer the node's sessions dispatch to; a plane's events go to it too.
     pub observer: &'static ObserverCell<DocumentSinks>,
     /// The node's zenoh id.
-    pub zid: &'a [u8],
+    pub zid: SessionZid,
     /// The value of every policy the node's machines read: the snapshot the node's creator
     /// resolved, which a plane's sessions are made with as the node's own are.
     pub policy: &'a SessionPolicy,

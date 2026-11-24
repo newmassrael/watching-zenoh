@@ -788,7 +788,10 @@ mod tests {
         let mut driver = ScriptedScoutLink::with(observed);
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
-            zid: Some(wz_session_core::session_init_params::zid_bytes(OUR_ZID)),
+            zid: Some(
+                wz_session_core::session_zid::SessionZid::new(OUR_ZID)
+                    .expect("a 1 to 16 byte zid, not all zero"),
+            ),
             timeout_ms: 400,
             exit_on_first: false,
         });

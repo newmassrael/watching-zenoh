@@ -698,6 +698,11 @@ impl NodeIdentity {
         self.zid.as_slice()
     }
 
+    /// The zenoh id as the value a session and a plane are made with.
+    pub fn session_zid(&self) -> SessionZid {
+        self.zid
+    }
+
     /// The zenoh id in its hex form, in fixed text.
     pub fn zid_hex(&self) -> FixedText<33> {
         let mut text: FixedText<33> = FixedText::new();
@@ -744,7 +749,7 @@ impl NodeIdentity {
             lease_ms: 10_000,
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
-            cookie: cookie_bytes(&[]),
+            cookie: cookie_bytes([]),
             tx_queue: TxQueueConf::of_snapshot(
                 policy,
                 &wz_session_core::limits::SessionLimits::BUILD,
@@ -1212,12 +1217,7 @@ where
         let local = CoopLocalSet::new(&runtime);
         let zid_text = identity.zid_hex();
         // The plane advertises the node's zid, which the factory is about to take with the identity.
-        let mut zid = [0u8; ZID_MAX];
-        let zid_len = identity.zid().len();
-        // A zid is at most `ZID_MAX` bytes by its type.
-        if let Some(into) = zid.get_mut(..zid_len) {
-            into.copy_from_slice(identity.zid());
-        }
+        let zid = identity.session_zid();
 
         // The verbs are the node's own, so their key names it: its zid, and the mode it is (a
         // client, which `NodeIdentity::params` presents; the peer it shows a node that opened a
@@ -1281,7 +1281,7 @@ where
         let plane = plane.start(PlaneContext {
             runtime: runtime.clone(),
             observer,
-            zid: zid.get(..zid_len).unwrap_or_default(),
+            zid,
             policy: &policy,
             limits,
         });
@@ -1577,7 +1577,6 @@ mod tests {
     use wz_session_core::caps::{MAX_QUERYABLES, MAX_SUBSCRIPTIONS};
     use wz_session_core::reliability::Reliability;
     use wz_session_core::sample_kind::SampleKind;
-    use wz_session_core::session_init_params::zid_bytes;
     use wz_session_core::sink::BorrowedSample;
 
     /// A watch over counters that are one number, with a report every 5 s.
@@ -1710,7 +1709,10 @@ mod tests {
         let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
         let params = identity.params(1472, &SessionPolicy::defaults(), &SessionLimits::BUILD);
         assert_eq!(params.whatami, WhatAmI::Client);
-        assert_eq!(params.zid, zid_bytes(&[1, 2, 3, 4]));
+        assert_eq!(
+            params.zid,
+            wz_session_core::session_zid::SessionZid::from_array([1, 2, 3, 4])
+        );
         assert_eq!(params.batch_size, 1472);
         assert_eq!(params.lease_ms, 10_000);
         assert_eq!(params.seq_num_res, 2);
@@ -2031,13 +2033,15 @@ mod tests {
             reliability: Reliability::Reliable,
         };
         let reached = observer
-            .borrow_mut()
+            .try_borrow_mut()
+            .expect("an idle observer lends")
             .tables
             .subscribers
             .dispatch_borrowed(&view("demo/in", b"21.5!"), true);
         assert_eq!(reached, 1);
         let reached = observer
-            .borrow_mut()
+            .try_borrow_mut()
+            .expect("an idle observer lends")
             .tables
             .subscribers
             .dispatch_borrowed(&view("demo/elsewhere", b"x"), true);
@@ -2108,7 +2112,15 @@ mod tests {
         let observer = held
             .get()
             .expect("the observer was built before the refusal");
-        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 2);
+        assert_eq!(
+            observer
+                .try_borrow_mut()
+                .expect("an idle observer lends")
+                .tables
+                .subscribers
+                .len(),
+            2
+        );
         assert_eq!(
             stated_declared.all().len(),
             2,
@@ -2126,7 +2138,15 @@ mod tests {
             control_declared,
         )
         .expect("the build's limits take it");
-        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 3);
+        assert_eq!(
+            observer
+                .try_borrow_mut()
+                .expect("an idle observer lends")
+                .tables
+                .subscribers
+                .len(),
+            3
+        );
         assert_eq!(control_declared.all().len(), 3);
     }
 

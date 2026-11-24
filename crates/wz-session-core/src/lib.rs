@@ -684,12 +684,6 @@ pub mod peer_init_caps;
 // AP-only as a free fn in the tokio crate (getrandom has no MCU
 // backend, and the orphan rule forbids a cross-crate inherent method).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-073 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod signing_key;
 
 /// R2760 — the accept cookie that CARRIES the acceptor's state, so the
@@ -751,8 +745,6 @@ pub mod locator_directory;
 /// R311ei moving SigningKey here. No codec coupling — drives the session
 /// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-086 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
 pub mod session_init_params;
 
 // Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
@@ -2054,8 +2046,6 @@ pub mod session_memory;
 /// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
 /// that holds several peers in one session (`tests/it/files/slot_observer_heap.rs`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-095 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
@@ -2223,12 +2213,6 @@ pub mod session_slot;
 // signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types across feature states (R311g1).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-// Totality debt TD-076 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod reconnect;
 
 /// What a session still waits for from its peer before its declarations are SYNCED:

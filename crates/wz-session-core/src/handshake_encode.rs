@@ -948,14 +948,14 @@ mod tests {
         use alloc::vec;
         crate::session_init_params::SessionInitParams {
             whatami: WhatAmI::Peer,
-            zid: crate::session_init_params::zid_bytes(&[0x01; 4]),
+            zid: crate::session_zid::SessionZid::from_array([0x01; 4]),
             seq_num_res: 0,
             req_id_res: 0,
             batch_size: 0,
             lease_ms,
             keep_alive: crate::session_init_params::KeepAliveConf::default(),
             initial_sn: 0,
-            cookie: crate::session_init_params::cookie_bytes(&[]),
+            cookie: crate::session_init_params::cookie_bytes([]),
             tx_queue: crate::session_init_params::TxQueueConf::of_snapshot(
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,

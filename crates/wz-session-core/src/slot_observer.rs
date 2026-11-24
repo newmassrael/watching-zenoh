@@ -931,8 +931,8 @@ enum CellState {
 pub struct AlreadyInitialised;
 
 /// The process-wide observer's place, for a `static`: empty until [`Self::init_with`]
-/// builds the observer in it, once, and lent through [`Self::borrow_mut`] after that,
-/// one holder at a time (the rule `RefCell` keeps, with the same panic on a second).
+/// builds the observer in it, once, and lent through [`Self::try_borrow_mut`] after that,
+/// one holder at a time (the rule `RefCell` keeps, refused as a value on a second).
 ///
 /// It exists for the observer's size. A `RefCell<SlotObserverOf>` can only be filled by
 /// value, and the value passes through every call that hands it on: on a 32 KB stack the
@@ -955,8 +955,8 @@ impl<K: ObserverSinks> ObserverCell<K> {
     }
 
     /// Build the observer in the cell (nothing registered) and hand it to `register`,
-    /// which holds it while it runs. The cell is `Held` meanwhile, so a `borrow_mut`
-    /// from inside `register` is the panic it would be on a `RefCell`.
+    /// which holds it while it runs. The cell is `Held` meanwhile, so a `try_borrow_mut`
+    /// from inside `register` lends nothing.
     ///
     /// # Errors
     ///
@@ -986,29 +986,14 @@ impl<K: ObserverSinks> ObserverCell<K> {
     }
 
     /// Lend the observer, or `None` for a cell with no observer yet or one a guard
-    /// holds.
+    /// holds: a dispatch reached from inside a dispatch, which the profile's one
+    /// cooperative task never does, is refused rather than lent twice.
     pub fn try_borrow_mut(&self) -> Option<ObserverGuard<'_, K>> {
         if self.state.get() != CellState::Idle {
             return None;
         }
         self.state.set(CellState::Held);
         Some(ObserverGuard { cell: self })
-    }
-
-    /// Lend the observer.
-    ///
-    /// # Panics
-    ///
-    /// On a cell with no observer yet and on one a guard holds: a dispatch reached
-    /// from inside a dispatch, which the profile's one cooperative task never does.
-    pub fn borrow_mut(&self) -> ObserverGuard<'_, K> {
-        match self.state.get() {
-            CellState::Idle => {}
-            CellState::Empty => panic!("the observer cell was borrowed before it was built"),
-            CellState::Held => panic!("the observer cell is already borrowed"),
-        }
-        self.state.set(CellState::Held);
-        ObserverGuard { cell: self }
     }
 }
 
@@ -1680,14 +1665,15 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
         {
             let subscribers = &self.tables;
-            dropped += self.remote_subscribers.flush_declarations_on_link_loss(
-                &mut peers.remote_subscribers,
-                &|c| {
-                    (c.locality.allows_local()
-                        && subscribers.has_local_matching(c.keyexpr.as_str()))
-                        || others.subscribes(c)
-                },
-            );
+            dropped =
+                dropped.saturating_add(self.remote_subscribers.flush_declarations_on_link_loss(
+                    &mut peers.remote_subscribers,
+                    &|c| {
+                        (c.locality.allows_local()
+                            && subscribers.has_local_matching(c.keyexpr.as_str()))
+                            || others.subscribes(c)
+                    },
+                ));
         }
         #[cfg(all(
             feature = "declare-queryable",
@@ -1696,16 +1682,18 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         ))]
         {
             let queryables = self.tables.queryables();
-            dropped += self.remote_queryables.flush_declarations_on_link_loss(
-                &mut peers.remote_queryables,
-                &|c| {
-                    (c.locality.allows_local()
-                        && queryables.is_some_and(|queryables| {
-                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
-                        }))
-                        || others.answers(c)
-                },
-            );
+            dropped =
+                dropped.saturating_add(self.remote_queryables.flush_declarations_on_link_loss(
+                    &mut peers.remote_queryables,
+                    &|c| {
+                        (c.locality.allows_local()
+                            && queryables.is_some_and(|queryables| {
+                                queryables
+                                    .has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                            }))
+                            || others.answers(c)
+                    },
+                ));
         }
         #[cfg(all(
             feature = "declare-queryable",
@@ -1713,11 +1701,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-declare"
         ))]
         {
-            dropped += self
-                .remote_queryables
-                .flush_declarations_on_link_loss(&mut peers.remote_queryables, &|c| {
-                    others.answers(c)
-                });
+            dropped = dropped.saturating_add(
+                self.remote_queryables
+                    .flush_declarations_on_link_loss(&mut peers.remote_queryables, &|c| {
+                        others.answers(c)
+                    }),
+            );
         }
         let _ = (&peers, others);
         dropped

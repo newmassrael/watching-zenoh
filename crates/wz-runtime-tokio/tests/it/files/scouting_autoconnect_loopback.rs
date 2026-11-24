@@ -203,7 +203,10 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
         .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
         what: 0x03, // ROUTER | PEER — what this node is looking for.
-        zid: Some(wz_session_core::session_init_params::zid_bytes(SCOUT_ZID)),
+        zid: Some(
+            wz_session_core::session_zid::SessionZid::new(SCOUT_ZID)
+                .expect("a 1 to 16 byte zid, not all zero"),
+        ),
         timeout_ms: 300,
         // SURVEY mode: every responder in the window, not just the first. This is
         // the arm `autoconnect_all` runs in; `--scout` uses the other one.

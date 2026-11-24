@@ -5748,7 +5748,7 @@ mod tests {
         let policy = crate::policy::SessionPolicy::defaults();
         let params = crate::multicast_params::MulticastParams {
             whatami: crate::WhatAmI::Peer,
-            zid: crate::multicast_params::zid_vec(&[0x61, 0x62]),
+            zid: crate::session_zid::SessionZid::from_array([0x61, 0x62]),
             lease_ms: 7_000,
             join_interval_ms: 250,
             seq_num_res: 0x02,

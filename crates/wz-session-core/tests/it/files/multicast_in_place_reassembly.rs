@@ -35,7 +35,7 @@ use wz_session_core::driver_loop::{IterationEvent, ReassemblyDropReason};
 use wz_session_core::extfragment::FRAGMENT_FIRST_EXT_ID;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
-use wz_session_core::multicast_params::{zid_vec, GroupJoinRule, MulticastParams};
+use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
 use wz_session_core::multicast_rx::dispatch_multicast_inbound_reassembling;
 use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
@@ -46,7 +46,8 @@ const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: zid_vec(zid),
+        zid: wz_session_core::session_zid::SessionZid::new(zid)
+            .expect("a 1 to 16 byte zid, not all zero"),
         lease_ms: 5_000,
         join_interval_ms: 1,
         seq_num_res: 0x02,

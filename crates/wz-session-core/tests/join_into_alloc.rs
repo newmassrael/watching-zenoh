@@ -24,7 +24,7 @@ use std::cell::Cell;
 use sce_forge_runtime::codec::SliceSink;
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::multicast_join::{encode_join, encode_join_into, JOIN_MAX_BYTES};
-use wz_session_core::multicast_params::{zid_vec, MulticastParams};
+use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::sn::{mask_from_res, MulticastTxConduits};
 
@@ -74,7 +74,7 @@ fn allocations_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
 fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: zid_vec(&[0xab; 8]),
+        zid: wz_session_core::session_zid::SessionZid::from_array([0xab; 8]),
         lease_ms: 10_000,
         join_interval_ms: 2_500,
         seq_num_res: 0x02,
