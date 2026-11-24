@@ -28,7 +28,7 @@ use crate::bounded::{CapacityFull, KeyBacking, KeyMaker, KeyUnkept, Profile, Sto
 use crate::caps;
 use crate::id_map::{IdMap, KeyText};
 use crate::wire_id::ExprId;
-use crate::wireexpr_resolve::{KeyexprBuf, OwnMappingSpace};
+use crate::wireexpr_resolve::{KeyexprOut, OwnMappingSpace};
 
 /// The key expressions a session declared, by the id it gave each, in the storage policy `P`.
 pub struct DeclaredKeyexprs<P: Storage = Profile> {
@@ -104,7 +104,7 @@ impl<P: Storage> OwnMappingSpace for DeclaredKeyexprs<P> {
     fn append_own_mapping(
         &self,
         id: ExprId,
-        out: &mut KeyexprBuf,
+        out: &mut dyn KeyexprOut,
     ) -> Option<Result<(), CapacityFull<()>>> {
         self.literal(id).map(|literal| out.push_str(literal))
     }
@@ -196,6 +196,7 @@ impl LinkKeyexprs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wireexpr_resolve::KeyexprBuf;
 
     /// A declaration is read back by its id, a second one under the same id takes its place, and
     /// a forgotten one reads nothing, on the growable policy and on the fixed one alike.

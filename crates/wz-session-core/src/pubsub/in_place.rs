@@ -30,9 +30,11 @@
 //! instead, counted in [`InPlaceFallbacks`]: a Put whose payload is a list of
 //! slices (joined or resolved into a buffer of its own by
 //! `put_payload::collect_wire_payload`), and a Put whose resolved keyexpr is
-//! longer than [`crate::wireexpr_resolve::KeyexprBuf`], which only
-//! the fixed bounded backing refuses. Each is still delivered, as the copying
-//! path delivers it.
+//! longer than the buffer it is composed in, which only a fixed buffer refuses: a
+//! fixed [`crate::wireexpr_resolve::KeyexprBuf`], or the row the lent policy lends at
+//! open ([`crate::wireexpr_resolve::ComposeRow`]). Each is still delivered, as the
+//! copying path delivers it, where the build has that path; a build that lends only
+//! (`rx-lent-only`) counts it and drops it.
 
 #[cfg(feature = "alloc")]
 use core::cell::OnceCell;
@@ -50,7 +52,9 @@ use crate::sample_kind::SampleKind;
 use crate::sink::{FanOut, SampleDelivery, SampleView};
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 use crate::wireexpr_resolve::resolve_plain_parts_over;
-use crate::wireexpr_resolve::{resolve_wireexpr_view_held_over, KeyexprBuf, KeyexprPastBound};
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+use crate::wireexpr_resolve::KeyexprBuf;
+use crate::wireexpr_resolve::{resolve_wireexpr_view_held_over, ComposeRoom, KeyexprPastBound};
 
 /// The sample a Push read in place is delivered as: every field a range of the
 /// frame or a value read off it, valid for the delivery call.
@@ -284,9 +288,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
     }
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
-    /// fits, short of a timestamp or encoding hint a subscriber asks for.
+    /// fits, short of a timestamp or encoding hint a subscriber asks for. A keyexpr that has to
+    /// be composed is composed in the side's room ([`Storage::Compose`]): on the lent policy the
+    /// row lent at open, which refuses one past it.
     fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
-        &self,
+        &mut self,
         subs: &mut L,
         cx: &mut X,
         push: &Push<'_>,
@@ -308,18 +314,22 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         // The keyexpr may be the peer table's own literal, so the table stays
         // borrowed through the delivery; the subscriptions are another value
-        // (`subs`). A composed keyexpr lies in `composed`, in this
-        // frame: fixed on the fixed backing, an empty string until written on
-        // the growable one.
-        let spaces = self.mapping_spaces();
-        let mut composed = KeyexprBuf::new();
+        // (`subs`). A composed keyexpr lies in the side's room, a field apart from the
+        // table, or in `frame` where the policy composes in this call's frame.
+        let SubscriberPeer {
+            naming,
+            compose,
+            class,
+            ..
+        } = self;
+        let mut frame = Default::default();
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
-        // of it into `composed` before the delivery writes it.
+        // of it into the room before the delivery writes it.
         let (keyexpr, held) = match resolve_wireexpr_view_held_over(
             &push.keyexpr.body,
-            spaces,
+            naming.spaces(),
             subs.own_space(),
-            &mut composed,
+            ComposeRoom::buffer(compose, &mut frame),
         ) {
             Ok(Some(resolved)) => resolved,
             // The empty keyexpr, or an id the space does not hold: dropped, as
@@ -357,7 +367,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.
-        if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
+        if let (Some(own), Some(info)) = (
+            naming.own_zid.as_ref().map(|zid| zid.as_slice()),
+            sample.source_info.as_ref(),
+        ) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
                 return Ok(());
@@ -369,7 +382,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let mut turn = FanOut::begin();
         subs.deliver_from_peer(
             sample.keyexpr,
-            self.class,
+            *class,
             PeerDelivery {
                 no_allocation: true,
                 ..PeerDelivery::default()
@@ -946,6 +959,162 @@ mod tests {
                 ..InPlaceFallbacks::default()
             }
         );
+    }
+
+    /// An arena of `bytes` bytes the test leaks, so it outlives every row lent from it.
+    fn arena(bytes: usize) -> crate::bounded::Arena {
+        use crate::bounded::ARENA_ALIGN;
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every lent row.
+        unsafe { crate::bounded::Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) }
+    }
+
+    /// A peer's side of the lent policy whose own space names `literal` by id 3, its rows lent
+    /// from an arena of exactly the bytes it says it takes when `lend` says so, and lent nothing
+    /// otherwise.
+    fn lent_side(literal: &str, lend: bool) -> SubscriberPeer<crate::bounded::Lent> {
+        use crate::bounded::Lent;
+        let mut side = SubscriberPeer::<Lent>::default();
+        if lend {
+            let bytes = SubscriberPeer::<Lent>::arena_bytes(0).expect("one row");
+            side.lend_rows(&mut arena(bytes), 0)
+                .expect("the arena has the bytes the side says it takes");
+        }
+        let mut table: hashbrown::HashMap<crate::wire_id::ExprId, String> =
+            hashbrown::HashMap::new();
+        table.insert(3, literal.to_string());
+        let space: crate::wireexpr_resolve::SharedOwnMappingSpace = Arc::new(table);
+        side.set_own_mapping_space(space);
+        side
+    }
+
+    /// `push` delivered lent from `side` to a table that records what matches `pattern`: the
+    /// keys the table was handed.
+    fn delivered_from(
+        side: &mut SubscriberPeer<crate::bounded::Lent>,
+        push: &Push<'_>,
+        pattern: &str,
+    ) -> Vec<String> {
+        let (mut registry, seen) = recording(pattern);
+        let (table, _) = registry.split_mut();
+        let record = InPlaceRecord::push_of_frame(push, false, 7, crate::qos::Priority::DEFAULT);
+        table.dispatch_iteration_event(side, IterationEvent::InPlace(record));
+        let seen = seen.lock().unwrap();
+        seen.iter().map(|s| s.keyexpr.clone()).collect()
+    }
+
+    /// The side of the lent policy composes an `M=0` key with its suffix in the row lent at
+    /// open, on every backing: the key is delivered whole and nothing falls back. Turned red by a
+    /// row lent without its value (`ComposeRow::lent` not pushing it), which refuses the key.
+    #[test]
+    fn a_lent_side_composes_a_key_in_the_row_lent_at_open() {
+        let mut side = lent_side("mine/", true);
+        let wire = own_space_wire();
+        let keys = delivered_from(&mut side, &own_space_push(&wire), "mine/*");
+        assert_eq!(keys, ["mine/x"]);
+        assert_eq!(side.in_place_fallbacks(), InPlaceFallbacks::default());
+    }
+
+    /// A key one byte past the row the lent policy lends is refused where it lies and counted, on
+    /// every backing, the growable one too: the row is fixed whatever the build's profile. A build
+    /// that lends only drops it; one with the copying path delivers it through that path.
+    #[test]
+    fn a_key_past_the_lent_row_is_counted_on_every_backing() {
+        // The literal with the message's one-byte suffix is one byte past the row.
+        let literal = alloc::format!("{}/", "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 1));
+        let mut side = lent_side(&literal, true);
+        let wire = own_space_wire();
+        let keys = delivered_from(&mut side, &own_space_push(&wire), "**");
+        #[cfg(feature = "rx-lent-only")]
+        assert!(keys.is_empty(), "dropped where it lies: {keys:?}");
+        #[cfg(not(feature = "rx-lent-only"))]
+        assert_eq!(keys, [alloc::format!("{literal}x")]);
+        assert_eq!(
+            side.in_place_fallbacks(),
+            InPlaceFallbacks {
+                keyexpr_past_bound: 1,
+                ..InPlaceFallbacks::default()
+            }
+        );
+    }
+
+    /// The control of the witness above: a key of exactly the row's length is composed and
+    /// delivered, so the witness measures the one byte past it and not a row too short.
+    #[test]
+    fn a_key_of_the_lent_rows_length_is_delivered() {
+        let literal = alloc::format!("{}/", "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 2));
+        let mut side = lent_side(&literal, true);
+        let wire = own_space_wire();
+        let keys = delivered_from(&mut side, &own_space_push(&wire), "**");
+        assert_eq!(keys, [alloc::format!("{literal}x")]);
+        assert_eq!(side.in_place_fallbacks(), InPlaceFallbacks::default());
+    }
+
+    /// A side of the lent policy lent no row refuses the key it would compose, as a table lent no
+    /// row refuses every value, and counts it; a key it lends from the message, which needs no
+    /// composing, is delivered all the same.
+    #[test]
+    fn a_lent_side_lent_no_row_refuses_only_what_it_would_compose() {
+        let mut side = lent_side("mine/", false);
+        let wire = own_space_wire();
+        let composed = delivered_from(&mut side, &own_space_push(&wire), "mine/*");
+        #[cfg(feature = "rx-lent-only")]
+        assert!(composed.is_empty(), "refused: {composed:?}");
+        #[cfg(not(feature = "rx-lent-only"))]
+        assert_eq!(composed, ["mine/x"]);
+        let built = crate::push_build::build_push_literal("mine/y", b"v").expect("build");
+        let wire = wire_of(&built);
+        let literal = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        assert_eq!(delivered_from(&mut side, &literal, "mine/*"), ["mine/y"]);
+        assert_eq!(
+            side.in_place_fallbacks(),
+            InPlaceFallbacks {
+                keyexpr_past_bound: 1,
+                ..InPlaceFallbacks::default()
+            }
+        );
+    }
+
+    /// The side takes the bytes it says it takes for its rows: an arena of one byte fewer refuses
+    /// the lend.
+    #[test]
+    fn a_lent_side_takes_the_bytes_it_says_for_its_row() {
+        use crate::bounded::Lent;
+        let bytes = SubscriberPeer::<Lent>::arena_bytes(0).expect("one row");
+        assert!(bytes >= crate::caps::MAX_KEYEXPR_BYTES, "{bytes} bytes");
+        let mut exact = arena(bytes);
+        assert!(SubscriberPeer::<Lent>::default()
+            .lend_rows(&mut exact, 0)
+            .is_ok());
+        assert_eq!(exact.high_water(), bytes);
+        assert!(SubscriberPeer::<Lent>::default()
+            .lend_rows(&mut arena(bytes - 1), 0)
+            .is_err());
+    }
+
+    /// The counts of two sides add field by field, held at their largest.
+    #[test]
+    fn fallbacks_add_field_by_field() {
+        let sliced = InPlaceFallbacks {
+            sliced: 1,
+            ..InPlaceFallbacks::default()
+        };
+        let past = InPlaceFallbacks {
+            keyexpr_past_bound: 2,
+            ..InPlaceFallbacks::default()
+        };
+        let both = sliced.plus(past).plus(past);
+        assert_eq!((both.sliced, both.keyexpr_past_bound), (1, 4));
+        let full = InPlaceFallbacks {
+            keyexpr_past_bound: u32::MAX,
+            ..InPlaceFallbacks::default()
+        };
+        assert_eq!(both.plus(full).keyexpr_past_bound, u32::MAX);
     }
 
     /// A sample whose source names this session is not fired, lent or owned.

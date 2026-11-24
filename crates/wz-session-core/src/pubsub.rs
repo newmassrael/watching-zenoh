@@ -145,8 +145,6 @@ use crate::wireexpr_resolve::resolve_wireexpr_into_over;
 // this import carries that arm's gate rather than the wider `any(..)` above.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::wireexpr_resolve::resolve_declared_keyexpr_into_over;
-#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
-use crate::wireexpr_resolve::KeyexprBuf;
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
 // field and the `mapping_spaces()` accessor exist in every `alloc` profile,
 // including one with no wire-dispatch consumer compiled in, whereas the
@@ -392,6 +390,11 @@ pub struct SubscriberPeer<P: Storage = Profile> {
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     in_place_fallbacks: InPlaceFallbacks,
+    /// Where a key the peer names by one of its ids with a suffix, or by one of ours, is composed
+    /// while one of its messages is delivered: the policy's room ([`Storage::Compose`]), a row
+    /// lent at open on the lent policy.
+    #[cfg(feature = "storage-profile")]
+    compose: P::Compose,
     /// Which peer the image declares this session's peer to be, once the session knows its zid
     /// (`PeerAllowance::class_of`): the row of the
     /// allowance a message from it is asked against. `None` is a peer not declared, which a closed
@@ -612,10 +615,11 @@ pub struct InPlaceFallbacks {
     /// slices are joined or resolved into a buffer of their own, which is the
     /// owned path's (`put_payload::collect_wire_payload`).
     pub sliced: u32,
-    /// A Put whose resolved keyexpr is longer than
-    /// [`crate::wireexpr_resolve::KeyexprBuf`] holds. Only the
-    /// fixed bounded backing refuses one; the owned path resolves it into a
-    /// `String`.
+    /// A Put whose resolved keyexpr is longer than the buffer it is composed in holds
+    /// ([`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES)): a fixed
+    /// [`crate::wireexpr_resolve::KeyexprBuf`], or the row the lent policy lends at open
+    /// ([`crate::wireexpr_resolve::ComposeRow`]); the growable backing refuses none. The owned
+    /// path resolves it into a `String`; a build that lends only (`rx-lent-only`) drops it.
     pub keyexpr_past_bound: u32,
     /// A message that carries a timestamp stack (extension `0x7`): the nodes that deliver it add
     /// to the stack, which is an owned value the lent form has none of, so the owned path takes it.
@@ -636,6 +640,20 @@ impl InPlaceFallbacks {
         #[cfg(feature = "pubsub-ts-stack")]
         instrumented: 0,
     };
+
+    /// The counts of `self` and `other` together, each held at its largest: what the peers of a
+    /// session of many faces cost.
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            sliced: self.sliced.saturating_add(other.sliced),
+            keyexpr_past_bound: self
+                .keyexpr_past_bound
+                .saturating_add(other.keyexpr_past_bound),
+            #[cfg(feature = "pubsub-ts-stack")]
+            instrumented: self.instrumented.saturating_add(other.instrumented),
+        }
+    }
 }
 
 /// The counted refusals of the session-local subscriber-interest staging, by
@@ -2035,7 +2053,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// S9a — the keyexpr is resolved into a bounded buffer
     /// ([`resolve_wireexpr_into_over`]), not a `String`, so on the fixed backing the
     /// whole absorb of an interest allocates nothing; one longer than
-    /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
+    /// [`crate::wireexpr_resolve::KeyexprBuf`] holds cannot be remembered and is answered with its
     /// terminating `Final` alone, as an over-long one always was.
     #[cfg(all(
         feature = "alloc",
@@ -2048,7 +2066,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         interest: &InterestOwned,
     ) {
         let SubscriberPeer {
-            naming, interests, ..
+            naming,
+            interests,
+            compose,
+            ..
         } = self;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
@@ -2067,13 +2088,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
             // answer those; this registry holds neither.
             return;
         }
-        let mut composed = KeyexprBuf::new();
+        let mut frame = Default::default();
         let pattern: Option<&str> = match &body.keyexpr {
             Some(w) => match resolve_wireexpr_into_over(
                 &w.body,
                 naming.spaces(),
                 subs.own_space(),
-                &mut composed,
+                crate::wireexpr_resolve::ComposeRoom::buffer(compose, &mut frame),
             ) {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
@@ -2106,7 +2127,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         interest: &wz_codecs::lent::Interest<'_>,
     ) {
         let SubscriberPeer {
-            naming, interests, ..
+            naming,
+            interests,
+            compose,
+            ..
         } = self;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
@@ -2119,13 +2143,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         if !body.su() {
             return;
         }
-        let mut composed = KeyexprBuf::new();
+        let mut frame = Default::default();
         let pattern: Option<&str> = match &body.keyexpr {
             Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view_over(
                 &w.body,
                 naming.spaces(),
                 subs.own_space(),
-                &mut composed,
+                crate::wireexpr_resolve::ComposeRoom::buffer(compose, &mut frame),
             ) {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
@@ -2756,6 +2780,8 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 any(feature = "pubsub-put", feature = "pubsub-delete")
             ))]
             in_place_fallbacks: InPlaceFallbacks::NONE,
+            #[cfg(feature = "storage-profile")]
+            compose: Default::default(),
             class: None,
             _policy: core::marker::PhantomData,
         }
@@ -2788,6 +2814,8 @@ impl SubscriberPeer<crate::bounded::Static> {
                 any(feature = "pubsub-put", feature = "pubsub-delete")
             ))]
             in_place_fallbacks: InPlaceFallbacks::NONE,
+            #[cfg(feature = "storage-profile")]
+            compose: (),
             class: None,
             _policy: core::marker::PhantomData,
         }
@@ -2806,32 +2834,67 @@ impl SubscriberPeer<Lent> {
         Ok(side)
     }
 
-    /// Lend an empty side its staging (`staged` rows) from `arena`, where it lies: what
-    /// [`Self::lent`] makes, without the side being a value of its own. Refused as `lent` is.
+    /// Lend an empty side its staging (`staged` rows) and the row it composes keys in from
+    /// `arena`, where it lies: what [`Self::lent`] makes, without the side being a value of its
+    /// own. Refused as `lent` is.
     ///
     /// The key arena and the rows of interests the side was handed stay its own: lending its
     /// staging before or after it was handed them keeps the interests' keys and rows in them.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
         self.interests.staged = arena.lend(staged)?;
+        self.lend_compose_row(arena)
+    }
+
+    /// Lend an empty side the row it composes keys in: a build that answers no Interest keeps no
+    /// interest of the peer, and stages nothing back to it.
+    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
+    pub fn lend_rows(&mut self, arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
+        self.lend_compose_row(arena)
+    }
+
+    /// Lend the side the row it composes keys in ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)).
+    #[cfg(feature = "storage-profile")]
+    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+        self.compose = crate::wireexpr_resolve::ComposeRow::lent(arena)?;
         Ok(())
     }
 
-    /// Nothing to lend: a build that answers no Interest keeps no interest of the peer.
-    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
-    pub fn lend_rows(&mut self, _arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
+    /// Nothing to lend: a build with no storage profile resolves no key of the peer's.
+    #[cfg(not(feature = "storage-profile"))]
+    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+        let _ = arena;
         Ok(())
     }
 
     /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub const fn arena_bytes(staged: usize) -> Option<usize> {
-        InterestSide::<Lent>::arena_bytes(staged)
+        match (
+            InterestSide::<Lent>::arena_bytes(staged),
+            Self::compose_bytes(),
+        ) {
+            (Some(staging), Some(compose)) => staging.checked_add(compose),
+            _ => None,
+        }
     }
 
-    /// The bytes of an arena [`Self::lent`] takes: none in a build that answers no Interest.
+    /// The bytes of an arena [`Self::lent`] takes: its row to compose keys in alone, in a build
+    /// that answers no Interest.
     #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
     pub const fn arena_bytes(_staged: usize) -> Option<usize> {
+        Self::compose_bytes()
+    }
+
+    /// The bytes of the row the side composes keys in.
+    #[cfg(feature = "storage-profile")]
+    const fn compose_bytes() -> Option<usize> {
+        crate::wireexpr_resolve::ComposeRow::arena_bytes()
+    }
+
+    /// No row: a build with no storage profile composes no key.
+    #[cfg(not(feature = "storage-profile"))]
+    const fn compose_bytes() -> Option<usize> {
         Some(0)
     }
 
@@ -3320,12 +3383,12 @@ impl<P: Storage> SubscriberPeer<P> {
                 //
                 // S9a — resolved into a bounded buffer and bound from it, so
                 // the fixed backing does the whole absorb without the heap.
-                let mut composed = KeyexprBuf::new();
+                let mut frame = Default::default();
                 let literal = match resolve_declared_keyexpr_into_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
                     own,
-                    &mut composed,
+                    crate::wireexpr_resolve::ComposeRoom::buffer(&mut self.compose, &mut frame),
                 ) {
                     Ok(Some(literal)) => literal,
                     // Unresolvable, or too long for the table's text.
@@ -3411,12 +3474,12 @@ impl<P: Storage> SubscriberPeer<P> {
         use wz_codecs::lent::DeclareVariant;
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
-                let mut composed = KeyexprBuf::new();
+                let mut frame = Default::default();
                 let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
                     own,
-                    &mut composed,
+                    crate::wireexpr_resolve::ComposeRoom::buffer(&mut self.compose, &mut frame),
                 ) {
                     Ok(Some(literal)) => literal,
                     // Unresolvable, or too long for the table's text.
