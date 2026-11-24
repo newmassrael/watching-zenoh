@@ -70,6 +70,9 @@ use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
+#[cfg(feature = "query")]
+use wz_session_core::pending_get::LegTables;
+use wz_session_core::pending_get::{GetKind, SessionFaces};
 use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
@@ -468,6 +471,45 @@ pub(super) struct Registry {
     /// cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+}
+
+/// The faces as the session's state reaches them (`SessionState`): a
+/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
+/// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
+impl SessionFaces for Registry {
+    fn end_leg(&mut self, face: FaceId, kind: GetKind) {
+        #[cfg(feature = "query")]
+        if let Some(gets) = self.gets_mut(face) {
+            gets.end_leg(kind);
+        }
+        #[cfg(not(feature = "query"))]
+        let _ = (face, kind);
+    }
+
+    fn lose_face(&mut self, face: FaceId) {
+        self.flush_declarations_on_link_loss(face);
+        // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
+        #[cfg(feature = "liveliness")]
+        self.lose_tokens(face);
+    }
+
+    fn next_get_deadline_ms(&self) -> Option<u64> {
+        #[cfg(feature = "query")]
+        {
+            self.all_gets()
+                .filter_map(LegTables::next_deadline_ms)
+                .min()
+        }
+        #[cfg(not(feature = "query"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
+        Registry::retract_owed(self, room)
+    }
 }
 
 /// The faces other than the one a call acts on, as the build holds them. A build that adds no face

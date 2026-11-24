@@ -342,7 +342,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -509,7 +509,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Result<wz_capi_port::QblId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
                 wire,
@@ -550,7 +550,7 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Result<wz_capi_port::TokenId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_token_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -577,7 +577,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_wire(
                 self,
                 keyexpr.to_owned(),
@@ -677,7 +677,7 @@ impl SessionEngine for SharedSession {
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -704,7 +704,7 @@ impl SessionEngine for SharedSession {
             allowed_origin,
             links,
         } = reach;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
                 wire,
@@ -725,7 +725,7 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
     ) -> Result<wz_capi_port::TokenId, Refusal> {
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_token_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -749,7 +749,7 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        self.declared(|| {
+        self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -785,6 +785,21 @@ impl SharedSession {
             return Err(Refusal::Closed);
         }
         made().ok_or(Refusal::NoEntityId)
+    }
+
+    /// [`Self::declared`] for a declaration on `wire`, which `made` is handed: a closed session,
+    /// which runs nothing, gives back what the key held of its declarations
+    /// ([`WireKey::into_holds`]); the registry gives it back when it refuses or lets the entry go.
+    fn declared_on_wire<T>(
+        &self,
+        wire: WireKey,
+        made: impl FnOnce(WireKey) -> Option<T>,
+    ) -> Result<T, Refusal> {
+        if self.is_closed() {
+            wire.let_go(self);
+            return Err(Refusal::Closed);
+        }
+        made(wire).ok_or(Refusal::NoEntityId)
     }
 
     /// The registry's walk of a liveliness get, as the port answers it: refused on a closed session,

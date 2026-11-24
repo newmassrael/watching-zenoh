@@ -55,7 +55,6 @@ use wz_session_core::wire_id::RequestId;
 use crate::round::{LegHolders, Round};
 
 use super::queued::{Pending, Queued};
-use super::registry::{FaceId, Registry};
 
 /// The end of one leg: the leg, the request id of the timeout that ended it, which its callback is
 /// handed after every reply held before it (none for a leg that did not time out), and the row of
@@ -367,45 +366,10 @@ impl LegHolders for GetPlane {
     }
 }
 
-/// Which of the observer's registries a pending leg's entry is in, and the id it is registered
-/// under there: each kind's id is its own type, so one cannot be looked up as the other.
-#[derive(Clone, Copy)]
-pub(super) enum GetKind {
-    /// A query: its entry is under its request id, and its peer owes a Final.
-    Query(wz_session_core::wire_id::RequestId),
-    /// A liveliness snapshot: its entry is under its Interest id, and its peer owes a DeclFinal.
-    #[cfg(feature = "liveliness-get")]
-    Liveliness(u64),
-}
-
-/// A leg the session has pending: the face it was asked of, the id its callback is held under,
-/// its entry ([`GetKind`]) and the key of the fan that cancels it, when a token can. A row of a table the session's arena lent, one for each get its
-/// tables of pending gets hold.
-pub(crate) struct PendingGet {
-    pub(super) face: FaceId,
-    pub(super) leg: u64,
-    pub(super) kind: GetKind,
-    pub(super) fan: Option<FanKey>,
-}
-
-impl PendingGet {
-    /// Drop this leg's entry from its face's pending gets, which ends the leg (its sink's guard
-    /// says so). A face the session no longer holds took its entries with it.
-    pub(super) fn unregister(&self, registry: &mut Registry) {
-        let Some(gets) = registry.gets_mut(self.face) else {
-            return;
-        };
-        match self.kind {
-            GetKind::Query(rid) => {
-                gets.replies.unregister(rid);
-            }
-            #[cfg(feature = "liveliness-get")]
-            GetKind::Liveliness(interest_id) => {
-                gets.liveliness_gets.unregister(interest_id);
-            }
-        }
-    }
-}
+/// A leg the session has pending, with the key of the fan that cancels it when a token can: a row
+/// of a table the session's arena lent, one for each get its tables of pending gets hold.
+pub(crate) type PendingGet = wz_session_core::pending_get::PendingGet<FanKey>;
+pub(super) use wz_session_core::pending_get::GetKind;
 
 /// The end of a leg, said once: when the pending entry that owns it is dropped, with the timeout
 /// that ended it, which the entry's sink was told of before its drop.

@@ -17,8 +17,10 @@
 //! `z_result_t _z_trigger_queryables(`), and zenoh keeps by sending the Final when the last `Query` is
 //! dropped (`zenoh/src/api/queryable.rs` @ `impl Drop for QueryInner {`).
 //!
-//! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
-//! program drops it; until then it answers on its own link.
+//! A query the callback keeps ([`QueryHolder::keep_query`]) is one hold more, released when the C
+//! program lets it go; until then it answers on its own link, its key held in the session's key
+//! arena and its parameters in a cell of the plane (`HELD_QUERY_PARAMS_BYTES`), so keeping it
+//! copies nothing onto the heap.
 //!
 //! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted ([`QueryPlane::take_asked`]) and the get hands each of them its own view
@@ -49,15 +51,19 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryableSink, WireKey};
+use wz_capi_port::{
+    HeldKey, HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, WireHolds, WireKey,
+};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::bounded::{BoundedVec, KeyUnkept, Lent};
+use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
 use wz_session_core::caps;
 use wz_session_core::declare_form::RetractionKey;
+use wz_session_core::key_arena::LentKeys;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::query::QueryResponder;
 #[cfg(feature = "local-queryable")]
@@ -92,12 +98,22 @@ pub(crate) struct QueryableRow {
     /// made it on): a build without groups tells no one the key, and the declaration goes with
     /// the row, let go of with no lock of the session held.
     #[cfg(not(feature = "group"))]
-    _keeps: WireKey,
+    keeps: WireKey,
     /// The program's callback, called where the row lies through a shared borrow, with the holder
     /// of the face each query came in on; a refused declaration lets it go with the row.
     sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
+}
+
+impl super::RowHolds for QueryableRow {
+    fn into_holds(self) -> WireHolds {
+        #[cfg(feature = "group")]
+        let wire = self.wire;
+        #[cfg(not(feature = "group"))]
+        let wire = self.keeps;
+        wire.into_holds()
+    }
 }
 
 impl QueryableRow {
@@ -115,7 +131,7 @@ impl QueryableRow {
             #[cfg(feature = "group")]
             wire,
             #[cfg(not(feature = "group"))]
-            _keeps: wire,
+            keeps: wire,
             sink,
             latch: CallLatch::new(),
         }
@@ -312,6 +328,71 @@ pub(crate) struct FinalHold {
     holds: usize,
     /// The QoS of the Final the dispatch owes, once it owes one.
     due: Option<QosLevel>,
+    /// What the session keeps of the query while a program keeps it past its callback.
+    kept: Option<KeptQuery>,
+}
+
+/// What the session keeps of a query a program keeps past its callback
+/// ([`QueryHolder::keep_query`]): its key, a block of the session's key arena, its parameters, a
+/// cell of the plane's ([`ParamCells`]), its QoS, and how many of its row's holds are keeps. The
+/// block and the cell are given back with the last keep and stand where they lie until then, so
+/// a reply, and the ABI that lends them on, reads them with no lock while it holds a keep.
+struct KeptQuery {
+    key: HeldKey,
+    /// The cell the parameters lie at the start of, `None` for a query without parameters.
+    params: Option<ByteBuf>,
+    params_len: usize,
+    qos: QosLevel,
+    keeps: usize,
+}
+
+// SAFETY: the key is `Send` itself; the cell's claim is a pointer into the plane's cells, whose
+// flag is set and cleared, and whose bytes are written, only under the lock of the plane that holds
+// the row (`QueryPlane::holds`), and read elsewhere only while a keep holds the cell.
+unsafe impl Send for KeptQuery {}
+
+impl KeptQuery {
+    /// The key and the parameters where they lie.
+    fn parts(&self) -> (*const str, *const [u8]) {
+        let params = match &self.params {
+            Some(cell) => cell.as_slice().get(..self.params_len).unwrap_or_default(),
+            None => &[],
+        };
+        (self.key.as_str() as *const str, params as *const [u8])
+    }
+}
+
+/// The cells a kept query's parameters are written to, one for each query the plane holds at once,
+/// each `HELD_QUERY_PARAMS_BYTES` long, lent from the session's arena at its open.
+pub(crate) struct ParamCells(LentByteCells);
+
+// SAFETY: the cells are claimed and released only under the lock of the plane that holds them, and
+// their memory is the session's arena, which outlives the plane (`QueryPlane::let_go`).
+unsafe impl Send for ParamCells {}
+
+impl ParamCells {
+    /// The cells `cells` lends.
+    pub(crate) fn over(cells: LentByteCells) -> Self {
+        Self(cells)
+    }
+}
+
+/// What the last keep of a query let go of ([`FinalHolds::release_kept`]): the QoS of the Final
+/// owed, when this was the row's last hold, and the key the keeps held, which goes back to the
+/// session's key arena under the session's lock.
+#[must_use = "the key goes back to the session's arena, and the Final owed is sent"]
+pub(super) struct Released {
+    pub(super) due: Option<QosLevel>,
+    pub(super) key: Option<HeldKey>,
+}
+
+/// What the end of a turn of an answer lets go of ([`CoopEngine::answer`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Release {
+    /// One hold of the query's Final: its callback returned.
+    Hold,
+    /// One keep of the query, and its hold: the program let the query go.
+    Kept,
 }
 
 /// The Finals held open, by the link generation and request id they answer: one row for each
@@ -330,6 +411,9 @@ pub(crate) struct FinalHold {
 #[derive(Default)]
 pub(super) struct FinalHolds {
     holds: HeldFinals,
+    /// The cells of the parameters of the queries kept, none in a session whose kept queries keep
+    /// no parameters (`HELD_QUERY_PARAMS_BYTES` of `0`).
+    params: Option<ParamCells>,
     /// The requests refused for want of a row in the dispatch now running, whose Final that
     /// dispatch owes and must not send. A request that reached a queryable owes its Final in the
     /// same dispatch, so [`Self::owe`] takes each out before the dispatch ends; a dispatch owes no
@@ -349,9 +433,29 @@ pub(crate) type RefusedFinals = BoundedVec<RefusedFinal, { caps::MAX_PENDING_FIN
 
 impl FinalHolds {
     /// No Final held, in `holds` and `refused`, rows the session's arena lent, as many of each
-    /// as the queries whose Finals it holds at once.
-    pub(super) fn over(holds: HeldFinals, refused: RefusedFinals) -> Self {
-        Self { holds, refused }
+    /// as the queries whose Finals it holds at once, and the parameters of the queries kept in
+    /// `params`'s cells.
+    pub(super) fn over(
+        holds: HeldFinals,
+        refused: RefusedFinals,
+        params: Option<ParamCells>,
+    ) -> Self {
+        Self {
+            holds,
+            params,
+            refused,
+        }
+    }
+
+    /// The row of the Final of `rid` on link `generation`.
+    fn row(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<&mut FinalHold> {
+        self.holds
+            .iter_mut()
+            .find(|h| h.generation == generation && h.rid == rid)
     }
 
     /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing and
@@ -379,8 +483,123 @@ impl FinalHolds {
                 rid,
                 holds: 1,
                 due: None,
+                kept: None,
             })
             .is_ok()
+    }
+
+    /// One keep more of the query of `rid` on link `generation`, which a program keeps already,
+    /// and one hold more of its Final: `None` when the query is not kept, and `Some(false)`,
+    /// taking nothing, when its holds are as many as a count holds.
+    pub(super) fn keep_again(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<bool> {
+        let hold = self.row(generation, rid)?;
+        let kept = hold.kept.as_mut()?;
+        let (Some(holds), Some(keeps)) = (hold.holds.checked_add(1), kept.keeps.checked_add(1))
+        else {
+            return Some(false);
+        };
+        hold.holds = holds;
+        kept.keeps = keeps;
+        Some(true)
+    }
+
+    /// A cell holding `params`, the parameters of a query about to be kept: `None` for none,
+    /// which takes no cell, and refused when they are longer than a cell
+    /// ([`Refusal::ExceedsCapacity`]) or no cell is free ([`Refusal::TableFull`]).
+    pub(super) fn claim_params(&self, params: &[u8]) -> Result<Option<ByteBuf>, Refusal> {
+        if params.is_empty() {
+            return Ok(None);
+        }
+        let cells = match &self.params {
+            Some(cells) if params.len() <= cells.0.size() => &cells.0,
+            _ => return Err(Refusal::ExceedsCapacity),
+        };
+        let mut cell = cells.claim().ok_or(Refusal::TableFull)?;
+        let Some(start) = cell.as_mut_slice().get_mut(..params.len()) else {
+            return Err(Refusal::ExceedsCapacity);
+        };
+        start.copy_from_slice(params);
+        Ok(Some(cell))
+    }
+
+    /// The first keep of the query of `rid` on link `generation`, whose callback runs and so holds
+    /// its row, as `key`, its parameters the first `params_len` bytes of `params`, and `qos`:
+    /// one hold more of its Final. Handed back, keeping nothing, when no row holds the query or
+    /// its holds are as many as a count holds.
+    pub(super) fn keep(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+        key: HeldKey,
+        params: (Option<ByteBuf>, usize),
+        qos: QosLevel,
+    ) -> Result<(), HeldKey> {
+        let Some(hold) = self.row(generation, rid) else {
+            return Err(key);
+        };
+        let (None, Some(holds)) = (&hold.kept, hold.holds.checked_add(1)) else {
+            return Err(key);
+        };
+        hold.holds = holds;
+        hold.kept = Some(KeptQuery {
+            key,
+            params: params.0,
+            params_len: params.1,
+            qos,
+            keeps: 1,
+        });
+        Ok(())
+    }
+
+    /// Where the key and the parameters of the kept query of `rid` on link `generation` lie, and
+    /// its QoS: `None` when the query is not kept. They stand for as long as a keep of it does.
+    pub(super) fn kept_parts(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<(*const str, *const [u8], QosLevel)> {
+        let kept = self.row(generation, rid)?.kept.as_ref()?;
+        let (key, params) = kept.parts();
+        Some((key, params, kept.qos))
+    }
+
+    /// Let go of one keep of the query of `rid` on link `generation`, and of its hold: the
+    /// parameters' cell goes back with the last keep and the key is handed back to go back to the
+    /// arena, and the Final's QoS when it was owed and this was the row's last hold. A query not
+    /// kept lets go of nothing.
+    pub(super) fn release_kept(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Released {
+        let mut released = Released {
+            due: None,
+            key: None,
+        };
+        let Some((at, hold)) = self
+            .holds
+            .iter_mut()
+            .enumerate()
+            .find(|(_, h)| h.generation == generation && h.rid == rid)
+        else {
+            return released;
+        };
+        let Some(kept) = hold.kept.as_mut() else {
+            return released;
+        };
+        kept.keeps = kept.keeps.saturating_sub(1);
+        if kept.keeps == 0 {
+            released.key = hold.kept.take().map(|kept| kept.key);
+        }
+        hold.holds = hold.holds.saturating_sub(1);
+        if hold.holds == 0 {
+            released.due = self.holds.remove(at).due;
+        }
+        released
     }
 
     /// A query of the dispatch now running reaches a queryable: one hold more on its Final, or
@@ -422,11 +641,7 @@ impl FinalHolds {
             self.refused.remove(at);
             return false;
         }
-        match self
-            .holds
-            .iter_mut()
-            .find(|h| h.generation == generation && h.rid == rid)
-        {
+        match self.row(generation, rid) {
             Some(hold) => {
                 hold.due = Some(qos);
                 false
@@ -743,15 +958,23 @@ impl FinalHolds {
         let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
         let refused =
             Arena::table_bytes::<RefusedFinal>(rows).expect("rows the address space holds");
+        let params = Arena::byte_cells_bytes(caps::HELD_QUERY_PARAMS_BYTES, rows)
+            .expect("cells the address space holds");
         let arena: &'static mut crate::arena::SessionArena = Box::leak(Box::new(
             crate::arena::SessionArena::of_bytes(
-                held.saturating_add(refused),
+                held.saturating_add(refused).saturating_add(params),
                 &crate::arena::AllocatorMemory,
             )
             .expect("the host has the memory"),
         ));
         let mut lend = arena.lender();
-        let holds = Self::over(lend.table(rows), lend.table(rows));
+        let holds = Self::over(
+            lend.table(rows),
+            lend.table(rows),
+            Some(ParamCells::over(
+                lend.byte_cells(caps::HELD_QUERY_PARAMS_BYTES, rows),
+            )),
+        );
         lend.finish().expect("the arena has the rows");
         holds
     }
@@ -821,26 +1044,25 @@ pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone +
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
     fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery> {
-        let answering = Answering::innermost();
-        let held = self.engine.upgrade().and_then(|engine| {
-            let (at, generation, rid) = answering?;
-            // Only the query this thread is answering, of this engine, can be held: a hold taken
-            // anywhere else would come after the Final it was meant to keep.
-            if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
-                return None;
-            }
-            // The query is being answered, so its Final is held already and this takes no row.
-            lock(&engine.plane.holds)
-                .take(generation, rid)
-                .then_some((generation, rid))
-        });
+        // A keep refused holds nothing, and the query held answers nothing, as one taken outside
+        // a callback.
         Box::new(CoopHeld {
             engine: self.engine.clone(),
-            held,
-            keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec),
-            qos: view.qos(),
+            id: self.keep_query(view).ok().flatten(),
         })
+    }
+
+    fn keep_query(&self, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
+        let engine = self.engine.upgrade().ok_or(Refusal::Closed)?;
+        let Some((at, generation, rid)) = Answering::innermost() else {
+            return Ok(None);
+        };
+        // Only the query this thread is answering, of this engine, can be kept: a hold taken
+        // anywhere else would come after the Final it was meant to keep.
+        if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
+            return Ok(None);
+        }
+        engine.keep(generation, view)
     }
 
     fn session_closed(&self) -> bool {
@@ -856,36 +1078,94 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     pub(crate) fn queries_refused(&self) -> u64 {
         self.plane.refused.load(Ordering::Relaxed)
     }
+
+    /// Keep the query `view` describes, which this thread's callback answers under link
+    /// `generation` and whose row its call holds: its key is held in the session's key arena and
+    /// its parameters written to a cell of the plane, beside one hold more of its Final. A query
+    /// kept already is kept once more with what its first keep holds. Refused, holding nothing,
+    /// as [`QueryHolder::keep_query`] says.
+    fn keep(&self, generation: u64, view: &dyn QueryView) -> Result<Option<HeldQueryId>, Refusal> {
+        let rid = view.rid();
+        // The plane's lock is taken under the session's, which the key arena is read under.
+        let core = self.live().ok_or(Refusal::Closed)?;
+        let mut holds = lock(&self.plane.holds);
+        match holds.keep_again(generation, rid) {
+            Some(true) => return Ok(Some(HeldQueryId { generation, rid })),
+            Some(false) => return Err(Refusal::TableFull),
+            None => {}
+        }
+        let params = view.parameters().unwrap_or_default();
+        let cell = holds.claim_params(params)?;
+        // A text the arena keeps already, whoever holds it, is that block shared.
+        let key = match LentKeys::from(core.0.session.keys).shared(view.keyexpr()) {
+            Ok(key) => HeldKey::of(key),
+            Err(KeyUnkept::TooLong) => return Err(Refusal::KeyTooLong),
+            Err(KeyUnkept::NoRoom) => return Err(Refusal::TableFull),
+        };
+        match holds.keep(generation, rid, key, (cell, params.len()), view.qos()) {
+            Ok(()) => Ok(Some(HeldQueryId { generation, rid })),
+            Err(key) => {
+                // SAFETY: the session's lock is held (`core`), and the key is its arena's.
+                unsafe { key.release(&core.0.session.keys) };
+                Err(Refusal::TableFull)
+            }
+        }
+    }
+
+    /// Answer the kept query `id` with what `answer` writes ([`super::SessionEngine::reply_held`]).
+    /// The reply holds a keep of its own while it reads the query's key and parameters, with no
+    /// lock held, so a release of the caller's keep from another thread meanwhile gives back
+    /// nothing it reads.
+    pub(super) fn reply_kept(&self, id: HeldQueryId, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        if super::SessionEngine::is_closed(self) {
+            return;
+        }
+        let parts = {
+            let mut holds = lock(&self.plane.holds);
+            match holds.keep_again(id.generation, id.rid) {
+                Some(true) => holds.kept_parts(id.generation, id.rid),
+                _ => None,
+            }
+        };
+        let Some((key, params, qos)) = parts else {
+            return;
+        };
+        // SAFETY: the keep taken above holds the key's block and the parameters' cell until the
+        // release below, which comes after the responder that reads them is gone.
+        let (key, params) = unsafe { (&*key, &*params) };
+        let mut onward = Onward::to(self, id.generation);
+        {
+            let mut responder = responder_for(id.rid, key, Some(params), qos, &mut onward);
+            answer(&mut responder);
+        }
+        self.answer(id.generation, id.rid, Release::Kept);
+    }
+
+    /// The key and the parameters of the kept query `id`, where they lie.
+    ///
+    /// # Safety
+    /// As [`super::SessionEngine::held_parts`]'s: a keep of the caller's holds them for longer than
+    /// the borrow.
+    pub(super) unsafe fn kept_parts_of(&self, id: HeldQueryId) -> Option<(&str, &[u8])> {
+        let (key, params, _) = lock(&self.plane.holds).kept_parts(id.generation, id.rid)?;
+        // SAFETY: the caller's: a keep of its own holds the key's block and the cell.
+        Some(unsafe { (&*key, &*params) })
+    }
 }
 
-/// A query a C program keeps past its callback ([`HeldQuery`]). `held` is the generation and
-/// request id of the hold it took, `None` for one taken outside a callback, which holds nothing
-/// and answers nothing.
+/// A query a C program keeps past its callback, as the heap-held [`HeldQuery`] the engines without
+/// ids keep: the id of its keep, `None` for one refused or taken outside a callback, which holds
+/// nothing and answers nothing.
 struct CoopHeld<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: Weak<CoopEngine<L, C>>,
-    held: Option<(u64, wz_session_core::wire_id::RequestId)>,
-    keyexpr: String,
-    parameters: Option<Vec<u8>>,
-    qos: QosLevel,
+    id: Option<HeldQueryId>,
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for CoopHeld<L, C> {
     fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
-        let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) else {
-            return;
-        };
-        let mut onward = Onward::to(&engine, generation);
-        {
-            let mut responder = responder_for(
-                rid,
-                &self.keyexpr,
-                self.parameters.as_deref(),
-                self.qos,
-                &mut onward,
-            );
-            answer(&mut responder);
+        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
+            engine.reply_kept(id, answer);
         }
-        engine.answer(generation, rid, false);
     }
 
     fn session_closed(&self) -> bool {
@@ -897,8 +1177,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {
     fn drop(&mut self) {
-        if let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) {
-            engine.answer(generation, rid, true);
+        if let (Some(id), Some(engine)) = (self.id, self.engine.upgrade()) {
+            engine.answer(id.generation, id.rid, Release::Kept);
         }
     }
 }
@@ -1013,6 +1293,76 @@ mod refusal_tests {
             "one release lets go of one hold, not the row"
         );
         assert_eq!(holds.holds.len(), 1, "the row is still held");
+    }
+
+    /// A query kept past its callback holds its Final, its key and its parameters' cell until its
+    /// last keep is let go of: a second keep shares what the first holds, the callback's own hold
+    /// ending leaves the Final held, and the last keep hands the key back with the Final owed and
+    /// frees the cell, which the next keep claims again. The CONTROL is the first release, which
+    /// lets go of a keep and nothing else. Turned red by a release that keeps the cell, or hands
+    /// the key or the Final back before the last keep.
+    #[test]
+    fn a_kept_query_holds_its_final_key_and_cell_until_its_last_keep() {
+        let mut holds = FinalHolds::leaked(1);
+        assert!(holds.admit(1, 7), "the callback's hold");
+        assert_eq!(holds.keep_again(1, 7), None, "not kept yet");
+        let cell = holds.claim_params(b"a=1").expect("a cell");
+        assert!(holds
+            .keep(1, 7, HeldKey::own("demo/k"), (cell, 3), QosLevel::DEFAULT)
+            .is_ok());
+        let (key, params, _) = holds.kept_parts(1, 7).expect("kept");
+        // SAFETY: the keep holds the key and the cell, and the test lets go of it only below.
+        let (key, params) = unsafe { (&*key, &*params) };
+        assert_eq!((key, params), ("demo/k", &b"a=1"[..]));
+        assert_eq!(holds.keep_again(1, 7), Some(true), "a second keep");
+        assert!(holds.release(1, 7).is_none(), "the callback returned");
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the keeps hold the Final"
+        );
+        let first = holds.release_kept(1, 7);
+        assert!(
+            first.key.is_none() && first.due.is_none(),
+            "CONTROL: one keep is left"
+        );
+        let last = holds.release_kept(1, 7);
+        assert_eq!(last.due, Some(QosLevel::DEFAULT), "the Final owed goes out");
+        let key = last.key.expect("the last keep hands the key back");
+        assert_eq!(key.as_str(), "demo/k");
+        // SAFETY: the test's key is a copy of its own, freed once.
+        unsafe { key.free_own() };
+        assert!(holds.kept_parts(1, 7).is_none(), "nothing is kept");
+        assert!(
+            matches!(holds.claim_params(b"b=2"), Ok(Some(_))),
+            "the cell went back with the last keep"
+        );
+    }
+
+    /// Parameters longer than a cell are refused, none take no cell, and a cell past the plane's
+    /// is refused as a full table; a query nothing keeps lets go of nothing at a release of a keep.
+    #[test]
+    fn a_keep_past_a_cell_is_refused_and_a_query_not_kept_releases_nothing() {
+        let mut holds = FinalHolds::leaked(1);
+        let long = [b'x'; caps::HELD_QUERY_PARAMS_BYTES + 1];
+        assert_eq!(
+            holds.claim_params(&long).err(),
+            Some(Refusal::ExceedsCapacity)
+        );
+        assert!(matches!(holds.claim_params(b""), Ok(None)), "no cell");
+        let taken = holds.claim_params(b"a=1").expect("the one cell");
+        assert!(taken.is_some());
+        assert_eq!(
+            holds.claim_params(b"a=1").err(),
+            Some(Refusal::TableFull),
+            "every cell taken"
+        );
+        assert!(holds.admit(1, 7), "CONTROL: the callback's hold");
+        let released = holds.release_kept(1, 7);
+        assert!(released.key.is_none() && released.due.is_none());
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "the callback's hold still holds the Final"
+        );
     }
 
     /// A hold taken outside a dispatch (a get of the session's own) and refused notes no

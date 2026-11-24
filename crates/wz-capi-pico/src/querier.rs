@@ -439,7 +439,7 @@ pub unsafe extern "C" fn z_declare_querier(
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
             &key,
-            &key.wire(Arc::as_ref(&engine)),
+            &key.named_wire(Arc::as_ref(&engine)),
             qos.destination.allows_local(),
         ) {
             Ok(filter) => filter,
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         issue_get(
             &state.shared,
             state.key.literal(),
-            state.key.wire(Arc::as_ref(&state.shared)),
+            state.key.named_wire(Arc::as_ref(&state.shared)),
             &ask,
             closure,
             token,

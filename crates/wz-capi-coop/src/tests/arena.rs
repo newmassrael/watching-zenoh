@@ -1202,6 +1202,33 @@ fn the_plan_lends_a_row_of_held_and_refused_finals_for_each_query_held() {
     );
 }
 
+/// The parameters of the queries kept past their callbacks lie in a cell of the arena for each
+/// query the session holds at once, `HELD_QUERY_PARAMS_BYTES` each, beside a flag for each. Turned
+/// red by cells counted by the build's ceiling of queries held, or by a plan that lays out none.
+#[cfg(feature = "queryable")]
+#[test]
+fn the_plan_lends_a_parameter_cell_for_each_query_held() {
+    let lowered = lowered(|l| l.select_max_pending_finals(Quota::at_most(3)));
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    let kept: Vec<_> = plan
+        .rows()
+        .iter()
+        .filter(|row| row.part.starts_with("kept parameter"))
+        .map(|row| (row.part, row.count, row.entry_bytes))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (
+                "kept parameter flags",
+                3,
+                wz_session_core::byte_cells::LentByteCells::FLAG_BYTES
+            ),
+            ("kept parameters", 3, caps::HELD_QUERY_PARAMS_BYTES),
+        ]
+    );
+}
+
 /// A build without queryables holds no query, so its plan lays out no row of Finals.
 #[cfg(not(feature = "queryable"))]
 #[test]

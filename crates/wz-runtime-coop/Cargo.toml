@@ -268,6 +268,19 @@ switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
 # profile's, so it takes `alloc` and the unicast session.
 app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
 
+# The transport of a session as an engine over the faces holds it (`transport::TransportState`),
+# beside its links: the ports it listens on and its say on a second link to a node it holds
+# (`listen`), the groups it joined (`group`), the key-wire form of each link (`shared-key-ids`),
+# where an answer to a query goes (`queryable`), the faces a get asks (`query`) and the rows of
+# its links it reports (`connectivity`). Each is the engine's feature of the same name, which the
+# engine forwards here; a build without one holds none of it.
+listen = ["session-unicast-accept", "udp-listen"]
+group = []
+shared-key-ids = ["dep:wz-session-core", "wz-session-core/shared-key-ids"]
+queryable = []
+query = []
+connectivity = []
+
 # The runtime's critical sections on a HOST: a lock of the process, reentrant on its thread,
 # which `cs::with` takes itself, in place of the `critical-section` implementation an image links
 # (src/cs.rs). A host program built with it links no such implementation, and a C library built

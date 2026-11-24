@@ -470,6 +470,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/time.rs` | S5 | |
 | `crates/wz-runtime-coop/src/timer.rs` | S5 | |
 | `crates/wz-runtime-coop/src/transport.rs` | S5 | |
+| `crates/wz-runtime-coop/src/transport/state.rs` | S5 | |
 | `crates/wz-runtime-coop/src/udp_link.rs` | S5 | |
 | `crates/wz-runtime-coop/src/yield_now.rs` | S10 | |
 | `crates/wz-runtime-core/src/allocator.rs` | S9 | |
@@ -843,6 +844,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/peer_table.rs` | S1 | |
 | `crates/wz-session-core/src/peer_tables.rs` | S1 | |
 | `crates/wz-session-core/src/peer_target.rs` | S1 | |
+| `crates/wz-session-core/src/pending_get.rs` | S2 | |
 | `crates/wz-session-core/src/plain_push.rs` | S2 | |
 | `crates/wz-session-core/src/plane_lock.rs` | S2 | |
 | `crates/wz-session-core/src/policy.rs` | S3 | |

@@ -27,6 +27,7 @@ use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptionsOf;
+use wz_session_core::query_sink::ReplyOut;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -39,9 +40,9 @@ use crate::os::Mutex;
 use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink,
-    MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink,
-    Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, LinksNotHonoured,
+    LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId,
+    SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -579,6 +580,33 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
+    }
+
+    /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
+    /// writes into a responder built as its handler's was (its key, the replies its parameters
+    /// accept, its QoS), on the route it came in on. A query no longer kept, one of a closed
+    /// session and one whose link has since been lost send nothing; an engine that keeps no query
+    /// answers nothing, which is the provided answer.
+    fn reply_held(&self, id: HeldQueryId, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        let _ = (id, answer);
+    }
+
+    /// Let go of one keep of query `id`: its last hold sends the query's `ResponseFinal` when
+    /// its dispatch owes one, and gives back what the keep held of it. Each keep is released once;
+    /// what a closed session keeps goes with its memory. The provided answer does nothing.
+    fn release_held(&self, id: HeldQueryId) {
+        let _ = id;
+    }
+
+    /// The key and the parameters of the kept query `id`, where the session keeps them: `None`
+    /// for a query not kept, and from an engine that keeps none, which is the provided answer.
+    ///
+    /// # Safety
+    /// The caller holds a keep of `id` it took itself, and releases it only after the last borrow
+    /// of what this answers ends: what it lends stands for as long as that keep does.
+    unsafe fn held_parts(&self, id: HeldQueryId) -> Option<(&str, &[u8])> {
+        let _ = id;
+        None
     }
 
     /// Ask which liveliness tokens are alive on `keyexpr` (named on the wire as `wire`): one leg

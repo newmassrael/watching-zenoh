@@ -44,7 +44,7 @@ use crate::abi::{
 use crate::bytes::{ByteBuf, NoRoom};
 use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
+use crate::keyexpr::{declared_of, keyexpr_str, named_wire_key_of, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
@@ -1435,7 +1435,8 @@ impl PlainPublisher {
         // R2962 — the filter is created AFTER the key, because its Interest names
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
-        let wire = key.wire(Arc::as_ref(&session.engine));
+        // The publisher keeps its key, which holds the declaration: its wire form holds nothing.
+        let wire = key.named_wire(Arc::as_ref(&session.engine));
         let filter = WriteFilter::declare(
             session,
             FilterPlane::Subscribers,
@@ -2875,7 +2876,7 @@ unsafe fn session_publish(
         return Z_ERR_INVALID;
     };
     let engine = engine_ref(state);
-    let wire = wire_key_of(keyexpr, engine);
+    let wire = named_wire_key_of(keyexpr, engine);
     publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
 }
 
@@ -3226,7 +3227,7 @@ unsafe fn subscriber_wire(
     key: &DeclaredKeyexpr,
 ) -> WireKey {
     let wire = wire_key_of(keyexpr, shared);
-    match key.declaration_hold() {
+    match key.declaration_hold(shared) {
         Some(hold) => wire.holding_also(hold),
         None => wire,
     }
