@@ -29,6 +29,12 @@
 //!   segment size, 536 when the SYN was not seen) to the acknowledgement that
 //!   covers it, as its median and maximum: Nagle's algorithm meeting a delayed
 //!   acknowledgement shows as gaps near 40 ms or 200 ms;
+//! * the SEND BURSTS: from the direction's first data after the handshake, and
+//!   from each data segment it sends after an idle of at least
+//!   [`IDLE_RESTART_NS`] with nothing outstanding, the new data segments and
+//!   bytes of each round trip (each FLIGHT) that follows, until the next
+//!   burst. A congestion window that restarts after an idle (RFC 5681,
+//!   section 4.1) and grows again shows as flights of 10, 20, 40 segments;
 //!
 //! and per connection ATTEMPT: how many SYNs it took and how far apart, what
 //! answered (a SYN/ACK, a RST, or nothing the capture saw), the two intervals of
@@ -41,6 +47,18 @@
 //! round trip in SYN to SYN/ACK and almost nothing in SYN/ACK to ACK; a tap
 //! beside the acceptor the reverse. Both are written, so a reader sees which
 //! side the tap stood on from which one is large.
+//!
+//! # Where a flight ends
+//!
+//! A flight begins with a new data segment and ends when the peer acknowledges
+//! that segment; the next new data segment begins the next flight. This is the
+//! round a sender's slow start counts (the HyStart round of RFC 9406: the data
+//! sent before the acknowledgement of the round's first segment returns). A
+//! retransmission, a keep-alive and a segment the capture saw twice are not new
+//! data and are in no flight. Read at a tap beside the receiver the flights
+//! are the same rounds, each seen half a round trip later. A capture taken on
+//! the sending host before segmentation offload shows one large segment where
+//! the wire carried several, which is why each flight carries its bytes too.
 //!
 //! Counted at ingest, so a retention ceiling does not move it, and bounded:
 //! each list holds a fixed number and counts what it left out.
@@ -66,6 +84,17 @@ pub const FAST_RETRANSMIT_NS: u64 = 20_000_000;
 /// The maximum segment size a receiver is held to when its SYN was not seen
 /// (RFC 9293, section 3.7.1).
 pub const DEFAULT_MSS: u16 = 536;
+/// The idle, with nothing outstanding, after which a direction's next data
+/// segment begins a send burst. RFC 5681 (section 4.1) restarts the congestion
+/// window after an idle longer than the retransmission timeout, and the
+/// smallest timeout a common stack uses is Linux's `TCP_RTO_MIN`, 200 ms. A
+/// burst names the idle it followed, so a reader that holds a sender to a
+/// longer timeout reads past the shorter ones.
+pub const IDLE_RESTART_NS: u64 = 200_000_000;
+/// Send bursts of two flights or more one direction keeps.
+pub const BURSTS_HELD: usize = 16;
+/// Flights a burst keeps.
+pub const FLIGHTS_HELD: usize = 16;
 
 /// `a` before `b` in sequence space.
 fn seq_lt(a: u32, b: u32) -> bool {
@@ -226,6 +255,68 @@ pub struct Attempt {
     pub port_reuse: bool,
 }
 
+/// The new data one round trip of a send burst carried.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flight {
+    /// The new data segments.
+    pub segments: u64,
+    /// Their payload bytes.
+    pub bytes: u64,
+}
+
+/// One send burst: a direction's data from its first segment after the
+/// handshake, or after an idle, to the next burst.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Burst {
+    /// The segment that began it.
+    pub start: Moment,
+    /// The idle it followed, from the direction's previous data segment;
+    /// `None` for the connection's first data.
+    pub idle_ns: Option<u64>,
+    /// Its flights in order, the first few.
+    pub flights: Vec<Flight>,
+    /// Flights past that bound.
+    pub flights_more: u64,
+}
+
+impl Burst {
+    /// A new flight beginning with a segment of `bytes`.
+    fn open_flight(&mut self, bytes: u64) {
+        if self.flights.len() < FLIGHTS_HELD {
+            self.flights.push(Flight { segments: 1, bytes });
+        } else {
+            self.flights_more += 1;
+        }
+    }
+
+    /// One more segment of `bytes` in the current flight.
+    fn add(&mut self, bytes: u64) {
+        // A flight past the bound is counted and not filled.
+        if self.flights_more == 0 {
+            if let Some(f) = self.flights.last_mut() {
+                f.segments += 1;
+                f.bytes += bytes;
+            }
+        }
+    }
+}
+
+/// Where a direction's open send burst is held.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum OpenBurst {
+    /// None is open: no burst began, as when the capture joined the connection
+    /// and the direction has not gone idle since.
+    #[default]
+    No,
+    /// In its first flight, held here and in no list: a burst that ends within
+    /// one flight shows no growth and is only counted.
+    First(Burst),
+    /// Past its first flight, the last of `Half::bursts`.
+    Listed,
+    /// Past its first flight with the list full: its flights are not kept.
+    Unlisted,
+}
+
 /// What one direction of a connection did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Half {
@@ -256,6 +347,19 @@ pub struct Half {
     pub gaps: Vec<u64>,
     /// Gaps past that bound.
     pub gaps_more: u64,
+    /// The send bursts that reached a second flight, the first few.
+    pub bursts: Vec<Burst>,
+    /// Every send burst, those that ended within one flight included.
+    pub burst_count: u64,
+    /// Bursts of two flights or more past the list's bound.
+    pub bursts_more: u64,
+    open: OpenBurst,
+    /// The end of the current flight's first segment, until the peer
+    /// acknowledges it; `None` then, so the next new data begins a flight.
+    flight_mark: Option<u32>,
+    /// The direction has sent data, and the instant of the last it sent.
+    sent_data: bool,
+    last_data_ns: Option<u64>,
     next_seq: Option<u32>,
     ack: Option<u32>,
     window: Option<u16>,
@@ -272,6 +376,71 @@ impl Half {
         sorted.sort_unstable();
         let max = *sorted.last()?;
         Some((sorted[sorted.len() / 2], max))
+    }
+
+    /// The bursts that ended, or so far stand, within one flight.
+    pub fn one_flight(&self) -> u64 {
+        self.burst_count - self.bursts.len() as u64 - self.bursts_more
+    }
+
+    /// A new data segment of `bytes` ending at `end`, at `at`; `quiet` when
+    /// the peer had acknowledged everything the direction sent before it.
+    fn send(&mut self, end: u32, bytes: u64, at: Moment, quiet: bool) {
+        let idle_ns = match (self.last_data_ns, at.at_ns) {
+            (Some(f), Some(t)) if t >= f => Some(t - f),
+            _ => None,
+        };
+        let begins = quiet
+            && if self.sent_data {
+                idle_ns.is_some_and(|i| i >= IDLE_RESTART_NS)
+            } else {
+                // The connection's first data: a burst only when the handshake
+                // was seen, since joined later it is no first.
+                self.saw_syn
+            };
+        if begins {
+            self.burst_count += 1;
+            self.open = OpenBurst::First(Burst {
+                start: at,
+                idle_ns: if self.sent_data { idle_ns } else { None },
+                flights: alloc::vec![Flight { segments: 1, bytes }],
+                flights_more: 0,
+            });
+            self.flight_mark = Some(end);
+        } else if self.flight_mark.is_none() && !matches!(self.open, OpenBurst::No) {
+            self.flight_mark = Some(end);
+            match core::mem::take(&mut self.open) {
+                OpenBurst::First(mut b) => {
+                    b.open_flight(bytes);
+                    self.open = if self.bursts.len() < BURSTS_HELD {
+                        self.bursts.push(b);
+                        OpenBurst::Listed
+                    } else {
+                        self.bursts_more += 1;
+                        OpenBurst::Unlisted
+                    };
+                }
+                OpenBurst::Listed => {
+                    if let Some(b) = self.bursts.last_mut() {
+                        b.open_flight(bytes);
+                    }
+                    self.open = OpenBurst::Listed;
+                }
+                other => self.open = other,
+            }
+        } else {
+            match &mut self.open {
+                OpenBurst::First(b) => b.add(bytes),
+                OpenBurst::Listed => {
+                    if let Some(b) = self.bursts.last_mut() {
+                        b.add(bytes);
+                    }
+                }
+                OpenBurst::No | OpenBurst::Unlisted => {}
+            }
+        }
+        self.sent_data = true;
+        self.last_data_ns = at.at_ns;
     }
 
     fn record(&mut self, kind: Retransmit, at: Moment) {
@@ -479,8 +648,12 @@ impl TcpFacts {
             h.ack = Some(ack);
             h.window = Some(s.tcp.window);
             h.last_ack = Some(at);
-            // The peer's small segments this acknowledgement covers.
+            // The peer's small segments this acknowledgement covers, and the
+            // first segment of its current flight.
             let peer = &mut self.halves[p];
+            if peer.flight_mark.is_some_and(|m| seq_le(m, ack)) {
+                peer.flight_mark = None;
+            }
             while let Some(&(end, sent)) = peer.pending.front() {
                 if !seq_le(end, ack) {
                     break;
@@ -543,6 +716,16 @@ impl TcpFacts {
                     h.window_full.get_or_insert(0);
                 }
                 _ => {}
+            }
+            // New data, not a retransmission nor a keep-alive, goes to the
+            // send bursts; `quiet` when the peer had acknowledged all before it.
+            let new_data = match h.next_seq {
+                Some(n) => !seq_lt(s.seq, n),
+                None => true,
+            };
+            if new_data {
+                let quiet = h.next_seq.zip(peer_ack).is_some_and(|(n, a)| seq_le(n, a));
+                h.send(end, u64::from(len), at, quiet);
             }
             let small = len < u32::from(peer_mss.unwrap_or(DEFAULT_MSS));
             if small && !resent && h.pending.len() < PENDING_HELD {
@@ -940,6 +1123,145 @@ pub(crate) mod tests {
             f.halves()[0].gap_median_max(),
             Some((40_000_000, 40_000_000))
         );
+    }
+
+    /// Direction `a` sends `n` segments of 1000 bytes from `*seq`, one
+    /// microsecond apart from `at`.
+    fn send_a(f: &mut TcpFacts, seq: &mut u32, packet: &mut usize, n: u32, at: u64) {
+        for i in 0..n {
+            feed(
+                f,
+                S {
+                    a_to_b: true,
+                    seq: *seq,
+                    ack: Some(501),
+                    window: 502,
+                    len: 1000,
+                    packet: *packet,
+                    ..S::default()
+                },
+                at + u64::from(i) * 1_000,
+            );
+            *seq = seq.wrapping_add(1000);
+            *packet += 1;
+        }
+    }
+
+    /// Direction `b` acknowledges up to `n` at `at`.
+    fn ack_b(f: &mut TcpFacts, n: u32, packet: &mut usize, at: u64) {
+        feed(
+            f,
+            S {
+                seq: 501,
+                ack: Some(n),
+                window: 65000,
+                packet: *packet,
+                ..S::default()
+            },
+            at,
+        );
+        *packet += 1;
+    }
+
+    fn segments(b: &Burst) -> Vec<u64> {
+        b.flights.iter().map(|f| f.segments).collect()
+    }
+
+    #[test]
+    fn a_burst_after_an_idle_counts_each_round_trips_new_segments() {
+        let mut f = TcpFacts::default();
+        handshake(&mut f);
+        let (mut seq, mut packet) = (101u32, 3usize);
+        // The connection's first data: two segments, then four once the
+        // first is acknowledged.
+        send_a(&mut f, &mut seq, &mut packet, 2, 1_000_000);
+        ack_b(&mut f, 1101, &mut packet, 11_000_000);
+        send_a(&mut f, &mut seq, &mut packet, 4, 11_100_000);
+        ack_b(&mut f, seq, &mut packet, 21_000_000);
+        // 300 ms with nothing outstanding: the window restarts at 10 and
+        // grows to 20; a resend is in no flight.
+        let restart = 11_103_000 + 300_000_000;
+        let first = seq;
+        send_a(&mut f, &mut seq, &mut packet, 10, restart);
+        feed(
+            &mut f,
+            S {
+                a_to_b: true,
+                seq: first,
+                ack: Some(501),
+                window: 502,
+                len: 1000,
+                packet,
+                ..S::default()
+            },
+            restart + 20_000,
+        );
+        packet += 1;
+        ack_b(&mut f, first + 1000, &mut packet, restart + 10_000_000);
+        send_a(&mut f, &mut seq, &mut packet, 20, restart + 10_100_000);
+        ack_b(&mut f, seq, &mut packet, restart + 20_000_000);
+        // Quiet for less than the restart idle: the same burst, a third flight.
+        send_a(&mut f, &mut seq, &mut packet, 1, restart + 170_000_000);
+        ack_b(&mut f, seq, &mut packet, restart + 180_000_000);
+        // Idle again, one segment: a burst that ends within one flight. An
+        // idle while it is outstanding begins nothing.
+        send_a(&mut f, &mut seq, &mut packet, 1, restart + 700_000_000);
+        send_a(&mut f, &mut seq, &mut packet, 1, restart + 1_000_000_000);
+
+        let a = &f.halves()[0];
+        assert_eq!(a.burst_count, 3);
+        assert_eq!(a.bursts.len(), 2);
+        assert_eq!(a.one_flight(), 1);
+        assert_eq!(a.bursts[0].idle_ns, None, "the connection's first data");
+        assert_eq!(a.bursts[0].start.packet, 3);
+        assert_eq!(segments(&a.bursts[0]), alloc::vec![2, 4]);
+        assert_eq!(a.bursts[1].idle_ns, Some(300_000_000));
+        assert_eq!(segments(&a.bursts[1]), alloc::vec![10, 20, 1]);
+        assert_eq!(a.bursts[1].flights[1].bytes, 20_000);
+        assert_eq!(a.retransmits[0], 1, "the resend is a retransmission");
+        assert!(f.halves()[1].bursts.is_empty(), "b sent no data");
+    }
+
+    #[test]
+    fn a_capture_that_joined_the_connection_begins_at_its_first_idle() {
+        let mut f = TcpFacts::default();
+        let (mut seq, mut packet) = (5_000u32, 0usize);
+        send_a(&mut f, &mut seq, &mut packet, 3, 0);
+        ack_b(&mut f, seq, &mut packet, 10_000_000);
+        assert_eq!(f.halves()[0].burst_count, 0, "no first data without a SYN");
+        send_a(&mut f, &mut seq, &mut packet, 2, 400_000_000);
+        let a = &f.halves()[0];
+        assert_eq!(a.burst_count, 1);
+        assert_eq!(a.one_flight(), 1, "a first flight stands as one so far");
+        assert!(a.bursts.is_empty());
+    }
+
+    #[test]
+    fn the_flights_and_the_bursts_are_bounded_and_counted_past_it() {
+        let mut f = TcpFacts::default();
+        handshake(&mut f);
+        let (mut seq, mut packet) = (101u32, 3usize);
+        let mut at = 1_000_000;
+        for _ in 0..FLIGHTS_HELD + 4 {
+            send_a(&mut f, &mut seq, &mut packet, 2, at);
+            ack_b(&mut f, seq, &mut packet, at + 1_000_000);
+            at += 2_000_000;
+        }
+        for _ in 0..BURSTS_HELD {
+            at += IDLE_RESTART_NS;
+            for _ in 0..2 {
+                send_a(&mut f, &mut seq, &mut packet, 1, at);
+                ack_b(&mut f, seq, &mut packet, at + 1_000_000);
+                at += 2_000_000;
+            }
+        }
+        let a = &f.halves()[0];
+        assert_eq!(a.bursts[0].flights.len(), FLIGHTS_HELD);
+        assert_eq!(a.bursts[0].flights_more, 4);
+        assert_eq!(a.bursts.len(), BURSTS_HELD);
+        assert_eq!(a.bursts_more, 1);
+        assert_eq!(a.burst_count, 1 + BURSTS_HELD as u64);
+        assert_eq!(a.one_flight(), 0);
     }
 
     #[test]

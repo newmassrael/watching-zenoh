@@ -5966,7 +5966,16 @@ fn write_network<W: DocOut>(facts: &crate::ip_facts::FlowFacts, out: &mut W) {
 ///                   "retransmits":{"timeout":0,"fast":0,"spurious":0,
 ///                                  "events":[]},
 ///                   "ack_gap_ns":{"samples":0,"median":null,"max":null},
-///                   "more":0}, {"direction":"b",...}]}
+///                   "more":0,
+///                   "send_bursts":{"bursts":[{"packet":5,"at_ns":...,
+///                                             "idle_ns":300000000,
+///                                             "flights":[{"segments":10,
+///                                                         "bytes":14480},
+///                                                        {"segments":20,
+///                                                         "bytes":28960}],
+///                                             "flights_more":0}],
+///                                  "count":3,"one_flight":2,"more":0}},
+///                  {"direction":"b",...}]}
 /// ```
 ///
 /// Per attempt: `syn_packet` the first SYN, `syns` how many it took and
@@ -5983,6 +5992,17 @@ fn write_network<W: DocOut>(facts: &crate::ip_facts::FlowFacts, out: &mut W) {
 /// acknowledgement gap's `median` and `max` over `samples`; `more`, the events
 /// and spans past the lists' bound of 64. Instants are capture nanoseconds,
 /// `null` for a packet with no clock.
+///
+/// `send_bursts` (revision 87) is how the direction's congestion window grew
+/// round trip by round trip ([`crate::tcp_facts`]): a burst begins at the
+/// direction's first data after the handshake (`idle_ns` `null`) and at each
+/// data segment after an idle of 200 ms or more with nothing outstanding
+/// (`idle_ns` that idle), at its `packet` and `at_ns`; each of its `flights`
+/// is the new data `segments` and `bytes` sent from a segment to the peer's
+/// acknowledgement of it, sixteen of them and `flights_more` the rest. The list
+/// holds the first sixteen bursts that reached a second flight; `count` is
+/// every burst, `one_flight` those that ended within one, and `more` the
+/// bursts of two flights or more past the list.
 fn write_tcp<W: DocOut>(facts: Option<&crate::tcp_facts::TcpFacts>, out: &mut W) {
     use crate::tcp_facts::Moment;
     out.key("tcp");
@@ -6107,6 +6127,41 @@ fn write_tcp<W: DocOut>(facts: Option<&crate::tcp_facts::TcpFacts>, out: &mut W)
         out.close_map();
         out.key("more");
         out.uint(h.more);
+        out.key("send_bursts");
+        out.open_map();
+        out.key("bursts");
+        out.open_array();
+        for b in &h.bursts {
+            out.open_map();
+            out.key("packet");
+            out.uint(b.start.packet as u64);
+            out.key("at_ns");
+            instant(b.start.at_ns, out);
+            out.key("idle_ns");
+            opt_ns(b.idle_ns, out);
+            out.key("flights");
+            out.open_array();
+            for flight in &b.flights {
+                out.open_map();
+                out.key("segments");
+                out.uint(flight.segments);
+                out.key("bytes");
+                out.uint(flight.bytes);
+                out.close_map();
+            }
+            out.close_array();
+            out.key("flights_more");
+            out.uint(b.flights_more);
+            out.close_map();
+        }
+        out.close_array();
+        out.key("count");
+        out.uint(h.burst_count);
+        out.key("one_flight");
+        out.uint(h.one_flight());
+        out.key("more");
+        out.uint(h.bursts_more);
+        out.close_map();
         out.close_map();
     }
     out.close_array();

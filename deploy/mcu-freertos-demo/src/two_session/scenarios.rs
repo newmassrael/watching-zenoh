@@ -36,7 +36,7 @@ use wz::link_lwip::LwipLink;
 use wz::runtime_coop::session_drive::{
     spawn_session, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-use wz::runtime_coop::session_runtime::new_session_actions;
+use wz::runtime_coop::session_runtime::{new_session_actions, SessionEntropy, SessionHandle};
 use wz::runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_freertos::{FreertosClock, FreertosEntropy};
 use wz::session_lwip::multicast_drive::{
@@ -63,7 +63,7 @@ use wz_session_core::WhatAmI;
 use crate::board::{heap_free_bytes, TICK_HZ};
 
 type Clock = FreertosClock<TICK_HZ>;
-type Actions = Rc<SessionLinkActions<CoopRuntime<Clock>, CoopTime<Clock>>>;
+type Actions = SessionHandle<Clock>;
 
 /// The group's JOIN interval: the deploy manifest's
 /// (`deploy/mcu_client_and_group.yaml`, `group.join_interval_ms`).
@@ -267,11 +267,13 @@ impl TwoSessions {
             .open_acceptor(router_port)
             .map_err(|e| format!("bind router: {:?}", e))?;
         let router_cost = before.saturating_sub(heap_free_bytes());
+        // The board's one source: both sessions draw their handshake's secrets from it, each
+        // through a handle on it.
+        let entropy = SessionEntropy::new(FreertosEntropy);
         let router = new_session_actions(
             sink,
             unicast_params(0xa1, &policy, &limits)?,
             CoopTime::new(&runtime),
-            FreertosEntropy,
         );
         let router_log = Rc::new(RouterLog::default());
         let log = router_log.clone();
@@ -280,6 +282,7 @@ impl TwoSessions {
             &local,
             pump,
             router.clone(),
+            entropy.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::spec_defaults(),
@@ -306,6 +309,7 @@ impl TwoSessions {
             &local,
             pump,
             client.clone(),
+            entropy,
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::spec_defaults(),

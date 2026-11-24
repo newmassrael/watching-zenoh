@@ -1824,7 +1824,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":86,"key":"kind","values":[...],
+ *     {"name":"fields","revision":87,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -3482,7 +3482,15 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                                    "events":[{"retransmit":"fast",
  *                                               "packet":15,"at_ns":T}]},
  *                     "ack_gap_ns":{"samples":1,"median":40000000,
- *                                   "max":40000000},"more":0},
+ *                                   "max":40000000},"more":0,
+ *                     "send_bursts":{"bursts":[{"packet":5,"at_ns":T,
+ *                                               "idle_ns":300000000,
+ *                                               "flights":[{"segments":10,
+ *                                                           "bytes":14480},
+ *                                                          {"segments":20,
+ *                                                           "bytes":28960}],
+ *                                               "flights_more":0}],
+ *                                    "count":3,"one_flight":2,"more":0}},
  *                    {"direction":"b",...}]}
  *
  * Each ATTEMPT to connect: `syn_packet` its first SYN, `syns` how many it took
@@ -3517,6 +3525,26 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * capture's nanoseconds, `null` for a packet with no clock. A connection that
  * never got its SYN/ACK has no zenoh session and so no session-table row; its
  * flow object here is where it is.
+ *
+ * (field-document revision 87, row_facts 27) Each direction also carries,
+ * last, `send_bursts`: how its congestion window grew round trip by round
+ * trip, as a window restarted after an idle (RFC 5681, section 4.1) shows as
+ * flights of 10, then 20 segments. A BURST begins at the direction's first
+ * data after the handshake (`idle_ns` `null`; a capture that missed the SYNs
+ * has none) and at each new data segment sent after an idle of 200 ms or more
+ * (Linux's smallest retransmission timeout) while the peer had acknowledged
+ * everything; `idle_ns` is that idle, from the direction's previous data
+ * segment, so a reader that holds the sender to a longer timeout skips the
+ * shorter ones. `packet` and `at_ns` are the segment that began it. A FLIGHT
+ * is one round trip: it begins with a new data segment and ends when the peer
+ * acknowledges that segment; the next new data segment begins the next. Each
+ * flight counts its new data `segments` and their payload `bytes` (a
+ * retransmission or a keep-alive is in none; `bytes` tells a capture taken
+ * before segmentation offload, whose one segment was several on the wire).
+ * Sixteen flights a burst, `flights_more` the rest. The list holds the first
+ * sixteen bursts that reached a second flight; `count` is every burst,
+ * `one_flight` those that ended (or so far stand) within one flight and are
+ * not listed, `more` the bursts of two flights or more past the list.
  *
  * @values fields answer
  * @values fields retransmit
@@ -6986,7 +7014,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":86,"key":"state",
+ *     "value_families":[{"name":"fields","revision":87,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

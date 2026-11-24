@@ -4870,8 +4870,11 @@ int main(void) {
      * 85: every flow gains `unrowed_comments`, the comments of its packets
      * that begin no row. A key arrives; nothing retires.
      * 86: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
-     * nothing retires. */
-    revisioned[2].revision = 86;
+     * nothing retires.
+     * 87: each TCP direction gains `send_bursts`, its new data segments and
+     * bytes per round trip after an idle. Seven keys arrive; nothing
+     * retires. */
+    revisioned[2].revision = 87;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
