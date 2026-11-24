@@ -6976,10 +6976,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         };
         let _ = self.actions().send_interest_kinds(
             interest_id,
-            plane.kinds(),
-            /*current=*/ true,
-            /*future=*/ true,
-            aggregate,
+            wz_session_core::session_actions::InterestAsk {
+                kinds: plane.kinds(),
+                current: true,
+                future: true,
+                aggregate,
+            },
             mapping_id,
             suffix,
         );

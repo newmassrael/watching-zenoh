@@ -2099,10 +2099,12 @@ impl InterestHold {
         actions
             .send_interest_kinds(
                 self.interest_id,
-                kinds(self.plane),
-                /* current */ true,
-                /* future */ true,
-                aggregate,
+                wz_session_core::session_actions::InterestAsk {
+                    kinds: kinds(self.plane),
+                    current: true,
+                    future: true,
+                    aggregate,
+                },
                 mapping_id,
                 suffix,
             )

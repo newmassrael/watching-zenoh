@@ -3662,6 +3662,22 @@ enum Dispatched {
     Chain,
 }
 
+/// What an interest asks of its peer ([`SessionLinkActions::send_interest_kinds`]): which kinds
+/// of declaration, whether those that stand now (`current`) and those to come (`future`), and
+/// whether as one aggregated reply (R2962).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterestAsk {
+    /// The kinds of declaration asked for.
+    pub kinds: InterestKinds,
+    /// The declarations that stand now.
+    pub current: bool,
+    /// The declarations to come.
+    pub future: bool,
+    /// Answered as one aggregated reply.
+    pub aggregate: bool,
+}
+
 /// How a publication is sent ([`SessionLinkActions::send_plain_put_qos`] and its twins): on
 /// the reliable or the best-effort channel of `priority`'s conduit, and flushed at once when
 /// `express`, past the batching window.
@@ -16736,10 +16752,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.send_interest_kinds(
                 interest_id,
-                InterestKinds::SUBSCRIBERS,
-                current,
-                future,
-                /*aggregate=*/ false,
+                InterestAsk {
+                    kinds: InterestKinds::SUBSCRIBERS,
+                    current,
+                    future,
+                    aggregate: false,
+                },
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -16777,10 +16795,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.send_interest_kinds(
                 interest_id,
-                InterestKinds::QUERYABLES,
-                current,
-                future,
-                /*aggregate=*/ false,
+                InterestAsk {
+                    kinds: InterestKinds::QUERYABLES,
+                    current,
+                    future,
+                    aggregate: false,
+                },
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -16827,17 +16847,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::interest_build::build_interest_kinds_with_aggregate`]): a request to the peer, recorded
     /// in the reconnect cache so a replay re-asks identically.
     #[cfg(feature = "alloc")]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_interest_kinds(
         &self,
         interest_id: u64,
-        kinds: InterestKinds,
-        current: bool,
-        future: bool,
-        aggregate: bool,
+        ask: InterestAsk,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
+        let InterestAsk {
+            kinds,
+            current,
+            future,
+            aggregate,
+        } = ask;
         // A lend-only session writes it from its parts. An interest with neither CURRENT nor
         // FUTURE is the Final form, which carries no keyexpr: the owned builder refuses it, and
         // so does this.
@@ -16859,10 +16881,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             )?;
             self.declare_matching_interest_recorded(
                 interest_id,
-                kinds,
-                current,
-                future,
-                aggregate,
+                ask,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
                 || self.dispatch_interest_lent(&interest, crate::sample::QosLevel::DEFAULT),
@@ -16882,10 +16901,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A4 — record for post-reconnect replay and send, as one step.
             self.declare_matching_interest_recorded(
                 interest_id,
-                kinds,
-                current,
-                future,
-                aggregate,
+                ask,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
                 || self.dispatch_interest(interest, /*reliable=*/ true),
@@ -16916,18 +16932,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// while every matching listener stays registered — the silent half-dead
     /// state.
     #[cfg(all(feature = "declare-interest", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn declare_matching_interest_recorded<E>(
         &self,
         interest_id: u64,
-        kinds: InterestKinds,
-        current: bool,
-        future: bool,
-        aggregate: bool,
+        ask: InterestAsk,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
+        let InterestAsk {
+            kinds,
+            current,
+            future,
+            aggregate,
+        } = ask;
         #[cfg(feature = "session-reconnect")]
         {
             self.record_and_send(
