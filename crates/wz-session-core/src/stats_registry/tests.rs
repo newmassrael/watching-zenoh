@@ -137,10 +137,12 @@ fn s2() -> (StatsRegistry, StatsTransportId, LinkSlot) {
     for size in [40, 2000] {
         metrics.observe_network_message_payload(
             StatsDirection::Tx,
-            StatSpace::User,
-            Priority::Data,
-            MessageLabel::Put,
-            false,
+            NetworkMessagePayloadLabels {
+                space: StatSpace::User,
+                priority: Priority::Data,
+                message: MessageLabel::Put,
+                shm: false,
+            },
             size,
             [],
         );
@@ -217,10 +219,12 @@ fn s5() -> StatsRegistry {
         .expect("just opened")
         .observe_network_message_payload(
             StatsDirection::Rx,
-            StatSpace::User,
-            Priority::Data,
-            MessageLabel::Put,
-            false,
+            NetworkMessagePayloadLabels {
+                space: StatSpace::User,
+                priority: Priority::Data,
+                message: MessageLabel::Put,
+                shm: false,
+            },
             64,
             ["a/**", "a/b"],
         );
@@ -338,10 +342,12 @@ fn a_retired_transport_keeps_its_transport_counts_and_loses_its_link_counts() {
     metrics.inc_bytes(StatsDirection::Tx, link, 100);
     metrics.observe_network_message_payload(
         StatsDirection::Tx,
-        StatSpace::User,
-        Priority::Data,
-        MessageLabel::Put,
-        false,
+        NetworkMessagePayloadLabels {
+            space: StatSpace::User,
+            priority: Priority::Data,
+            message: MessageLabel::Put,
+            shm: false,
+        },
         40,
         [],
     );
@@ -659,10 +665,12 @@ fn a_classified_payload_counts_under_the_keys_its_class_matched() {
     pinned.set_key_filters(filters.clone());
     pinned.observe_network_message_payload(
         StatsDirection::Rx,
-        StatSpace::User,
-        Priority::Data,
-        MessageLabel::Put,
-        false,
+        NetworkMessagePayloadLabels {
+            space: StatSpace::User,
+            priority: Priority::Data,
+            message: MessageLabel::Put,
+            shm: false,
+        },
         64,
         ["a/**", "a/b"],
     );
@@ -691,10 +699,12 @@ fn a_new_filter_list_drops_the_per_key_series_of_the_old() {
     let observe = |metrics: &mut TransportMetrics| {
         metrics.observe_network_message_payload(
             StatsDirection::Tx,
-            StatSpace::User,
-            Priority::Data,
-            MessageLabel::Put,
-            false,
+            NetworkMessagePayloadLabels {
+                space: StatSpace::User,
+                priority: Priority::Data,
+                message: MessageLabel::Put,
+                shm: false,
+            },
             8,
             ["a/**"],
         );
@@ -711,10 +721,12 @@ fn a_new_filter_list_drops_the_per_key_series_of_the_old() {
     expected.set_key_filters(StatsKeyFilters::new(alloc::vec!["b/**".to_string()]).unwrap());
     expected.observe_network_message_payload(
         StatsDirection::Tx,
-        StatSpace::User,
-        Priority::Data,
-        MessageLabel::Put,
-        false,
+        NetworkMessagePayloadLabels {
+            space: StatSpace::User,
+            priority: Priority::Data,
+            message: MessageLabel::Put,
+            shm: false,
+        },
         8,
         [],
     );
