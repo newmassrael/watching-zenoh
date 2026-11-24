@@ -18,13 +18,13 @@
 use core::ffi::c_int;
 use core::net::SocketAddr;
 
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 // Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as every
 // implementation of them below is.
 wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::WaitOn;
 }
-use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
 use crate::net::{
@@ -284,12 +284,12 @@ impl StreamSocket for PosixTcpSocket {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        self.local
-    }
-
-    fn peer(&self) -> SocketAddr {
-        self.peer
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: self.local,
+            peer: self.peer,
+        }
     }
 
     const WRITES_NOW: bool = true;
@@ -398,6 +398,11 @@ impl Drop for PosixTcpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This end's address and the peer's, of a stream over IP.
+    fn ip_ends(stream: &PosixTcpSocket) -> (SocketAddr, SocketAddr) {
+        stream.ends().ip().expect("a stream over IP")
+    }
     use core::mem::size_of;
     use core::net::{Ipv4Addr, Ipv6Addr};
     use std::io::{Read, Write};
@@ -447,9 +452,9 @@ mod tests {
         let far = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("an IPv6 listener");
         let near = PosixTcpSocket::connect(far.local_addr().unwrap()).expect("a connection");
         let (taken, from) = far.accept().expect("the far end");
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), from);
-        assert_eq!(taken.local_addr().unwrap(), near.peer());
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, from);
+        assert_eq!(taken.local_addr().unwrap(), ip_ends(&near).1);
 
         let listener =
             PosixTcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))).expect("a listener");
@@ -457,8 +462,8 @@ mod tests {
         assert_ne!(listener.local().port(), 0);
         let dialler = TcpStream::connect(listener.local()).expect("a connection");
         let accepted = accepted(&listener);
-        assert_eq!(accepted.peer(), dialler.local_addr().unwrap());
-        assert_eq!(accepted.local(), listener.local());
+        assert_eq!(ip_ends(&accepted).1, dialler.local_addr().unwrap());
+        assert_eq!(ip_ends(&accepted).0, listener.local());
     }
 
     /// A dial the kernel has no socket family for is the stack's permanent refusal; a dial with no
@@ -710,9 +715,9 @@ mod tests {
     #[test]
     fn a_connection_names_both_its_ends() {
         let (near, far) = pair();
-        assert_eq!(near.peer(), far.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
-        assert_ne!(near.local().port(), 0);
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
+        assert_ne!(ip_ends(&near).0.port(), 0);
     }
 
     /// A loopback port that refuses every connect for as long as the value lives: a TCP socket
@@ -766,8 +771,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let (mut far, _) = listener.accept().expect("the far end");
-        assert_eq!(near.peer(), listener.local_addr().unwrap());
-        assert_eq!(near.local(), far.peer_addr().unwrap());
+        assert_eq!(ip_ends(&near).1, listener.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
         near.write_all(b"made")
             .expect("a made connection carries bytes");
         let mut got = [0u8; 4];
@@ -925,8 +930,8 @@ mod tests {
         let (listener, port) = listening();
         let far = std_connect(port);
         let near = accepted(&listener);
-        assert_eq!(near.local(), at(port));
-        assert_eq!(near.peer(), far.local_addr().unwrap());
+        assert_eq!(ip_ends(&near).0, at(port));
+        assert_eq!(ip_ends(&near).1, far.local_addr().unwrap());
         assert!(nodelay_of(near.fd));
     }
 
@@ -954,8 +959,11 @@ mod tests {
         let (listener, port) = listening();
         let first = std_connect(port);
         let second = std_connect(port);
-        assert_eq!(accepted(&listener).peer(), first.local_addr().unwrap());
-        assert_eq!(accepted(&listener).peer(), second.local_addr().unwrap());
+        assert_eq!(ip_ends(&accepted(&listener)).1, first.local_addr().unwrap());
+        assert_eq!(
+            ip_ends(&accepted(&listener)).1,
+            second.local_addr().unwrap()
+        );
     }
 
     #[test]
