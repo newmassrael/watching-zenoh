@@ -28,13 +28,11 @@ use wz_runtime_tokio_test_support::fixture_session_init_params;
 /// than driving the peer's `DeclKexpr` inbound).
 fn mark_session_established(session: &TokioSession) {
     // R311nf — `actions()` is now infallible on `TokioSession` (= `Session<_,_,Unicast>`).
-    *session
+    let now = session.actions().clock.now_monotonic_ms();
+    session
         .actions()
         .link
-        .established_at
-        .lock()
-        .expect("established_at poisoned in test fixture") =
-        Some(session.actions().clock.now_monotonic_ms());
+        .fact_established_at(|slot| *slot = Some(now));
 }
 
 /// Convenience constructor that returns a (Session,

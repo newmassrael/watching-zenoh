@@ -2718,24 +2718,10 @@ pub struct DatagramResume {
     pub record: Option<usize>,
 }
 
-/// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
-/// fields that belong to ONE physical link, not the logical session. Split out
-/// of the former flat `SessionLinkActions`: `driver` is the per-link write seam
-/// (reliability-segregated + per-link keepalive TX), the three stamps are the
-/// per-link lease + keepalive baselines (a shared stamp would let a live link
-/// keep a dead standby link's lease fresh so it is never reaped), and
-/// `transport_available` is the per-link F2 send gate. A later multilink slice
-/// gives each physical link its own `LinkState` while N of them share ONE
-/// [`SessionCore`]; at N=1 (every build today) one `LinkState` pairs with one
-/// `SessionCore` inside [`SessionLinkActions`] (both behind the `R::Shared`
-/// pointer), behavior / wire / data-plane identical to the pre-split struct.
-/// Parameterised by `R` only — none of the 5 fields name the clock `T`.
-pub struct LinkState<R: SessionRuntime> {
-    /// R::LinkSink — the per-profile owning handle to the link write
-    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
-    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
-    /// pure `&dyn BoxedLinkDriver` through `SessionLinkActions::link_driver`.
-    pub driver: R::LinkSink,
+/// A link's time stamps: milliseconds on the session's clock, `None` until first taken. Kept
+/// together under one lock in [`LinkState`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkStamps {
     /// R311la — monotonic timestamp in milliseconds of the most recent
     /// successfully parsed inbound transport message of ANY kind
     /// (Frame, Fragment, KeepAlive, handshake, Close — everything but
@@ -2761,7 +2747,59 @@ pub struct LinkState<R: SessionRuntime> {
     /// halved to 8-byte u64), and the storage form matches the
     /// [`TimeSource::now_monotonic_ms`] contract that wz callers
     /// will use across AP + Phase W targets.
-    pub last_inbound_at: R::Mutex<Option<u64>>,
+    pub last_inbound_at: Option<u64>,
+    /// R84 — monotonic timestamp in milliseconds captured when the
+    /// session FSM enters the `Established` state. Populated by the
+    /// `record_established_at()` Lua action wired to the
+    /// `Established.onentry` block in `session_fsm_unicast.scxml`.
+    /// Consumers (specifically `check_lease_deadline`) fall back to
+    /// this stamp when `last_inbound_at` is `None` so a peer that
+    /// never sends anything after handshake still reaches
+    /// `lease.expired -> Closing` per session-fsm §2.5 ("lease counts
+    /// from Established entry"); the prior R77 behaviour was
+    /// `NoBaseline` indefinitely in that case.
+    ///
+    /// Storage form and clock semantics match
+    /// `last_inbound_at` — both are `u64` ms since the
+    /// shared [`SessionCore::clock`] epoch (R294 migration
+    /// from `std::time::Instant`); the lease comparator subtracts
+    /// them as pure `u64` arithmetic.
+    pub established_at: Option<u64>,
+    /// R311kw — monotonic timestamp in milliseconds of the most recent
+    /// outbound wire emit on this link. Stamped by the
+    /// `SessionLinkActions::send_wire` seam every TX path funnels through
+    /// (handshake t_msg, CLOSE, Frame / Fragment, batch flush), the
+    /// deadline-model equivalent of zenoh-pico's
+    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
+    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
+    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
+    /// KeepAlive when the line already spoke). pico resets the flag each
+    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
+    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
+    /// same store-raw / compare-at-check split as the R311ks multicast
+    /// per-peer sweep. `None` until the first emit; storage form and clock
+    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
+    pub last_outbound_at: Option<u64>,
+}
+
+/// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
+/// fields that belong to ONE physical link, not the logical session. Split out
+/// of the former flat `SessionLinkActions`: `driver` is the per-link write seam
+/// (reliability-segregated + per-link keepalive TX), the three stamps are the
+/// per-link lease + keepalive baselines (a shared stamp would let a live link
+/// keep a dead standby link's lease fresh so it is never reaped), and
+/// `transport_available` is the per-link F2 send gate. A later multilink slice
+/// gives each physical link its own `LinkState` while N of them share ONE
+/// [`SessionCore`]; at N=1 (every build today) one `LinkState` pairs with one
+/// `SessionCore` inside [`SessionLinkActions`] (both behind the `R::Shared`
+/// pointer), behavior / wire / data-plane identical to the pre-split struct.
+/// Parameterised by `R` only — none of the 5 fields name the clock `T`.
+pub struct LinkState<R: SessionRuntime> {
+    /// R::LinkSink — the per-profile owning handle to the link write
+    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
+    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
+    /// pure `&dyn BoxedLinkDriver` through `SessionLinkActions::link_driver`.
+    pub driver: R::LinkSink,
     /// R311y632 (§17) — bytes of the CURRENT framing unit that have not been
     /// dispatched yet.
     ///
@@ -2793,38 +2831,10 @@ pub struct LinkState<R: SessionRuntime> {
     /// Per link, as `pending_batch` is.
     #[cfg(feature = "alloc")]
     pub datagram_resume: R::Mutex<Option<DatagramResume>>,
-    /// R84 — monotonic timestamp in milliseconds captured when the
-    /// session FSM enters the `Established` state. Populated by the
-    /// `record_established_at()` Lua action wired to the
-    /// `Established.onentry` block in `session_fsm_unicast.scxml`.
-    /// Consumers (specifically `check_lease_deadline`) fall back to
-    /// this stamp when `last_inbound_at` is `None` so a peer that
-    /// never sends anything after handshake still reaches
-    /// `lease.expired -> Closing` per session-fsm §2.5 ("lease counts
-    /// from Established entry"); the prior R77 behaviour was
-    /// `NoBaseline` indefinitely in that case.
-    ///
-    /// Storage form and clock semantics match
-    /// `last_inbound_at` — both are `u64` ms since the
-    /// shared [`SessionCore::clock`] epoch (R294 migration
-    /// from `std::time::Instant`); the lease comparator subtracts
-    /// them as pure `u64` arithmetic.
-    pub established_at: R::Mutex<Option<u64>>,
-    /// R311kw — monotonic timestamp in milliseconds of the most recent
-    /// outbound wire emit on this link. Stamped by the
-    /// `SessionLinkActions::send_wire` seam every TX path funnels through
-    /// (handshake t_msg, CLOSE, Frame / Fragment, batch flush), the
-    /// deadline-model equivalent of zenoh-pico's
-    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
-    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
-    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
-    /// KeepAlive when the line already spoke). pico resets the flag each
-    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
-    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
-    /// same store-raw / compare-at-check split as the R311ks multicast
-    /// per-peer sweep. `None` until the first emit; storage form and clock
-    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
-    pub last_outbound_at: R::Mutex<Option<u64>>,
+    /// The link's time stamps ([`LinkStamps`]), under one lock: the lease and keepalive deadlines
+    /// read two of them at once, and a transport replaced for a re-dial clears all three. Reached
+    /// through [`Self::stamps()`], [`Self::with_stamps`] and the `fact_*` doors.
+    stamps: R::Mutex<LinkStamps>,
     /// F2 — is the transport currently accepting data sends? `true` at
     /// construction (the bundle is built over a live link sink; the
     /// pre-handshake window keeps today's emit semantics), `false` when
@@ -3136,6 +3146,43 @@ impl LinkPriorityRange {
 /// shared core: the type system, not a runtime assertion, forbids it.
 #[cfg(feature = "transport-multilink")]
 pub struct PubkeyBound(());
+
+/// One door per time stamp the link keeps ([`LinkStamps`]): the stamp, lent to `f` for the length
+/// of the call. A caller names the stamp and not the lock that guards it. `f` runs with the lock
+/// held: it must not open another door or take another lock.
+macro_rules! link_stamp_doors {
+    ($( $door:ident => $field:ident, )*) => {
+        impl<R: SessionRuntime> LinkState<R> {
+            $(
+                #[doc = concat!("The link's `", stringify!($field), "`, lent to `f` under its lock.")]
+                #[inline]
+                pub fn $door<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
+                    R::with_mutex_mut(&self.stamps, |stamps| f(&mut stamps.$field))
+                }
+            )*
+
+            /// Every stamp of the link, read in one hold of its lock. Out of line: one copy of the
+            /// read for every reader of them, where each read inlined was a copy of the lock.
+            #[inline(never)]
+            pub fn stamps(&self) -> LinkStamps {
+                R::with_mutex_mut(&self.stamps, |stamps| *stamps)
+            }
+
+            /// Every stamp of the link, lent to `f` under its one lock: for a writer of several at
+            /// once, which then takes the lock once.
+            #[inline]
+            pub fn with_stamps<U>(&self, f: impl FnOnce(&mut LinkStamps) -> U) -> U {
+                R::with_mutex_mut(&self.stamps, f)
+            }
+        }
+    };
+}
+
+link_stamp_doors! {
+    fact_established_at => established_at,
+    fact_last_inbound_at => last_inbound_at,
+    fact_last_outbound_at => last_outbound_at,
+}
 
 impl<R: SessionRuntime> LinkState<R> {
     /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
@@ -4062,14 +4109,6 @@ impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
 use crate::tx_deadline::PushDeadline;
 use crate::tx_deadline::TxExpiry;
 
-/// A link's millisecond value held under its runtime's lock (a stamp of the link's clock, or the
-/// lease its peer advertised), read. Out of line: one copy of the read for every reader of these,
-/// where each read inlined was a copy of the lock.
-#[inline(never)]
-pub(crate) fn read_ms<R: SessionRuntime>(slot: &R::Mutex<Option<u64>>) -> Option<u64> {
-    R::with_mutex_mut(slot, |ms| *ms)
-}
-
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
     #[inline]
@@ -4892,13 +4931,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             at,
             LinkState {
                 driver: driver,
-                last_inbound_at: R::new_mutex(None::<u64>),
                 #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 #[cfg(feature = "alloc")]
                 datagram_resume: R::new_mutex(None::<DatagramResume>),
-                established_at: R::new_mutex(None::<u64>),
-                last_outbound_at: R::new_mutex(None::<u64>),
+                stamps: R::new_mutex(LinkStamps::default()),
                 transport_available: crate::send_gate::SendGate::new(true),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
@@ -6460,7 +6497,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
 
-    /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
+    /// R311kw — the one wire-emit seam: stamp [`LinkState::fact_last_outbound_at`]
     /// and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
     /// batch flush) so the keepalive emitter's idle window sees EVERY
@@ -6621,7 +6658,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !driver.carries_apart(reliability)
             && (priority == Priority::Control || !driver.reports_wire_writes())
         {
-            R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
+            link.fact_last_outbound_at(|slot| *slot = Some(now));
         }
 
         // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
@@ -10940,9 +10977,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
         let now = self.clock.now_monotonic_ms();
-        R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
-            *slot = Some(now);
-        });
+        self.link.fact_last_inbound_at(|slot| *slot = Some(now));
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.
@@ -16498,7 +16533,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// do not surface a PoisonError equivalent — the trait normalises
     /// the AP side to match.
     pub fn is_established(&self) -> bool {
-        R::with_mutex_mut(&self.link.established_at, |slot| slot.is_some())
+        self.link.fact_established_at(|slot| slot.is_some())
     }
 
     /// R311kx — the governing lease window in milliseconds:
@@ -18305,8 +18340,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
             ))]
             self.release_handshake_answer();
-            R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
-            R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
+            // The stamps are the closed transport's, cleared in one hold: the replacement
+            // starts with no establishment, nothing received and no TX history (pico's fresh
+            // transport initializes `_transmitted = 0`, unicast/transport.c:65).
+            self.link
+                .with_stamps(|stamps| *stamps = LinkStamps::default());
             // The liveness duties belong to the transport that was
             // established: the replacement link's Established entry starts
             // its own, and none runs over the re-dial window.
@@ -18327,10 +18365,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 R::with_mutex_mut(&self.link.transport_deletion_taken, |taken| *taken = false);
                 self.core.out_of_band.take(|s| s.transport_deleted = false);
             }
-            // R311kw — the outbound stamp is per-transport: the replacement
-            // link starts with no TX history (pico's fresh transport
-            // initializes `_transmitted = 0`, unicast/transport.c:65).
-            R::with_mutex_mut(&self.link.last_outbound_at, |slot| *slot = None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
             // one way, so the last link's outcome became the next link's
@@ -18484,7 +18518,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if progress == u64::MAX {
             return None;
         }
-        let established = read_ms::<R>(&self.link.established_at)?;
+        let established = self.link.stamps().established_at?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),
@@ -19593,7 +19627,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // subtract stays on one scale. Read outside the slot closure.
         let now = a.clock.now_monotonic_ms();
         // R311y205 (IMPL-2a) — the established stamp + F2 gate are per-link.
-        R::with_mutex_mut(&self.link().established_at, |slot| *slot = Some(now));
+        self.link().fact_established_at(|slot| *slot = Some(now));
         // The establishment is over, so no step of it is answered again.
         #[cfg(all(
             any(feature = "codec-init-body", feature = "codec-open-body"),
