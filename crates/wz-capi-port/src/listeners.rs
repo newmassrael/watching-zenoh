@@ -70,7 +70,8 @@ impl<C> ListenerSet<C> {
     pub fn insert(&self, listener: Arc<C>) -> u64 {
         self.inner.with(|entries| {
             let id = entries.next_id;
-            entries.next_id += 1;
+            // An id is named once in 2^64 insertions.
+            entries.next_id = entries.next_id.wrapping_add(1);
             entries.by_id.insert(id, listener);
             id
         })

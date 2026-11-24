@@ -235,7 +235,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (96) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (89) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -283,9 +283,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | open |
-| TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
-| TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
-| TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
@@ -312,13 +309,11 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
 | TD-202 | `wz-runtime-coop` | `app_link` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
-| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing` | 1 | open |
 | TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
 | TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
 | TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
 | TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
-| TD-228 | `wz-capi-port` | `cancellation` | `arithmetic_side_effects` | 5 | open |
-| TD-229 | `wz-capi-port` | `listeners` | `arithmetic_side_effects` | 1 | open |
 
 TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
 fills a list of `N` zids from the text a build states: on Rust 1.81 a `const fn` takes no `&mut`,

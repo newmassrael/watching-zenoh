@@ -1396,7 +1396,8 @@ impl<
             if self.iter >= limit {
                 return Some(DriverOutcome::IterationLimit);
             }
-            self.iter += 1;
+            // Below the limit, so one more is still a count.
+            self.iter = self.iter.saturating_add(1);
         }
 
         // R2922 — raise what the session was asked from OUTSIDE the loop (a
