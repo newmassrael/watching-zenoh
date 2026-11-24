@@ -251,11 +251,29 @@ mod tests {
         }
     }
 
-    /// An action's own type and the types it derives are hashed. No published
-    /// value was at hand for an action, so the action's own hash is pinned to
-    /// the value the recipe the four published hashes above verify gives
-    /// when it is extended by rosidl's `add_action` (rosidl_parser's `Action`
-    /// for the derived types): a change to how an action is described moves
+    /// An action's derived service, read from its `.action` source as turtlesim
+    /// ships it, hashes to the published value: the request is `goal_id` (a
+    /// UUID) then `goal`, the response `accepted` then `stamp` (a Time), and
+    /// the description reaches the goal, the UUID, the Time and the service
+    /// event.
+    #[test]
+    fn a_published_action_service_hash_is_computed_exactly() {
+        let set = set_of(&[(
+            "turtlesim_msgs/action/RotateAbsolute.action",
+            "# The desired heading in radians\nfloat32 theta\n---\n\
+             # The angular displacement in radians to the starting position\nfloat32 delta\n\
+             ---\n# The remaining rotation in radians\nfloat32 remaining\n",
+        )]);
+        assert_eq!(
+            type_hash(&set, "turtlesim_msgs/action/RotateAbsolute_SendGoal").as_deref(),
+            Ok("RIHS01_3d5d3cfcbb721f88038eaedcd4af95565360a82b36f1983e3a6c7448d2d18fbe")
+        );
+    }
+
+    /// An action's own type and the types it derives are hashed. The action's
+    /// own hash is pinned to the value the recipe that reproduces the published
+    /// hashes above (the action service's included) gives when it is extended
+    /// by rosidl's `add_action`: a change to how an action is described moves
     /// it.
     #[test]
     fn an_action_and_every_type_it_derives_is_hashed() {
