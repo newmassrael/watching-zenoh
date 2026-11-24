@@ -1593,7 +1593,7 @@ fn decode_frame_head<C: KeptChain>(
         has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         chain,
     };
-    Ok((head, unit.len() - cursor.remaining()))
+    Ok((head, unit.len().saturating_sub(cursor.remaining())))
 }
 
 /// The `Frame` at the front of `unit`, decoded up to its payload, and the
@@ -1686,7 +1686,7 @@ fn decode_fragment_head<C: KeptChain>(
         has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
         chain,
     };
-    Ok((head, unit.len() - cursor.remaining()))
+    Ok((head, unit.len().saturating_sub(cursor.remaining())))
 }
 
 #[cfg(all(
@@ -1799,7 +1799,12 @@ fn parse_unit_into(
                 Some(unit) => unit
                     .subslice(payload_at..bytes.len())
                     .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?,
-                None => RxBytes::from(bytes[payload_at..].to_vec()),
+                None => RxBytes::from(
+                    bytes
+                        .get(payload_at..)
+                        .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?
+                        .to_vec(),
+                ),
             };
             let FrameHead {
                 reliable,
@@ -1833,7 +1838,11 @@ fn parse_unit_into(
                 },
                 payload_at,
             ) = decode_fragment_head::<Vec<ExtEntryOwned>>(bytes)?;
-            let payload = bytes[payload_at..].to_vec();
+            // The head was read from the unit, so its end is within it.
+            let payload = bytes
+                .get(payload_at..)
+                .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?
+                .to_vec();
             let priority = ext_qos_priority(&extensions);
             // R311y578 — project the chain-boundary markers BEFORE the ext
             // chain moves into the variant. Both are unit exts in the
@@ -1935,7 +1944,7 @@ fn parse_init(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPars
             extensions,
         )?;
     }
-    Ok(bytes.len() - cursor.remaining())
+    Ok(bytes.len().saturating_sub(cursor.remaining()))
 }
 
 /// The `Open` arm of [`parse_unit`], out of line and read by its document
@@ -1967,7 +1976,7 @@ fn parse_open(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPars
             extensions,
         )?;
     }
-    Ok(bytes.len() - cursor.remaining())
+    Ok(bytes.len().saturating_sub(cursor.remaining()))
 }
 
 /// The `Close` arm of [`parse_unit`], out of line and read by its document
@@ -1992,7 +2001,7 @@ fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPar
             extensions,
         )?;
     }
-    Ok(bytes.len() - cursor.remaining())
+    Ok(bytes.len().saturating_sub(cursor.remaining()))
 }
 
 /// R69b — map a parsed inbound transport frame to the matching
@@ -2346,7 +2355,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         }
         _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
     };
-    Ok((read, bytes.len() - cursor.remaining()))
+    Ok((read, bytes.len().saturating_sub(cursor.remaining())))
 }
 
 /// The refusal of a handshake cookie longer than the session keeps
@@ -2530,7 +2539,7 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
             extensions,
         )?;
     }
-    Ok(bytes.len() - cursor.remaining())
+    Ok(bytes.len().saturating_sub(cursor.remaining()))
 }
 
 /// The JOIN (`T_MID_JOIN`, 0x07), read whole by its document
@@ -2558,7 +2567,7 @@ fn decode_join_message(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundPar
             body,
             extensions,
         },
-        bytes.len() - cursor.remaining(),
+        bytes.len().saturating_sub(cursor.remaining()),
     ))
 }
 
@@ -2623,7 +2632,7 @@ fn decode_oam(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> 
             has_ext: view.z(),
             extensions,
         },
-        bytes.len() - cursor.remaining(),
+        bytes.len().saturating_sub(cursor.remaining()),
     ))
 }
 

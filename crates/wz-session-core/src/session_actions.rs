@@ -1154,25 +1154,9 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
     /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
     /// every priority collapses onto the single conduit.
-    // Its readers are the batching paths and the lend-only frame open (`open_frame_lent`).
-    #[cfg(any(
-        feature = "transport-batching",
-        all(
-            feature = "tx-lend-only",
-            any(
-                feature = "codec-push",
-                feature = "codec-request",
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "declare-keyexpr",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "declare-token",
-                feature = "declare-interest",
-                feature = "liveliness-token",
-            )
-        )
-    ))]
+    // Its readers are the batching paths (the lend-only frame open reads it inside its batching
+    // window), and `flush_conduit` is one under the feature alone.
+    #[cfg(feature = "transport-batching")]
     const fn conduit_index(priority: Priority) -> usize {
         #[cfg(feature = "transport-qos")]
         {
@@ -3599,8 +3583,9 @@ enum UnicastPush {
     /// every try gets as far as the lane is deep and no further. Such a message is the caller's
     /// to send with a wait; a chain the lane can hold whole is probed like a frame.
     ///
-    /// Only a build that fragments has a chain to refuse.
-    #[cfg(feature = "transport-fragmentation")]
+    /// Only a build that fragments has a chain to refuse, and only one with `alloc` has a
+    /// sender that may not wait (`DispatchStage::Probe`).
+    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
     Chain,
 }
 
@@ -9078,6 +9063,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session gave the link when it was established ([`Self::record_established_at`]), asked
     /// of the same parameters.
     #[cfg(all(
+        feature = "alloc",
         feature = "transport-fragmentation",
         any(
             feature = "codec-push",
@@ -12001,11 +11987,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // counted as a message sent and not a congestion drop, the message is the caller's.
             #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
             Ok(UnicastPush::Chain) => Ok(Dispatched::Chain),
-            // Only a probe is answered `Chain`, and a probe exists with `alloc`.
-            #[cfg(all(not(feature = "alloc"), feature = "transport-fragmentation"))]
-            Ok(UnicastPush::Chain) => {
-                unreachable!("a chain is refused only to a sender that may not wait")
-            }
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
             // and the refusal was counted where it was raised (`refuse_tx`).
@@ -12387,7 +12368,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
         // with the SN of this message given back; the sender sends it waiting. The chain that
         // fits may still find the lane full and is abandoned and put down for later, which is
-        // what a probe does with a frame.
+        // what a probe does with a frame. A probe exists with `alloc`.
+        #[cfg(feature = "alloc")]
         if deadline.is_probe() {
             let before_last = plan
                 .remaining_fragments()
@@ -13884,7 +13866,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         declare: &crate::transport_profile::owned::DeclareOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::declare_body(declare);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14025,7 +14007,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // and an express message leaves its batch at once
         // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
         let qos = crate::declare_ext_qos::read_request_qos(request);
-        let encode_body = crate::frame_encode::request_body(request);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14085,7 +14067,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // answered in the `Data` band. A non-QoS session still clamps the band
         // downstream.
         let qos = crate::declare_ext_qos::read_response_qos(response);
-        let encode_body = crate::frame_encode::response_body(response);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14138,7 +14120,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // final built with `QosLevel::DEFAULT` carries no ext and lands on the
         // DEFAULT band exactly as before.
         let qos = crate::declare_ext_qos::read_response_final_qos(response_final);
-        let encode_body = crate::frame_encode::response_final_body(response_final);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]
@@ -14191,7 +14173,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         interest: &crate::transport_profile::owned::InterestOwned,
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
-        let encode_body = crate::frame_encode::interest_body(interest);
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
         #[cfg(feature = "tx-lend-only")]

@@ -68,10 +68,15 @@ impl Drop for LentRemainder<'_> {
     }
 }
 
+/// That a [`TableLock`] ran the call it was given: made by the call alone (the field is private
+/// to this module), so a lock can hand one back only by having run the call at least once.
+pub struct LockedCall(());
+
 /// The lock a transport's table is held under, which the ABI that makes the transport gives it.
 pub trait TableLock: Send + Sync {
-    /// Run `f` on the table with the lock held.
-    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable));
+    /// Run `f` on the table with the lock held, and hand back what `f` returned: the proof
+    /// that it ran.
+    fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall;
 }
 
 /// A transport the program supplies: its port and the table of its links.
@@ -90,15 +95,18 @@ impl AppTransport {
     /// after the lock is.
     pub fn with<R>(&self, f: impl FnOnce(&mut AppLinkTable) -> R) -> R {
         let mut f = Some(f);
-        let mut out = None;
-        self.table.lock_with(&mut |table| {
+        let mut out = core::mem::MaybeUninit::<R>::uninit();
+        let LockedCall(()) = self.table.lock_with(&mut |table| {
             if let Some(f) = f.take() {
-                out = Some(f(table));
+                out.write(f(table));
             }
+            LockedCall(())
         });
-        // A lock that did not run the closure has broken its one promise; there is no table to
-        // answer from.
-        out.expect("a transport's table lock runs the call it is given")
+        // SAFETY: a `LockedCall` is made only by the closure above (its field is private to this
+        // module), so the lock that handed one back ran the closure at least once. `f` starts
+        // `Some` and only the closure takes it, so its first run wrote `out`; a later run finds
+        // `f` taken and writes nothing. `out` is therefore initialised here, and read once.
+        unsafe { out.assume_init() }
     }
 
     /// The program's calls.
@@ -260,8 +268,8 @@ mod tests {
     struct HostLock(Mutex<AppLinkTable>);
 
     impl TableLock for HostLock {
-        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable)) {
-            f(&mut self.0.lock().unwrap());
+        fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+            f(&mut self.0.lock().unwrap())
         }
     }
 
@@ -400,5 +408,28 @@ mod tests {
         transport.perform(effects);
         assert_eq!(calls.drained.lock().unwrap().as_slice(), [link]);
         transport.received(link, b"e", None).unwrap();
+    }
+    /// A lock that runs the call it is given twice still runs the caller's closure once, and the
+    /// answer is that run's.
+    #[test]
+    fn a_lock_that_runs_the_call_twice_runs_the_closure_once() {
+        struct Twice(Mutex<AppLinkTable>);
+        impl TableLock for Twice {
+            fn lock_with(&self, f: &mut dyn FnMut(&mut AppLinkTable) -> LockedCall) -> LockedCall {
+                let mut table = self.0.lock().unwrap();
+                let LockedCall(()) = f(&mut table);
+                f(&mut table)
+            }
+        }
+        let transport = AppTransport::new(
+            Box::new(Twice(Mutex::new(AppLinkTable::new()))),
+            Box::new(Port(Arc::new(Calls::default()))),
+        );
+        let mut runs = 0;
+        let answer = transport.with(|_| {
+            runs += 1;
+            7
+        });
+        assert_eq!((answer, runs), (7, 1));
     }
 }

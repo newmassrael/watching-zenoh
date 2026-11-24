@@ -799,9 +799,13 @@ impl MulticastTxReply<'_> {
     pub fn with_body<R>(self, f: impl FnOnce(&crate::frame_encode::BodyEncoder<'_>) -> R) -> R {
         match self {
             #[cfg(feature = "codec-response")]
-            Self::Response(response) => f(&crate::frame_encode::response_body(response)),
+            Self::Response(response) => {
+                f(&|sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink))
+            }
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-            Self::DeclareReply(declare) => f(&crate::frame_encode::declare_body(declare)),
+            Self::DeclareReply(declare) => {
+                f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
+            }
         }
     }
 }
@@ -816,22 +820,32 @@ pub fn multicast_tx_item_body<R>(
     match item {
         MulticastTxItem::Push { push, .. } => f(&crate::frame_encode::push_body(push)),
         #[cfg(feature = "codec-request")]
-        MulticastTxItem::Request { request } => f(&crate::frame_encode::request_body(request)),
+        MulticastTxItem::Request { request } => {
+            f(&|sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink))
+        }
         #[cfg(feature = "codec-response")]
-        MulticastTxItem::Response { response } => f(&crate::frame_encode::response_body(response)),
+        MulticastTxItem::Response { response } => {
+            f(&|sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink))
+        }
         #[cfg(feature = "codec-response-final")]
         MulticastTxItem::ResponseFinal { request_id, qos } => {
             let response_final =
                 crate::response_final_build::build_response_final(*request_id, *qos);
             // Named, so the encoder that borrows the message is let go before the message is.
-            let body = crate::frame_encode::response_final_body(&response_final);
+            let body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
             f(&body)
         }
         #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-        MulticastTxItem::DeclareReply { declare } => f(&crate::frame_encode::declare_body(declare)),
+        MulticastTxItem::DeclareReply { declare } => {
+            f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
+        }
         #[cfg(feature = "codec-declare")]
-        MulticastTxItem::Declare { declare } => f(&crate::frame_encode::declare_body(declare)),
-        MulticastTxItem::Interest { interest } => f(&crate::frame_encode::interest_body(interest)),
+        MulticastTxItem::Declare { declare } => {
+            f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
+        }
+        MulticastTxItem::Interest { interest } => {
+            f(&|sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink))
+        }
     }
 }
 
@@ -1179,7 +1193,7 @@ where
         MulticastTxItem::Request { request } => push_frame(
             meta,
             worst_case,
-            crate::frame_encode::request_body(&request),
+            |sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink),
             tx_sn,
             params,
             conf,
@@ -1195,7 +1209,7 @@ where
             // `meta.reliable` is pinned true for a reply (`frame_meta`).
             meta,
             worst_case,
-            crate::frame_encode::response_body(&response),
+            |sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink),
             tx_sn,
             params,
             conf,
@@ -1216,7 +1230,7 @@ where
             push_frame(
                 meta,
                 worst_case,
-                crate::frame_encode::response_final_body(&response_final),
+                |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink),
                 tx_sn,
                 params,
                 conf,
@@ -1234,7 +1248,7 @@ where
         MulticastTxItem::DeclareReply { declare } => push_frame(
             meta,
             worst_case,
-            crate::frame_encode::declare_body(&declare),
+            declare_body(declare),
             tx_sn,
             params,
             conf,
@@ -1245,7 +1259,7 @@ where
         MulticastTxItem::Declare { declare } => push_frame(
             meta,
             worst_case,
-            crate::frame_encode::declare_body(&declare),
+            declare_body(declare),
             tx_sn,
             params,
             conf,
@@ -1256,7 +1270,7 @@ where
         MulticastTxItem::Interest { interest } => push_frame(
             meta,
             worst_case,
-            crate::frame_encode::interest_body(&interest),
+            |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink),
             tx_sn,
             params,
             conf,
@@ -1385,6 +1399,23 @@ fn frame_meta(
 ))]
 fn declare_frame_meta(declare: &crate::transport_profile::owned::DeclareOwned) -> FrameMeta {
     control_frame_meta(crate::declare_ext_qos::read_declare_qos(declare))
+}
+
+/// How a `Declare` the group carries is written: one writer for the declare reply and the
+/// declaration alike, so the frame walk is compiled once for both.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-declare",
+    any(
+        feature = "codec-push",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+fn declare_body(
+    declare: &crate::transport_profile::owned::DeclareOwned,
+) -> impl Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError> + '_
+{
+    move |sink| declare.encode(sink)
 }
 
 /// R2937 — the conduit a push of `item` onto a group of `params` mints on:
@@ -3862,7 +3893,7 @@ mod group_declarations_written_from_parts {
             for key in keys() {
                 let owned = crate::declare_build::build_group_retraction(what, 5, key)
                     .expect("an owned retraction");
-                let expected = written(&crate::frame_encode::declare_body(&owned));
+                let expected = written(&|sink: &mut crate::tx_buf::TxSink<'_>| owned.encode(sink));
                 let (bytes, size, framing) = multicast_tx_group_retraction(what, 5, key, |m| {
                     (written(m.body), m.size, m.framing)
                 })
@@ -3890,7 +3921,7 @@ mod group_declarations_written_from_parts {
             for key in keys() {
                 let owned = crate::declare_build::build_group_announcement(what, 5, key)
                     .expect("an owned announcement");
-                let expected = written(&crate::frame_encode::declare_body(&owned));
+                let expected = written(&|sink: &mut crate::tx_buf::TxSink<'_>| owned.encode(sink));
                 let bytes = multicast_tx_group_announcement(what, 5, key, |m| written(m.body))
                     .expect("an announcement written from its parts");
                 assert_eq!(bytes, expected, "{what:?} on {key:?}");

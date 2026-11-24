@@ -655,7 +655,9 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
                     // A borrowed unit's residue is copied to be kept: the one copy
                     // a batch costs on this path, and a unit holding only the one
                     // message a handshake sends costs none.
-                    None => Some(crate::link::RxBytes::from(bytes[*consumed..].to_vec())),
+                    None => bytes
+                        .get(*consumed..)
+                        .map(|rest| crate::link::RxBytes::from(rest.to_vec())),
                 };
                 if let Some(rest) = rest {
                     actions.park_pending_unit(rest);
@@ -869,45 +871,18 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // frame the admission refuses (no Close frame: anti-amplification).
                 #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
                 InboundFrame::Init { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                #[cfg(feature = "codec-init-body")]
-                InboundFrame::Init { .. } => {
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
                 #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
                 InboundFrame::Open { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                #[cfg(feature = "codec-open-body")]
-                InboundFrame::Open { .. } => {
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
-                #[cfg(feature = "codec-close")]
-                InboundFrame::Close { .. } => {
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
-                // R311y605 — a JOIN reaches `inbound_to_fsm_event` as
-                // `Some(FramingError)`, exactly as it did before it was
-                // decodable at all (it fell through to `Unknown` then).
-                // Same unreachability, same reason.
-                #[cfg(all(feature = "alloc", feature = "codec-join"))]
-                InboundFrame::Join { .. } => {
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
-                // Transport OAM projects to `Some(FramingError)` for the same
-                // reason a JOIN does — wz's unicast FSM has no operations
-                // transition — so the outer Some arm took it.
-                #[cfg(feature = "alloc")]
-                InboundFrame::Oam { .. } => {
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
-                #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-                InboundFrame::Network { .. } => {
-                    unreachable!("observer network envelope projects to FramingError")
-                }
-                InboundFrame::Unknown { .. } => {
-                    // inbound_to_fsm_event projects these to Some(event),
-                    // so the outer Some arm handled them — this branch
-                    // is unreachable.
-                    unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
-                }
+                // Every other message `inbound_to_fsm_event` projects to an event (a handshake
+                // message, a Close, a JOIN, transport OAM, a network envelope, an unknown id), so
+                // the arm above took it; one it did not is judged as the framing error it projects to.
+                _ => decide_admitted(
+                    E::FramingError,
+                    &frame.control_facts(),
+                    to_engine,
+                    actions,
+                    engine,
+                ),
             },
         },
         Err(err) => {
@@ -1964,9 +1939,16 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     // time, as upstream's batch walk does: nothing of it is copied to wait for a later turn.
     let mut at = used;
     while at > 0 && at < unit.len() {
+        let Some(rest) = unit.get(at..) else {
+            break;
+        };
         let (_, used, _) =
-            dispatch_datagram_unit(&unit[at..], None, false, actions, engine, record, on_event);
-        at = if used == 0 { unit.len() } else { at + used };
+            dispatch_datagram_unit(rest, None, false, actions, engine, record, on_event);
+        at = if used == 0 {
+            unit.len()
+        } else {
+            at.saturating_add(used)
+        };
     }
     path
 }
@@ -2010,7 +1992,10 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
             });
             break;
         }
-        let (read_by, used, stopped) = unit_at(&datagram[at..], next_record.take(), &mut *on_event);
+        let Some(rest) = datagram.get(at..) else {
+            break;
+        };
+        let (read_by, used, stopped) = unit_at(rest, next_record.take(), &mut *on_event);
         path.get_or_insert(read_by);
         if stopped {
             actions.set_datagram_resume(DatagramResume {
@@ -2022,7 +2007,7 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
         if used == 0 {
             break;
         }
-        at += used;
+        at = at.saturating_add(used);
     }
     path.unwrap_or(DatagramPath::InPlace)
 }
@@ -2657,9 +2642,10 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         // `impl<R: BacktrackableReader> Drop for FrameReader<'_, R> {`). A refusal that ends
         // the link reads nothing more.
         let end = match refused {
-            DriverLoopOutcome::RxSnRejected { .. } => {
-                payload_at + frame_records_extent(&unit[payload_at..], record)
-            }
+            DriverLoopOutcome::RxSnRejected { .. } => payload_at.saturating_add(
+                unit.get(payload_at..)
+                    .map_or(0, |records| frame_records_extent(records, record)),
+            ),
             _ => unit.len(),
         };
         return (DatagramPath::InPlace, end, false);
@@ -2675,7 +2661,9 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     // The frame's own chain is handed over owned only with an owned record:
     // a frame whose every record is lent never owns it.
     let walked = walk_records_in_place(
-        &unit[records_at..],
+        // The records begin after the frame's head, or where a stopped walk left them, both
+        // within the unit.
+        unit.get(records_at..).unwrap_or_default(),
         carrier,
         #[cfg(all(
             feature = "alloc",
@@ -2693,7 +2681,11 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         // The walk ends at a transport message of the same batch (a second Frame header, a
         // KeepAlive): the unit goes on from there. Or it stopped before a record, which the next
         // step reads from.
-        Ok((read, stopped)) => (DatagramPath::InPlace, records_at + read, stopped),
+        Ok((read, stopped)) => (
+            DatagramPath::InPlace,
+            records_at.saturating_add(read),
+            stopped,
+        ),
         Err(parse_err) => {
             engine.process_event(E::FramingError);
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
