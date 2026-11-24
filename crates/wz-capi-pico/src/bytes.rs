@@ -2222,6 +2222,23 @@ mod box_cache_tests {
 }
 
 #[cfg(test)]
+impl ByteBuf {
+    /// How many hold the block this payload holds a share of; none for a payload with no block.
+    pub(crate) fn holders(&self) -> usize {
+        (*self.block)
+            .as_ref()
+            .map_or(0, |block| block.head().refs.load(Ordering::Relaxed))
+    }
+
+    /// Set how many hold this payload's block, for a test that has a share of it refused.
+    pub(crate) fn set_holders(&self, holders: usize) {
+        if let Some(block) = &*self.block {
+            block.head().refs.store(holders, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
 mod block_tests {
     use super::*;
 
