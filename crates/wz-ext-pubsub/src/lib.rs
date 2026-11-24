@@ -26,8 +26,8 @@
 
 extern crate alloc;
 
-// The publisher and the subscriber hold their state under a lock: `std`'s, or without it the host's
-// own (`wz-host-sync`). A build with neither has none to give them.
+// The publisher and the subscriber hold their state under the host's lock (`wz-host-sync`), which
+// `std` or `host-sync` brings. A build with neither has none to give them.
 #[cfg(all(
     not(any(feature = "std", feature = "host-sync")),
     any(feature = "advanced-publisher", feature = "advanced-subscriber")

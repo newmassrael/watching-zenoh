@@ -17,9 +17,9 @@
 //! ([`Round::end_rejoined`]), so a sample of either is never copied; a key the session resolved
 //! from an alias lies in a frame of the dispatch, and is written into the table's keys. The round
 //! keeps no area to copy any other part into: a record with a part that lies nowhere the round
-//! reads it is refused and counted ([`RoundCounts::unplaced`]). A record
-//! offered again for one more subscriber is written once: the subscriber's callback joins the
-//! ones it owes.
+//! reads it is refused and counted ([`RoundCounts::unplaced`]). A sample one fan-out hands to
+//! many subscribers is read and written once, at its first row: each later row's call joins the
+//! ones the record owes, or is refused as the first was.
 //!
 //! The session writes the table under its lock while it is empty or filling; the lock's release
 //! seals it ([`Round::seal`]); one delivery takes it, hands every record to its callbacks in
@@ -77,9 +77,6 @@ pub trait RoundCall: Sized {
 
 /// A call of a subscriber's callback, which a sample is handed to.
 pub trait SampleCall: RoundCall {
-    /// Whether `other` is a call of the same row.
-    fn same_row(&self, other: &Self) -> bool;
-
     /// Hand `sample` to the row's callback.
     fn hand(&self, sample: &dyn SampleView);
 }
@@ -204,10 +201,6 @@ impl RoundCall for Infallible {
 }
 
 impl SampleCall for Infallible {
-    fn same_row(&self, _other: &Self) -> bool {
-        match *self {}
-    }
-
     fn hand(&self, _sample: &dyn SampleView) {
         match *self {}
     }
@@ -552,6 +545,20 @@ impl<C: RoundCalls> Entry<C> {
     }
 }
 
+/// What the fan-out of a sample that runs now made of it at its first row, which each later row of
+/// the fan-out follows without reading the sample again ([`Round::offer_sample`]).
+#[derive(Clone, Copy)]
+enum Fan {
+    /// No fan-out's first row was offered to the table since it was emptied.
+    None,
+    /// The record the table holds last is the fan-out's sample: a later row owes a call of it,
+    /// counted by the sample's congestion control (`holds_sender`) when no callback is left.
+    Written { holds_sender: bool },
+    /// The sample found no room, or a part of it found no place (`unplaced`): a later row is
+    /// refused as the first was.
+    Refused { holds_sender: bool, unplaced: bool },
+}
+
 /// A callback a record of the round owes: a call of a subscriber's callback begun on its row under
 /// the session's lock and ended as the round is emptied ([`Released::settle`]), or another
 /// callback copied out of the row that matched it and let go of, with no lock held, as the round is
@@ -708,9 +715,8 @@ struct Table<C: RoundCalls> {
     longest_key: usize,
     /// The key written last, which the records on it that follow share.
     key: Option<Span>,
-    /// Whether the record written last is the one of the sample whose fan-out runs now: what a
-    /// later row of that fan-out joins. A record of no fan-out, or of one before, is joined by none.
-    fan: bool,
+    /// What the fan-out that runs now made of its sample ([`Fan`]): what a later row of it follows.
+    fan: Fan,
 }
 
 impl<C: RoundCalls> Table<C> {
@@ -919,7 +925,7 @@ impl<C: RoundCalls> Table<C> {
         self.entries.clear();
         self.keys.clear();
         self.key = None;
-        self.fan = false;
+        self.fan = Fan::None;
         self.datagram = None;
         self.rejoined = None;
         self.spent = false;
@@ -1228,7 +1234,7 @@ impl<C: RoundCalls> Round<C> {
             ptr::write(addr_of_mut!((*table).keys), rows.keys);
             ptr::write(addr_of_mut!((*table).longest_key), rows.longest_key);
             ptr::write(addr_of_mut!((*table).key), None);
-            ptr::write(addr_of_mut!((*table).fan), false);
+            ptr::write(addr_of_mut!((*table).fan), Fan::None);
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
@@ -1432,12 +1438,15 @@ impl<C: RoundCalls> Round<C> {
 
     /// Hold `sample` for `call`, a call of a subscriber's callback begun on its row, read where it
     /// lies when it lies in the datagram a link lends the step; `first` when `call` is the first
-    /// row of the sample's fan-out. A later row of the same fan-out joins the record the sample
-    /// was written in, so a sample offered to many subscribers is written once; what finds no
-    /// room is counted, and its call ended.
+    /// row of the sample's fan-out. The first row reads the sample once and writes its record, or
+    /// finds it refused; each later row of the same fan-out follows that without reading the sample
+    /// again: its call is owed by the same record, or refused as the first was. A sample offered to
+    /// many subscribers is so written once; what finds no room is counted for each call, and the
+    /// call ended.
     ///
     /// # Safety
-    /// The caller holds the session's lock.
+    /// The caller holds the session's lock, and offers a later row of a fan-out in the same hold of
+    /// it as the fan-out's first row.
     pub unsafe fn offer_sample(&self, call: C::Subscriber, sample: &dyn SampleView, first: bool) {
         // The session's own put is handed the calls and holds nothing.
         // SAFETY: the caller's contract: written under the session's lock, which is held.
@@ -1455,74 +1464,104 @@ impl<C: RoundCalls> Round<C> {
             debug_assert!(kept, "a session's subscribers fit the table of them");
             return;
         }
-        let sample = Offered::of(sample);
-        // SAFETY: the caller's contract.
-        let lending = unsafe { self.lending() };
-        // The call of a sample the round keeps no record of, and whether a part of it found no
-        // place rather than the table no room: refused after this block, in one place.
-        let (call, unplaced) = 'refused: {
+        if !first {
             // SAFETY: the caller's contract.
-            let Some(table) = (unsafe { self.writable() }) else {
-                break 'refused (call, false);
-            };
-            // A record is joined by the later rows of its own fan-out alone: a sample of the same
-            // bytes in another fan-out is a record of its own.
-            let call = if first {
-                table.fan = false;
-                call
-            } else {
-                match self.join_sample(table, call) {
-                    Ok(()) => {
-                        // SAFETY: the caller's contract: the session's lock is held.
-                        unsafe { self.filled(table) };
+            if let Some(table) = unsafe { self.writable() } {
+                match table.fan {
+                    Fan::Written { holds_sender } => {
+                        if let Some(
+                            last @ Entry {
+                                what: Held::Sample { .. },
+                                ..
+                            },
+                        ) = table.entries.last_mut()
+                        {
+                            match table.callbacks.push(Owed::Subscriber(call)) {
+                                Ok(()) => last.owed = last.owed.saturating_add(1),
+                                Err(full) => {
+                                    self.refuse(holds_sender);
+                                    self.released.settle(full.0);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                    Fan::Refused {
+                        holds_sender,
+                        unplaced,
+                    } => {
+                        self.refuse_sample(call, holds_sender, unplaced);
                         return;
                     }
-                    Err(call) => call,
+                    Fan::None => {}
                 }
-            };
-            if !Self::takes(table, 1) {
-                break 'refused (call, false);
             }
-            let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
-                break 'refused (call, true);
-            };
-            let first = table.callbacks.len();
-            let entry = table.entries.push(Entry::owing_one(
-                Held::Sample {
-                    head: Head {
-                        kind: sample.kind,
-                        reliability: sample.reliability,
-                        qos: sample.qos,
-                        key,
-                        payload,
-                    },
-                    rest,
-                },
-                first,
-            ));
-            let kept = match entry {
-                Ok(()) => {
-                    if let Some(held) = sample.held {
-                        table.hold_key(key, held);
-                    }
-                    table.fan = true;
-                    self.owe_call(table, call)
-                }
-                Err(_) => {
-                    self.released.end(call);
-                    false
-                }
-            };
-            debug_assert!(kept, "the table had the room its checks found");
-            // SAFETY: the caller's contract: the session's lock is held.
-            unsafe { self.filled(table) };
+        }
+        let sample = Offered::of(sample);
+        let holds_sender = holds_its_sender(sample.reliability, sample.qos);
+        // SAFETY: the caller's contract.
+        let lending = unsafe { self.lending() };
+        // SAFETY: the caller's contract.
+        let Some(table) = (unsafe { self.writable() }) else {
+            self.refuse_sample(call, holds_sender, false);
             return;
         };
-        // A part that found no place is counted apart too (`Self::refuse_unplaced`).
+        if !Self::takes(table, 1) {
+            table.fan = Fan::Refused {
+                holds_sender,
+                unplaced: false,
+            };
+            self.refuse_sample(call, holds_sender, false);
+            return;
+        }
+        let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
+            table.fan = Fan::Refused {
+                holds_sender,
+                unplaced: true,
+            };
+            self.refuse_sample(call, holds_sender, true);
+            return;
+        };
+        let first = table.callbacks.len();
+        let entry = table.entries.push(Entry::owing_one(
+            Held::Sample {
+                head: Head {
+                    kind: sample.kind,
+                    reliability: sample.reliability,
+                    qos: sample.qos,
+                    key,
+                    payload,
+                },
+                rest,
+            },
+            first,
+        ));
+        let kept = match entry {
+            Ok(()) => {
+                if let Some(held) = sample.held {
+                    table.hold_key(key, held);
+                }
+                self.owe_call(table, call)
+            }
+            Err(_) => {
+                self.released.end(call);
+                false
+            }
+        };
+        debug_assert!(kept, "the table had the room its checks found");
+        table.fan = Fan::Written { holds_sender };
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
+    }
+
+    /// Refuse `call` of a sample the round keeps no record of: counted by the sample's congestion
+    /// control (`holds_sender`), apart as well when a part of it found no place (`unplaced`), and
+    /// the call ended.
+    fn refuse_sample(&self, call: C::Subscriber, holds_sender: bool, unplaced: bool) {
         if unplaced {
             self.unplaced.fetch_add(1, Ordering::Relaxed);
         }
-        self.refuse(holds_its_sender(sample.reliability, sample.qos));
+        self.refuse(holds_sender);
         self.released.end(call);
     }
 
@@ -1552,36 +1591,6 @@ impl<C: RoundCalls> Round<C> {
         let payload = table.place(sample.payload, lending)?;
         let rest = table.place_parts(&sample.rest, lending)?;
         Some((key, payload, rest))
-    }
-
-    /// Join `call` to the record `table` holds last when that is the record of the fan-out `call`
-    /// is a later row of and no call of the same row is owed it yet; the call back when it does not
-    /// join.
-    fn join_sample(&self, table: &mut Table<C>, call: C::Subscriber) -> Result<(), C::Subscriber> {
-        let Some(
-            entry @ Entry {
-                what: Held::Sample { .. },
-                ..
-            },
-        ) = table.entries.last()
-        else {
-            return Err(call);
-        };
-        let joins = table.fan
-            && !table
-                .owed(entry)
-                .iter()
-                .filter_map(Owed::subscriber)
-                .any(|held| held.same_row(&call));
-        if !joins || !Self::joins(table) {
-            return Err(call);
-        }
-        if self.owe_call(table, call) {
-            if let Some(last) = table.entries.last_mut() {
-                last.owed = last.owed.saturating_add(1);
-            }
-        }
-        Ok(())
     }
 
     /// Hold `sample`, a token's appearance or retraction, for `call`, a call of a liveliness

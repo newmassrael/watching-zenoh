@@ -421,10 +421,14 @@ mod alloc_impl {
         /// Push messages drive injection; every other `IterationEvent`
         /// (Lease, non-Push records) is a no-op. This is the wire-inbound
         /// (ACL = wire -> domain) path; local self-publishes do not inject.
-        pub fn dispatch_iteration_event<'a>(
+        pub fn dispatch_iteration_event<
+            'a,
+            PS: crate::bounded::Storage,
+            OS: crate::bounded::Storage,
+        >(
             &self,
             event: IterationEvent<'_, '_>,
-            peer_table: impl Into<MappingSpaces<'a>>,
+            peer_table: impl Into<MappingSpaces<'a, PS, OS>>,
             injector: &mut dyn EventInjector,
         ) -> usize {
             let peer_table = peer_table.into();
@@ -473,11 +477,11 @@ mod alloc_impl {
 
         /// One received Push through the switchboard: its keyexpr resolved,
         /// its kind and payload projected, then [`Self::dispatch`].
-        fn dispatch_push(
+        fn dispatch_push<PS: crate::bounded::Storage, OS: crate::bounded::Storage>(
             &self,
             push: &crate::wire::PushOwned,
             reliability: Reliability,
-            peer_table: MappingSpaces<'_>,
+            peer_table: MappingSpaces<'_, PS, OS>,
             injector: &mut dyn EventInjector,
         ) -> usize {
             let Some(resolved) = resolve_wireexpr_in(&push.keyexpr.body, peer_table) else {

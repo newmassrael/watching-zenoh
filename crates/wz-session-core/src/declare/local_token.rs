@@ -466,10 +466,10 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// `Err` only when the staging refused the whole chain; see
     /// [`Self::respond_to_interest_borrowed`]. Every no-op above is `Ok`.
     #[cfg(feature = "alloc")]
-    pub fn respond_to_interest<'a, Q: Storage>(
+    pub fn respond_to_interest<'a, Q: Storage, PS: Storage, OS: Storage>(
         &self,
         interest: &InterestOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<(), CapacityFull<()>> {
         self.answer_interest(self, interest, peer_keyexpr_table.into(), pending)
@@ -477,11 +477,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
 
     /// [`Self::respond_to_interest`] with the tokens of `held`.
     #[cfg(feature = "alloc")]
-    fn answer_interest<Q: Storage>(
+    fn answer_interest<Q: Storage, PS: Storage, OS: Storage>(
         &self,
         held: &dyn HeldTokens,
         interest: &InterestOwned,
-        peer_keyexpr_table: MappingSpaces<'_>,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<(), CapacityFull<()>> {
         if !interest.c() {
@@ -526,11 +526,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// answered with the terminating `Final` alone, as the subscriber side
     /// answers it.
     #[cfg(all(feature = "storage-profile", feature = "rx-lent-control"))]
-    fn answer_interest_view<Q: Storage>(
+    fn answer_interest_view<Q: Storage, PS: Storage, OS: Storage>(
         &self,
         held: &dyn HeldTokens,
         interest: &wz_codecs::lent::Interest<'_>,
-        peer_keyexpr_table: MappingSpaces<'_>,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> Result<(), CapacityFull<()>> {
         if !interest.c() {
@@ -579,10 +579,10 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// the fixed backing's bound meets the batching; a refused chain does not
     /// stop the frame, because the next Interest may need fewer slots.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a, Q: Storage>(
+    pub fn dispatch_messages<'a, Q: Storage, PS: Storage, OS: Storage>(
         &self,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> usize {
         self.answer_messages(self, messages, peer_keyexpr_table.into(), pending)
@@ -590,11 +590,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
 
     /// [`Self::dispatch_messages`] with the tokens of `held`.
     #[cfg(feature = "alloc")]
-    fn answer_messages<Q: Storage>(
+    fn answer_messages<Q: Storage, PS: Storage, OS: Storage>(
         &self,
         held: &dyn HeldTokens,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: MappingSpaces<'_>,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> usize {
         let mut refused = 0usize;
@@ -619,11 +619,11 @@ impl<P: Storage> LocalTokenRegistry<P> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn answer_iteration_event<'a, Q: Storage>(
+    pub fn answer_iteration_event<'a, Q: Storage, PS: Storage, OS: Storage>(
         &self,
         held: &dyn HeldTokens,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, Q>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();

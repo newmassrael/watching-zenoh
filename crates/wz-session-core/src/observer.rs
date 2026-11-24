@@ -558,11 +558,11 @@ impl ApplicationLayerObserver {
         any(feature = "liveliness-token", feature = "declare-subscriber"),
         feature = "interest-answer"
     ))]
-    fn stage_queryable_interest(
+    fn stage_queryable_interest<PS: crate::bounded::Storage, OS: crate::bounded::Storage>(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
         staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
         interest: &crate::transport_profile::owned::InterestOwned,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, PS, OS>,
     ) {
         if !interest.c() {
             return;
@@ -599,11 +599,11 @@ impl ApplicationLayerObserver {
         any(feature = "liveliness-token", feature = "declare-subscriber"),
         feature = "interest-answer"
     ))]
-    fn stage_queryable_interest_view(
+    fn stage_queryable_interest_view<PS: crate::bounded::Storage, OS: crate::bounded::Storage>(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
         staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
         interest: &wz_codecs::lent::Interest<'_>,
-        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_, PS, OS>,
     ) {
         if !interest.c() {
             return;

@@ -226,10 +226,6 @@ impl RoundCall for SubscriberCall {
 }
 
 impl SampleCall for SubscriberCall {
-    fn same_row(&self, other: &Self) -> bool {
-        SubscriberCall::same_row(self, other)
-    }
-
     fn hand(&self, sample: &dyn SampleView) {
         SubscriberCall::hand(self, sample);
     }

@@ -20,6 +20,13 @@
 //! the number [`Thread::id`] gives the thread a spawn started. [`Parker`] is what one thread waits on
 //! until another wakes it, with or without a timeout on [`monotonic_ns`], the host's monotonic
 //! clock; a timed wait is on that clock, so a date set on the host moves no deadline.
+//!
+//! [`Mutex`], [`Condvar`] and [`RwLock`] are the typed forms, in the shape of `std`'s, that every
+//! crate of a C ABI's graph holds for a lock it makes while a session is open: making, taking,
+//! waiting on and notifying one takes no memory on any host. They are the in-place ones
+//! ([`in_place`]), or in a build with `std` (the `std` feature) `std`'s where `std`'s lie in
+//! their own bytes as well. A lock whose holder panicked is handed out as it was left, and in a
+//! build with `std` reads as poisoned ([`Mutex::is_poisoned`]).
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -27,13 +34,12 @@
 // Nothing here allocates: a lock and a condition variable are a word of their owner's, and a
 // thread's body lies in a record of a static pool.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "std"))]
 extern crate std;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
-use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use core::time::Duration;
 
@@ -275,142 +281,51 @@ unsafe fn raw_wait_until(cv: &RawCondvar, lock: &RawLock, deadline_ns: u64) -> b
     notified
 }
 
-/// A value behind a [`RawLock`], reached through a guard: the shape of `std::sync::Mutex` with
-/// no poisoning (nothing here unwinds), made in a `const` context.
-pub struct Mutex<T> {
-    raw: RawLock,
-    value: UnsafeCell<T>,
-}
+// The typed forms: the in-place ones, or `std`'s where those lie in their own bytes too (Linux's,
+// Android's and the BSDs' futex, Windows' slim lock and address wait). `std`'s are pthread objects
+// elsewhere (macOS, QNX), which must not move once used, so `std` boxes each the first time it is
+// taken: a lock made after a session opened would allocate on its first take. One name, one
+// contract, whichever answers it.
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )
+))]
+mod std_lock;
+#[cfg(not(all(
+    feature = "std",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )
+)))]
+use in_place as chosen;
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )
+))]
+use std_lock as chosen;
 
-// SAFETY: the value is reached only through a guard, and the lock lets one thread hold a guard at
-// a time.
-unsafe impl<T: Send> Sync for Mutex<T> {}
+pub mod in_place;
 
-impl<T> Mutex<T> {
-    /// `value`, behind a lock no thread holds.
-    pub const fn new(value: T) -> Self {
-        Self {
-            raw: RawLock::new(),
-            value: UnsafeCell::new(value),
-        }
-    }
-
-    /// Wait until the lock is the calling thread's.
-    pub fn lock(&self) -> MutexGuard<'_, T> {
-        self.raw.lock();
-        MutexGuard { mutex: self }
-    }
-
-    /// The lock, when no thread holds it: `None` without waiting when one does.
-    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        if self.raw.try_lock() {
-            Some(MutexGuard { mutex: self })
-        } else {
-            None
-        }
-    }
-
-    /// The value, through the only reference there is.
-    pub fn get_mut(&mut self) -> &mut T {
-        self.value.get_mut()
-    }
-
-    /// The value, the lock gone.
-    pub fn into_inner(self) -> T {
-        self.value.into_inner()
-    }
-}
-
-impl<T: Default> Default for Mutex<T> {
-    fn default() -> Self {
-        Self::new(T::default())
-    }
-}
-
-/// What [`Mutex::lock`] hands back; the lock is let go when it is dropped.
-pub struct MutexGuard<'a, T> {
-    mutex: &'a Mutex<T>,
-}
-
-impl<T> Deref for MutexGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        // SAFETY: the guard holds the lock, so no other reference to the value is live.
-        unsafe { &*self.mutex.value.get() }
-    }
-}
-
-impl<T> DerefMut for MutexGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: as for `deref`, and `&mut self` makes this the only one.
-        unsafe { &mut *self.mutex.value.get() }
-    }
-}
-
-impl<T> Drop for MutexGuard<'_, T> {
-    fn drop(&mut self) {
-        // SAFETY: this guard holds the lock it lets go.
-        unsafe { self.mutex.raw.unlock() }
-    }
-}
-
-/// A condition variable waited on with a [`Mutex`]'s guard: the shape of `std::sync::Condvar`.
-pub struct Condvar {
-    raw: RawCondvar,
-}
-
-impl Condvar {
-    /// A condition variable no thread waits on.
-    pub const fn new() -> Self {
-        Self {
-            raw: RawCondvar::new(),
-        }
-    }
-
-    /// Let the guard's lock go, wait until notified, and take it again. A wake may come without
-    /// a notification, so the caller waits in a loop on its own condition.
-    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
-        // SAFETY: the guard holds its lock, which the wait lets go and takes again.
-        unsafe { self.raw.wait(&guard.mutex.raw) };
-        guard
-    }
-
-    /// Wait while `condition` holds of the value, for at most `timeout`: the guard, and whether
-    /// the time ran out with the condition still holding.
-    pub fn wait_timeout_while<'a, T>(
-        &self,
-        mut guard: MutexGuard<'a, T>,
-        timeout: Duration,
-        mut condition: impl FnMut(&mut T) -> bool,
-    ) -> (MutexGuard<'a, T>, bool) {
-        let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-        let deadline = monotonic_ns().saturating_add(timeout_ns);
-        while condition(&mut guard) {
-            if monotonic_ns() >= deadline {
-                return (guard, true);
-            }
-            // SAFETY: as in `wait`.
-            unsafe { raw_wait_until(&self.raw, &guard.mutex.raw, deadline) };
-        }
-        (guard, false)
-    }
-
-    /// Wake a waiting thread (every waiter, which their loops allow).
-    pub fn notify_one(&self) {
-        self.raw.notify_one();
-    }
-
-    /// Wake every waiting thread.
-    pub fn notify_all(&self) {
-        self.raw.notify_all();
-    }
-}
-
-impl Default for Condvar {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use chosen::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A reading of the monotonic clock ([`monotonic_ns`]): the shape of `std::time::Instant`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1044,5 +959,109 @@ mod tests {
         let started = Instant::now();
         sleep_ms(30);
         assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+    /// A lock, a condition variable and a reader-writer lock made, each taken for the first time,
+    /// tried, waited on with a timeout and notified: what a value made after a session opened does
+    /// with its own.
+    macro_rules! first_use {
+        ($mutex:ident, $condvar:ident, $rwlock:ident) => {
+            || {
+                let mutex = $mutex::new(0_u32);
+                let condvar = $condvar::new();
+                *mutex.lock() += 1;
+                drop(mutex.try_lock());
+                let (guard, _) = condvar.wait_timeout_ms(mutex.lock(), 1);
+                drop(guard);
+                condvar.notify_one();
+                condvar.notify_all();
+                let rwlock = $rwlock::new(0_u32);
+                *rwlock.write() += 1;
+                let (first, second) = (rwlock.read(), rwlock.read());
+                assert_eq!(*first + *second, 2);
+            }
+        };
+    }
+
+    /// Every allocation of the calling thread while `run` runs, counted.
+    fn allocations(run: impl FnOnce()) -> usize {
+        COUNTING.with(|count| count.set(Some(0)));
+        run();
+        COUNTING.with(|count| count.take()).unwrap_or(0)
+    }
+
+    std::thread_local! {
+        static COUNTING: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+    }
+
+    /// The test binary's allocator: the system's, counting on a thread that asked
+    /// ([`allocations`]).
+    struct Counting;
+
+    // SAFETY: every call is the system allocator's; the count is a thread's own cell.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = COUNTING.try_with(|count| {
+                if let Some(seen) = count.get() {
+                    count.set(Some(seen.saturating_add(1)));
+                }
+            });
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.dealloc(at, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// The crate's lock, condition variable and reader-writer lock take no memory when first
+    /// taken, waited on or notified, whichever form the build chose for the host, and neither do
+    /// the in-place ones.
+    ///
+    /// # Control
+    ///
+    /// A `std` build on macOS that chose `std`'s lock, which boxes a pthread mutex on its first
+    /// take, counts an allocation; the box the control makes is counted.
+    #[test]
+    fn the_locks_take_no_memory_when_first_taken() {
+        use crate::in_place::{
+            Condvar as InPlaceCondvar, Mutex as InPlaceMutex, RwLock as InPlaceRwLock,
+        };
+        assert_eq!(
+            allocations(first_use!(Mutex, Condvar, RwLock)),
+            0,
+            "the chosen locks live in their own bytes"
+        );
+        assert_eq!(
+            allocations(first_use!(InPlaceMutex, InPlaceCondvar, InPlaceRwLock)),
+            0,
+            "the in-place locks live in their own bytes"
+        );
+        let control = allocations(|| drop(core::hint::black_box(Box::new(1_u64))));
+        assert_eq!(control, 1, "the allocator counts");
+    }
+
+    /// A lock whose holder panicked reads as poisoned and still hands out the value as the holder
+    /// left it, whichever form the build chose; one no holder panicked in does not.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_lock_its_holder_panicked_in_reads_as_poisoned_and_is_handed_out() {
+        let mutex = Arc::new(Mutex::new(1_u32));
+        let holder = {
+            let mutex = mutex.clone();
+            std::thread::spawn(move || {
+                let mut value = mutex.lock();
+                *value = 2;
+                panic!("the holder panics with the lock held");
+            })
+        };
+        assert!(holder.join().is_err(), "the holder panicked");
+        assert!(mutex.is_poisoned());
+        assert_eq!(*mutex.lock(), 2, "the value as the holder left it");
+        assert!(!Mutex::new(0_u32).is_poisoned());
     }
 }

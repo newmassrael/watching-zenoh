@@ -305,7 +305,7 @@ mod peer_tables {
                     table.dispatch_declare(
                         &mut peer,
                         &m.body,
-                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                        MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                     );
                 }
             });
@@ -330,7 +330,7 @@ mod peer_tables {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                    MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                 );
             }
             // The same id from the other session means something else there, and fits.
@@ -338,7 +338,7 @@ mod peer_tables {
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
             );
             assert_eq!(
                 (
@@ -375,7 +375,7 @@ mod peer_tables {
                     table.dispatch_declare(
                         &mut peer,
                         &m.body,
-                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                        MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                     );
                 }
             });
@@ -396,14 +396,14 @@ mod peer_tables {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                    MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                 );
             }
             let one = qbl(3, "quiet/three");
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
             );
             assert_eq!(
                 (
@@ -442,7 +442,7 @@ mod peer_tables {
                 for m in &msgs {
                     reg.dispatch_declare(
                         &m.body,
-                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                        MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                     );
                 }
             });
@@ -467,13 +467,13 @@ mod peer_tables {
             for m in &declares(caps::MAX_REMOTE_DECLS + 4, tok) {
                 flooded.dispatch_declare(
                     &m.body,
-                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                    MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
                 );
             }
             let one = tok(3, "quiet/three");
             quiet.dispatch_declare(
                 &one.body,
-                MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                MappingSpaces::<Profile, Profile>::for_aliases(&aliases, None),
             );
             assert_eq!(
                 (

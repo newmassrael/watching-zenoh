@@ -45,8 +45,10 @@ fn a_listening_sessions_admission_takes_no_memory_once_it_is_open() {
     let rows = crate::arena::links_of(&config).expect("a session the build admits");
     let engine = open_with(config);
     let admission = engine.link_admission();
-    let zids: Vec<[u8; 4]> = (0..rows).map(dialler).collect();
-    let past = dialler(rows);
+    let spelled = |bytes: &[u8]| SessionZid::new(bytes).expect("a zid");
+    let zids: Vec<SessionZid> = (0..rows).map(|at| spelled(&dialler(at))).collect();
+    let past = spelled(&dialler(rows));
+    let lower = spelled(&LOWER);
     let mut held = Vec::with_capacity(rows);
     let mut admitted = 0usize;
     let mut past_refused = false;
@@ -55,20 +57,20 @@ fn a_listening_sessions_admission_takes_no_memory_once_it_is_open() {
     let allocations = counted(|| {
         for zid in &zids {
             let mut lease = LinkLease::new(Arc::clone(&admission), false);
-            if lease.reserve(zid) {
+            if lease.reserve(Some(zid)) {
                 admitted += 1;
             }
             held.push(lease);
         }
         let mut refused = LinkLease::new(Arc::clone(&admission), false);
-        past_refused = !refused.reserve(&past);
+        past_refused = !refused.reserve(Some(&past));
         drop(refused);
         held.clear();
 
         let mut dial = LinkLease::new(Arc::clone(&admission), true);
-        let dial_reserved = dial.reserve(&LOWER);
+        let dial_reserved = dial.reserve(Some(&lower));
         let mut inbound = LinkLease::new(Arc::clone(&admission), false);
-        let inbound_admitted = inbound.reserve(&LOWER);
+        let inbound_admitted = inbound.reserve(Some(&lower));
         crossing = (
             dial_reserved,
             inbound_admitted,
@@ -88,7 +90,7 @@ fn a_listening_sessions_admission_takes_no_memory_once_it_is_open() {
     assert!(past_refused, "CONTROL: the link past the rows is refused");
     assert_eq!(
         crossing,
-        (true, true, false, SessionZid::new(&LOWER).ok()),
+        (true, true, false, Some(lower)),
         "CONTROL: the lower node's link supersedes the session's dial, and names its node"
     );
 }

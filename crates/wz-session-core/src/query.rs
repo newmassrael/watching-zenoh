@@ -3380,11 +3380,11 @@ impl QueryPeer {
     /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
     /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_request<'a, L: LocalQueryables, S: Storage>(
+    pub fn dispatch_request<'a, L: LocalQueryables, S: Storage, PS: Storage, OS: Storage>(
         &mut self,
         queryables: &mut L,
         request: &RequestOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         replies: &mut ReplyStage<S>,
     ) -> DispatchOutcome
     where
@@ -3395,12 +3395,12 @@ impl QueryPeer {
 
     /// [`Self::dispatch_request`], each matched row asked through `cx` ([`QueryDelivered`]).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_request_with<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_request_with<'a, L: LocalQueryables, X, S: Storage, PS: Storage, OS: Storage>(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         request: &RequestOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         replies: &mut ReplyStage<S>,
     ) -> DispatchOutcome
     where
@@ -3639,11 +3639,11 @@ impl QueryPeer {
     /// [`Self::dispatch_request`]; they do not enqueue a Final
     /// either.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a, L: LocalQueryables, S: Storage>(
+    pub fn dispatch_messages<'a, L: LocalQueryables, S: Storage, PS: Storage, OS: Storage>(
         &mut self,
         queryables: &mut L,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
     ) where
@@ -3661,12 +3661,12 @@ impl QueryPeer {
 
     /// [`Self::dispatch_messages`], each matched row asked through `cx` ([`QueryDelivered`]).
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages_with<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_messages_with<'a, L: LocalQueryables, X, S: Storage, PS: Storage, OS: Storage>(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         messages: &[NetworkMessage],
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
     ) where
@@ -3751,12 +3751,19 @@ impl QueryPeer {
     // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
-    pub fn dispatch_iteration_event<'a, L: LocalQueryables, X, S: Storage>(
+    pub fn dispatch_iteration_event<
+        'a,
+        L: LocalQueryables,
+        X,
+        S: Storage,
+        PS: Storage,
+        OS: Storage,
+    >(
         &mut self,
         queryables: &mut L,
         cx: &mut X,
         event: IterationEvent<'_, '_>,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
     ) where

@@ -166,10 +166,13 @@ impl LinkLease {
         }
     }
 
-    /// See [`LinkAdmission::reserve`]. The node is kept, admitted or not.
-    pub fn reserve(&mut self, remote_zid: &[u8]) -> bool {
-        self.node = crate::session_zid::SessionZid::new(remote_zid).ok();
-        self.authority.reserve(self.token, remote_zid)
+    /// See [`LinkAdmission::reserve`]. The node is kept, admitted or not. A handshake that named
+    /// no zid names no node, and the authority is asked with no bytes, which collide with none.
+    /// The zid comes made: a lease judges no bytes the handshake read has judged already.
+    pub fn reserve(&mut self, remote_zid: Option<&crate::session_zid::SessionZid>) -> bool {
+        self.node = remote_zid.copied();
+        let bytes = remote_zid.map_or(&[][..], crate::session_zid::SessionZid::as_slice);
+        self.authority.reserve(self.token, bytes)
     }
 
     /// The node the authority was last asked about ([`Self::reserve`]), or `None` before it was
@@ -936,20 +939,21 @@ mod book_tests {
         fn release(&self, _token: u64) {}
     }
 
-    /// A lease names the node it was last asked about, refused or not, as the zid it spells, and
-    /// no node for bytes that spell none. Turned red by a lease that forgets a refused node, or
-    /// names one for bytes of zeros.
+    /// A lease names the node it was last asked about, refused or not, and no node once a
+    /// question named none. Turned red by a lease that forgets a refused node, or keeps the node
+    /// of an earlier question when the last named none.
     #[cfg(target_has_atomic = "ptr")]
     #[test]
-    fn a_lease_names_the_node_it_was_refused_for_and_none_for_bytes_that_spell_none() {
+    fn a_lease_names_the_node_it_was_refused_for_and_none_for_a_question_naming_none() {
         use crate::session_zid::SessionZid;
 
+        let high = SessionZid::new(&HIGH).expect("a zid");
         let mut lease = LinkLease::new(alloc::sync::Arc::new(RefusesEverything), true);
         assert_eq!(lease.node(), None, "no node before the question");
-        assert!(!lease.reserve(&HIGH));
-        assert_eq!(lease.node(), SessionZid::new(&HIGH).ok());
-        assert!(!lease.reserve(&[0x00, 0x00]));
-        assert_eq!(lease.node(), None, "bytes of zeros name no node");
+        assert!(!lease.reserve(Some(&high)));
+        assert_eq!(lease.node(), Some(high));
+        assert!(!lease.reserve(None));
+        assert_eq!(lease.node(), None, "a question naming no zid names no node");
     }
 
     /// A step of the two links' handshakes: link 0 is dialled by A and accepted by B, link 1 is

@@ -1103,6 +1103,11 @@ round_fed_gates=(
     # crate on the runtime and their manifests. A text read and one `cargo metadata`, no build.
     "coop_critical_section_gate.py --selftest"
     "coop_critical_section_gate.py --check"
+    # A crate the cooperative C ABI links holds the host's lock, never `std`'s, which macOS boxes
+    # on its first take. Round-fed by the sources of every crate of that library's graph and their
+    # manifests. A text read, one `cargo metadata` and one `cargo tree`, no build.
+    "host_lock_gate.py --selftest"
+    "host_lock_gate.py --check"
     # The core crates of the C ABI library deny the totality lints, and a module still allowed
     # them is a row of the register in docs/c-abi-architecture.md, which only shrinks. Round-fed by
     # the four crates' sources and the register. A text read, no build.

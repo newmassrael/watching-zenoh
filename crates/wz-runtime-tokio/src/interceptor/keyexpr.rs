@@ -69,9 +69,12 @@ pub(crate) fn resolve_governed_keyexpr(
 /// match, it is a denial: a governed message whose key cannot be resolved is refused (see
 /// above), so an egress policy that read our aliases out of the peer's table refused every put
 /// on a declared key, the key the policy names or not.
-pub(crate) fn resolve_governed_keyexpr_in(
+pub(crate) fn resolve_governed_keyexpr_in<
+    PS: wz_session_core::bounded::Storage,
+    OS: wz_session_core::bounded::Storage,
+>(
     msg: MessageRef<'_>,
-    spaces: MappingSpaces<'_>,
+    spaces: MappingSpaces<'_, PS, OS>,
 ) -> Option<String> {
     match msg {
         MessageRef::Push(p) => resolve_wireexpr_in(&p.keyexpr.body, spaces),
@@ -102,7 +105,13 @@ pub(crate) fn resolve_governed_keyexpr_in(
 /// omitted that extension answers `None`, which is not a resolution FAILURE but
 /// an absent field: on ingress the enforcer admits it (zenoh's deliberate
 /// asymmetry, `access_control.rs:472-485`), on egress it denies (`:762-776`).
-fn declare_governed_keyexpr(declare: &DeclareOwned, spaces: MappingSpaces<'_>) -> Option<String> {
+fn declare_governed_keyexpr<
+    PS: wz_session_core::bounded::Storage,
+    OS: wz_session_core::bounded::Storage,
+>(
+    declare: &DeclareOwned,
+    spaces: MappingSpaces<'_, PS, OS>,
+) -> Option<String> {
     if let Some(we) = declare_subscriber_wireexpr(declare)
         .or_else(|| declare_queryable_wireexpr(declare))
         .or_else(|| declare_token_wireexpr(declare))

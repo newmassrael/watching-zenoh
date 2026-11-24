@@ -264,7 +264,7 @@ mod declarations {
                 table.dispatch_declare(
                     &mut peer,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             if held_to_n::<P>() {
@@ -295,14 +295,14 @@ mod declarations {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             let one = sub(3, "quiet/three");
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases::<P>(&aliases, None),
+                MappingSpaces::<P, P>::for_aliases(&aliases, None),
             );
             assert_eq!((quiet.declared_count(), quiet.refusals()), (1, 0));
             assert!(quiet.has_matching("quiet/three"));
@@ -328,7 +328,7 @@ mod declarations {
                 table.dispatch_declare(
                     &mut peer,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             if held_to_n::<P>() {
@@ -355,14 +355,14 @@ mod declarations {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             let one = qbl(3, "quiet/three");
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases::<P>(&aliases, None),
+                MappingSpaces::<P, P>::for_aliases(&aliases, None),
             );
             assert_eq!((quiet.declared_count(), quiet.refusals()), (1, 0));
         }
@@ -394,7 +394,7 @@ mod declarations {
                 table.dispatch_declare(
                     &mut peer,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             if held_to_n::<P>() {
@@ -417,14 +417,14 @@ mod declarations {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases::<P>(&aliases, None),
+                    MappingSpaces::<P, P>::for_aliases(&aliases, None),
                 );
             }
             let one = tok(3, "quiet/three");
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases::<P>(&aliases, None),
+                MappingSpaces::<P, P>::for_aliases(&aliases, None),
             );
             assert_eq!((quiet.count(), quiet.refusals()), (1, 0));
         }
@@ -435,7 +435,7 @@ mod declarations {
     /// does not resolve, so the policy is not visible to the reader.
     pub(crate) fn peer_aliases_resolve_the_same_on_both<P: Storage>() {
         let aliases = PeerAliases::<P>::default();
-        let spaces = MappingSpaces::for_aliases::<P>(&aliases, None);
+        let spaces = MappingSpaces::<P, P>::for_aliases(&aliases, None);
         assert!(spaces.peer().is_empty());
         assert_eq!(spaces.peer().get(&7), None);
     }

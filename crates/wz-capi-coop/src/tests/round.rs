@@ -763,8 +763,8 @@ fn a_refused_call_is_ended_at_once() {
     assert!(!held.retire(), "CONTROL: the held call still runs");
 }
 
-/// A sample offered again for a subscriber it is for already is a record of its own, handed to
-/// that subscriber twice.
+/// A sample offered again to a subscriber it is for already, in a fan-out of its own (a message
+/// that came twice), is a record of its own, handed to that subscriber twice.
 #[test]
 fn a_sample_offered_again_to_its_subscriber_is_a_record_of_its_own() {
     let round = round(4);
@@ -776,7 +776,7 @@ fn a_sample_offered_again_to_its_subscriber_is_a_record_of_its_own() {
     // round's records of it.
     unsafe { round.set_lending(Some(&datagram[..])) };
     unsafe { round.offer_sample(first.call(), &sample, true) };
-    unsafe { round.offer_sample(first.call(), &sample, false) };
+    unsafe { round.offer_sample(first.call(), &sample, true) };
     unsafe { round.set_lending(None) };
     unsafe { round.seal() };
     assert!(round.deliver());

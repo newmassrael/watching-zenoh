@@ -16,7 +16,9 @@
 //! format it is read with is a constant the reader holds, keyed by the source, so a record costs a
 //! few words and nothing is formatted on the node.
 
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::OnceLock;
+
+use wz_host_sync::Mutex;
 
 use wz_session_core::caps::{EVENT_RECORD_ARGS, EVENT_RING_SLOTS};
 use wz_session_core::event_ring::{EventRing, FullPolicy, Observer, Pushed, Read};
@@ -97,10 +99,7 @@ impl EventLog {
     /// Record an event at `timestamp` (an NTP64 word from the node clock, or `0` where the node
     /// has none). `args` beyond `EVENT_RECORD_ARGS` are ignored.
     pub fn emit_at(&self, level: u8, source: u16, timestamp: u64, args: &[u64]) -> Pushed {
-        let _one_at_a_time = self
-            .producers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _one_at_a_time = self.producers.lock();
         // SAFETY: the lock is held for the whole life of the producer, so there is never another.
         let mut producer = unsafe { self.ring.producer() };
         producer.push(level, source, timestamp, args)
@@ -140,10 +139,7 @@ impl EventLog {
     /// Read what is there for the one consumer, freeing it, until nothing is left, and hand each
     /// result to `each`. Under `drop-newest` this is what makes room.
     pub fn drain(&self, mut each: impl FnMut(LogRead)) {
-        let _one_at_a_time = self
-            .consumers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _one_at_a_time = self.consumers.lock();
         // SAFETY: the lock is held for the whole life of the consumer.
         let mut consumer = unsafe { self.ring.consumer() };
         loop {
@@ -157,10 +153,7 @@ impl EventLog {
     /// Free every event before sequence number `upto`, for a reader that read them through an
     /// [`Observer`] of its own and says when it is done. Only forward.
     pub fn release_to(&self, upto: u64) {
-        let _one_at_a_time = self
-            .consumers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _one_at_a_time = self.consumers.lock();
         // SAFETY: the lock is held for the whole life of the consumer.
         unsafe { self.ring.consumer() }.release(upto);
     }

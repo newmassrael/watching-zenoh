@@ -86,15 +86,23 @@ default = [
     "config-policy",
     "conformance-digest",
 ]
-# `std`: the library runs on a host, whose standard library gives the engine port's mutex,
-# condition variable, threads and sleep (`wz-capi-port`'s `os`) and the host layer under the
+# `std`: the library runs on a host, whose standard library gives the engine port's threads and
+# sleep (`wz-capi-port`'s `os`), the locks being `wz-host-sync`'s in its `std` build, which take no
+# memory when first taken on any host, and the host layer under the
 # platform exports (`src/os/unix.rs`, `src/os/windows.rs`). Without it the crate is `no_std` with
 # `alloc` and the ABI layer stands on the port alone, so that the pico C ABI on an MCU is this
 # crate and not a copy of it (`docs/upstream-parity.md` section 5a). Both host engines and every
 # capability whose code is still written against the host's library select it, so a host build
 # has it whatever its feature list; a capability comes to the MCU when its module no longer
 # needs it.
-std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-time?/std"]
+std = [
+    "dep:wz-host-sync",
+    "wz-host-sync/std",
+    "wz-capi-port/std",
+    "wz-capi-coop?/std",
+    "wz-ext-pubsub?/std",
+    "wz-node-time?/std",
+]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
 # `engine-tokio`: `wz-capi-core`, a session on its own OS thread and tokio runtime. It carries
@@ -809,9 +817,9 @@ wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = 
 # the one both engines take it from.
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
-# The host's lock, condition variable, threads and monotonic clock without `std` (`os-posix`,
-# `os-windows`): what the doors of the additional features hold and wait on there, in place of
-# `std::sync`.
+# The host's lock and condition variable, with `std` and without, which the doors of the additional
+# features hold and wait on, and its threads and monotonic clock without `std` (`os-posix`,
+# `os-windows`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 # The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
 # sockets as the session's links on the heap profile, the kernel's tick as its clock, and the

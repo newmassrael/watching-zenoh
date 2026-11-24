@@ -3971,6 +3971,12 @@ layer_c0_test_discipline() {
     # section past it leaves a name no host library defines, which only the Windows linker refuses.
     _runci_leg coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --selftest
     _runci_leg coop_critical_section_gate --after coop_critical_section_gate.selftest -- python3 scripts/lib/coop_critical_section_gate.py --check
+    # A crate the cooperative C ABI links holds the host's lock (`wz-host-sync`), never `std`'s,
+    # whose pthread form macOS boxes the first time it is taken: a lock made after a session opened
+    # would allocate there, on a host no Linux row reads. The selftest drives each rule over a
+    # fixture workspace.
+    _runci_leg host_lock_gate.selftest -- python3 scripts/lib/host_lock_gate.py --selftest
+    _runci_leg host_lock_gate --after host_lock_gate.selftest -- python3 scripts/lib/host_lock_gate.py --check
     # The release code of the C ABI library's core crates is total (docs/c-abi-architecture.md P6):
     # each crate denies the totality lints outside a test build, and a module still allowed them
     # is a row of the register in that document's section 7, which only shrinks. The selftest

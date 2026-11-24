@@ -61,9 +61,10 @@
 //! - A link kind pico does not have (QUIC, unixpipe, ...) reports its protocol
 //!   name as its `type`, where pico could not encode the document at all.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Weak};
 
 use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine};
+use wz_host_sync::{Mutex, MutexGuard};
 use wz_session_core::face::FaceSnapshot;
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::link::LinkKind;
@@ -114,7 +115,7 @@ impl AdminSpaceSlot {
     }
 
     fn running(&self) -> MutexGuard<'_, Option<Running>> {
-        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+        self.running.lock()
     }
 }
 
