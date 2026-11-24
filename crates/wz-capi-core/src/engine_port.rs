@@ -527,6 +527,35 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_queryable(self, id);
     }
 
+    // A reply holds the keep's value while it runs, so a release from another thread meanwhile
+    // sends the Final once the reply has gone out.
+    #[cfg(feature = "queryable")]
+    fn reply_held(
+        &self,
+        id: wz_capi_port::HeldQueryId,
+        answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut),
+    ) {
+        if SharedSession::is_closed(self) {
+            return;
+        }
+        if let Some(kept) = self.kept_queries.get(id) {
+            kept.held.reply(|out| answer(out));
+        }
+    }
+
+    #[cfg(feature = "queryable")]
+    fn release_held(&self, id: wz_capi_port::HeldQueryId) {
+        self.kept_queries.release(id);
+    }
+
+    #[cfg(feature = "queryable")]
+    unsafe fn held_parts(&self, id: wz_capi_port::HeldQueryId) -> Option<(&str, &[u8])> {
+        // SAFETY: the caller's contract is the trait's: its keep of `id` stands while the borrow
+        // does.
+        let kept = unsafe { self.kept_queries.lend(id) }?;
+        Some((kept.held.keyexpr(), &*kept.parameters))
+    }
+
     // One leg per connected face, as the snapshot get always fanned; it asks by the literal key,
     // which the runtime's liveliness get has no other form of, so `wire` is not read.
     #[cfg(feature = "liveliness-get")]
@@ -807,11 +836,24 @@ impl SharedSession {
 }
 
 /// One face's session as the port's [`QueryHolder`](wz_capi_port::QueryHolder): a query held
-/// through it answers on that face, and the node's latch says whether its session is closed.
+/// through it answers on that face, and the node's latch says whether its session is closed. A
+/// query kept is kept in the registry's slab ([`SharedSession`]'s `kept_queries`), held weakly:
+/// the slab is the session's, and a face's queryable outlives no session.
 #[cfg(feature = "queryable")]
 struct FaceHolder {
     face: wz_runtime_tokio::session::TokioQueryHolder,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    kept: std::sync::Weak<wz_capi_port::HeldSlab<FaceKept>>,
+}
+
+/// What the registry keeps of a query a program keeps past its handler: the runtime's hold of it,
+/// which answers on the face the query came in on and owes its Final until dropped, and its
+/// parameters, which the hold does not keep and a later read of the query lends
+/// ([`SessionEngine::held_parts`]).
+#[cfg(feature = "queryable")]
+pub(crate) struct FaceKept {
+    held: wz_runtime_tokio::session::TokioHeldQuery,
+    parameters: Box<[u8]>,
 }
 
 #[cfg(feature = "queryable")]
@@ -824,6 +866,24 @@ impl wz_capi_port::QueryHolder for FaceHolder {
             held: self.face.hold_query(view),
             closed: self.closed.clone(),
         })
+    }
+
+    fn keep_query(
+        &self,
+        view: &dyn wz_session_core::query_sink::QueryView,
+    ) -> Result<Option<wz_capi_port::HeldQueryId>, Refusal> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Refusal::Closed);
+        }
+        let kept = self.kept.upgrade().ok_or(Refusal::Closed)?;
+        kept.keep(
+            view.rid(),
+            FaceKept {
+                held: self.face.hold_query(view),
+                parameters: view.parameters().unwrap_or_default().into(),
+            },
+        )
+        .map(Some)
     }
 
     fn session_closed(&self) -> bool {
@@ -852,6 +912,7 @@ impl SharedSession {
         // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
+        let kept = Arc::downgrade(&self.kept_queries);
         let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
@@ -864,6 +925,7 @@ impl SharedSession {
                 let holder = FaceHolder {
                     face: face.clone(),
                     closed: closed.clone(),
+                    kept: kept.clone(),
                 };
                 let sink = Arc::clone(&sink);
                 Box::new(
