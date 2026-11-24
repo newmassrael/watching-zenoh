@@ -205,6 +205,19 @@ impl TaskCell {
         }
     }
 
+    /// Write at `place` the free cell [`Self::owned`] makes. Out of line: a store's cells are
+    /// written by one loop, and a loop of stores alone is laid out twice over and once more for
+    /// the cells left over, where one that calls is laid out once.
+    ///
+    /// # Safety
+    /// `place` is valid for a write of a cell and aligned for one.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[inline(never)]
+    unsafe fn write_owned(place: *mut Self, buf: *mut u8, cap: usize, owner: *const TaskStore) {
+        // SAFETY: the caller's contract.
+        unsafe { place.write(Self::owned(buf, cap, owner)) };
+    }
+
     /// Run `f` on the cell's bookkeeping, inside a critical section.
     ///
     /// The section is what keeps another context off the bookkeeping: a join handle is `Send`, so
@@ -409,7 +422,7 @@ impl TaskStore {
             let buf = base.wrapping_add(at.wrapping_mul(stride));
             // SAFETY: `at` is below `count`, so the place is one of the block's cells, aligned for
             // one, written once here and read by nothing before.
-            unsafe { first.add(at).write(TaskCell::owned(buf, cap, owner)) };
+            unsafe { TaskCell::write_owned(first.add(at), buf, cap, owner) };
         }
         store
     }
