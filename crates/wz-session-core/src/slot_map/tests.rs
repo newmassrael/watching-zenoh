@@ -445,3 +445,54 @@ fn the_slots_rank_a_row_by_its_handles_bits_as_the_table_does() {
     assert!(Slots::NONE.is_empty());
     assert_eq!(Slots::NONE.nth_live(0), None);
 }
+
+/// A row found once by its entry is read, changed and removed through it, and its handle names
+/// nothing after: the one look the entry made still tells a handle kept past its row.
+#[test]
+fn an_entry_reads_changes_and_removes_the_row_its_handle_names() {
+    let mut map = Map::<4>::new();
+    let a = map.insert(10).unwrap();
+    let b = map.insert(20).unwrap();
+    let mut entry = map.entry(a).expect("a live row");
+    assert_eq!(entry.get(), Some(&10));
+    *entry.get_mut().expect("the row") = 11;
+    assert_eq!(entry.get(), Some(&11));
+    assert!(matches!(entry.remove(), Some(Removal::Taken(11))));
+    assert!(map.get(a).is_none());
+    assert!(
+        map.entry(a).is_none(),
+        "a handle kept past its row finds no entry"
+    );
+    assert_eq!(map.get(b), Some(&20), "the other row is untouched");
+    assert_eq!(map.len(), 1);
+}
+
+/// A handle whose slot was freed and taken by a new row names no entry: the new row is at the
+/// same place under a new generation.
+#[test]
+fn a_handle_of_a_reused_slot_finds_no_entry() {
+    let mut map = Map::<1>::new();
+    let old = map.insert(1).unwrap();
+    assert!(map.remove(old).is_some());
+    let new = map.insert(2).unwrap();
+    assert!(map.entry(old).is_none());
+    assert_eq!(
+        map.entry(new).and_then(|entry| entry.get().copied()),
+        Some(2)
+    );
+}
+
+/// An entry pinned and then removed retires its row: it leaves every lookup and is handed back by
+/// the release of its pin, as a pin taken by the handle is.
+#[test]
+fn an_entry_pinned_then_removed_waits_for_its_release() {
+    let mut map = Map::<2>::new();
+    let a = map.insert(7).unwrap();
+    let mut entry = map.entry(a).expect("a live row");
+    assert!(entry.pin());
+    assert!(matches!(entry.remove(), Some(Removal::AfterCalls)));
+    assert!(map.get(a).is_none());
+    assert!(map.entry(a).is_none());
+    assert_eq!(map.release(a), Some(7));
+    assert!(map.is_empty());
+}

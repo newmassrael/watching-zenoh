@@ -315,6 +315,12 @@ impl Core {
     #[inline(never)]
     fn retire(&mut self, meta: &mut [Meta], place: usize, generation: u16) -> Option<Retired> {
         let at = Self::find(meta, place, generation, false)?;
+        self.retire_at(meta, at)
+    }
+
+    /// [`Self::retire`] of the live row at `at`, found already.
+    #[inline(never)]
+    fn retire_at(&mut self, meta: &mut [Meta], at: usize) -> Option<Retired> {
         let slot = meta.get_mut(at)?;
         if slot.pins == 0 {
             self.free(meta, at);
@@ -329,9 +335,12 @@ impl Core {
     /// are at their count's end.
     #[inline(never)]
     fn pin(meta: &mut [Meta], place: usize, generation: u16) -> bool {
-        let Some(at) = Self::find(meta, place, generation, false) else {
-            return false;
-        };
+        Self::find(meta, place, generation, false).is_some_and(|at| Self::pin_at(meta, at))
+    }
+
+    /// [`Self::pin`] of the live row at `at`, found already.
+    #[inline(never)]
+    fn pin_at(meta: &mut [Meta], at: usize) -> bool {
         let Some(slot) = meta.get_mut(at) else {
             return false;
         };
@@ -389,6 +398,41 @@ impl Core {
             }
         }
         None
+    }
+}
+
+/// A live row of a [`SlotMap`], found by its handle once ([`SlotMap::entry`]): what is done with
+/// it through here is done to the slot that one look found.
+pub struct Entry<'a, K, T, const N: usize, P: Storage> {
+    map: &'a mut SlotMap<K, T, N, P>,
+    at: usize,
+}
+
+impl<K, T, const N: usize, P: Storage> Entry<'_, K, T, N, P> {
+    /// The row.
+    pub fn get(&self) -> Option<&T> {
+        self.map.rows.get(self.at)?.as_ref()
+    }
+
+    /// The row, to change.
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        self.map.rows.get_mut(self.at)?.as_mut()
+    }
+
+    /// Pin the row while what it owns is called, as [`SlotMap::pin`] does; `false` when its pins
+    /// are at their count's end. The pin is given back by the row's handle
+    /// ([`SlotMap::release`]).
+    pub fn pin(&mut self) -> bool {
+        Core::pin_at(&mut self.map.meta, self.at)
+    }
+
+    /// Remove the row, as [`SlotMap::remove`] does: handed back now, or by its last unpin when it
+    /// is pinned.
+    pub fn remove(self) -> Option<Removal<T>> {
+        match self.map.core.retire_at(&mut self.map.meta, self.at)? {
+            Retired::Now(at) => self.map.rows.get_mut(at)?.take().map(Removal::Taken),
+            Retired::Deferred => Some(Removal::AfterCalls),
+        }
     }
 }
 
@@ -523,6 +567,15 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn get_mut(&mut self, handle: Handle<K>) -> Option<&mut T> {
         let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
         self.rows.get_mut(at)?.as_mut()
+    }
+
+    /// The live row `handle` names, found once for what the caller does with it next: read it,
+    /// change it, pin it and remove it through the [`Entry`] with no second look at the handle,
+    /// which a row that went in between could not have answered since the entry borrows the table.
+    /// `None` when it names no live row.
+    pub fn entry(&mut self, handle: Handle<K>) -> Option<Entry<'_, K, T, N, P>> {
+        let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
+        Some(Entry { map: self, at })
     }
 
     /// Whether `handle` names a live row.
