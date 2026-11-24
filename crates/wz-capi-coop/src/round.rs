@@ -15,11 +15,9 @@
 //! lie when they lie in the datagram a link lends the step (UDP, a stream), or in a message
 //! rejoined from its fragments whose buffer the round keeps until it is emptied
 //! ([`Round::end_rejoined`]), so a sample of either is never copied; a key the session resolved
-//! from an alias lies in a frame of the dispatch, and is written into the table's keys; every
-//! other part that lies elsewhere (a group's datagram its transport does not lend) is written
-//! into the table's area, which the session's arena lends (`DELIVERY_LANE_BYTES`). A build that
-//! reads every record where it lies (`rx-lent-only`) keeps no area: a record with a part that
-//! lies nowhere the round reads it is refused and counted ([`RoundCounts::unplaced`]). A record
+//! from an alias lies in a frame of the dispatch, and is written into the table's keys. The round
+//! keeps no area to copy any other part into: a record with a part that lies nowhere the round
+//! reads it is refused and counted ([`RoundCounts::unplaced`]). A record
 //! offered again for one more subscriber is written once: the subscriber's callback joins the
 //! ones it owes.
 //!
@@ -44,14 +42,10 @@
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-#[cfg(not(feature = "rx-lent-only"))]
-use core::ptr::NonNull;
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
-#[cfg(not(feature = "rx-lent-only"))]
-use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 #[cfg(feature = "group")]
@@ -71,6 +65,8 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
+#[cfg(feature = "query")]
+use crate::engine::LegId;
 #[cfg(feature = "liveliness")]
 use crate::engine::LivelinessCall;
 use crate::engine::SubscriberCall;
@@ -90,26 +86,6 @@ use {
     wz_session_core::session_tables::QueryableHandle,
 };
 
-/// The longest id of the clock that stamped a sample's timestamp the wire carries.
-#[cfg(not(feature = "rx-lent-only"))]
-const TIMESTAMP_ID_BYTES: usize = 16;
-
-/// The share of a record's room each subscriber it reaches is given, a subscriber's id: the
-/// build's sizes of the area are stated with it.
-#[cfg(not(feature = "rx-lent-only"))]
-const SUBSCRIBER_ID_BYTES: usize = core::mem::size_of::<SubId>();
-
-/// The most bytes one sample takes in the round beyond the message it arrived in, for a session
-/// whose longest key is `key_bytes` and that holds `subscribers` subscribers at most: its key as
-/// the session resolved it, which a peer may have named by an alias of a few bytes, the id of its
-/// timestamp's clock, and a share for each subscriber it is for.
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) const fn sample_overhead(key_bytes: usize, subscribers: usize) -> usize {
-    key_bytes
-        .saturating_add(TIMESTAMP_ID_BYTES)
-        .saturating_add(subscribers.saturating_mul(SUBSCRIBER_ID_BYTES))
-}
-
 /// The most subscribers one record of a session reaches: a sample's, of the `subscribers` it
 /// holds, or a token's, of the `liveliness` subscribers it holds (none in a build without
 /// liveliness), whichever is more.
@@ -126,98 +102,17 @@ const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
     }
 }
 
-/// The most bytes one record a session is handed can put in its round, for a session whose batch
-/// is `batch` bytes, whose largest rejoined message is `frag` bytes, whose longest key is `key`
-/// bytes and whose records reach `subscribers` subscribers at most: a record is no longer than a
-/// batch or a rejoined message, and its sample adds to it at most [`sample_overhead`].
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) const fn read_bytes(batch: usize, frag: usize, key: usize, subscribers: usize) -> usize {
-    let message = if batch > frag { batch } else { frag };
-    message.saturating_add(sample_overhead(key, subscribers))
-}
-
 /// What one record a session is handed can take of its round at most: the room the round is asked
 /// for before each record ([`RoundGate`]), so that what a record hands it always finds room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReadRoom {
-    /// Its bytes ([`read_bytes`]); and an entry, which every record takes one of at most. A build
-    /// with no area asks for no bytes: its records' parts lie where the round reads them.
-    #[cfg(not(feature = "rx-lent-only"))]
-    pub(crate) bytes: usize,
-    /// The callbacks it owes: one for each subscriber it reaches.
+    /// The callbacks it owes: one for each subscriber it reaches; and an entry, which every record
+    /// takes one of at most. A record asks for no bytes: its parts lie where the round reads them.
     pub(crate) callbacks: usize,
 }
 
-/// Whether an area of `AREA` bytes holds what one record can hand it in a build whose batch is
-/// `BATCH` bytes, whose largest rejoined message is `FRAG` bytes, whose longest key is `KEY`
-/// bytes and that holds `SUBS` subscribers and `LIVE` liveliness subscribers.
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) const fn holds_a_read<
-    const AREA: usize,
-    const BATCH: usize,
-    const FRAG: usize,
-    const KEY: usize,
-    const SUBS: usize,
-    const LIVE: usize,
->() -> bool {
-    read_bytes(BATCH, FRAG, KEY, most_subscribers(SUBS, LIVE)) <= AREA
-}
-
-// The build's area holds what one record can hand it at the build's largest batch and rejoined
-// message, so a session's area, sized from the session's values under the build's, never needs
-// more than the build gives it: a build that raises `PICO_UNICAST_BATCH_BYTES` or
-// `PICO_FRAG_MAX_BYTES` raises `DELIVERY_LANE_BYTES` with it.
-#[cfg(not(feature = "rx-lent-only"))]
-const _: () = assert!(
-    holds_a_read::<
-        { caps::DELIVERY_LANE_BYTES },
-        { caps::PICO_UNICAST_BATCH_BYTES },
-        { caps::PICO_FRAG_MAX_BYTES },
-        { caps::MAX_KEYEXPR_BYTES },
-        { caps::MAX_SUBSCRIPTIONS },
-        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-    >(),
-    "the build's delivery area holds what one record of the build's largest batch hands it"
-);
-
-/// What one record of a session whose batch is `batch` bytes and whose limits are `limits` can
-/// take of its round ([`ReadRoom`]), each limit lent under the build's value (`FRAG`, `KEY`,
-/// `SUBS`, `LIVE`). A value over the build's counts as the build's: the open refuses it.
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) fn read_room<
-    const FRAG: usize,
-    const KEY: usize,
-    const SUBS: usize,
-    const LIVE: usize,
->(
-    batch: usize,
-    limits: &SessionLimits,
-) -> ReadRoom {
-    let frag = limits
-        .pico_frag_max_bytes()
-        .lent_under(Quota::at_most(FRAG))
-        .unwrap_or(FRAG);
-    let key = limits
-        .max_keyexpr_bytes()
-        .lent_under(Quota::at_most(KEY))
-        .unwrap_or(KEY);
-    let subscribers = limits
-        .max_subscriptions()
-        .lent_under(Quota::at_most(SUBS))
-        .unwrap_or(SUBS);
-    let liveliness = session_liveliness::<LIVE>(limits);
-    let most = most_subscribers(subscribers, liveliness);
-    ReadRoom {
-        bytes: read_bytes(batch, frag, key, most),
-        // A reply owes its leg's callback, whatever the session's subscribers.
-        callbacks: most.max(1),
-    }
-}
-
-/// What one record of a session whose limits are `limits` can take of its round ([`ReadRoom`]),
-/// in a build with no area (`rx-lent-only`): an entry, and a callback for each subscriber it
-/// reaches, under the build's `SUBS` and `LIVE`.
-#[cfg(feature = "rx-lent-only")]
+/// What one record of a session whose limits are `limits` can take of its round ([`ReadRoom`]):
+/// an entry, and a callback for each subscriber it reaches, under the build's `SUBS` and `LIVE`.
 pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLimits) -> ReadRoom {
     let subscribers = limits
         .max_subscriptions()
@@ -232,41 +127,13 @@ pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLi
 
 /// The liveliness subscribers the session's `limits` admit, under `LIVE`, the build's value: a value
 /// over it counts as the build's, which the open refuses. What a record of a token owes a callback
-/// to at most, and so what the round's area is sized for ([`read_room`]) and a retraction asks of it.
+/// to at most, and so what the round's callbacks are asked for ([`read_room`]) and a retraction
+/// asks of them.
 pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> usize {
     limits
         .max_liveliness_subscriptions()
         .lent_under(Quota::at_most(LIVE))
         .unwrap_or(LIVE)
-}
-
-/// `limits` with the round's area long enough for what one record can hand it ([`read_room`] of
-/// the session's `PICO_UNICAST_BATCH_BYTES`): an area stated shorter is lengthened to it, as a
-/// record that found no room could never be handed on. `BATCH`, `FRAG`, `KEY`, `SUBS` and
-/// `LIVE` are the build's values, under which the session's lie.
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) fn holding_a_read<
-    const BATCH: usize,
-    const FRAG: usize,
-    const KEY: usize,
-    const SUBS: usize,
-    const LIVE: usize,
->(
-    mut limits: SessionLimits,
-) -> SessionLimits {
-    let Ok(batch) =
-        Quota::at_most(limits.pico_unicast_batch_bytes()).lent_under(Quota::at_most(BATCH))
-    else {
-        // A value over the build's refuses the session's open when its arena is laid out.
-        return limits;
-    };
-    let read = read_room::<FRAG, KEY, SUBS, LIVE>(batch, &limits).bytes;
-    if read > limits.delivery_lane_bytes() {
-        // Refused only by a domain of one value, which is the build's area, and the build's area
-        // holds the read (the assertion above).
-        let _ = limits.select_delivery_lane_bytes(read);
-    }
-    limits
 }
 
 /// Whether a sample sent with `reliability` and `qos` holds its sender: sent reliably, with
@@ -285,10 +152,9 @@ pub struct RoundCounts {
     /// Records whose congestion control holds their sender that found no room all the same:
     /// what was offered past the room the gate asked for (a token or a reply is one).
     pub held_over: u64,
-    /// Of the records above, those refused for a part that lies nowhere the round reads it, in a
-    /// build that keeps no area to write it into (`rx-lent-only`): a datagram its transport does
-    /// not lend, or a key the round's keys have no room for. Zero in a build with an area, which
-    /// writes such a part there.
+    /// Of the records above, those refused for a part that lies nowhere the round reads it, as the
+    /// round keeps no area to copy it into: a datagram its transport does not lend, or a key the
+    /// round's keys have no room for.
     pub unplaced: u64,
 }
 
@@ -306,9 +172,6 @@ enum Place {
     Shared,
     /// In the table's keys.
     Key,
-    /// In the table's area.
-    #[cfg(not(feature = "rx-lent-only"))]
-    Area,
 }
 
 /// A part of a record: where it lies, from the first byte of its place, and how long it is.
@@ -578,9 +441,9 @@ enum Owed {
     /// A liveliness subscriber's.
     #[cfg(feature = "liveliness")]
     Liveliness(LivelinessCall),
-    /// A get's leg's.
+    /// A get's leg's: a count of the row of its callback ([`LegHolders`]).
     #[cfg(feature = "query")]
-    Reply(Arc<ReplyCallback>),
+    Reply(LegId),
     /// A queryable's: the call begun on its row as the query reached it.
     #[cfg(feature = "queryable")]
     Query(QueryableCall),
@@ -618,11 +481,11 @@ impl Owed {
         }
     }
 
-    /// The callback, when it is a leg's.
+    /// The leg, when it is a leg's callback.
     #[cfg(feature = "query")]
-    fn reply(&self) -> Option<&Arc<ReplyCallback>> {
+    fn reply(&self) -> Option<LegId> {
         match self {
-            Self::Reply(callback) => Some(callback),
+            Self::Reply(leg) => Some(*leg),
             _ => None,
         }
     }
@@ -667,10 +530,6 @@ pub(crate) struct RoundRows {
     callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
     keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
     longest_key: usize,
-    /// The area the round writes the parts it cannot read where they lie into, and its bytes
-    /// (`DELIVERY_LANE_BYTES`): none until given ([`Self::writing_into`]).
-    #[cfg(not(feature = "rx-lent-only"))]
-    area: Option<(NonNull<u8>, usize)>,
 }
 
 impl RoundRows {
@@ -683,23 +542,7 @@ impl RoundRows {
             callbacks: arena.lend(counts.callbacks)?,
             keys: arena.lend(counts.key_bytes())?,
             longest_key: counts.longest_key,
-            #[cfg(not(feature = "rx-lent-only"))]
-            area: None,
         })
-    }
-
-    /// The tables, with the `bytes` bytes at `area` to write the parts the round cannot read
-    /// where they lie into.
-    ///
-    /// # Safety
-    /// `area` points at `bytes` bytes valid for reads and writes, used by nothing else, for as long
-    /// as the round they are made into is used.
-    #[cfg(not(feature = "rx-lent-only"))]
-    pub(crate) unsafe fn writing_into(self, area: NonNull<u8>, bytes: usize) -> Self {
-        Self {
-            area: Some((area, bytes)),
-            ..self
-        }
     }
 }
 
@@ -740,14 +583,6 @@ struct Table {
     /// Whether the record written last is the one of the sample whose fan-out runs now: what a
     /// later row of that fan-out joins. A record of no fan-out, or of one before, is joined by none.
     fan: bool,
-    /// The area the parts that lie nowhere the callbacks can read them are written into, and how
-    /// much of it is written.
-    #[cfg(not(feature = "rx-lent-only"))]
-    area: NonNull<u8>,
-    #[cfg(not(feature = "rx-lent-only"))]
-    area_bytes: usize,
-    #[cfg(not(feature = "rx-lent-only"))]
-    written: usize,
 }
 
 impl Table {
@@ -770,18 +605,14 @@ impl Table {
             }
             Place::Datagram => self.datagram.map(|(start, _)| start),
             Place::Rejoined => self.rejoined.map(|(start, _)| start),
-            #[cfg(not(feature = "rx-lent-only"))]
-            Place::Area => Some(self.area.as_ptr().cast_const()),
         };
         let Some(start) = start else {
             return &[];
         };
-        // SAFETY: the part lies inside its place (`Span::lent`, `Self::write`): the datagram, which
-        // its link leaves where it lies while the table lends it (`Round::lends_a_datagram`); the
-        // rejoined message, whose buffer the round keeps and no chain is staged into until the
-        // table no longer reads it (`Round::settle`); or the area, which the session's
-        // arena lends the round for as long as the round lives and nothing writes again until the
-        // table is emptied.
+        // SAFETY: the part lies inside its place (`Span::lent`): the datagram, which its link leaves
+        // where it lies while the table lends it (`Round::lends_a_datagram`); or the rejoined
+        // message, whose buffer the round keeps and no chain is staged into until the table no
+        // longer reads it (`Round::settle`).
         unsafe { core::slice::from_raw_parts(start.add(at), len) }
     }
 
@@ -794,17 +625,14 @@ impl Table {
 
     /// Where `part` is read: where it lies in `lending`, the datagram a link lends the step or the
     /// rejoined message being dispatched, when it lies there and the table reads no other of that
-    /// kind; written into the area otherwise. `None` when the area has not the room. Out of line:
-    /// every offer places its parts through this one body.
+    /// kind. `None` when it lies anywhere else: the round keeps no area to copy it into. Out of
+    /// line: every offer places its parts through this one body.
     #[inline(never)]
     fn place(&mut self, part: &[u8], lending: Option<Lending>) -> Option<Span> {
         if part.is_empty() {
             return Some(Span::EMPTY);
         }
-        if let Some(span) = self.lent(part, lending) {
-            return Some(span);
-        }
-        self.write(part)
+        self.lent(part, lending)
     }
 
     /// Where `part` lies in `lending`, when the table may read it there.
@@ -829,42 +657,9 @@ impl Table {
         self.datagram.is_some() || self.rejoined.is_some()
     }
 
-    /// Write `part` after what the area holds.
-    #[cfg(not(feature = "rx-lent-only"))]
-    fn write(&mut self, part: &[u8]) -> Option<Span> {
-        let left = self.area_bytes.checked_sub(self.written)?;
-        if part.len() > left {
-            return None;
-        }
-        let span = Span {
-            at: u32::try_from(self.written).ok()?,
-            len: u32::try_from(part.len()).ok()?,
-            place: Place::Area,
-        };
-        // SAFETY: `written + part.len()` is inside the area (checked above), which the round's
-        // table alone writes, and no delivery reads it while the session writes the table.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                part.as_ptr(),
-                self.area.as_ptr().add(self.written),
-                part.len(),
-            );
-        }
-        self.written = self.written.checked_add(part.len())?;
-        Some(span)
-    }
-
-    /// A build that keeps no area (`rx-lent-only`) writes no part: one that lies nowhere the round
-    /// reads it finds no place, and its record is refused and counted ([`RoundCounts::unplaced`]).
-    #[cfg(feature = "rx-lent-only")]
-    fn write(&mut self, part: &[u8]) -> Option<Span> {
-        // A part of no bytes lies anywhere; any other has nowhere to go.
-        part.is_empty().then_some(Span::EMPTY)
-    }
-
     /// Where `key` is read: where it lies in `lending`, where the table wrote it last when it is
-    /// that key again, after the keys written before it, or in the area once the keys are full;
-    /// `None` when there is no room. Out of line, as [`Self::place`] is.
+    /// that key again, or after the keys written before it; `None` when the keys have no room. Out
+    /// of line, as [`Self::place`] is.
     #[inline(never)]
     fn place_key(&mut self, key: &[u8], lending: Option<Lending>) -> Option<Span> {
         if let Some(span) = self.lent(key, lending) {
@@ -875,17 +670,12 @@ impl Table {
                 return Some(span.shared());
             }
         }
-        let span = if self.keys.free_slots() >= key.len() {
-            let span = Span {
-                at: u32::try_from(self.keys.len()).ok()?,
-                len: u32::try_from(key.len()).ok()?,
-                place: Place::Key,
-            };
-            self.keys.extend_from_slice(key).ok()?;
-            span
-        } else {
-            self.write(key)?
+        let span = Span {
+            at: u32::try_from(self.keys.len()).ok()?,
+            len: u32::try_from(key.len()).ok()?,
+            place: Place::Key,
         };
+        self.keys.extend_from_slice(key).ok()?;
         self.key = Some(span);
         Some(span)
     }
@@ -975,7 +765,7 @@ impl Table {
     }
 
     /// Hold nothing, for the next round: the count each record holds of a block of the session's
-    /// key arena handed back, and every row and part let go of; the area stays the table's. The
+    /// key arena handed back, and every row and part let go of. The
     /// lock holder's, once the calls are ended ([`Self::end_calls`]).
     fn clear(&mut self) {
         if let Some(space) = self.key_space {
@@ -1002,10 +792,6 @@ impl Table {
         self.fan = false;
         self.datagram = None;
         self.rejoined = None;
-        #[cfg(not(feature = "rx-lent-only"))]
-        {
-            self.written = 0;
-        }
         self.spent = false;
     }
 }
@@ -1039,6 +825,23 @@ pub(crate) trait AnswersQueries {
     fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64);
 }
 
+/// What holds the callbacks of the legs of the session's gets, each in a row held by count: a
+/// record of the round that owes a leg a reply holds one count of its row from when it is written
+/// to when its call is ended, so the callback outlives every reply held for it.
+#[cfg(feature = "query")]
+pub(crate) trait LegHolders: Send + Sync {
+    /// Take one more count of `leg`'s row: `false` when it names none.
+    fn hold(&self, leg: LegId) -> bool;
+
+    /// Hand `reply` to `leg`'s callback, which a count the caller holds keeps; the callback is
+    /// called with none of the holders' locks held.
+    fn call(&self, leg: LegId, reply: &dyn ReplyView);
+
+    /// Give back one count of `leg`'s row: its callback, taken out of the row, when that was the
+    /// last count, for the caller to drop with no lock held.
+    fn release(&self, leg: LegId) -> Option<ReplyCallback>;
+}
+
 /// The rows waiting to be let go of: as many as the tables of the kinds whose calls the round
 /// ends hold.
 const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS
@@ -1063,6 +866,10 @@ struct Released {
     /// ended ([`Releasing`]). A delivery that reads none takes no lock for them, and an
     /// undeclaration that waits for its row reads that no drop is under way.
     owed: AtomicUsize,
+    /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
+    /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
+    #[cfg(feature = "query")]
+    legs: Option<Arc<dyn LegHolders>>,
 }
 
 impl Released {
@@ -1070,6 +877,8 @@ impl Released {
         Self {
             handles: Lock::new(BoundedVec::new_static()),
             owed: AtomicUsize::new(0),
+            #[cfg(feature = "query")]
+            legs: None,
         }
     }
 
@@ -1120,7 +929,13 @@ impl Released {
             #[cfg(feature = "liveliness")]
             Owed::Liveliness(call) => self.end_liveliness(call),
             #[cfg(feature = "query")]
-            Owed::Reply(callback) => drop(callback),
+            Owed::Reply(leg) => {
+                // The record's count; the callback goes here, with no lock held, when it was the
+                // last.
+                if let Some(legs) = &self.legs {
+                    drop(legs.release(leg));
+                }
+            }
             #[cfg(feature = "queryable")]
             Owed::Query(call) => self.end_query(call),
         }
@@ -1232,8 +1047,8 @@ pub(crate) struct Round {
 // `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
 // kept buffers, whose claims belong to the session's task, are let go of on that task alone;
 // `released` and `answering` behind their own locks, `answering` naming the engine, whose
-// answering is made for any thread; every other field is an atomic or never written after the
-// round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
+// answering is made for any thread, as is the holder of the legs' rows `released` names; every
+// other field is an atomic or never written after the round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
 // them.
@@ -1251,8 +1066,7 @@ impl Round {
         // an `Arc` is the same allocation, and the optimiser writes nothing into it.
         let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
         // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
-        // is valid and nothing else reads or writes it while it is written; the area `rows` was
-        // given is as `RoundRows::writing_into` asks.
+        // is valid and nothing else reads or writes it while it is written.
         unsafe { Self::write_in((*raw).as_mut_ptr(), rows) };
         // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
         // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
@@ -1262,8 +1076,7 @@ impl Round {
     /// An empty round written where `at` points, field by field.
     ///
     /// # Safety
-    /// `at` is valid for writes of a `Self`, and what it held is overwritten without a drop; the
-    /// area `rows` was given is as [`RoundRows::writing_into`] asks.
+    /// `at` is valid for writes of a `Self`, and what it held is overwritten without a drop.
     #[inline(never)]
     unsafe fn write_in(at: *mut Self, rows: RoundRows) {
         // A field added to the round or its table and not written below would be read
@@ -1312,12 +1125,6 @@ impl Round {
                 longest_key: _,
                 key: _,
                 fan: _,
-                #[cfg(not(feature = "rx-lent-only"))]
-                    area: _,
-                #[cfg(not(feature = "rx-lent-only"))]
-                    area_bytes: _,
-                #[cfg(not(feature = "rx-lent-only"))]
-                    written: _,
             } = table;
         };
         // SAFETY: the caller's contract; an `UnsafeCell<T>` is laid out as the `T` it holds, and
@@ -1336,15 +1143,6 @@ impl Round {
             ptr::write(addr_of_mut!((*table).longest_key), rows.longest_key);
             ptr::write(addr_of_mut!((*table).key), None);
             ptr::write(addr_of_mut!((*table).fan), false);
-            #[cfg(not(feature = "rx-lent-only"))]
-            {
-                // A round given no area writes nothing into one: a part that lies nowhere it reads
-                // finds no room.
-                let (area, area_bytes) = rows.area.unwrap_or((NonNull::dangling(), 0));
-                ptr::write(addr_of_mut!((*table).area), area);
-                ptr::write(addr_of_mut!((*table).area_bytes), area_bytes);
-                ptr::write(addr_of_mut!((*table).written), 0);
-            }
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
@@ -1379,6 +1177,13 @@ impl Round {
     /// once, before the round is shared; a round never told copies every key.
     pub(crate) fn reads_keys_in(&mut self, keys: KeySpace) {
         self.table.get_mut().key_space = Some(keys);
+    }
+
+    /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
+    /// leg's row. Told once, before the round is shared.
+    #[cfg(feature = "query")]
+    pub(crate) fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders>) {
+        self.released.legs = Some(legs);
     }
 
     /// The table, to write, while it is empty or filling: `None` once it is sealed or handed out.
@@ -1477,11 +1282,10 @@ impl Round {
         count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count a record a part of which found no place: one the round cannot read where it lies and
-    /// has no room to write. Refused as one that found no room is, and, in a build that keeps no
-    /// area (`rx-lent-only`), counted apart as well ([`RoundCounts::unplaced`]).
+    /// Count a record a part of which found no place: one the round cannot read where it lies, as
+    /// it keeps no area to copy it into. Refused as one that found no room is, and counted apart as
+    /// well ([`RoundCounts::unplaced`]).
     fn refuse_unplaced(&self, holds_sender: bool) {
-        #[cfg(feature = "rx-lent-only")]
         self.unplaced.fetch_add(1, Ordering::Relaxed);
         self.refuse(holds_sender);
     }
@@ -1765,18 +1569,23 @@ impl Round {
         unsafe { self.filled(table) };
     }
 
-    /// Hold `view`, a reply, for `callback`, the leg's it answers, each part read where it lies
-    /// or written into the table. A reply is the answer a get waits for: one that finds no room is
-    /// counted with the records that hold their sender.
+    /// Hold `view`, a reply, for leg `leg`, whose callback answers it, each part read where it lies
+    /// or written into the table, with a count of the leg's row ([`LegHolders`]). A reply is the
+    /// answer a get waits for: one that finds no room is counted with the records that hold their
+    /// sender.
     ///
     /// # Safety
     /// The caller holds the session's lock.
     #[cfg(feature = "query")]
-    pub(crate) unsafe fn offer_reply(&self, callback: &Arc<ReplyCallback>, view: &dyn ReplyView) {
+    pub(crate) unsafe fn offer_reply(&self, leg: LegId, view: &dyn ReplyView) {
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
         let Some(table) = (unsafe { self.writable() }) else {
+            self.refuse(true);
+            return;
+        };
+        let Some(legs) = self.released.legs.as_deref() else {
             self.refuse(true);
             return;
         };
@@ -1789,6 +1598,10 @@ impl Round {
             self.refuse_unplaced(true);
             return;
         };
+        if !legs.hold(leg) {
+            self.refuse(true);
+            return;
+        }
         let key = reply.key;
         let first = table.callbacks.len();
         let entered = table
@@ -1798,11 +1611,12 @@ impl Round {
         if let (true, Some(held)) = (entered, held) {
             table.hold_key(key, held);
         }
-        let kept = entered
-            && table
-                .callbacks
-                .push(Owed::Reply(Arc::clone(callback)))
-                .is_ok();
+        let kept = entered && table.callbacks.push(Owed::Reply(leg)).is_ok();
+        if !kept {
+            // Refused after its count was taken: given back at once. The sink that offers the
+            // reply holds the row too, so this is never the count that lets the callback go.
+            drop(legs.release(leg));
+        }
         debug_assert!(kept, "the table had the room its checks found");
         // SAFETY: the caller's contract: the session's lock is held.
         unsafe { self.filled(table) };
@@ -2075,9 +1889,8 @@ impl Round {
     }
 
     /// Whether the table takes the room `room` of one more record: empty, or filling with an
-    /// entry, the callbacks, a key (in the keys, or in the area past the record's bytes) and the
-    /// bytes of a record written whole left. An empty table takes any record, so a link is never
-    /// stopped for good.
+    /// entry, the callbacks and a key of the longest left. A record's other parts lie where the
+    /// round reads them. An empty table takes any record, so a link is never stopped for good.
     ///
     /// # Safety
     /// The caller holds the session's lock.
@@ -2087,18 +1900,10 @@ impl Round {
             FILLING => {
                 // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
                 let table = unsafe { &*self.table.get() };
+                // A record's parts lie where the round reads them, apart from a key the session
+                // composed, which the keys take.
                 let keys = table.keys.free_slots() >= table.longest_key;
-                #[cfg(not(feature = "rx-lent-only"))]
-                let room_left = table
-                    .area_bytes
-                    .checked_sub(table.written)
-                    .and_then(|left| left.checked_sub(room.bytes))
-                    .is_some_and(|spare| keys || spare >= table.longest_key);
-                // With no area, a record's parts lie where the round reads them, apart from a key
-                // the session composed, which the keys take.
-                #[cfg(feature = "rx-lent-only")]
-                let room_left = keys;
-                Self::takes(table, room.callbacks) && room_left
+                Self::takes(table, room.callbacks) && keys
             }
             _ => false,
         }
@@ -2247,8 +2052,11 @@ impl Round {
                 #[cfg(feature = "query")]
                 Held::Reply(reply) => {
                     let view = RoundReply { reply, table };
-                    for callback in owed.iter().filter_map(Owed::reply) {
-                        callback.call(&view);
+                    // A reply was held only for a round told of the legs (`Self::offer_reply`).
+                    if let Some(legs) = self.released.legs.as_deref() {
+                        for leg in owed.iter().filter_map(Owed::reply) {
+                            legs.call(leg, &view);
+                        }
                     }
                 }
                 #[cfg(feature = "queryable")]
@@ -2343,22 +2151,9 @@ impl Round {
         RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows")
     }
 
-    /// A round holding `events` records at once, its tables lent from an arena the test leaks, given
-    /// no area: what a build that keeps none (`rx-lent-only`) makes.
-    #[cfg(any(feature = "rx-lent-only", all(feature = "std", feature = "queryable")))]
+    /// A round holding `events` records at once, its tables lent from an arena the test leaks.
     pub(crate) fn leaked(events: usize) -> Arc<Self> {
         Self::shared_over(Self::leaked_rows(events))
-    }
-
-    /// [`Self::leaked`] with an area of `bytes` the test leaks too.
-    #[cfg(not(feature = "rx-lent-only"))]
-    pub(crate) fn leaked_with_area(bytes: usize, events: usize) -> Arc<Self> {
-        let area: &'static mut [u8] = vec![0u8; bytes].leak();
-        // SAFETY: the area is leaked, so it outlives the round, and nothing else uses it.
-        let rows = unsafe {
-            Self::leaked_rows(events).writing_into(NonNull::from(area).cast::<u8>(), bytes)
-        };
-        Self::shared_over(rows)
     }
 }
 

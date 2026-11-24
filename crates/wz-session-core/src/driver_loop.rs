@@ -589,19 +589,13 @@ pub struct InPlaceFragment<'a> {
 }
 
 impl<'a> InPlaceFragment<'a> {
-    /// The fragment at the front of `unit`, whose payload starts at
+    /// The fragment at the front of `unit`, whose head is `head` and whose payload starts at
     /// `payload_at`. Built by the reassembling in-place receive path alone.
     #[cfg(all(feature = "reassembly", feature = "session-unicast"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn of_head(
         unit: &'a [u8],
         payload_at: usize,
-        reliable: bool,
-        sn: u64,
-        more: bool,
-        has_ext: bool,
-        priority: crate::qos::Priority,
-        markers: crate::extfragment::FragmentMarkers,
+        head: &crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
     ) -> Self {
         debug_assert!(
             payload_at <= unit.len(),
@@ -610,12 +604,12 @@ impl<'a> InPlaceFragment<'a> {
         Self {
             unit,
             payload_at,
-            reliable,
-            sn,
-            more,
-            has_ext,
-            priority,
-            markers,
+            reliable: head.reliable,
+            sn: head.sn,
+            more: head.more,
+            has_ext: head.has_ext,
+            priority: head.priority(),
+            markers: head.markers(),
         }
     }
 
@@ -725,10 +719,37 @@ pub fn owned_records(
 /// where it lies and each record handed on lent (`report_lent_record`), as its receive hands it;
 /// an outcome that carries no batch is handed as it is. A test of a table states its claim once
 /// and checks it in the form the build ships.
-// Its callers are the tests of the tables, each under the features of its own table; a test build
-// with none of them leaves it unused.
-#[cfg(all(test, feature = "alloc"))]
-#[allow(dead_code)]
+// Its callers are the tests of the tables, each under the features of its own table: the limits'
+// (a queryable), the observer's (a Push it routes, a subscriber's interest, a liveliness get), and
+// the group reply sink's. The table tests of `pubsub` and `slot_observer` need a Push and a
+// `pubsub-put`, which the observer's clause holds.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    any(
+        feature = "query-queryable",
+        all(
+            feature = "codec-push",
+            any(
+                feature = "pubsub-put",
+                feature = "declare-subscriber",
+                all(feature = "liveliness-get", feature = "liveliness-subscriber")
+            )
+        ),
+        all(
+            feature = "declare-subscriber",
+            any(not(feature = "interest-answer"), feature = "codec-declare")
+        ),
+        all(
+            feature = "session-multicast",
+            feature = "codec-frame",
+            feature = "codec-declare",
+            feature = "declare-final",
+            feature = "storage-profile",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    )
+))]
 pub(crate) fn deliver_frame(
     outcome: &DriverLoopOutcome,
     mut on_event: impl FnMut(IterationEvent<'_, '_>),

@@ -1165,11 +1165,11 @@ pub fn interest_final_propagated<'a>(interest_id: u64) -> Interest<'a> {
 
 // ── ResponseFinal ────────────────────────────────────────────────────────────
 
-/// The bytes [`response_final`] encodes to for the same arguments: what a sender with no
-/// allocator asks a link to lend for it, since a `ResponseFinal` has no size constant (its
-/// extension chain may carry a u32-long body). Its own frame, not inlined, so the value it
-/// counts is on the stack only while it counts.
-#[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
+/// The bytes [`response_final`] encodes to for the same arguments: what a sender asks a link to
+/// lend for it, since a `ResponseFinal` has no size constant (its extension chain may carry a
+/// u32-long body). Its own frame, not inlined, so the value it counts is on the stack only while
+/// it counts.
+#[cfg(feature = "codec-response-final")]
 #[inline(never)]
 pub fn response_final_len(request_id: crate::wire_id::RequestId, qos: QosLevel) -> usize {
     wz_codecs::response_final::ResponseFinalWire::measure(&response_final(request_id, qos)).len()

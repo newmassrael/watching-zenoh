@@ -57,6 +57,8 @@ use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
 };
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
@@ -589,19 +591,22 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             source_info,
         };
         let token = token.or_else(|| Some(state.cancel.clone()));
+        let ask = crate::get::GetAsk {
+            parameters: params_in,
+            target: state.target,
+            consolidation: state.consolidation,
+            timeout_ms: state.timeout_ms,
+            accept_replies: state.accept_replies,
+            payload: payload.as_ref(),
+            attachment: attachment.as_ref(),
+            qos: state.qos,
+            value_meta,
+        };
         issue_get(
             &state.shared,
             state.key.literal(),
             state.key.wire(Arc::as_ref(&state.shared)),
-            params_in,
-            state.target,
-            state.consolidation,
-            state.timeout_ms,
-            state.accept_replies,
-            payload,
-            attachment,
-            state.qos,
-            value_meta,
+            &ask,
             closure,
             token,
             None,

@@ -40,13 +40,13 @@ impl Counter {
     }
 
     /// `n` more.
-    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    #[cfg(any(test, feature = "routing-router-hat"))]
     pub(crate) fn add(&self, n: usize) {
         self.0.fetch_add(n, Ordering::Relaxed);
     }
 
     /// At least `n`: a peak, which is the one reading that is not a sum.
-    #[cfg_attr(not(feature = "router-multicast-faces"), allow(dead_code))]
+    #[cfg(any(test, feature = "router-multicast-faces"))]
     pub(crate) fn raise_to(&self, n: usize) {
         self.0.fetch_max(n, Ordering::Relaxed);
     }
@@ -60,31 +60,30 @@ impl Counter {
 /// gauges consistent with each other, and a reader that reads two sees them at two instants; the
 /// router's held messages and held bytes are read for a report and for a gate that is asserted again
 /// by every message that finds its budget reached, so a stale read costs one message.
+// Held by the router's egress queues alone.
+#[cfg(any(test, feature = "routing-router-hat"))]
 #[derive(Debug, Default)]
 pub(crate) struct Gauge(AtomicUsize);
 
+#[cfg(any(test, feature = "routing-router-hat"))]
 impl Gauge {
     /// A gauge at zero.
-    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
     pub(crate) const fn new() -> Self {
         Self(AtomicUsize::new(0))
     }
 
     /// The value now.
-    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
     pub(crate) fn get(&self) -> usize {
         self.0.load(Ordering::Relaxed)
     }
 
     /// `n` more; the value it has now.
-    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
     pub(crate) fn add(&self, n: usize) -> usize {
         self.0.fetch_add(n, Ordering::Relaxed).saturating_add(n)
     }
 
     /// `n` fewer; the value it has now. A gauge is never taken below what was put in, so going
     /// under zero is a bug in the caller and is stopped at zero in a release build.
-    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
     pub(crate) fn sub(&self, n: usize) -> usize {
         let (Ok(was) | Err(was)) =
             self.0

@@ -43,9 +43,9 @@ use crate::ffi::{catch, guarded, CClosure, InCallback};
 use crate::object_slot::{
     closures_of, count_in_entity, kept_at, retire_entity, Answering, Kind, Slot,
 };
+use crate::refusal::{refusal_code, Door};
 use crate::result::{
-    refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
+    ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 

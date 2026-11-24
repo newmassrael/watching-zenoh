@@ -127,11 +127,11 @@ pub type PumpSlots<C, L, const N: usize> =
 /// the `config.max_iters` cap) — `wz_runtime_coop::session_drive::run_session`
 /// over [`LwipSessionLink`].
 ///
-/// - `link` — the [`LwipLink`]; `poll_loopback` + `check_timeouts` drive the
-///   lwIP input path each tick. This is the loopback / QEMU shape — a real
-///   multi-NIC deploy drives netif input from the RX ISR instead (carry tail).
-/// - `driver` — the concrete [`LwipUdpDriver`](crate::driver::LwipUdpDriver) (for
-///   its peer's datagrams); the same object lives inside `actions` as the
+/// - `link` — the [`LwipLink`] paired with its driver ([`LwipSessionLink::new`]):
+///   `poll_loopback` + `check_timeouts` drive the lwIP input path each tick (the
+///   loopback / QEMU shape — a real multi-NIC deploy drives netif input from the RX
+///   ISR instead), and the concrete [`LwipUdpDriver`](crate::driver::LwipUdpDriver)
+///   reads its peer's datagrams; the same driver lives inside `actions` as the
 ///   session's link sink (`Rc<dyn BoxedLinkDriver>`, or under `session-slot` a
 ///   reference into the slot that holds both) for the outbound send seam.
 ///
@@ -141,8 +141,7 @@ pub type PumpSlots<C, L, const N: usize> =
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub fn run_session<C, F>(
     runtime: &CoopRuntime<C>,
-    link: &LwipLink,
-    driver: &DriverHandle,
+    link: LwipSessionLink<&LwipLink>,
     actions: &SessionHandle<C>,
     entropy: SessionEntropy,
     clock: &CoopTime<C>,
@@ -153,15 +152,7 @@ where
     C: ClockSource,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    coop_drive::run_session(
-        runtime,
-        LwipSessionLink::new(link, driver.clone()),
-        actions,
-        entropy,
-        clock,
-        config,
-        on_event,
-    )
+    coop_drive::run_session(runtime, link, actions, entropy, clock, config, on_event)
 }
 
 /// The MCU session AS A TASK over lwIP — the shared `session_task` over
@@ -175,8 +166,7 @@ where
 #[cfg(not(feature = "session-slot"))]
 pub async fn session_task<C, F>(
     runtime: CoopRuntime<C>,
-    link: Rc<LwipLink>,
-    driver: DriverHandle,
+    link: LwipSessionLink<Rc<LwipLink>>,
     actions: SessionHandle<C>,
     entropy: SessionEntropy,
     clock: CoopTime<C>,
@@ -187,16 +177,7 @@ where
     C: ClockSource,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    coop_drive::session_task(
-        runtime,
-        LwipSessionLink::new(link, driver),
-        actions,
-        entropy,
-        clock,
-        config,
-        on_event,
-    )
-    .await
+    coop_drive::session_task(runtime, link, actions, entropy, clock, config, on_event).await
 }
 
 /// Spawn one MCU session over lwIP onto `local` and return its join handle —
@@ -205,8 +186,7 @@ where
 #[cfg(not(feature = "session-slot"))]
 pub fn spawn_session<C, F>(
     local: &CoopLocalSet<C>,
-    link: Rc<LwipLink>,
-    driver: DriverHandle,
+    link: LwipSessionLink<Rc<LwipLink>>,
     actions: SessionHandle<C>,
     entropy: SessionEntropy,
     clock: CoopTime<C>,
@@ -217,15 +197,7 @@ where
     C: ClockSource + 'static,
     F: FnMut(IterationEvent<'_, '_>) + 'static,
 {
-    coop_drive::spawn_session(
-        local,
-        LwipSessionLink::new(link, driver),
-        actions,
-        entropy,
-        clock,
-        config,
-        on_event,
-    )
+    coop_drive::spawn_session(local, link, actions, entropy, clock, config, on_event)
 }
 
 // The tests build sessions with `Rc` handles and sockets, the form every profile
@@ -364,8 +336,7 @@ mod tests {
 
             let outcome = run_session(
                 &runtime,
-                &link,
-                &driver,
+                LwipSessionLink::new(&link, driver.clone()),
                 &actions,
                 SessionEntropy::new(Dry),
                 &clock,
@@ -506,8 +477,7 @@ mod tests {
             let (runtime, clock, driver, actions) = make_session(7452);
             run_session(
                 &runtime,
-                &link,
-                &driver,
+                LwipSessionLink::new(&link, driver.clone()),
                 &actions,
                 SessionEntropy::new(Dry),
                 &clock,
@@ -539,8 +509,7 @@ mod tests {
 
         let handle = spawn_session(
             &local,
-            link.clone(),
-            driver.clone(),
+            LwipSessionLink::new(link.clone(), driver.clone()),
             actions,
             SessionEntropy::new(Dry),
             clock,

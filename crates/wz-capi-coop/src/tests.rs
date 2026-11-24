@@ -132,6 +132,10 @@ enum Command {
     /// [`Command::Answer`] with each reply stamped by the router's clock.
     #[cfg(feature = "query")]
     AnswerStamped(&'static str, &'static [u8]),
+    /// Hold a queryable on the key `.0` that answers each query once on each of the keys `.1`,
+    /// each with the payload `.2`, as a get on a wildcard is answered by a key of each.
+    #[cfg(feature = "query")]
+    AnswerOnKeys(&'static str, &'static [&'static str], &'static [u8]),
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
@@ -737,6 +741,27 @@ fn run_router(
                                         None,
                                         &stamp,
                                     );
+                                },
+                            ),
+                        )
+                    })
+                    .expect("the router's queryable");
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::AnswerOnKeys(key, keys, value)) => {
+                answering
+                    .borrow_mut()
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    for answered in keys {
+                                        let _ = out.reply_keyed(answered, value);
+                                    }
                                 },
                             ),
                         )
@@ -1951,8 +1976,10 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::handle(layout),
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::handle(layout),
+        },
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -2023,8 +2050,10 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             || config(router),
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
-            &AllocatorMemory,
-            held,
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held,
+            },
         )
         .expect("the session opens")
     };
@@ -2081,6 +2110,42 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.give_back_place(theirs), Ok(()));
     assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
     assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
+}
+
+/// A place the ABI gives back on the thread that holds its session's lock (the last count of a
+/// get let go of by a drop made under the lock) would wait on itself: a debug build fails there at
+/// once, so no such path survives a test. Turned red by a hold of the lock the thread does not
+/// mark.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "taken again on the thread that holds it")]
+fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
+    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces, OpenStorage};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_capi_port::PlaceLender;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(48, 8).expect("a layout");
+    let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
+    let router = Router::start(CatchAll::None);
+    let engine = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        OpenStorage {
+            memory: &AllocatorMemory,
+            held,
+        },
+    )
+    .expect("the session opens");
+    let place = engine
+        .claim_place(EntityKind::Subscriber)
+        .expect("a place for a subscriber");
+    let _ = engine.under_the_lock(|| engine.give_back_place(place));
 }
 
 /// A session of the `advanced-cache` build keeps a ring of `ADVANCED_CACHE_BYTES` for its caches,
@@ -2573,8 +2638,10 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         },
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2615,8 +2682,10 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         listener,
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());
@@ -2705,11 +2774,7 @@ mod queryable;
 mod redial_heap;
 mod redial_wait;
 mod replay;
-// The round's own tests write parts into its area, which a lent-only build keeps none of.
-#[cfg(not(feature = "rx-lent-only"))]
 mod round;
-#[cfg(feature = "rx-lent-only")]
-mod round_lent;
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

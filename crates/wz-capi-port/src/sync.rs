@@ -73,9 +73,131 @@ impl<T: Default> Default for Lock<T> {
     }
 }
 
+/// The mark of a session's state lock held by the calling thread, from [`Self::enter`] to its
+/// drop: an engine marks each hold of its session's lock, so that a path that would take that
+/// lock again on the same thread (a place given back, a key let go of, by a drop made under the
+/// lock) fails at once in a debug build instead of waiting on itself, and a place's last holder
+/// can say that no session is held where it gives the place back ([`Self::any_here`]). Kept in a
+/// debug build on a host; a release build, and one with no `std`, keeps nothing and reads that
+/// none is held.
+pub struct SessionHeld {
+    #[cfg(all(feature = "std", debug_assertions))]
+    session: usize,
+}
+
+/// The sessions each thread marks held, the innermost last; a thread holds a few at most, and
+/// one past the room is not recorded, which only makes the check miss it.
+#[cfg(all(feature = "std", debug_assertions))]
+mod held_here {
+    use core::cell::Cell;
+
+    pub(super) const ROOM: usize = 4;
+
+    std::thread_local! {
+        pub(super) static HELD: Cell<([usize; ROOM], usize)> = const { Cell::new(([0; ROOM], 0)) };
+    }
+}
+
+impl SessionHeld {
+    /// Mark the session whose state lies at `session` held by this thread. A debug build fails
+    /// when this thread holds it already: the lock is not reentrant, so the take would wait on
+    /// itself.
+    pub fn enter(session: *const ()) -> Self {
+        #[cfg(all(feature = "std", debug_assertions))]
+        {
+            let session = session as usize;
+            held_here::HELD.with(|held| {
+                let (mut sessions, len) = held.get();
+                let taken = sessions.get(..len).unwrap_or(&[]);
+                debug_assert!(
+                    !taken.contains(&session),
+                    "a session's lock is taken again on the thread that holds it"
+                );
+                if let Some(slot) = sessions.get_mut(len) {
+                    *slot = session;
+                    held.set((sessions, len.saturating_add(1)));
+                }
+            });
+            Self { session }
+        }
+        #[cfg(not(all(feature = "std", debug_assertions)))]
+        {
+            let _ = session;
+            Self {}
+        }
+    }
+
+    /// Whether this thread holds any session's lock, as far as the marks say: never in a release
+    /// build.
+    pub fn any_here() -> bool {
+        #[cfg(all(feature = "std", debug_assertions))]
+        {
+            held_here::HELD.with(|held| held.get().1 != 0)
+        }
+        #[cfg(not(all(feature = "std", debug_assertions)))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for SessionHeld {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "std", debug_assertions))]
+        held_here::HELD.with(|held| {
+            let (mut sessions, len) = held.get();
+            let taken = sessions.get(..len).unwrap_or(&[]);
+            if let Some(at) = taken.iter().rposition(|&s| s == self.session) {
+                // The marks are let go of in any order a program's guards drop in.
+                let last = len.saturating_sub(1);
+                sessions.copy_within(at.saturating_add(1)..len, at);
+                if let Some(slot) = sessions.get_mut(last) {
+                    *slot = 0;
+                }
+                held.set((sessions, last));
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session marked held is held on its thread until its mark is dropped, another session may
+    /// be held inside it, and a release build reads none.
+    #[test]
+    fn a_session_is_held_from_its_mark_to_its_drop() {
+        let one = 1_u8;
+        let other = 2_u8;
+        assert!(!SessionHeld::any_here());
+        let outer = SessionHeld::enter(core::ptr::from_ref(&one).cast());
+        let inner = SessionHeld::enter(core::ptr::from_ref(&other).cast());
+        assert_eq!(
+            SessionHeld::any_here(),
+            cfg!(all(feature = "std", debug_assertions))
+        );
+        drop(outer);
+        assert_eq!(
+            SessionHeld::any_here(),
+            cfg!(all(feature = "std", debug_assertions))
+        );
+        drop(inner);
+        assert!(
+            !SessionHeld::any_here(),
+            "none is held once every mark is dropped"
+        );
+    }
+
+    /// A session's lock taken again on the thread that holds it fails at once in a debug build.
+    #[cfg(all(feature = "std", debug_assertions))]
+    #[test]
+    #[should_panic(expected = "taken again on the thread that holds it")]
+    fn a_session_held_twice_on_one_thread_fails() {
+        let one = 1_u8;
+        let _held = SessionHeld::enter(core::ptr::from_ref(&one).cast());
+        let _again = SessionHeld::enter(core::ptr::from_ref(&one).cast());
+    }
 
     #[test]
     fn what_the_closure_returns_is_handed_back() {

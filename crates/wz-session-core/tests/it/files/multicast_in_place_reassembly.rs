@@ -36,7 +36,7 @@ use wz_session_core::extfragment::FRAGMENT_FIRST_EXT_ID;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{GroupJoinRule, MulticastParams};
-use wz_session_core::multicast_rx::dispatch_multicast_inbound_reassembling;
+use wz_session_core::multicast_rx::{dispatch_multicast_inbound_reassembling, GroupDatagram};
 use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::sn::{mask_from_res, MulticastTxConduits};
@@ -113,9 +113,11 @@ fn a_restarted_member_chain_is_reported_dropped_once_in_place() {
         &mut d,
         &mut r,
         &local,
-        &beacon[..len],
-        PEER,
-        0,
+        GroupDatagram {
+            bytes: &beacon[..len],
+            src: PEER,
+            now_ms: 0,
+        },
         &mut |_| {},
         &(),
     );
@@ -134,9 +136,11 @@ fn a_restarted_member_chain_is_reported_dropped_once_in_place() {
             &mut d,
             &mut r,
             &local,
-            dgram,
-            PEER,
-            1 + i as u64,
+            GroupDatagram {
+                bytes: dgram,
+                src: PEER,
+                now_ms: 1 + i as u64,
+            },
             &mut |event| {
                 if let IterationEvent::ReassemblyDropped(reason) = event {
                     drops.push(reason);
@@ -163,7 +167,18 @@ fn admitted(
         &mut beacon,
     )
     .expect("a JOIN fits JOIN_MAX_BYTES");
-    dispatch_multicast_inbound_reassembling(d, r, local, &beacon[..len], PEER, 0, &mut |_| {}, &());
+    dispatch_multicast_inbound_reassembling(
+        d,
+        r,
+        local,
+        GroupDatagram {
+            bytes: &beacon[..len],
+            src: PEER,
+            now_ms: 0,
+        },
+        &mut |_| {},
+        &(),
+    );
     assert!(d.peer_index_by_src(PEER).is_some());
 }
 
@@ -219,9 +234,11 @@ fn a_frame_between_two_fragments_of_a_chain_ends_the_chain_at_the_next_fragment(
                 &mut d,
                 &mut r,
                 &local,
-                dgram,
-                PEER,
-                1 + i as u64,
+                GroupDatagram {
+                    bytes: dgram,
+                    src: PEER,
+                    now_ms: 1 + i as u64,
+                },
                 &mut |event| {
                     if let IterationEvent::ReassemblyDropped(_) = event {
                         dropped += 1;

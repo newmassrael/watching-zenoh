@@ -72,7 +72,10 @@ fn r77_not_monitored_pre_established() {
         "established slot empty pre-Established"
     );
     assert!(
-        !*actions.link.lease_armed.lock().unwrap(),
+        !actions
+            .link
+            .lease_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "no lease monitor runs before Established"
     );
     let pre_state = engine.get_current_state();
@@ -99,7 +102,10 @@ fn lease_is_not_checked_once_established_is_left() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     assert!(
-        *actions.link.lease_armed.lock().unwrap(),
+        actions
+            .link
+            .lease_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "Established entry starts the lease monitor"
     );
     let established = actions.link.established_at.lock().unwrap().unwrap();
@@ -107,7 +113,10 @@ fn lease_is_not_checked_once_established_is_left() {
     engine.process_event(E::SessionClose);
     assert_eq!(engine.get_current_state(), S::Closing);
     assert!(
-        !*actions.link.lease_armed.lock().unwrap(),
+        !actions
+            .link
+            .lease_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "the exit from Established stops the lease monitor"
     );
     assert!(

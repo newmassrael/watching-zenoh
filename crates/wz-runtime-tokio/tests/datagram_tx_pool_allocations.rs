@@ -819,7 +819,7 @@ mod multicast {
         for item in items {
             match producer.push(item).expect("linked") {
                 PushOutcome::Pushed => pushed += 1,
-                PushOutcome::Congested | PushOutcome::Held => {}
+                PushOutcome::Congested | PushOutcome::Held | PushOutcome::Refused(_) => {}
             }
             if !burst {
                 drain(tap, out);

@@ -40,7 +40,7 @@ use wz_session_core::accept_cookie::{
 use wz_session_core::accept_state::NegotiatedExtensions;
 use wz_session_core::handshake_encode::{
     encode_close, encode_close_into, encode_init, encode_init_into, encode_open, encode_open_into,
-    InitCaps,
+    ChainRef, InitCaps,
 };
 use wz_session_core::session_init_params::{
     session_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -238,7 +238,7 @@ fn an_init_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds(
                         "{what}: the heap encoder is the oracle"
                     );
                     assert_refuses_every_shorter_buffer(&what, &expected, |buf| {
-                        encode_init_into(buf, &p, caps, is_ack, exts, override_cookie)
+                        encode_init_into(buf, &p, caps, is_ack, exts.into(), override_cookie)
                     });
                 }
             }
@@ -261,8 +261,10 @@ fn an_ack_advertises_the_sizes_it_is_given_and_never_the_unset_sentinel() {
         batch_size: 512,
     };
     let expected = oracle_init(&p, capped, true, &[], Some(&[]));
-    let written =
-        into_fixed(64, |buf| encode_init_into(buf, &p, capped, true, &[], None)).expect("fits");
+    let written = into_fixed(64, |buf| {
+        encode_init_into(buf, &p, capped, true, ChainRef::Slice(&[]), None)
+    })
+    .expect("fits");
     assert_eq!(written, expected, "an InitAck capped to the peer's sizes");
 }
 
@@ -292,7 +294,7 @@ fn an_open_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds(
                         "{what}: the heap encoder is the oracle"
                     );
                     assert_refuses_every_shorter_buffer(&what, &expected, |buf| {
-                        encode_open_into(buf, &p, 1234, is_ack, cookie, exts)
+                        encode_open_into(buf, &p, 1234, is_ack, cookie, exts.into())
                     });
                 }
             }

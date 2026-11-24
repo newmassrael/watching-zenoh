@@ -1760,7 +1760,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             if let Some(refused) = ext.face_watch_refused() {
                 drop(ext);
                 drive.close();
-                return crate::result::refusal_code(refused, crate::result::Door::Session);
+                return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
             }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2153,8 +2153,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             source,
             policy,
             request.key_ids,
-            &wz_capi_coop::arena::AllocatorMemory,
-            crate::object_slot::held_places(SessionPlace::LAYOUT),
+            wz_capi_coop::arena::OpenStorage {
+                memory: &wz_capi_coop::arena::AllocatorMemory,
+                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+            },
         )
         .map(|engine| PicoDrive::App(engine.into_drive())),
         None => wz_capi_coop::CoopEngine::open_made_in(
@@ -2164,8 +2166,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             source,
             policy,
             request.key_ids,
-            &wz_capi_coop::arena::AllocatorMemory,
-            crate::object_slot::held_places(SessionPlace::LAYOUT),
+            wz_capi_coop::arena::OpenStorage {
+                memory: &wz_capi_coop::arena::AllocatorMemory,
+                held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+            },
         )
         .map(|engine| PicoDrive::Host(engine.into_drive())),
     };
@@ -2177,8 +2181,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         source,
         policy,
         request.key_ids,
-        &wz_capi_coop::arena::AllocatorMemory,
-        crate::object_slot::held_places(SessionPlace::LAYOUT),
+        wz_capi_coop::arena::OpenStorage {
+            memory: &wz_capi_coop::arena::AllocatorMemory,
+            held: crate::object_slot::held_places(SessionPlace::LAYOUT),
+        },
     )
     .map(wz_capi_coop::CoopEngine::into_drive);
     let drive = match opened {
@@ -2214,7 +2220,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     if let Some(refused) = ext.face_watch_refused() {
         drop(ext);
         drive.close();
-        return crate::result::refusal_code(refused, crate::result::Door::Session);
+        return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
     }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2699,7 +2705,7 @@ pub unsafe extern "C" fn zp_send_join(
         if live == Z_OK {
             if let Some(handle) = session_handle(zs) {
                 if let Err(refused) = engine_ref(handle).send_join_on_groups() {
-                    return crate::result::refusal_code(refused, crate::result::Door::Session);
+                    return crate::refusal::refusal_code(refused, crate::refusal::Door::Session);
                 }
             }
         }

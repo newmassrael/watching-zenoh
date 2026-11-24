@@ -134,8 +134,8 @@ compile_error!(
 );
 
 // A library has one engine (`docs/c-abi-engine-and-memory.md`, E1 and E3). The cooperative forms
-// read and send only what the session lends (`wz-capi-coop`'s `rx-lent-only` and `tx-lend-only`,
-// which they select), and the tokio engine refuses to be built beside those, so a build that names
+// read and send only what the session lends (`wz-session-core`'s `rx-lent-only` and
+// `wz-capi-coop`'s `tx-lend-only`, which they select), and the tokio engine refuses to be built beside those, so a build that names
 // both is refused here by name. A capability only the tokio engine runs selects it, and is named
 // on its own, so the program is told which feature to drop rather than which engine it pulled in.
 #[cfg(all(
@@ -667,6 +667,7 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
 pub mod replay_publisher;

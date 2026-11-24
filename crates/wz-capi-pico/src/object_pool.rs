@@ -211,6 +211,26 @@ pub struct wz_ext_object_pool_class_t {
     pub bytes: usize,
 }
 
+impl Default for wz_ext_object_pool_class_t {
+    /// Nothing reported, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            slot_bytes: 0,
+            slots: 0,
+            in_use: 0,
+            high_water: 0,
+            refused: 0,
+            bytes: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_object_pool_class_t {
+    const BASE: usize = core::mem::size_of::<Self>();
+}
+
 /// The code a door answers for counts that make no pools.
 fn code_of(unplanned: Unplanned) -> ZResult {
     match unplanned {

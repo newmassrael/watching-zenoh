@@ -848,8 +848,6 @@ pub mod capacity;
 /// is no longer a list to grow. `alloc` is the real dependency and always was:
 /// the decoder returns an owned `Vec` of entries.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-051 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::panic, clippy::arithmetic_side_effects)]
 mod ext_chain;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +
@@ -1165,8 +1163,6 @@ pub mod multicast_peer_arrived;
 // is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
 // `session-unicast` (it names the generated FSM event enum).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-066 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod inbound;
 
 /// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
@@ -1196,8 +1192,6 @@ pub mod tx_lease;
 /// profiles. Owned `Vec` output, so alloc-gated like `inbound` /
 /// `network_message`.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-017 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod frame_encode;
 
 /// Outbound transport-handshake / close / keepalive frame encoders
@@ -1288,8 +1282,6 @@ pub mod push_build;
 // output (alloc-gated) and `codec-push` gated, as `push_build` is. A plain comment, not an
 // outer doc: the module documents itself, and rustdoc would resolve its own links from here.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-// Totality debt TD-044 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod encoded_push;
 
 /// A literal-keyexpr `Put` as the codec's BORROWED `Push` over the caller's own text
@@ -2185,7 +2177,7 @@ pub mod session_timeouts;
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-004 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::unreachable)]
+#[allow(clippy::expect_used)]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
@@ -2222,11 +2214,7 @@ pub mod declaration_sync;
 /// [`session_actions`] (it names the FSM engine + the action bundle).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-036 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod drive;
 
 /// The unicast session's own timers (handshake, lease, keep-alive, the application layer's wake),
@@ -2574,8 +2562,6 @@ pub mod app_link_table;
 // behind the lock the ABI gives it, and the calls the program makes into it. Gated as the table
 // is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "app-link")]
-// Totality debt TD-132 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod app_transport;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]

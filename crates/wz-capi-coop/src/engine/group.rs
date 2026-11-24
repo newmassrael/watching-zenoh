@@ -280,8 +280,8 @@ pub(super) struct GroupJoining {
     pub(super) id: FaceId,
     pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
-    /// Whether the session has room for what the group delivers: the delivery lane's room for one
-    /// record of the group's batch.
+    /// Whether the session has room for what the group delivers: the round's room for one record
+    /// of the group's batch.
     pub(super) input_gate: GroupInputGate,
     /// The session's round of deliveries, which reads what the group's transport lends where it
     /// lies and keeps the buffer it gives back while a record still reads it.
@@ -1001,8 +1001,10 @@ impl<W: LinkWaits> GroupFace<W> {
             _ => key.suffix,
         };
         multicast_tx_publication(
-            key.mapping_id,
-            suffix,
+            wz_session_core::declare_form::GroupKey {
+                mapping_id: key.mapping_id,
+                suffix,
+            },
             put.kind,
             put.payload,
             put.meta,

@@ -201,11 +201,8 @@ pub(crate) use zephyr_host::*;
 /// this host's socket and clock. A build with `scout` scouts with the host's window instead.
 #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]
 mod scouting {
-    use core::net::{IpAddr, SocketAddr};
-
+    use wz_capi_port::ScoutAsk;
     use wz_session_core::scouting_host::{HelloRow, HelloTable, ScoutedHello};
-
-    use wz_session_core::session_zid::SessionZid;
 
     use super::Datagram;
 
@@ -213,50 +210,23 @@ mod scouting {
     /// window is `budget_ms` of `clock`: the host's, or the time base the scout's config names.
     /// Each datagram is read into `buffer`, the caller's: zenoh-pico's multicast batch as the
     /// scout's snapshot holds it, which is what its scout reads into.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_scout<C: wz_capi_coop::ClockSource + Clone>(
         clock: &C,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         table: &mut HelloTable,
         buffer: &mut [u8],
         on_hello: impl FnMut(&HelloRow),
     ) -> usize {
-        wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
-            clock,
-            SocketAddr::new(group, port),
-            what,
-            zid,
-            budget_ms,
-            table,
-            buffer,
-            on_hello,
-        )
+        wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(clock, ask, table, buffer, on_hello)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn scout_first<C: wz_capi_coop::ClockSource + Clone>(
         clock: &C,
-        group: IpAddr,
-        port: u16,
-        what: u8,
-        zid: Option<SessionZid>,
-        budget_ms: u64,
+        ask: ScoutAsk,
         table: &mut HelloTable,
         buffer: &mut [u8],
     ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
-            clock,
-            SocketAddr::new(group, port),
-            what,
-            zid,
-            budget_ms,
-            table,
-            buffer,
-        )
+        wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(clock, ask, table, buffer)
     }
 }
 #[cfg(all(feature = "scout-mcu", not(feature = "scout")))]

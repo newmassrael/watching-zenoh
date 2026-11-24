@@ -670,16 +670,7 @@ impl GroupTxStage {
             None,
             true,
             |minted, queue, window| {
-                multicast_tx_push_meta(
-                    meta,
-                    size,
-                    body,
-                    minted,
-                    params,
-                    &params.tx_queue,
-                    queue,
-                    window,
-                )
+                multicast_tx_push_meta(meta, size, body, minted, params, queue, window)
             },
         );
         drop(conduits);
@@ -1509,8 +1500,7 @@ mod tests {
     /// with `pace`.
     fn push_put(stage: &GroupTxStage, put: Put, pace: &dyn GroupTxPace) -> PushOutcome {
         wz_session_core::multicast_tx::multicast_tx_publication(
-            0,
-            Some("demo/stage"),
+            wz_session_core::declare_form::GroupKey::literal("demo/stage"),
             wz_session_core::sample::SampleKind::Put,
             put.payload.as_bytes(),
             &wz_session_core::metadata::PushMetadata::default(),

@@ -1986,6 +1986,27 @@ impl TransportsCell {
     }
 }
 
+/// A hold of the registry's lock and this thread's mark of it, let go of together.
+struct InnerGuard<'a> {
+    guard: MutexGuard<'a, Inner>,
+    // Read by a debug build only; let go of after the lock.
+    _held: wz_capi_port::sync::SessionHeld,
+}
+
+impl core::ops::Deref for InnerGuard<'_> {
+    type Target = Inner;
+
+    fn deref(&self) -> &Inner {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for InnerGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Inner {
+        &mut self.guard
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
@@ -3070,7 +3091,7 @@ impl SharedSession {
         id: u64,
         peer_zid: Option<&[u8]>,
         dialled: bool,
-    ) -> Option<MutexGuard<'_, Inner>> {
+    ) -> Option<InnerGuard<'_>> {
         // Decided under the lock that inserts the face, so two faces that come up
         // together cannot both pass: the one that takes the lock second sees the
         // first.
@@ -3239,10 +3260,20 @@ impl SharedSession {
     /// it somehow does, the registry is still structurally sound (a panic
     /// cannot leave a `BTreeMap` torn), and refusing to serve the session
     /// afterwards would be a worse failure than continuing.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ///
+    /// The thread marks the hold before it takes it, as the cooperative engine marks its own
+    /// (`wz_capi_port::sync::SessionHeld`): a take on the thread that holds the lock already (a
+    /// drop made under it that reaches the session again) fails a debug build there instead of
+    /// waiting on itself.
+    fn lock(&self) -> InnerGuard<'_> {
+        let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(&self.inner).cast());
+        InnerGuard {
+            guard: self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            _held: held,
+        }
     }
 
     /// A face reached Established: build its session and replay the whole

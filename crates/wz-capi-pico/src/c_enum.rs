@@ -40,7 +40,6 @@ impl CEnumWidth for [(); 4] {
 }
 
 /// The range of pico's enums with no negative value: each of them fits 0 to 7.
-#[allow(dead_code)]
 #[repr(C)]
 enum UnsignedProbe {
     Low = 0,
@@ -48,12 +47,15 @@ enum UnsignedProbe {
 }
 
 /// The range of pico's one enum with a negative value (`Z_CONSOLIDATION_MODE_AUTO` is -1).
-#[allow(dead_code)]
 #[repr(C)]
 enum SignedProbe {
     Low = -1,
     High = 7,
 }
+
+// A probe's width is the width its two ends need, so the ends are the range it states.
+const _: () = assert!(UnsignedProbe::Low as i32 == 0 && UnsignedProbe::High as i32 == 7);
+const _: () = assert!(SignedProbe::Low as i32 == -1 && SignedProbe::High as i32 == 7);
 
 /// A field of one of pico's enums whose values are all non-negative, as wide as the C ABI makes it.
 pub type PicoEnum = <[(); core::mem::size_of::<UnsignedProbe>()] as CEnumWidth>::Unsigned;

@@ -69,9 +69,10 @@ const _: LimitDomain = MaxKeyexprBytes::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxKeyexprBytesHeld = Limited<MaxKeyexprBytes, { MaxKeyexprBytes::HELD }>;
 
-/// `KEY_ARENA_BYTES`: How many bytes of key text the rows of a session's tables hold at
-/// once, in one arena each row keeps its key in: the session's own declarations, the
-/// application's tables, its pending gets and what each peer declares to it.
+/// `KEY_ARENA_BYTES`: How many bytes of key text a session holds at once, in one arena
+/// every keyed row keeps its key in: its declared key expressions, its entities with their
+/// write filters, Interests and matching listeners, its pending gets and what each peer
+/// declares to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyArenaBytes;
 
@@ -1907,7 +1908,7 @@ impl SessionLimits {
     /// build is compiled, from the declaration and not from the build's environment.
     pub const PICO_PRESET: Self = Self {
         max_keyexpr_bytes: Limited::build_default(),
-        key_arena_bytes: Limited::preset_or_build(4096, LimitValue::Integer(4096)),
+        key_arena_bytes: Limited::preset_or_build(4320, LimitValue::Integer(4320)),
         max_subscriptions: Limited::build_default(),
         match_memo_slots: Limited::build_default(),
         delivery_lane_events: Limited::build_default(),

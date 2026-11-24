@@ -48,9 +48,12 @@ use crate::session::Engine;
 use crate::abi::handle_ref;
 use crate::ffi::{catch, guarded, CClosure, HeldIn, InCallback};
 use crate::object_slot::{count_in_entity, kept_at, retire_entity, Answering, Kind, Slot};
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
-use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
+use crate::refusal::{refusal_code, Door};
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 use crate::write_filter::WriteFilter;
 use alloc::sync::Arc;
 
@@ -933,6 +936,7 @@ mod tests {
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
     fn a_listeners_place_stands_while_its_filter_holds_it() {
+        use crate::prelude::Vec;
         use crate::session::{
             engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
@@ -989,7 +993,7 @@ mod tests {
             places - 1,
             "the undeclared listener's place went back; the background one's stands"
         );
-        list.retract_all(&engine);
+        list.retract_all(Arc::as_ref(&engine));
         assert_eq!(
             free(&engine),
             places,

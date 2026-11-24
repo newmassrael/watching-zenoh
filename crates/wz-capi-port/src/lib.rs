@@ -100,6 +100,7 @@ mod query;
 mod refusal;
 // The limits of the process's runtime, which the machines it makes apart from any session read.
 pub mod runtime_limits;
+pub mod scout_ask;
 pub mod sync;
 // A time base the program supplies, made from the calls each C ABI's door is handed.
 #[cfg(feature = "time-base")]
@@ -107,7 +108,7 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
-pub use engine::{KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
+pub use engine::{DeclarationReach, KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
 pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
@@ -118,6 +119,7 @@ pub use query::{
     SharedQueryFn,
 };
 pub use refusal::Refusal;
+pub use scout_ask::ScoutAsk;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine

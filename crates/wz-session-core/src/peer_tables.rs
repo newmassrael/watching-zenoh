@@ -119,11 +119,29 @@ impl<P: Storage> PeerTables<P> {
     #[inline(never)]
     pub fn init_in(place: &mut MaybeUninit<Self>) -> &mut Self {
         let at = place.as_mut_ptr();
+        // A field added to the tables and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |tables: &Self| {
+            let Self {
+                subscribers: _,
+                remote_subscribers: _,
+                remote_queryables: _,
+                tokens: _,
+                replies: _,
+                finals: _,
+                queries: _,
+                #[cfg(feature = "liveliness-token")]
+                    pending_declares: _,
+                #[cfg(feature = "liveliness-token")]
+                    token_interest_chains_refused: _,
+            } = tables;
+        };
         // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
         // macro, as `SlotObserverOf::init_in_place` says why.
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
-        // pointer to it; `every_field_is_written` names every field, so the tables are whole when
-        // they are lent.
+        // pointer to it; the list above names every field, so the tables are whole when they are
+        // lent.
         unsafe {
             ptr::write(addr_of_mut!((*at).subscribers), SubscriberPeer::default());
             ptr::write(
@@ -144,26 +162,6 @@ impl<P: Storage> PeerTables<P> {
             ptr::write(addr_of_mut!((*at).token_interest_chains_refused), 0);
             &mut *at
         }
-    }
-
-    /// A field added to [`PeerTables`] and not written by [`Self::init_in`] would be read
-    /// uninitialised. This destructures the tables with no `..`, so adding a field without naming
-    /// it here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(tables: Self) {
-        let Self {
-            subscribers: _,
-            remote_subscribers: _,
-            remote_queryables: _,
-            tokens: _,
-            replies: _,
-            finals: _,
-            queries: _,
-            #[cfg(feature = "liveliness-token")]
-                pending_declares: _,
-            #[cfg(feature = "liveliness-token")]
-                token_interest_chains_refused: _,
-        } = tables;
     }
 }
 

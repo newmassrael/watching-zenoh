@@ -55,8 +55,11 @@ use wz_session_core::WhatAmI;
 
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::matching::FilterListeners;
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
-use crate::result::{refusal_code, Door, ZResult};
+use crate::refusal::{refusal_code, Door};
+use crate::result::ZResult;
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -246,7 +249,7 @@ impl WriteFilter {
 /// another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
-        self.listeners.retract_all(&self.shared);
+        self.listeners.retract_all(Arc::as_ref(&self.shared));
         self.shared.undeclare_write_filter(self.id);
     }
 }

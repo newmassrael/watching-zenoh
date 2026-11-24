@@ -641,68 +641,25 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
         plan.reserved_bytes() < built.reserved_bytes(),
         "the lowered limits lower the arena"
     );
-    // The round's tables follow its area, where the build keeps one.
-    #[cfg(not(feature = "rx-lent-only"))]
-    {
-        let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
-        let lane = parts
-            .iter()
-            .position(|part| *part == "delivery lane")
-            .expect("the plan has the lane");
-        assert_eq!(
-            parts[lane + 1..lane + 4],
-            ["delivery records", "delivery callbacks", "delivery keys"]
-        );
-    }
 }
 
-/// The delivery lane's area is the `DELIVERY_LANE_BYTES` the session's limits state, one buffer
-/// and its flag: a lowered value lowers it, and one over the build's refuses the plan, naming the
-/// limit and both values.
-#[cfg(not(feature = "rx-lent-only"))]
+/// The plan lays out no delivery area: every record is read where it lies, so the plan has no lane
+/// and no flag of one, and the round's tables are laid out next to each other. Turned red by a plan
+/// that reserves the area again.
 #[test]
-fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
-    let built =
-        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&built, "delivery lane").count, 1);
-    assert_eq!(
-        row(&built, "delivery lane").entry_bytes,
-        SessionLimits::defaults().delivery_lane_bytes()
-    );
-    assert_eq!(row(&built, "delivery lane flag").count, 1);
-    let lowered = lowered(|l| l.select_delivery_lane_bytes(1024));
-    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(row(&plan, "delivery lane").entry_bytes, 1024);
-    let over = caps::DELIVERY_LANE_BYTES + 1;
-    let mut raised = SessionLimits::defaults();
-    if raised.select_delivery_lane_bytes(over).is_ok() {
-        assert_eq!(
-            ArenaPlan::of(&client_config(), &raised),
-            Err(ArenaRefused::Limit {
-                limit: "DELIVERY_LANE_BYTES",
-                why: UnlentRows::OverCeiling {
-                    value: over,
-                    ceiling: caps::DELIVERY_LANE_BYTES,
-                },
-            })
-        );
-    }
-}
-
-/// A build that keeps no delivery area (`rx-lent-only`) lays out none: the plan has no lane and no
-/// flag of one, and the round's tables are its first rows of the session's state. Turned red by a
-/// lent-only plan that still reserves the area.
-#[cfg(feature = "rx-lent-only")]
-#[test]
-fn a_lent_only_plan_lays_out_no_delivery_lane() {
+fn the_plan_lays_out_no_delivery_lane() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let parts: Vec<&str> = built.rows().iter().map(|row| row.part).collect();
     assert!(!parts.contains(&"delivery lane"));
     assert!(!parts.contains(&"delivery lane flag"));
-    assert!(
-        parts.contains(&"delivery records"),
-        "CONTROL: the round's tables are laid out"
+    let records = parts
+        .iter()
+        .position(|part| *part == "delivery records")
+        .expect("CONTROL: the round's tables are laid out");
+    assert_eq!(
+        parts[records..records + 3],
+        ["delivery records", "delivery callbacks", "delivery keys"]
     );
 }
 
@@ -1148,8 +1105,9 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     }
 }
 
-/// The ends of the session's legs are lent a row for each get every table of pending gets holds,
-/// the only place an end waits for its delivery.
+/// The ends of the session's legs, the rows of their callbacks and the session's note of each leg
+/// pending are lent a row for each get every table of pending gets holds: a leg takes one of
+/// each, and none is held anywhere else.
 #[cfg(feature = "query")]
 #[test]
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
@@ -1168,6 +1126,16 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     assert_eq!(
         row(&plan, "ended legs").entry_bytes,
         core::mem::size_of::<crate::engine::Ended>()
+    );
+    assert_eq!(row(&plan, "leg callbacks").count, legs);
+    assert_eq!(
+        row(&plan, "leg callbacks").entry_bytes,
+        core::mem::size_of::<Option<crate::engine::LegRow>>()
+    );
+    assert_eq!(row(&plan, "pending legs").count, legs);
+    assert_eq!(
+        row(&plan, "pending legs").entry_bytes,
+        core::mem::size_of::<crate::engine::PendingGet>()
     );
 }
 
@@ -1605,13 +1573,11 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, the key arena's and the advanced
-        // cache's ring one area of them, a pool's one area of the rows its faces share, the
-        // watchers' one row of the spans of their lists, and the session's table set one area of
-        // its tables, not a row of each. The udp ports' slots and their queue are a listening
+        // The key arena's row and the advanced cache's ring are one area of the limit's bytes, a
+        // pool's one area of the rows its faces share, the watchers' one row of the spans of their
+        // lists, and the session's table set one area of its tables, not a row of each. The udp ports' slots and their queue are a listening
         // session's, which the preset's client is not: it holds none whatever the limit.
-        if row.basis == "DELIVERY_LANE_BYTES"
-            || row.basis == "KEY_ARENA_BYTES"
+        if row.basis == "KEY_ARENA_BYTES"
             || row.basis == "ADVANCED_CACHE_BYTES"
             || row.basis == "UDP_PORT_SLOTS"
             || row.basis == "MAX_DECL_OBSERVERS"
@@ -1731,43 +1697,16 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
     );
 }
 
-/// The pico preset's delivery lane is the least lane the build accepts at the preset's other
-/// values: one record of the larger of the batch and the largest message the session rejoins, with
-/// the most a sample adds to it, so a read always finds room for the record it takes next.
-#[cfg(not(feature = "rx-lent-only"))]
-#[test]
-fn the_pico_presets_lane_holds_one_record() {
-    let presets = pico_preset();
-    let lane = preset_of(&presets, "DELIVERY_LANE_BYTES").expect("the preset states the lane");
-    let limits = pico_preset_limits();
-    let frag = limits
-        .pico_frag_max_bytes()
-        .lent_under(Quota::at_most(caps::PICO_FRAG_MAX_BYTES))
-        .expect("the preset's rejoined message is under the build's");
-    let key = limits
-        .max_keyexpr_bytes()
-        .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
-        .expect("the preset's key is under the build's");
-    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
-    let liveliness = pico_value("MAX_LIVELINESS_SUBSCRIPTIONS");
-    let most = if cfg!(feature = "liveliness") {
-        subscribers.max(liveliness)
-    } else {
-        subscribers
-    };
-    assert_eq!(
-        lane,
-        crate::round::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
-        "the preset's lane is one record's room"
-    );
-    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
-    assert_eq!(row(&plan, "delivery lane").entry_bytes, lane);
-    assert!(lane < SessionLimits::defaults().delivery_lane_bytes());
-}
-
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
-/// its table of pending gets and the ends of their legs.
-const FACE_PARTS: [&str; 3] = ["peer tables", "pending gets", "ended legs"];
+/// its table of pending gets, and the ends of their legs, their callbacks and the session's note
+/// of each.
+const FACE_PARTS: [&str; 5] = [
+    "peer tables",
+    "pending gets",
+    "ended legs",
+    "leg callbacks",
+    "pending legs",
+];
 
 /// The parts of an arena held once for the session whose size follows its faces: the pools of what
 /// the faces' peers write, each one area.

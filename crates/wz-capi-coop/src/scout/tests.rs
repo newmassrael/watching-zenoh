@@ -28,6 +28,21 @@ fn table() -> Box<HelloTable> {
     Box::new(HelloTable::new())
 }
 
+/// A window to `at` asking for `WHAT`, naming `zid`, open for `budget_ms`.
+fn ask(
+    at: SocketAddr,
+    zid: Option<wz_session_core::session_zid::SessionZid>,
+    budget_ms: u64,
+) -> ScoutAsk {
+    ScoutAsk {
+        group: at.ip(),
+        port: at.port(),
+        what: WHAT,
+        zid,
+        budget_ms,
+    }
+}
+
 /// A Hello datagram `[S_MID_HELLO | L][version][cbyte][zid][n][len][locator]...`: `whatami` in the
 /// low two bits of the cbyte and the zid length less one in the high nibble, as the wire spells
 /// them. Checked through the decode the window itself uses.
@@ -205,10 +220,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
     ]);
     let first = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        responder.at,
-        WHAT,
-        Some([0xAA, 0xBB].into()),
-        5_000,
+        ask(responder.at, Some([0xAA, 0xBB].into()), 5_000),
         &mut table(),
         &mut [0u8; 2048],
     )
@@ -219,10 +231,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
     let mut seen = Vec::new();
     let delivered = crate::scout_datagram::run_scout::<PosixUdpSocket, _>(
         &PosixClock,
-        responder.at,
-        WHAT,
-        Some([0xAA, 0xBB].into()),
-        300,
+        ask(responder.at, Some([0xAA, 0xBB].into()), 300),
         &mut table(),
         &mut [0u8; 2048],
         |hello| seen.push(hello.zid[0]),
@@ -244,10 +253,7 @@ fn the_window_over_one_datagram_socket_asks_an_ipv6_responder() {
     assert!(responder.at.is_ipv6());
     let first = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        responder.at,
-        WHAT,
-        Some([0xAA, 0xBB].into()),
-        5_000,
+        ask(responder.at, Some([0xAA, 0xBB].into()), 5_000),
         &mut table(),
         &mut [0u8; 2048],
     )
@@ -263,10 +269,7 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
     let none = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
         // The discard port: nothing listens there on a test host.
-        SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
-        WHAT,
-        None,
-        100,
+        ask(SocketAddr::from((Ipv4Addr::LOCALHOST, 9)), None, 100),
         &mut table(),
         &mut [0u8; 2048],
     );
@@ -386,11 +389,11 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
     // A group and port nothing else is expected to use.
     let delivered = run_scout::<PosixUdpSocket, _>(
         &PosixClock,
-        IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)),
-        47_477,
-        WHAT,
-        Some([0x77; 16].into()),
-        150,
+        ask(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)), 47_477),
+            Some([0x77; 16].into()),
+            150,
+        ),
         &mut table(),
         &mut [0u8; 2048],
         |_| seen += 1,
@@ -399,13 +402,13 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
     assert!(started.elapsed() >= Duration::from_millis(100));
     assert!(scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)),
-        47_477,
-        WHAT,
-        Some([0x77; 16].into()),
-        100,
+        ask(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77)), 47_477),
+            Some([0x77; 16].into()),
+            100
+        ),
         &mut table(),
-        &mut [0u8; 2048],
+        &mut [0u8; 2048]
     )
     .is_none());
 }
@@ -527,20 +530,14 @@ fn the_window_reads_into_the_buffer_its_caller_lends() {
     let responder = Responder::start(vec![hello_datagram(1, &[0x55; 4], &["tcp/10.0.0.5:7447"])]);
     let short = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        responder.at,
-        WHAT,
-        Some([0xAA, 0xBB].into()),
-        300,
+        ask(responder.at, Some([0xAA, 0xBB].into()), 300),
         &mut table(),
         &mut [0u8; 8],
     );
     assert!(short.is_none(), "a Hello cut to the buffer is no Hello");
     let whole = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
         &PosixClock,
-        responder.at,
-        WHAT,
-        Some([0xAA, 0xBB].into()),
-        5_000,
+        ask(responder.at, Some([0xAA, 0xBB].into()), 5_000),
         &mut table(),
         &mut [0u8; 2048],
     )

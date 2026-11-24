@@ -240,8 +240,8 @@ pub type SessionEntropy = &'static mut dyn EntropySource;
 /// a reference position forces the struct's declared bounds to be
 /// satisfied at compile time. The sync drive loop consumer
 /// (`session_drive`) that constructs and drives it lands in the
-/// follow-up; this gate is the type-check that unblocks it.
-#[allow(dead_code)]
+/// follow-up; this gate is the type-check that unblocks it. Generic over the clock, so a named
+/// function rather than a `const`; its leading `_` keeps it out of the dead-code lint.
 fn _session_link_actions_composes_on_lwip<C: ClockSource>(
     _actions: &wz_session_core::session_actions::SessionLinkActions<CoopRuntime<C>, CoopTime<C>>,
 ) {
@@ -291,7 +291,7 @@ where
 }
 
 /// LinkSink fixity. Mirrors the AP-side
-/// `tokio_session_runtime_link_sink_bounds_compile` regression assert,
+/// link-sink bounds assert in `wz_runtime_tokio::runtime_impl`,
 /// but pins the *opposite* auto-trait shape: the MCU sink is `Clone`
 /// (the shared-by-refcount contract every profile satisfies) and is
 /// deliberately NOT asserted `Send + Sync` — re-binding it to an `Arc`
@@ -299,8 +299,7 @@ where
 /// the single-task profile does not need. A regression that re-adds a
 /// `Send + Sync` supertrait onto `BoxedLinkDriver` (which would force an
 /// `unsafe impl Send` on the `!Send` `LwipUdpSocket` driver) surfaces at
-/// the driver impl, not here.
-#[allow(dead_code)]
+/// the driver impl, not here. Generic over the clock, as the composition check above is.
 fn _lwip_session_runtime_link_sink_is_clone<C: ClockSource>() {
     fn _assert_clone<T: Clone>() {}
     _assert_clone::<<CoopRuntime<C> as SessionRuntime>::LinkSink>();

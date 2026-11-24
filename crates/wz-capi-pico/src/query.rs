@@ -1372,7 +1372,7 @@ pub(crate) fn declare_queryable_on(
             key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
             sink,
         )
-        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
+        .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
     Ok((id, key))
 }
 

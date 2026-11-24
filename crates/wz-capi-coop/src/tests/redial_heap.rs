@@ -228,8 +228,10 @@ fn open_counted(source: impl OpenSource) -> u64 {
             source,
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
-            &AllocatorMemory,
-            crate::arena::HeldPlaces::NONE,
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held: crate::arena::HeldPlaces::NONE,
+            },
         )
         .err();
     });

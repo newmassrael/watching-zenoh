@@ -448,7 +448,7 @@ fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::Source
 // short-circuits to None so a `codec-request` subset that does not compose
 // querier values carries no value decode path.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-fn extract_query_value_parts(query: &QueryOwned) -> Option<(u32, Option<&[u8]>, &[u8])> {
+fn extract_query_value_parts(query: &QueryOwned) -> Option<crate::encoding::ValueParts<'_>> {
     #[cfg(not(feature = "query-value"))]
     {
         let _ = query;
@@ -3079,7 +3079,7 @@ struct QueryProjection<'q> {
     /// and schema, and its payload. A build with no heap does not project a query's value: its
     /// encoding is an owned hint, and the queryables of such a build (the admin space) read none.
     #[cfg(feature = "alloc")]
-    plain_value: Option<(u32, Option<&'q [u8]>, &'q [u8])>,
+    plain_value: Option<crate::encoding::ValueParts<'q>>,
     /// The value held as shareable bytes: un-swapped out of shared memory, or a
     /// range of a frame the link lent. Preferred over `plain_value` when present.
     #[cfg(feature = "alloc")]
@@ -3918,12 +3918,12 @@ where
     #[cfg(all(feature = "alloc", feature = "query-value"))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
         Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
-        None => plain_value.map(|(packed_id, schema, payload)| {
+        None => plain_value.map(|parts| {
             let hint = crate::sample::EncodingHint {
-                packed_id,
-                schema: schema.map(<[u8]>::to_vec),
+                packed_id: parts.packed_id,
+                schema: parts.schema.map(<[u8]>::to_vec),
             };
-            (hint, payload)
+            (hint, parts.payload)
         }),
     };
     // The plain value's encoding where it lies, which a holder that keeps the query past its
@@ -3932,7 +3932,7 @@ where
     #[cfg(all(feature = "alloc", feature = "query-value"))]
     let lent_encoding = plain_value
         .filter(|_| unswapped_value.is_none())
-        .map(|(packed_id, schema, _)| (packed_id, schema));
+        .map(|parts| (parts.packed_id, parts.schema));
     #[cfg(all(feature = "alloc", not(feature = "query-value")))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
         let _ = plain_value;
@@ -8586,13 +8586,13 @@ mod shm_reply_tests {
 
     /// The same reply with its payload as plain bytes, built from the staged one so every
     /// other field is the same.
-    // Without `query-reply-err` a `QueryReply` has one variant, and the pattern is
-    // irrefutable; with it, it is not. One spelling serves both.
-    #[allow(irrefutable_let_patterns)]
     fn as_plain_bytes(reply: &QueryReply) -> QueryReply {
         let mut plain = reply.clone();
-        if let QueryReply::Reply { body, .. } = &mut plain {
-            *body = ReplyBody::Put(BYTES.to_vec());
+        match &mut plain {
+            QueryReply::Reply { body, .. } => *body = ReplyBody::Put(BYTES.to_vec()),
+            // An Err has no payload to make plain.
+            #[cfg(feature = "query-reply-err")]
+            _ => {}
         }
         plain
     }
@@ -8619,13 +8619,14 @@ mod shm_reply_tests {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
-    // As `as_plain_bytes`: the `else` is unreachable exactly when the Err variant is compiled out.
-    #[allow(irrefutable_let_patterns)]
     #[test]
     fn a_reply_answered_with_a_buffer_is_staged_as_the_buffer_not_as_a_copy() {
         let (shared, _) = handle();
-        let QueryReply::Reply { body, .. } = staged(&shared) else {
-            panic!("a data reply");
+        let body = match staged(&shared) {
+            QueryReply::Reply { body, .. } => body,
+            // The Err variant is compiled with `query-reply-err` alone.
+            #[cfg(feature = "query-reply-err")]
+            _ => panic!("a data reply"),
         };
         assert_eq!(
             body,
