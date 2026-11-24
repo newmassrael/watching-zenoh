@@ -3847,7 +3847,7 @@ pub fn health_document_json(d: &crate::Dissection) -> String {
 /// `{"text":"..","utf8":true}`. `text` is the stored bytes when they are
 /// UTF-8, and otherwise their decoding with each invalid sequence replaced by
 /// U+FFFD, `utf8` then `false` ([`crate::pcapng::Comment`]).
-pub(crate) fn write_comment<W: DocOut>(comment: &crate::pcapng::Comment, out: &mut W) {
+pub fn write_comment<W: DocOut>(comment: &crate::pcapng::Comment, out: &mut W) {
     out.open_map();
     out.key("text");
     out.text(&comment.text);
