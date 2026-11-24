@@ -15,7 +15,7 @@
 //! anything (the staged close reason, for one, is the link's
 //! `close_reason`, read through `SessionLinkActions::close_reason`).
 //!
-//! The live trace slot (`SessionCore::trace: R::Mutex<ActionTrace>`) and the
+//! The live trace slot (`SessionFacts::trace`, under the session's one lock) and the
 //! snapshot accessor (`SessionLinkActions::trace_snapshot`, which reads the slot
 //! under the runtime's mutex and copies it out with
 //! [`ActionTrace::clone_via_copy`]) exist only with the `action-trace` feature,

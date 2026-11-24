@@ -663,3 +663,37 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
         "nothing was written"
     );
 }
+
+/// The session's facts are one row under one lock: what a door writes is what the whole row reads,
+/// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
+mod facts_lock {
+    use super::bundle;
+
+    #[test]
+    fn a_fact_written_through_its_door_is_read_in_the_one_row() {
+        let (actions, _link) = bundle();
+        actions.fact_peer_whatami(|slot| *slot = Some(2));
+        actions.fact_cookie_nonce(|slot| *slot = Some(7));
+        let (whatami, nonce) =
+            actions.with_facts(|facts| (facts.handshake.peer_whatami, facts.cookie_nonce));
+        assert_eq!(whatami, Some(2), "the handshake's row");
+        assert_eq!(nonce, Some(7), "the session's row");
+    }
+
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_empties_the_handshake_row_and_keeps_the_cookie_nonce() {
+        let (actions, _link) = bundle();
+        actions.fact_inbound_peer_zid(|slot| *slot = Some([0x0A; 4].into()));
+        actions.fact_cookie_nonce(|slot| *slot = Some(7));
+        actions.reset_for_reopen();
+        let (zid, nonce) =
+            actions.with_facts(|facts| (facts.handshake.inbound_peer_zid, facts.cookie_nonce));
+        assert_eq!(zid, None, "a handshake fact is the transport's, and goes");
+        assert_eq!(
+            nonce,
+            Some(7),
+            "the nonce survives to be drawn over at the next InitAck"
+        );
+    }
+}
