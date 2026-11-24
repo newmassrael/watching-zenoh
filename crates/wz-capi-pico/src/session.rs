@@ -1815,6 +1815,30 @@ where
     }
 }
 
+/// Write the unicast endpoints of `config` into the rows the open lent (`writer`), each as pico's
+/// link of its scheme reads it: the one it states to connect to, then those the scout found
+/// (`scouted`), then the one it states to listen on. Borrowed, so the writer that holds the config
+/// and the scout's answers lets them go at its one end, whatever the writing came to, and not once
+/// for each refusal.
+#[cfg(not(feature = "engine-tokio"))]
+fn write_unicast_endpoints(
+    writer: &mut wz_capi_coop::open_source::EndpointWriter<'_>,
+    config: &ConfigState,
+    scouted: &[String],
+) -> Result<(), wz_capi_coop::OpenError> {
+    let dialled = config
+        .get(Z_CONFIG_CONNECT_KEY)
+        .into_iter()
+        .chain(scouted.iter().map(String::as_str));
+    for endpoint in dialled {
+        crate::endpoint::with_engine_text(endpoint, |text| writer.dial(text))?;
+    }
+    if let Some(endpoint) = config.get(Z_CONFIG_LISTEN_KEY) {
+        crate::endpoint::with_engine_text(endpoint, |text| writer.listen(text))?;
+    }
+    Ok(())
+}
+
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     // What the config names, read where it lies; the texts themselves are written into the
@@ -1994,19 +2018,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // writer, before anything is dialled or bound.
     let source = PicoOpenSource::new(make_config, move |writer| {
         if joins_a_group {
-            return Ok(());
+            Ok(())
+        } else {
+            write_unicast_endpoints(writer, &config, &scouted)
         }
-        let dialled = config
-            .get(Z_CONFIG_CONNECT_KEY)
-            .into_iter()
-            .chain(scouted.iter().map(String::as_str));
-        for endpoint in dialled {
-            crate::endpoint::with_engine_text(endpoint, |text| writer.dial(text))?;
-        }
-        if let Some(endpoint) = config.get(Z_CONFIG_LISTEN_KEY) {
-            crate::endpoint::with_engine_text(endpoint, |text| writer.listen(text))?;
-        }
-        Ok(())
     });
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
