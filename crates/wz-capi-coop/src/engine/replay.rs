@@ -377,6 +377,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell each face that is up of the subscriber `handle` names, as [`Self::announce`] tells a
     /// declaration: the row is the declaration itself, so the tables stored it before any link is
     /// told of it, and each link is told from the row.
+    // Out of line: the declaration that asks it measured smaller with its walk of the faces
+    // apart.
+    #[inline(never)]
     pub(super) fn announce_subscriber(&mut self, handle: SubscriberHandle) {
         let place = self.subscriber_place(handle);
         let registry = &self.registry;
