@@ -89,14 +89,27 @@
 //! refused with the typed reader's diagnostic, and the payload is left as it
 //! was.
 //!
+//! ## Storage
+//!
+//! A payload keeps its values in a store ([`Storage`]): a table of slots, one
+//! per value, and the bytes its strings, bytes and kept fields are written in.
+//! [`Payload::new`] keeps it on the heap, which grows; a caller that reserves
+//! the store itself ([`Payload::over`]) gives one of a fixed size, and the
+//! payload takes nothing more after it is made. Such a store refuses what does
+//! not fit it ([`Refusal::Full`]): a set is refused and changes nothing, and a
+//! decode is refused and leaves the payload empty, since its values replace the
+//! payload's as they are read. Paths are judged and walked where they are
+//! written, and the bytes are written into the caller's buffer
+//! ([`Payload::encode_into`]), so no call takes memory of its own beyond a
+//! refusal's sentence.
+//!
 //! ## Refusals
 //!
 //! Each is a [`Refusal`]: the path names no field the payload addresses, the
 //! value's type is not the field's, the value does not fit the field or an index
 //! is past the end of its list, a field is not set, the schema states an option
-//! the writer cannot act on, or the bytes are not a message.
+//! the writer cannot act on, the bytes are not a message, or the store is full.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -104,12 +117,12 @@ use core::borrow::Borrow;
 use core::fmt;
 
 use crate::proto_decode::{
-    DecodedField, SchemaMessage, SchemaSet, Value, WireError, MAX_DECODE_DEPTH,
+    FieldEvents, Item, SchemaMessage, SchemaSet, WireError, MAX_DECODE_DEPTH,
 };
 use crate::proto_parse::{Label, ScalarKind, Syntax};
 use crate::proto_range::{RangeRefusal, RangeSource, ValueRange};
 use crate::proto_schema::{FieldKind, Fld, Msg};
-use crate::proto_write::{self, has_presence, Narrowing, Wire};
+use crate::proto_write::{self, has_presence, Count, Fixed, Narrowing, Out, Wire};
 
 /// A value as the program gives it to a field.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,6 +220,10 @@ pub enum Refusal {
     Schema { path: String, reason: String },
     /// The bytes are not a message of the schema.
     Wire(WireError),
+    /// The payload's storage has no room left for what the call would hold: more values than its
+    /// table has slots, or more bytes of strings, bytes and kept fields than it has. A refused
+    /// set changes nothing; a refused decode leaves the payload empty.
+    Full { path: String, reason: String },
 }
 
 impl fmt::Display for Refusal {
@@ -219,13 +236,15 @@ impl fmt::Display for Refusal {
             Self::Absent { path, at } => write!(f, "`{path}` is not set: `{at}` is absent"),
             Self::Schema { path, reason } => write!(f, "schema at `{path}`: {reason}"),
             Self::Wire(w) => write!(f, "the bytes are not a message of the schema: {w}"),
+            Self::Full { path, reason } => write!(f, "no room at `{path}`: {reason}"),
         }
     }
 }
 
-/// One value of a field, held as the field's type holds it.
-#[derive(Clone, Debug)]
-enum Held {
+/// A value as the program sets it or the bytes carry it, before the payload keeps it: a string or
+/// bytes still the giver's.
+#[derive(Clone, Copy, Debug)]
+enum Value<'v> {
     /// `int32`, `int64`, `sint32`, `sint64`, `sfixed32`, `sfixed64`, and an
     /// enum's number.
     Int(i64),
@@ -234,54 +253,437 @@ enum Held {
     Float(f32),
     Double(f64),
     Bool(bool),
-    Text(String),
-    Bytes(Vec<u8>),
-    Message(Fields),
+    Text(&'v str),
+    Bytes(&'v [u8]),
 }
 
-/// The values of one message: each known field's by number (one value for a
-/// singular field, the elements of a repeated one), and the wire bytes of the
-/// fields it carries without addressing them.
-#[derive(Clone, Debug, Default)]
-struct Fields {
-    known: BTreeMap<u64, Vec<Held>>,
-    kept: Vec<u8>,
+/// Where a run of bytes lies in a payload's byte store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Span {
+    at: usize,
+    len: usize,
 }
 
-impl Fields {
-    /// How many values field `number` holds.
-    fn len(&self, number: u64) -> usize {
-        self.known.get(&number).map_or(0, Vec::len)
+/// What one slot of a payload's table holds.
+#[derive(Clone, Copy, Debug, Default)]
+enum Slot {
+    /// A slot no value is in.
+    #[default]
+    Free,
+    Int(i64),
+    Uint(u64),
+    Float(f32),
+    Double(f64),
+    Bool(bool),
+    /// UTF-8, checked when it was given or read.
+    Text(Span),
+    Bytes(Span),
+    /// A message: the slots whose parent this one is are its fields.
+    Message,
+    /// Wire bytes the message carries without addressing them: a field the schema does not know,
+    /// a map's entry, a group.
+    Kept(Span),
+}
+
+/// The parent of a slot that is a field of the payload's own message.
+const ROOT: u32 = u32::MAX;
+/// The parent a slot is given while a removal is under way, which no slot index is.
+const REMOVED: u32 = u32::MAX - 1;
+
+/// One slot of a payload's table: a value of one field, which message holds it and the field's
+/// number. The elements of a repeated field are its slots under one parent in the order of the
+/// table, and a message comes before every slot inside it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Entry {
+    number: u64,
+    parent: u32,
+    slot: Slot,
+}
+
+/// Where a payload keeps its values: the slots of its table and the bytes its strings, bytes and
+/// kept fields are written in. A store of a fixed size refuses what does not fit; one that may grow
+/// ([`HeapStorage`]) grows.
+pub trait Storage {
+    /// The table's slots.
+    fn entries(&self) -> &[Entry];
+    fn entries_mut(&mut self) -> &mut [Entry];
+    /// The byte store.
+    fn bytes(&self) -> &[u8];
+    fn bytes_mut(&mut self) -> &mut [u8];
+    /// Make room for at least `entries` slots and `bytes` bytes; whether there is. A store of a
+    /// fixed size answers by what it has.
+    fn reserve(&mut self, entries: usize, bytes: usize) -> bool {
+        self.entries().len() >= entries && self.bytes().len() >= bytes
+    }
+}
+
+/// A store on the heap, which grows as the payload needs: what [`Payload::new`] makes.
+#[derive(Debug, Default)]
+pub struct HeapStorage {
+    entries: Vec<Entry>,
+    bytes: Vec<u8>,
+}
+
+impl Storage for HeapStorage {
+    fn entries(&self) -> &[Entry] {
+        &self.entries
     }
 
-    /// The value at `index` of field `number`.
-    fn value(&self, number: u64, index: usize) -> Option<&Held> {
-        self.known.get(&number).and_then(|list| list.get(index))
+    fn entries_mut(&mut self) -> &mut [Entry] {
+        &mut self.entries
     }
 
-    /// Clear the other members of the oneof `field` is in.
-    fn clear_oneof(&mut self, holder: &Msg, field: &Fld) {
-        if let Some(oneof) = field.oneof {
-            for other in holder
-                .fields
-                .iter()
-                .filter(|f| f.oneof == Some(oneof) && f.number != field.number)
-            {
-                self.known.remove(&other.number);
-            }
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    fn reserve(&mut self, entries: usize, bytes: usize) -> bool {
+        if self.entries.len() < entries {
+            self.entries
+                .resize(entries.max(self.entries.len() * 2), Entry::default());
+        }
+        if self.bytes.len() < bytes {
+            self.bytes.resize(bytes.max(self.bytes.len() * 2), 0);
+        }
+        true
+    }
+}
+
+/// Why a table took no more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoRoom {
+    Entries,
+    Bytes,
+}
+
+impl NoRoom {
+    fn refusal(self, path: &str) -> Refusal {
+        Refusal::Full {
+            path: String::from(path),
+            reason: String::from(match self {
+                Self::Entries => "the payload's storage holds no more values",
+                Self::Bytes => "the payload's storage holds no more bytes",
+            }),
         }
     }
 }
 
-/// The message a held value is, made one when it is not.
-fn message_mut(held: &mut Held) -> &mut Fields {
-    if !matches!(held, Held::Message(_)) {
-        *held = Held::Message(Fields::default());
+/// The values of a payload in its store: the slots in use and the bytes written.
+#[derive(Debug)]
+struct Table<St> {
+    store: St,
+    len: usize,
+    used: usize,
+}
+
+impl<St: Storage> Table<St> {
+    fn new(store: St) -> Self {
+        Self {
+            store,
+            len: 0,
+            used: 0,
+        }
     }
-    match held {
-        Held::Message(fields) => fields,
-        _ => unreachable!("the value was made a message above"),
+
+    fn clear(&mut self) {
+        self.len = 0;
+        self.used = 0;
     }
+
+    /// The slots in use.
+    fn live(&self) -> &[Entry] {
+        self.store.entries().get(..self.len).unwrap_or_default()
+    }
+
+    fn entry(&self, at: usize) -> Option<Entry> {
+        self.live().get(at).copied()
+    }
+
+    fn set_slot(&mut self, at: usize, slot: Slot) {
+        if let Some(entry) = self.store.entries_mut().get_mut(at) {
+            entry.slot = slot;
+        }
+    }
+
+    fn bytes_of(&self, span: Span) -> &[u8] {
+        self.store
+            .bytes()
+            .get(span.at..span.at.saturating_add(span.len))
+            .unwrap_or_default()
+    }
+
+    fn text_of(&self, span: Span) -> &str {
+        core::str::from_utf8(self.bytes_of(span)).unwrap_or_default()
+    }
+
+    /// The slots of field `number` of the message at `parent`, in order.
+    fn values(&self, parent: u32, number: u64) -> impl Iterator<Item = usize> + '_ {
+        self.live()
+            .iter()
+            .enumerate()
+            .filter(move |(_, e)| {
+                e.parent == parent && e.number == number && !matches!(e.slot, Slot::Kept(_))
+            })
+            .map(|(at, _)| at)
+    }
+
+    /// How many values field `number` of the message at `parent` holds.
+    fn count(&self, parent: u32, number: u64) -> usize {
+        self.values(parent, number).count()
+    }
+
+    /// The slot of the value at `index` of field `number` of the message at `parent`.
+    fn nth(&self, parent: u32, number: u64, index: usize) -> Option<usize> {
+        self.values(parent, number).nth(index)
+    }
+
+    /// The slot of the last value of field `number` of the message at `parent`.
+    fn last(&self, parent: u32, number: u64) -> Option<usize> {
+        self.values(parent, number).last()
+    }
+
+    /// Whether `extra` more slots and `bytes` more bytes fit, the store grown or the bytes no
+    /// slot holds any more given back first when they would not.
+    fn room(&mut self, extra: usize, bytes: usize) -> Result<(), NoRoom> {
+        let entries = self.len.saturating_add(extra);
+        if self.used.saturating_add(bytes) > self.store.bytes().len() {
+            self.compact();
+        }
+        let need = self.used.saturating_add(bytes);
+        if self.store.reserve(entries, need) {
+            return Ok(());
+        }
+        if self.store.entries().len() < entries {
+            Err(NoRoom::Entries)
+        } else {
+            Err(NoRoom::Bytes)
+        }
+    }
+
+    /// The bytes the slots hold.
+    fn live_bytes(&self) -> usize {
+        self.live()
+            .iter()
+            .map(|e| match e.slot {
+                Slot::Text(s) | Slot::Bytes(s) | Slot::Kept(s) => s.len,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Whether `extra` more slots fit, and `bytes` more bytes once `freed` bytes a slot holds now
+    /// are let go: the store grown when it may, and nothing changed when it does not fit.
+    fn fits(&mut self, extra: usize, bytes: usize, freed: usize) -> Result<(), NoRoom> {
+        let entries = self.len.saturating_add(extra);
+        let capacity = self.store.bytes().len();
+        let in_place = self.used.saturating_add(bytes) <= capacity;
+        let after_compaction = self
+            .live_bytes()
+            .saturating_sub(freed)
+            .saturating_add(bytes)
+            <= capacity;
+        if self.store.entries().len() >= entries && (in_place || after_compaction) {
+            return Ok(());
+        }
+        let need = self.used.saturating_add(bytes);
+        if self.store.reserve(entries, need) {
+            return Ok(());
+        }
+        if self.store.entries().len() < entries {
+            Err(NoRoom::Entries)
+        } else {
+            Err(NoRoom::Bytes)
+        }
+    }
+
+    /// Put a slot at the end of the table.
+    fn push(&mut self, number: u64, parent: u32, slot: Slot) -> Result<usize, NoRoom> {
+        self.room(1, 0)?;
+        let at = self.len;
+        let Some(entry) = self.store.entries_mut().get_mut(at) else {
+            return Err(NoRoom::Entries);
+        };
+        *entry = Entry {
+            number,
+            parent,
+            slot,
+        };
+        self.len += 1;
+        Ok(at)
+    }
+
+    /// Write `data` into the byte store: where it lies.
+    fn write(&mut self, data: &[u8]) -> Result<Span, NoRoom> {
+        self.room(0, data.len())?;
+        let at = self.used;
+        let end = at.saturating_add(data.len());
+        let Some(place) = self.store.bytes_mut().get_mut(at..end) else {
+            return Err(NoRoom::Bytes);
+        };
+        place.copy_from_slice(data);
+        self.used = end;
+        Ok(Span {
+            at,
+            len: data.len(),
+        })
+    }
+
+    /// The slot `value` is held in, its bytes written; over `old`'s bytes when they are as long
+    /// at least.
+    fn slot_of(&mut self, value: Value<'_>, old: Option<Slot>) -> Result<Slot, NoRoom> {
+        let data = match value {
+            Value::Int(v) => return Ok(Slot::Int(v)),
+            Value::Uint(v) => return Ok(Slot::Uint(v)),
+            Value::Float(v) => return Ok(Slot::Float(v)),
+            Value::Double(v) => return Ok(Slot::Double(v)),
+            Value::Bool(v) => return Ok(Slot::Bool(v)),
+            Value::Text(v) => v.as_bytes(),
+            Value::Bytes(v) => v,
+        };
+        let reuse = match old {
+            Some(Slot::Text(span) | Slot::Bytes(span)) if span.len >= data.len() => Some(span),
+            _ => None,
+        };
+        let span = match reuse {
+            Some(span) => {
+                if let Some(place) = self
+                    .store
+                    .bytes_mut()
+                    .get_mut(span.at..span.at.saturating_add(data.len()))
+                {
+                    place.copy_from_slice(data);
+                }
+                Span {
+                    at: span.at,
+                    len: data.len(),
+                }
+            }
+            None => self.write(data)?,
+        };
+        Ok(match value {
+            Value::Text(_) => Slot::Text(span),
+            _ => Slot::Bytes(span),
+        })
+    }
+
+    /// Give back the bytes no slot holds: the runs slots hold moved down to the start, in order.
+    fn compact(&mut self) {
+        let mut to = 0usize;
+        loop {
+            // The run lying first at or past `to`: every run below `to` has moved already.
+            let next = self
+                .live()
+                .iter()
+                .enumerate()
+                .filter_map(|(at, e)| match e.slot {
+                    Slot::Text(s) | Slot::Bytes(s) | Slot::Kept(s) if s.len > 0 && s.at >= to => {
+                        Some((at, s))
+                    }
+                    _ => None,
+                })
+                .min_by_key(|(_, s)| s.at);
+            let Some((at, span)) = next else {
+                break;
+            };
+            self.store
+                .bytes_mut()
+                .copy_within(span.at..span.at + span.len, to);
+            let moved = Span {
+                at: to,
+                len: span.len,
+            };
+            let slot = match self.live()[at].slot {
+                Slot::Text(_) => Slot::Text(moved),
+                Slot::Bytes(_) => Slot::Bytes(moved),
+                _ => Slot::Kept(moved),
+            };
+            self.set_slot(at, slot);
+            to += span.len;
+        }
+        self.used = to;
+    }
+
+    /// Remove the slots `pick` names, with every slot inside one of them: the slots after move
+    /// down, keeping their order, and each parent is the slot's new place.
+    fn remove(&mut self, pick: impl Fn(usize, &Entry) -> bool) {
+        let len = self.len;
+        let entries = self.store.entries_mut();
+        let Some(entries) = entries.get_mut(..len) else {
+            return;
+        };
+        // A message comes before what is inside it, so one pass in order marks a slot inside a
+        // removed one after the removed one was marked.
+        for at in 0..entries.len() {
+            let inside = match entries[at].parent {
+                ROOT => false,
+                parent => entries
+                    .get(parent as usize)
+                    .is_some_and(|p| p.parent == REMOVED),
+            };
+            if inside || pick(at, &entries[at]) {
+                entries[at].parent = REMOVED;
+            }
+        }
+        let removed_before = |entries: &[Entry], at: usize| {
+            entries[..at].iter().filter(|e| e.parent == REMOVED).count()
+        };
+        for at in 0..entries.len() {
+            let parent = entries[at].parent;
+            if parent != ROOT && parent != REMOVED {
+                let shift = removed_before(entries, parent as usize);
+                entries[at].parent = parent - shift as u32;
+            }
+        }
+        let mut to = 0usize;
+        for at in 0..entries.len() {
+            if entries[at].parent != REMOVED {
+                entries[to] = entries[at];
+                to += 1;
+            }
+        }
+        self.len = to;
+    }
+
+    /// Remove every value of the other members of the oneof `field` of `holder` is in, in the
+    /// message at `parent`.
+    fn clear_oneof(&mut self, parent: u32, holder: &Msg, field: &Fld) {
+        if let Some(oneof) = field.oneof {
+            self.remove(|_, e| {
+                e.parent == parent
+                    && e.number != field.number
+                    && !matches!(e.slot, Slot::Kept(_))
+                    && holder
+                        .fields
+                        .iter()
+                        .any(|f| f.number == e.number && f.oneof == Some(oneof))
+            });
+        }
+    }
+
+    /// Remove every value of field `number` of the message at `parent`.
+    fn remove_field(&mut self, parent: u32, number: u64) {
+        self.remove(|_, e| {
+            e.parent == parent && e.number == number && !matches!(e.slot, Slot::Kept(_))
+        });
+    }
+}
+
+/// The bytes a value is written in, for a string or bytes; none for another.
+fn value_len(value: Value<'_>) -> usize {
+    match value {
+        Value::Text(v) => v.len(),
+        Value::Bytes(v) => v.len(),
+        _ => 0,
+    }
+}
+
+/// The index a parent is named by.
+fn parent_of(at: usize) -> u32 {
+    u32::try_from(at).unwrap_or(REMOVED)
 }
 
 /// One step of a path: the field, the message that holds it, its index, and
@@ -535,15 +937,15 @@ fn integer_range(
 }
 
 /// The value `given` as field `field` of `holder` holds it, an integer held to
-/// the range `narrowing` chooses.
-fn held_of(
+/// the range `narrowing` chooses; a string or bytes still borrowed from `given`.
+fn held_of<'v>(
     schema: &SchemaSet,
     holder: &Msg,
     field: &Fld,
-    given: Given<'_>,
+    given: Given<'v>,
     narrowing: Narrowing,
     path: &str,
-) -> Result<Held, Refusal> {
+) -> Result<Value<'v>, Refusal> {
     let mismatch = || Refusal::Type {
         path: String::from(path),
         reason: format!(
@@ -583,23 +985,23 @@ fn held_of(
                     }));
                 }
                 return Ok(if unsigned(kind) {
-                    Held::Uint(v as u64)
+                    Value::Uint(v as u64)
                 } else {
-                    Held::Int(v as i64)
+                    Value::Int(v as i64)
                 });
             }
             match (kind, given) {
-                (ScalarKind::Double, Given::Real(v)) => Ok(Held::Double(v)),
+                (ScalarKind::Double, Given::Real(v)) => Ok(Value::Double(v)),
                 (ScalarKind::Float, Given::Real(v)) => {
                     let narrow = v as f32;
                     if v.is_finite() && narrow.is_infinite() {
                         return Err(range(format!("{v} is finite and past what a float holds")));
                     }
-                    Ok(Held::Float(narrow))
+                    Ok(Value::Float(narrow))
                 }
-                (ScalarKind::Bool, Given::Bool(v)) => Ok(Held::Bool(v)),
-                (ScalarKind::String, Given::Text(v)) => Ok(Held::Text(String::from(v))),
-                (ScalarKind::Bytes, Given::Bytes(v)) => Ok(Held::Bytes(v.to_vec())),
+                (ScalarKind::Bool, Given::Bool(v)) => Ok(Value::Bool(v)),
+                (ScalarKind::String, Given::Text(v)) => Ok(Value::Text(v)),
+                (ScalarKind::Bytes, Given::Bytes(v)) => Ok(Value::Bytes(v)),
                 _ => Err(mismatch()),
             }
         }
@@ -630,7 +1032,7 @@ fn held_of(
                     info.full_name
                 )));
             }
-            Ok(Held::Int(i64::from(number)))
+            Ok(Value::Int(i64::from(number)))
         }
         FieldKind::Message(_) => Err(Refusal::Type {
             path: String::from(path),
@@ -654,19 +1056,6 @@ enum View<'p> {
     Text(&'p str),
     Bytes(&'p [u8]),
     Message,
-}
-
-fn view(held: &Held) -> View<'_> {
-    match held {
-        Held::Int(v) => View::Int(*v),
-        Held::Uint(v) => View::Uint(*v),
-        Held::Float(v) => View::Float(*v),
-        Held::Double(v) => View::Double(*v),
-        Held::Bool(v) => View::Bool(*v),
-        Held::Text(v) => View::Text(v),
-        Held::Bytes(v) => View::Bytes(v),
-        Held::Message(_) => View::Message,
-    }
 }
 
 /// The value a field without presence reads as when it is not set.
@@ -748,37 +1137,49 @@ fn got<'p>(
 /// `S` holds the schema: a `&SchemaSet`, or a shared owner of one for a
 /// payload that outlives the borrow (an `Arc<SchemaSet>`). The message must be
 /// one the same set found.
-pub struct Payload<S> {
+///
+/// `St` is where it keeps its values ([`Storage`]): the heap, growing, for a payload [`Payload::new`]
+/// makes, or a store of a fixed size a caller reserved ([`Payload::over`]), which refuses what does
+/// not fit it ([`Refusal::Full`]) and takes nothing else after the payload is made.
+pub struct Payload<S, St = HeapStorage> {
     schema: S,
     message: SchemaMessage,
-    fields: Fields,
+    table: Table<St>,
     narrowing: Narrowing,
 }
 
-impl<S> fmt::Debug for Payload<S> {
+impl<S, St> fmt::Debug for Payload<S, St> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Payload")
             .field("message", &self.message)
-            .field("fields", &self.fields.known.len())
+            .field("values", &self.table.len)
+            .field("bytes", &self.table.used)
             .finish()
     }
 }
 
-impl<S: Borrow<SchemaSet>> Payload<S> {
-    /// An empty payload of `message`, which `schema` found
-    /// ([`SchemaSet::message`]), whose integers are held to their fields' types.
+impl<S: Borrow<SchemaSet>> Payload<S, HeapStorage> {
+    /// An empty payload of `message` of `schema`, kept on the heap, its integers held to their
+    /// fields' types.
     pub fn new(schema: S, message: SchemaMessage) -> Self {
         Self::narrowed(schema, message, Narrowing::Type)
     }
 
-    /// An empty payload of `message` whose integers are held to the range
-    /// `narrowing` chooses: [`Narrowing::NanopbIntSize`] for a receiver that
-    /// links nanopb. See the module documentation.
+    /// [`Payload::new`], its integers held to the range `narrowing` chooses: [`Narrowing::NanopbIntSize`]
+    /// for a receiver that links nanopb. See the module documentation.
     pub fn narrowed(schema: S, message: SchemaMessage, narrowing: Narrowing) -> Self {
+        Self::over(schema, message, narrowing, HeapStorage::default())
+    }
+}
+
+impl<S: Borrow<SchemaSet>, St: Storage> Payload<S, St> {
+    /// An empty payload of `message` of `schema` keeping its values in `store`, its integers held
+    /// to the range `narrowing` chooses.
+    pub fn over(schema: S, message: SchemaMessage, narrowing: Narrowing, store: St) -> Self {
         Self {
             schema,
             message,
-            fields: Fields::default(),
+            table: Table::new(store),
             narrowing,
         }
     }
@@ -795,7 +1196,8 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     ///
     /// [`Refusal::Path`], [`Refusal::Type`] or [`Refusal::Range`], and
     /// [`Refusal::Schema`] for an integer field whose range the payload's
-    /// narrowing cannot know; the payload is then as it was.
+    /// narrowing cannot know, and [`Refusal::Full`] when the store has no room for the value; the
+    /// payload is then as it was.
     pub fn set(&mut self, path: &str, value: Given<'_>) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
         let route = route(schema, schema.linked(self.message), path)?;
@@ -803,20 +1205,82 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
         if last.repeated() && last.index.is_none() {
             return Err(list_named(path, &last));
         }
-        let held = held_of(schema, last.holder, last.field, value, self.narrowing, path)?;
-        reach(&self.fields, route.all(), path)?;
-        let mut fields = &mut self.fields;
+        let value = held_of(schema, last.holder, last.field, value, self.narrowing, path)?;
+        let table = &mut self.table;
+        // What the set adds is judged before anything is changed: a holder for each step that is
+        // not there, a slot for a value that replaces none, and the bytes of a string or bytes that
+        // the value it replaces does not have room for.
+        let mut parent = Some(ROOT);
+        let mut holders = 0usize;
         for step in route.inner() {
-            fields = descend(fields, &step);
+            let number = step.field.number;
+            let len = parent.map_or(0, |p| table.count(p, number));
+            if let Some(index) = step.index {
+                if index > len {
+                    return Err(reach_refused(path, &step, len));
+                }
+            }
+            parent = parent
+                .and_then(|p| table.nth(p, number, step.index.unwrap_or(0)))
+                .filter(|&at| matches!(table.entry(at).map(|e| e.slot), Some(Slot::Message)))
+                .map(parent_of);
+            if parent.is_none() {
+                holders += 1;
+            }
         }
-        fields.clear_oneof(last.holder, last.field);
-        let list = fields.known.entry(last.field.number).or_default();
-        match last.index {
-            Some(index) if index < list.len() => list[index] = held,
-            Some(_) => list.push(held),
+        let number = last.field.number;
+        let len = parent.map_or(0, |p| table.count(p, number));
+        if let Some(index) = last.index {
+            if index > len {
+                return Err(reach_refused(path, &last, len));
+            }
+        }
+        let replaced = parent
+            .and_then(|p| match last.index {
+                Some(index) => table.nth(p, number, index),
+                None => table.last(p, number),
+            })
+            .and_then(|at| table.entry(at));
+        let room_there = match replaced.map(|e| e.slot) {
+            Some(Slot::Text(span) | Slot::Bytes(span)) => span.len,
+            _ => 0,
+        };
+        let bytes = match value {
+            Value::Text(v) if v.len() > room_there => v.len(),
+            Value::Bytes(v) if v.len() > room_there => v.len(),
+            _ => 0,
+        };
+        let slots = holders + usize::from(replaced.is_none());
+        let freed = if bytes > 0 { room_there } else { 0 };
+        table
+            .fits(slots, bytes, freed)
+            .map_err(|no| no.refusal(path))?;
+        // From here every write fits.
+        let mut parent = ROOT;
+        for step in route.inner() {
+            parent = descend(table, parent, &step).map_err(|no| no.refusal(path))?;
+        }
+        table.clear_oneof(parent, last.holder, last.field);
+        let at = match last.index {
+            Some(index) => table.nth(parent, number, index),
+            None => table.last(parent, number),
+        };
+        let mut old = at.and_then(|at| table.entry(at)).map(|e| e.slot);
+        if let (Some(at), Some(Slot::Text(span) | Slot::Bytes(span))) = (at, old) {
+            if span.len < value_len(value) {
+                // The bytes the value replaced are let go before the new ones are written, which
+                // is the room `fits` counted.
+                table.set_slot(at, Slot::Free);
+                old = None;
+            }
+        }
+        let slot = table.slot_of(value, old).map_err(|no| no.refusal(path))?;
+        match at {
+            Some(at) => table.set_slot(at, slot),
             None => {
-                list.clear();
-                list.push(held);
+                table
+                    .push(number, parent, slot)
+                    .map_err(|no| no.refusal(path))?;
             }
         }
         Ok(())
@@ -836,15 +1300,29 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
         if last.repeated() && last.index.is_none() {
             return Err(list_named(path, &last));
         }
-        let Some(fields) = holder_of(&self.fields, route.inner(), path)? else {
-            return Err(absent(path, route.inner(), &self.fields));
+        let Some(parent) = holder_of(&self.table, route.inner(), path)? else {
+            return Err(absent(path, route.inner(), &self.table));
         };
         let index = last.index.unwrap_or(0);
-        if let Some(held) = fields.value(last.field.number, index) {
-            return got(schema, last.field, view(held), wanted, path);
+        if let Some(entry) = self
+            .table
+            .nth(parent, last.field.number, index)
+            .and_then(|at| self.table.entry(at))
+        {
+            return got(
+                schema,
+                last.field,
+                view(&self.table, entry.slot),
+                wanted,
+                path,
+            );
         }
         if last.index.is_some() {
-            return Err(past_end(path, &last, fields.len(last.field.number)));
+            return Err(past_end(
+                path,
+                &last,
+                self.table.count(parent, last.field.number),
+            ));
         }
         if has_presence(last.holder, last.field) {
             return Err(Refusal::Absent {
@@ -888,7 +1366,8 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
                 ),
             });
         }
-        Ok(holder_of(&self.fields, route.inner(), path)?.map_or(0, |f| f.len(last.field.number)))
+        Ok(holder_of(&self.table, route.inner(), path)?
+            .map_or(0, |p| self.table.count(p, last.field.number)))
     }
 
     /// Clear the field `path` names (every element of a repeated one), or the
@@ -903,41 +1382,37 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
         let schema: &SchemaSet = self.schema.borrow();
         let route = route(schema, schema.linked(self.message), path)?;
         let last = route.last;
-        let Some(holder) = holder_of(&self.fields, route.inner(), path)? else {
+        let Some(parent) = holder_of(&self.table, route.inner(), path)? else {
             return Ok(());
         };
-        let len = holder.len(last.field.number);
-        if let Some(index) = last.index {
-            if index >= len {
-                return Err(past_end(path, &last, len));
-            }
-        }
-        let mut fields = &mut self.fields;
-        for step in route.inner() {
-            fields = descend(fields, &step);
-        }
         let number = last.field.number;
+        let len = self.table.count(parent, number);
         match last.index {
-            None => {
-                fields.known.remove(&number);
-            }
+            None => self.table.remove_field(parent, number),
+            Some(index) if index >= len => return Err(past_end(path, &last, len)),
             Some(index) => {
-                let now_empty = fields.known.get_mut(&number).is_some_and(|list| {
-                    list.remove(index);
-                    list.is_empty()
-                });
-                if now_empty {
-                    fields.known.remove(&number);
+                if let Some(at) = self.table.nth(parent, number, index) {
+                    self.table.remove(|i, _| i == at);
                 }
             }
         }
         Ok(())
     }
 
-    /// Clear every field: the payload is as [`Payload::new`] or
-    /// [`Payload::narrowed`] made it, its narrowing kept.
+    /// Clear every field: the payload is as it was made, its narrowing kept.
     pub fn reset(&mut self) {
-        self.fields = Fields::default();
+        self.table.clear();
+    }
+
+    /// How many bytes [`Self::encode`] writes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::encode`].
+    pub fn encoded_len(&self) -> Result<usize, Refusal> {
+        let mut count = Count::default();
+        self.write_to(&mut count)?;
+        Ok(count.0)
     }
 
     /// The protobuf bytes of the payload; see the module documentation.
@@ -947,16 +1422,32 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// [`Refusal::Absent`] for a required field that is not set;
     /// [`Refusal::Schema`] for a `packed` option the writer cannot act on.
     pub fn encode(&self) -> Result<Vec<u8>, Refusal> {
-        let schema: &SchemaSet = self.schema.borrow();
-        let mut out = Vec::new();
-        write_message(
-            schema,
-            schema.linked(self.message),
-            &self.fields,
-            "",
-            &mut out,
-        )?;
+        let mut out = Vec::with_capacity(self.encoded_len()?);
+        self.write_to(&mut out)?;
         Ok(out)
+    }
+
+    /// The protobuf bytes of the payload written into `out` from its start, and how many there
+    /// are, which is more than `out` holds when the bytes do not fit it: then what fits is written
+    /// and the rest is not. Nothing is allocated.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::encode`].
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Refusal> {
+        let mut fixed = Fixed::new(out);
+        self.write_to(&mut fixed)?;
+        Ok(fixed.len())
+    }
+
+    fn write_to<O: Out>(&self, out: &mut O) -> Result<(), Refusal> {
+        let schema: &SchemaSet = self.schema.borrow();
+        let writer = Writer {
+            schema,
+            table: &self.table,
+            root: schema.linked(self.message),
+        };
+        writer.message(writer.root, ROOT, out)
     }
 
     /// Replace the payload's values with those `bytes` carry; see the module
@@ -965,12 +1456,50 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// # Errors
     ///
     /// [`Refusal::Wire`] for bytes that are not a message of the schema; the
-    /// payload is then as it was.
+    /// payload is then as it was. [`Refusal::Full`] for bytes whose values do not fit the store;
+    /// the payload is then empty.
     pub fn decode(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
-        let listing = schema.decode(self.message, bytes).map_err(Refusal::Wire)?;
-        self.fields = fields_of(schema, schema.linked(self.message), &listing, bytes);
+        // The bytes are judged whole before a value is replaced.
+        schema
+            .walk_fields(self.message, bytes, &mut Judged)
+            .map_err(Refusal::Wire)?;
+        self.table.clear();
+        let root = schema.linked(self.message);
+        let mut fill = Fill {
+            schema,
+            table: &mut self.table,
+            bytes,
+            open: [None; MAX_DECODE_DEPTH + 1],
+            depth: 0,
+            full: None,
+        };
+        fill.open[0] = Some((ROOT, root));
+        let walked = schema.walk_fields(self.message, bytes, &mut fill);
+        let full = fill.full;
+        if let Err(wire) = walked {
+            // The first walk read the same bytes whole, so the second cannot be refused.
+            self.table.clear();
+            return Err(Refusal::Wire(wire));
+        }
+        if let Some(no) = full {
+            self.table.clear();
+            return Err(no.refusal(""));
+        }
         Ok(())
+    }
+}
+
+/// The refusal of a set whose index is past where an element is replaced or appended.
+fn reach_refused(path: &str, step: &Step<'_>, len: usize) -> Refusal {
+    Refusal::Range {
+        path: String::from(path),
+        reason: format!(
+            "`{}` has {len} element(s): an element is replaced below {len} and appended at {len}, \
+             and {} is past that",
+            step.field.name,
+            step.index.unwrap_or(0)
+        ),
     }
 }
 
@@ -993,21 +1522,31 @@ fn past_end(path: &str, step: &Step<'_>, len: usize) -> Refusal {
     }
 }
 
-/// The message that holds the last step's field, `None` when one along the
-/// way is not there.
-fn holder_of<'f, 's>(
-    fields: &'f Fields,
+/// The slot of the message that holds the last step's field (`ROOT` for the payload's own),
+/// `None` when one along the way is not there.
+fn holder_of<'s, St: Storage>(
+    table: &Table<St>,
     inner: impl Iterator<Item = Step<'s>>,
     path: &str,
-) -> Result<Option<&'f Fields>, Refusal> {
-    let mut at = fields;
+) -> Result<Option<u32>, Refusal> {
+    let mut at = ROOT;
     for step in inner {
+        let number = step.field.number;
         let index = step.index.unwrap_or(0);
-        match at.value(step.field.number, index) {
-            Some(Held::Message(next)) => at = next,
+        match table
+            .nth(at, number, index)
+            .and_then(|i| table.entry(i).map(|e| (i, e)))
+        {
+            Some((
+                i,
+                Entry {
+                    slot: Slot::Message,
+                    ..
+                },
+            )) => at = parent_of(i),
             Some(_) => return Ok(None),
             None if step.index.is_some() => {
-                return Err(past_end(path, &step, at.len(step.field.number)))
+                return Err(past_end(path, &step, table.count(at, number)))
             }
             None => return Ok(None),
         }
@@ -1017,15 +1556,28 @@ fn holder_of<'f, 's>(
 
 /// The refusal of a read whose holder is not there, naming the first part of
 /// the path that is absent.
-fn absent<'s>(path: &str, inner: impl Iterator<Item = Step<'s>>, fields: &Fields) -> Refusal {
-    let mut at = fields;
+fn absent<'s, St: Storage>(
+    path: &str,
+    inner: impl Iterator<Item = Step<'s>>,
+    table: &Table<St>,
+) -> Refusal {
+    let mut at = ROOT;
     for step in inner {
-        match at.value(step.field.number, step.index.unwrap_or(0)) {
-            Some(Held::Message(next)) => at = next,
+        let found = table
+            .nth(at, step.field.number, step.index.unwrap_or(0))
+            .and_then(|i| table.entry(i).map(|e| (i, e)));
+        match found {
+            Some((
+                i,
+                Entry {
+                    slot: Slot::Message,
+                    ..
+                },
+            )) => at = parent_of(i),
             _ => {
                 return Refusal::Absent {
                     path: String::from(path),
-                    at: String::from(&path[..step.end]),
+                    at: String::from(path.get(..step.end).unwrap_or(path)),
                 }
             }
         }
@@ -1036,98 +1588,248 @@ fn absent<'s>(path: &str, inner: impl Iterator<Item = Step<'s>>, fields: &Fields
     }
 }
 
-/// Whether a set of `steps` can be made: every index at most the length of its
-/// list, a list that is not there yet being empty.
-fn reach<'s>(
-    fields: &Fields,
-    steps: impl Iterator<Item = Step<'s>>,
-    path: &str,
-) -> Result<(), Refusal> {
-    let mut at = Some(fields);
-    for step in steps {
-        let number = step.field.number;
-        let len = at.map_or(0, |f| f.len(number));
-        if let Some(index) = step.index {
-            if index > len {
-                return Err(Refusal::Range {
-                    path: String::from(path),
-                    reason: format!(
-                        "`{}` has {len} element(s): an element is replaced below {len} and \
-                         appended at {len}, and {index} is past that",
-                        step.field.name
-                    ),
-                });
-            }
-        }
-        at = at
-            .and_then(|f| f.value(number, step.index.unwrap_or(0)))
-            .and_then(|held| match held {
-                Held::Message(next) => Some(next),
-                _ => None,
-            });
+/// The message a step of a set goes into, made when it is not there; the
+/// index was judged before, and the room.
+fn descend<St: Storage>(
+    table: &mut Table<St>,
+    parent: u32,
+    step: &Step<'_>,
+) -> Result<u32, NoRoom> {
+    let number = step.field.number;
+    if step.index.is_none() && table.count(parent, number) == 0 {
+        table.clear_oneof(parent, step.holder, step.field);
     }
-    Ok(())
+    let at = match table.nth(parent, number, step.index.unwrap_or(0)) {
+        Some(at) => at,
+        None => table.push(number, parent, Slot::Message)?,
+    };
+    if !matches!(table.entry(at).map(|e| e.slot), Some(Slot::Message)) {
+        table.set_slot(at, Slot::Message);
+    }
+    Ok(parent_of(at))
 }
 
-/// The message a step of a set goes into, made when it is not there; the
-/// index was judged by `reach`.
-fn descend<'f>(fields: &'f mut Fields, step: &Step<'_>) -> &'f mut Fields {
-    let number = step.field.number;
-    let index = step.index.unwrap_or(0);
-    if step.index.is_none() && fields.len(number) == 0 {
-        fields.clear_oneof(step.holder, step.field);
+/// A slot's value as it is read.
+fn view<St: Storage>(table: &Table<St>, slot: Slot) -> View<'_> {
+    match slot {
+        Slot::Int(v) => View::Int(v),
+        Slot::Uint(v) => View::Uint(v),
+        Slot::Float(v) => View::Float(v),
+        Slot::Double(v) => View::Double(v),
+        Slot::Bool(v) => View::Bool(v),
+        Slot::Text(span) => View::Text(table.text_of(span)),
+        Slot::Bytes(span) => View::Bytes(table.bytes_of(span)),
+        Slot::Message | Slot::Free | Slot::Kept(_) => View::Message,
     }
-    let list = fields.known.entry(number).or_default();
-    if index >= list.len() {
-        list.push(Held::Message(Fields::default()));
-    }
-    let last = list.len() - 1;
-    message_mut(&mut list[index.min(last)])
 }
 
 // ---- the bytes ------------------------------------------------------------
 
-/// The wire form of one value of `field`, from the one writer.
-fn wire_of<'h>(
-    schema: &SchemaSet,
-    field: &Fld,
-    held: &'h Held,
-    path: &str,
-) -> Result<Wire<'h>, Refusal> {
-    let integer =
-        |kind: ScalarKind, v: i128| ValueRange::of_type(kind).map(|_| Wire::integer(kind, v));
-    let wire = match (field.kind, held) {
-        (FieldKind::Scalar(kind), Held::Int(v)) => integer(kind, i128::from(*v)),
-        (FieldKind::Scalar(kind), Held::Uint(v)) => integer(kind, i128::from(*v)),
-        (FieldKind::Enum(_), Held::Int(v)) => i32::try_from(*v).ok().map(Wire::enum_number),
-        (FieldKind::Scalar(ScalarKind::Float), Held::Float(v)) => Some(Wire::Fixed32(v.to_bits())),
-        (FieldKind::Scalar(ScalarKind::Double), Held::Double(v)) => {
-            Some(Wire::Fixed64(v.to_bits()))
-        }
-        (FieldKind::Scalar(ScalarKind::Bool), Held::Bool(v)) => Some(Wire::Varint(u64::from(*v))),
-        (FieldKind::Scalar(ScalarKind::String), Held::Text(v)) => {
-            Some(Wire::delimited(v.as_bytes()))
-        }
-        (FieldKind::Scalar(ScalarKind::Bytes), Held::Bytes(v)) => {
-            Some(Wire::delimited(v.as_slice()))
-        }
-        (FieldKind::Message(m), Held::Message(inner)) => {
-            let Some(msg) = schema.linked_at(m) else {
-                return Err(Refusal::Schema {
-                    path: String::from(path),
-                    reason: String::from("the field's message is not in the schema set"),
+/// The writer of a payload's bytes, from its table.
+struct Writer<'w, St> {
+    schema: &'w SchemaSet,
+    table: &'w Table<St>,
+    root: &'w Msg,
+}
+
+impl<St: Storage> Writer<'_, St> {
+    /// The wire form of one value of `field`, from the one writer; `None` for a message, which is
+    /// written by its fields.
+    fn wire_of(&self, field: &Fld, slot: Slot, at: usize) -> Result<Option<Wire<'_>>, Refusal> {
+        let integer =
+            |kind: ScalarKind, v: i128| ValueRange::of_type(kind).map(|_| Wire::integer(kind, v));
+        let wire = match (field.kind, slot) {
+            (FieldKind::Message(_), Slot::Message) => return Ok(None),
+            (FieldKind::Scalar(kind), Slot::Int(v)) => integer(kind, i128::from(v)),
+            (FieldKind::Scalar(kind), Slot::Uint(v)) => integer(kind, i128::from(v)),
+            (FieldKind::Enum(_), Slot::Int(v)) => i32::try_from(v).ok().map(Wire::enum_number),
+            (FieldKind::Scalar(ScalarKind::Float), Slot::Float(v)) => {
+                Some(Wire::Fixed32(v.to_bits()))
+            }
+            (FieldKind::Scalar(ScalarKind::Double), Slot::Double(v)) => {
+                Some(Wire::Fixed64(v.to_bits()))
+            }
+            (FieldKind::Scalar(ScalarKind::Bool), Slot::Bool(v)) => {
+                Some(Wire::Varint(u64::from(v)))
+            }
+            (FieldKind::Scalar(ScalarKind::String), Slot::Text(span))
+            | (FieldKind::Scalar(ScalarKind::Bytes), Slot::Bytes(span)) => {
+                Some(Wire::delimited(self.table.bytes_of(span)))
+            }
+            _ => None,
+        };
+        wire.map(Some).ok_or_else(|| Refusal::Type {
+            path: self.path_of(at),
+            reason: format!("the field is {}", type_name(self.schema, field)),
+        })
+    }
+
+    /// The fields of the message `msg` at `parent`, in ascending number, then what it keeps as
+    /// wire bytes.
+    fn message<O: Out>(&self, msg: &Msg, parent: u32, out: &mut O) -> Result<(), Refusal> {
+        for field in &msg.fields {
+            if field.label == Label::Required && self.table.count(parent, field.number) == 0 {
+                let path = self.child_path(parent, &field.name);
+                return Err(Refusal::Absent {
+                    at: path.clone(),
+                    path,
                 });
-            };
-            let mut body = Vec::new();
-            write_message(schema, msg, inner, path, &mut body)?;
-            Some(Wire::delimited(body))
+            }
         }
-        _ => None,
-    };
-    wire.ok_or_else(|| Refusal::Type {
-        path: String::from(path),
-        reason: format!("the field is {}", type_name(schema, field)),
-    })
+        let mut after: Option<u64> = None;
+        loop {
+            let next = self
+                .table
+                .live()
+                .iter()
+                .filter(|e| e.parent == parent && !matches!(e.slot, Slot::Kept(_)))
+                .map(|e| e.number)
+                .filter(|&n| after.map_or(true, |a| n > a))
+                .min();
+            let Some(number) = next else {
+                break;
+            };
+            after = Some(number);
+            let Some(field) = msg.fields.iter().find(|f| f.number == number) else {
+                continue;
+            };
+            self.field(msg, field, parent, out)?;
+        }
+        for entry in self.table.live().iter().filter(|e| e.parent == parent) {
+            if let Slot::Kept(span) = entry.slot {
+                out.put_slice(self.table.bytes_of(span));
+            }
+        }
+        Ok(())
+    }
+
+    /// The values field `field` of `msg` holds in the message at `parent`.
+    fn field<O: Out>(
+        &self,
+        msg: &Msg,
+        field: &Fld,
+        parent: u32,
+        out: &mut O,
+    ) -> Result<(), Refusal> {
+        let number = field.number;
+        if field.label != Label::Repeated {
+            let Some(at) = self.table.last(parent, number) else {
+                return Ok(());
+            };
+            return self.value(field, at, has_presence(msg, field), out);
+        }
+        let packed = proto_write::packed(msg, field).map_err(|_| Refusal::Schema {
+            path: self.child_path(parent, &field.name),
+            reason: format!(
+                "`{}` states `packed`, which takes `true` or `false`, and `true` only on a \
+                 repeated numeric, bool or enum field",
+                field.name
+            ),
+        })?;
+        if !packed {
+            for at in self.table.values(parent, number) {
+                self.value(field, at, true, out)?;
+            }
+            return Ok(());
+        }
+        // A run is counted before it is written, so nothing is gathered apart.
+        let mut run = Count::default();
+        for at in self.table.values(parent, number) {
+            if let Some(wire) = self.wire_of(field, self.slot(at), at)? {
+                wire.put(&mut run);
+            }
+        }
+        if run.0 == 0 && self.table.count(parent, number) == 0 {
+            return Ok(());
+        }
+        proto_write::put_tag(out, number, proto_write::WIRE_LEN);
+        proto_write::put_varint(out, run.0 as u64);
+        for at in self.table.values(parent, number) {
+            if let Some(wire) = self.wire_of(field, self.slot(at), at)? {
+                wire.put(out);
+            }
+        }
+        Ok(())
+    }
+
+    /// One value of `field`, at slot `at`, under its tag: a message as its length and its fields.
+    fn value<O: Out>(
+        &self,
+        field: &Fld,
+        at: usize,
+        presence: bool,
+        out: &mut O,
+    ) -> Result<(), Refusal> {
+        if let Some(wire) = self.wire_of(field, self.slot(at), at)? {
+            proto_write::put_singular(out, field.number, presence, &wire);
+            return Ok(());
+        }
+        let FieldKind::Message(m) = field.kind else {
+            return Ok(());
+        };
+        let Some(inner) = self.schema.linked_at(m) else {
+            return Err(Refusal::Schema {
+                path: self.path_of(at),
+                reason: String::from("the field's message is not in the schema set"),
+            });
+        };
+        let mut length = Count::default();
+        self.message(inner, parent_of(at), &mut length)?;
+        proto_write::put_tag(out, field.number, proto_write::WIRE_LEN);
+        proto_write::put_varint(out, length.0 as u64);
+        self.message(inner, parent_of(at), out)
+    }
+
+    fn slot(&self, at: usize) -> Slot {
+        self.table.entry(at).map_or(Slot::Free, |e| e.slot)
+    }
+
+    /// The path of the value at slot `at`, written for a refusal.
+    fn path_of(&self, at: usize) -> String {
+        let Some(entry) = self.table.entry(at) else {
+            return String::new();
+        };
+        let (holder, prefix) = self.holder_and_path(entry.parent);
+        let Some(field) = holder.and_then(|m| m.fields.iter().find(|f| f.number == entry.number))
+        else {
+            return prefix;
+        };
+        let mut path = child(&prefix, &field.name);
+        if field.label == Label::Repeated {
+            let index = self
+                .table
+                .values(entry.parent, entry.number)
+                .position(|i| i == at)
+                .unwrap_or(0);
+            path = format!("{path}[{index}]");
+        }
+        path
+    }
+
+    /// The path of field `name` of the message at `parent`, written for a refusal.
+    fn child_path(&self, parent: u32, name: &str) -> String {
+        child(&self.holder_and_path(parent).1, name)
+    }
+
+    /// The message type of the message at `parent` and its path.
+    fn holder_and_path(&self, parent: u32) -> (Option<&Msg>, String) {
+        if parent == ROOT {
+            return (Some(self.root), String::new());
+        }
+        let at = parent as usize;
+        let path = self.path_of(at);
+        let Some(entry) = self.table.entry(at) else {
+            return (None, path);
+        };
+        let (outer, _) = self.holder_and_path(entry.parent);
+        let inner = outer
+            .and_then(|m| m.fields.iter().find(|f| f.number == entry.number))
+            .and_then(|f| match f.kind {
+                FieldKind::Message(m) => self.schema.linked_at(m),
+                _ => None,
+            });
+        (inner, path)
+    }
 }
 
 /// The path of field `name` inside the message at `prefix`.
@@ -1139,137 +1841,140 @@ fn child(prefix: &str, name: &str) -> String {
     }
 }
 
-/// The fields of one message, then what it keeps as wire bytes.
-fn write_message(
-    schema: &SchemaSet,
-    msg: &Msg,
-    fields: &Fields,
-    prefix: &str,
-    out: &mut Vec<u8>,
-) -> Result<(), Refusal> {
-    for field in &msg.fields {
-        if field.label == Label::Required && fields.len(field.number) == 0 {
-            let path = child(prefix, &field.name);
-            return Err(Refusal::Absent {
-                at: path.clone(),
-                path,
-            });
-        }
-    }
-    for (&number, list) in &fields.known {
-        let Some(field) = msg.fields.iter().find(|f| f.number == number) else {
-            continue;
-        };
-        let here = child(prefix, &field.name);
-        if field.label == Label::Repeated {
-            if list.is_empty() {
-                continue;
-            }
-            let packed = proto_write::packed(msg, field).map_err(|_| Refusal::Schema {
-                path: here.clone(),
-                reason: format!(
-                    "`{}` states `packed`, which takes `true` or `false`, and `true` only on a \
-                     repeated numeric, bool or enum field",
-                    field.name
-                ),
-            })?;
-            let mut elements = Vec::with_capacity(list.len());
-            for (i, held) in list.iter().enumerate() {
-                elements.push(wire_of(schema, field, held, &format!("{here}[{i}]"))?);
-            }
-            proto_write::put_repeated(out, number, packed, &elements);
-        } else if let Some(held) = list.last() {
-            let wire = wire_of(schema, field, held, &here)?;
-            proto_write::put_singular(out, number, has_presence(msg, field), &wire);
-        }
-    }
-    out.extend_from_slice(&fields.kept);
-    Ok(())
-}
-
 // ---- decoding -------------------------------------------------------------
 
-/// The values of a decoded message, as a parser keeps them.
-fn fields_of(schema: &SchemaSet, msg: &Msg, listing: &[DecodedField], bytes: &[u8]) -> Fields {
-    let mut fields = Fields::default();
-    for entry in listing {
-        let field = msg.fields.iter().find(|f| f.number == entry.number);
-        let held = field.and_then(|f| held_from(schema, f, &entry.value, bytes));
-        let (Some(field), Some(held)) = (field, held) else {
-            fields
-                .kept
-                .extend_from_slice(bytes.get(entry.start..entry.end).unwrap_or_default());
-            continue;
-        };
-        put_decoded(schema, msg, &mut fields, field, held);
-    }
-    fields
+/// The first walk of bytes being decoded, which only judges them.
+struct Judged;
+
+impl<'b> FieldEvents<'b> for Judged {
+    fn value(&mut self, _number: u64, _item: Item<'b>) {}
+    fn kept(&mut self, _span: (usize, usize)) {}
+    fn enter(&mut self, _number: u64) {}
+    fn leave(&mut self) {}
 }
 
-/// A decoded value as its field holds it; `None` for a value the payload
-/// keeps as its wire bytes (an unknown field, a map entry).
-fn held_from(schema: &SchemaSet, field: &Fld, value: &Value, bytes: &[u8]) -> Option<Held> {
-    if matches!(field.kind, FieldKind::Map { .. } | FieldKind::Group) {
-        return None;
+/// The walk that fills a payload's table from bytes, as a parser keeps them: an element appended
+/// to a repeated field, a message merged into the one there, any other value replacing it, and
+/// what the payload does not address kept as its wire bytes.
+struct Fill<'f, St> {
+    schema: &'f SchemaSet,
+    table: &'f mut Table<St>,
+    bytes: &'f [u8],
+    /// The messages the walk is inside, the payload's own first: each one's slot and type, `None`
+    /// past the depth the walk is at, and for a message the payload does not address (whose
+    /// fields are then not read).
+    open: [Option<(u32, &'f Msg)>; MAX_DECODE_DEPTH + 1],
+    depth: usize,
+    /// What did not fit, after which nothing more is kept.
+    full: Option<NoRoom>,
+}
+
+impl<'f, St: Storage> Fill<'f, St> {
+    fn current(&self) -> Option<(u32, &'f Msg)> {
+        self.open.get(self.depth).copied().flatten()
     }
-    Some(match value {
-        Value::Signed(v) => Held::Int(*v),
-        Value::Unsigned(v) => Held::Uint(*v),
-        Value::Float(v) => Held::Float(*v),
-        Value::Double(v) => Held::Double(*v),
-        Value::Bool(v) => Held::Bool(*v),
-        Value::Text(v) => Held::Text(v.clone()),
-        Value::Bytes(v) => Held::Bytes(v.clone()),
-        Value::Enum { number, .. } => Held::Int(i64::from(*number)),
-        Value::Message(inner) => {
-            let FieldKind::Message(m) = field.kind else {
-                return None;
-            };
-            Held::Message(fields_of(schema, schema.linked_at(m)?, inner, bytes))
+
+    fn keep(&mut self, result: Result<usize, NoRoom>) {
+        if let Err(no) = result {
+            self.full = Some(no);
         }
-        Value::Unknown(_) => return None,
-    })
+    }
 }
 
-/// One decoded occurrence into the message: an element appended to a repeated
-/// field, a message merged into the one there, any other value replacing it.
-fn put_decoded(schema: &SchemaSet, msg: &Msg, fields: &mut Fields, field: &Fld, held: Held) {
-    if field.label == Label::Repeated {
-        fields.known.entry(field.number).or_default().push(held);
-        return;
+impl<'b, St: Storage> FieldEvents<'b> for Fill<'_, St> {
+    fn value(&mut self, number: u64, item: Item<'b>) {
+        if self.full.is_some() {
+            return;
+        }
+        let Some((parent, msg)) = self.current() else {
+            return;
+        };
+        let Some(field) = msg.fields.iter().find(|f| f.number == number) else {
+            return;
+        };
+        let value = match item {
+            Item::Signed(v) => Value::Int(v),
+            Item::Unsigned(v) => Value::Uint(v),
+            Item::Float(v) => Value::Float(v),
+            Item::Double(v) => Value::Double(v),
+            Item::Bool(v) => Value::Bool(v),
+            Item::Text(v) => Value::Text(v),
+            Item::Bytes(v) => Value::Bytes(v),
+            Item::Enum(v) => Value::Int(i64::from(v)),
+        };
+        let slot = match self.table.slot_of(value, None) {
+            Ok(slot) => slot,
+            Err(no) => {
+                self.full = Some(no);
+                return;
+            }
+        };
+        if field.label != Label::Repeated {
+            self.table.clear_oneof(parent, msg, field);
+            self.table.remove_field(parent, number);
+        }
+        let pushed = self.table.push(number, parent, slot);
+        self.keep(pushed);
     }
-    fields.clear_oneof(msg, field);
-    let list = fields.known.entry(field.number).or_default();
-    let inner = match field.kind {
-        FieldKind::Message(m) => schema.linked_at(m),
-        _ => None,
-    };
-    match (inner, held) {
-        (Some(inner), Held::Message(more)) => {
-            if let Some(Held::Message(there)) = list.last_mut() {
-                merge(schema, inner, there, more);
-            } else {
-                list.clear();
-                list.push(Held::Message(more));
+
+    fn kept(&mut self, span: (usize, usize)) {
+        if self.full.is_some() {
+            return;
+        }
+        let Some((parent, _)) = self.current() else {
+            return;
+        };
+        let data = self.bytes.get(span.0..span.1).unwrap_or_default();
+        let kept = self
+            .table
+            .write(data)
+            .and_then(|span| self.table.push(0, parent, Slot::Kept(span)));
+        self.keep(kept);
+    }
+
+    fn enter(&mut self, number: u64) {
+        let opened = match (self.full, self.current()) {
+            (None, Some((parent, msg))) => self.open_message(parent, msg, number),
+            _ => None,
+        };
+        self.depth += 1;
+        if let Some(slot) = self.open.get_mut(self.depth) {
+            *slot = opened;
+        }
+    }
+
+    fn leave(&mut self) {
+        if let Some(slot) = self.open.get_mut(self.depth) {
+            *slot = None;
+        }
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+impl<'f, St: Storage> Fill<'f, St> {
+    /// The message field `number` of `msg` at `parent` begins: the slot its values go under, the
+    /// one a singular field holds already when it does, and its type.
+    fn open_message(&mut self, parent: u32, msg: &'f Msg, number: u64) -> Option<(u32, &'f Msg)> {
+        let field = msg.fields.iter().find(|f| f.number == number)?;
+        let FieldKind::Message(m) = field.kind else {
+            return None;
+        };
+        let inner = self.schema.linked_at(m)?;
+        let at = if field.label == Label::Repeated {
+            self.table.push(number, parent, Slot::Message)
+        } else {
+            self.table.clear_oneof(parent, msg, field);
+            match self.table.last(parent, number) {
+                Some(at) => Ok(at),
+                None => self.table.push(number, parent, Slot::Message),
+            }
+        };
+        match at {
+            Ok(at) => Some((parent_of(at), inner)),
+            Err(no) => {
+                self.full = Some(no);
+                None
             }
         }
-        (_, held) => {
-            list.clear();
-            list.push(held);
-        }
     }
-}
-
-/// `more` merged into `there`, as a parser merges a message field that occurs
-/// twice.
-fn merge(schema: &SchemaSet, msg: &Msg, there: &mut Fields, more: Fields) {
-    for (number, list) in more.known {
-        let Some(field) = msg.fields.iter().find(|f| f.number == number) else {
-            continue;
-        };
-        for held in list {
-            put_decoded(schema, msg, there, field, held);
-        }
-    }
-    there.kept.extend_from_slice(&more.kept);
 }

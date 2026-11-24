@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::message_payload::{Given, Got, Payload, Refusal, Wanted};
+use crate::message_payload::{Entry, Given, Got, Payload, Refusal, Storage, Wanted};
 use crate::proto_decode::SchemaSet;
 use crate::proto_schema::ProtoFile;
 use crate::proto_write::Narrowing;
@@ -747,4 +747,126 @@ fn a_path_is_walked_again_to_the_step_where_it_stops() {
         p.get("origin..x", Wanted::Signed),
         Err(Refusal::Path { .. })
     ));
+}
+
+/// A store of a fixed size, as a caller reserves one.
+struct Reserved {
+    entries: Vec<Entry>,
+    bytes: Vec<u8>,
+}
+
+impl Reserved {
+    fn of(entries: usize, bytes: usize) -> Self {
+        Self {
+            entries: vec![Entry::default(); entries],
+            bytes: vec![0; bytes],
+        }
+    }
+}
+
+impl Storage for Reserved {
+    fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    fn entries_mut(&mut self) -> &mut [Entry] {
+        &mut self.entries
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+}
+
+fn reserved<'s>(
+    schema: &'s SchemaSet,
+    entries: usize,
+    bytes: usize,
+) -> Payload<&'s SchemaSet, Reserved> {
+    let found = schema
+        .message("syn.payload.Sample")
+        .expect("the message is in the schema");
+    Payload::over(schema, found, Narrowing::Type, Reserved::of(entries, bytes))
+}
+
+#[test]
+fn a_fixed_store_refuses_what_does_not_fit_and_a_refused_set_changes_nothing() {
+    let schema = schema();
+    // Two slots: the origin and one of its fields.
+    let mut p = reserved(&schema, 2, 4);
+    set_reserved(&mut p, "origin.x", Given::Signed(1));
+    assert!(matches!(
+        p.set("origin.y", Given::Signed(2)),
+        Err(Refusal::Full { .. })
+    ));
+    assert_eq!(p.get("origin.x", Wanted::Signed), Ok(Got::Signed(1)));
+    assert_eq!(p.get("origin.y", Wanted::Signed), Ok(Got::Signed(0)));
+    // A value replaced takes no slot of its own.
+    set_reserved(&mut p, "origin.x", Given::Signed(3));
+    assert_eq!(p.get("origin.x", Wanted::Signed), Ok(Got::Signed(3)));
+
+    // Four bytes: a shorter string is written over the one it replaces, a longer one after the
+    // bytes no value holds are given back.
+    let mut p = reserved(&schema, 4, 4);
+    set_reserved(&mut p, "label", Given::Text("abcd"));
+    set_reserved(&mut p, "label", Given::Text("xy"));
+    set_reserved(&mut p, "label", Given::Text("wxyz"));
+    assert_eq!(p.get("label", Wanted::Text), Ok(Got::Text("wxyz")));
+    assert!(matches!(
+        p.set("blob", Given::Bytes(&[1])),
+        Err(Refusal::Full { .. })
+    ));
+    assert_eq!(p.get("blob", Wanted::Bytes), Ok(Got::Bytes(&[])));
+    p.clear("label").expect("cleared");
+    set_reserved(&mut p, "blob", Given::Bytes(&[1, 2, 3, 4]));
+    assert_eq!(p.get("blob", Wanted::Bytes), Ok(Got::Bytes(&[1, 2, 3, 4])));
+}
+
+fn set_reserved(p: &mut Payload<&SchemaSet, Reserved>, path: &str, value: Given<'_>) {
+    p.set(path, value)
+        .unwrap_or_else(|why| panic!("`{path}` is set: {why}"));
+}
+
+#[test]
+fn bytes_too_many_for_a_fixed_store_are_refused_and_leave_the_payload_empty() {
+    let schema = schema();
+    let mut p = reserved(&schema, 1, 0);
+    set_reserved(&mut p, "serial", Given::Unsigned(9));
+    // Two values: serial 150 and offset 2.
+    assert!(matches!(
+        p.decode(&[0x08, 0x96, 0x01, 0x10, 0x02]),
+        Err(Refusal::Full { .. })
+    ));
+    assert_eq!(p.get("serial", Wanted::Unsigned), Ok(Got::Unsigned(0)));
+    assert_eq!(p.encoded_len(), Ok(0));
+    // Bytes that are no message are refused before a value is replaced.
+    set_reserved(&mut p, "serial", Given::Unsigned(9));
+    assert!(matches!(p.decode(&[0x08]), Err(Refusal::Wire(_))));
+    assert_eq!(p.get("serial", Wanted::Unsigned), Ok(Got::Unsigned(9)));
+    p.decode(&[0x08, 0x05]).expect("one value fits");
+    assert_eq!(p.get("serial", Wanted::Unsigned), Ok(Got::Unsigned(5)));
+}
+
+#[test]
+fn bytes_written_into_a_buffer_are_the_bytes_encoded() {
+    let schema = schema();
+    let mut p = payload(&schema, "syn.payload.Sample");
+    set(&mut p, "serial", Given::Unsigned(150));
+    set(&mut p, "origin.x", Given::Signed(-3));
+    set(&mut p, "path[0].y", Given::Signed(4));
+    set(&mut p, "counts[0]", Given::Signed(1));
+    set(&mut p, "counts[1]", Given::Signed(2));
+    let encoded = bytes(&p);
+    assert_eq!(p.encoded_len(), Ok(encoded.len()));
+    let mut room = vec![0u8; encoded.len()];
+    assert_eq!(p.encode_into(&mut room), Ok(encoded.len()));
+    assert_eq!(room, encoded);
+    // A buffer too short is told the whole length, and what fits is written.
+    let mut short = [0u8; 2];
+    assert_eq!(p.encode_into(&mut short), Ok(encoded.len()));
+    assert_eq!(short[..], encoded[..2]);
 }

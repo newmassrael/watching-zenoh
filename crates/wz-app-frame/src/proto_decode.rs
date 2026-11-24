@@ -657,7 +657,7 @@ trait Visit<'b> {
     /// written with; `raw` indexes `bytes`, the message it was read in.
     fn unknown(&mut self, number: u64, raw: Raw, bytes: &'b [u8], span: (usize, usize));
     /// A message field, or a map's entry, begins: what follows until its [`Self::leave`] is in it.
-    fn enter(&mut self, number: u64);
+    fn enter(&mut self, number: u64, spec: &Spec<'_>);
     /// The message field `enter` began was read whole, at `span`.
     fn leave(&mut self, number: u64, spec: &Spec<'_>, span: (usize, usize));
 }
@@ -868,7 +868,7 @@ impl<'s> Reader<'s> {
                 visit.known(number, spec, Item::Enum(v as u32 as i32), span);
             }
             (Holds::Message(m), Raw::Len(a, b)) => {
-                visit.enter(number);
+                visit.enter(number, spec);
                 self.nested(Owner::Message(m), &bytes[a..b], base + a, depth, visit)
                     .map_err(blame)?;
                 visit.leave(number, spec, span);
@@ -881,7 +881,7 @@ impl<'s> Reader<'s> {
                     holder: spec.prefix.0,
                     map: spec.name,
                 };
-                visit.enter(number);
+                visit.enter(number, spec);
                 self.nested(owner, &bytes[a..b], base + a, depth, visit)
                     .map_err(blame)?;
                 visit.leave(number, spec, span);
@@ -969,7 +969,7 @@ impl<'b> Visit<'b> for Listing<'_, '_> {
         self.push(unknown(number, raw, bytes, span));
     }
 
-    fn enter(&mut self, _number: u64) {
+    fn enter(&mut self, _number: u64, _spec: &Spec<'_>) {
         self.open.push(Vec::new());
     }
 
@@ -1024,7 +1024,7 @@ impl<'b> Visit<'b> for PathRead<'_, 'b> {
 
     fn unknown(&mut self, _number: u64, _raw: Raw, _bytes: &'b [u8], _span: (usize, usize)) {}
 
-    fn enter(&mut self, number: u64) {
+    fn enter(&mut self, number: u64, _spec: &Spec<'_>) {
         if self.matched == self.depth
             && self.depth + 1 < self.path.len()
             && self.path.get(self.depth) == Some(&number)
@@ -1076,6 +1076,87 @@ impl SchemaSet {
             None if read.holders_met => AtPath::LeafMissing,
             None => AtPath::HolderMissing,
         })
+    }
+}
+
+/// What a walk of a message's bytes tells a reader that keeps values of its own
+/// ([`SchemaSet::walk_fields`]), in the order the bytes hold them.
+pub(crate) trait FieldEvents<'b> {
+    /// A value of field `number`, which the schema knows: one per occurrence, and one per element
+    /// of a packed run.
+    fn value(&mut self, number: u64, item: Item<'b>);
+    /// Bytes a reader keeps as the wire wrote them, at `span` of the bytes walked: a field the
+    /// schema does not know, a known number under a wire type its type is never written with, a
+    /// group, and each entry of a map, whole.
+    fn kept(&mut self, span: (usize, usize));
+    /// A message field `number` begins: the values that follow until [`Self::leave`] are its.
+    fn enter(&mut self, number: u64);
+    /// The message field [`Self::enter`] began was read whole.
+    fn leave(&mut self);
+}
+
+/// The walk as [`FieldEvents`] see it: a map's entries are kept whole, and nothing inside one is
+/// told.
+struct Events<'e, F> {
+    events: &'e mut F,
+    /// How many map entries the walk is inside.
+    in_map: usize,
+}
+
+impl<'b, F: FieldEvents<'b>> Visit<'b> for Events<'_, F> {
+    fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
+        if self.in_map == 0 {
+            self.events.value(number, item);
+        }
+    }
+
+    fn unknown(&mut self, _number: u64, _raw: Raw, _bytes: &'b [u8], span: (usize, usize)) {
+        if self.in_map == 0 {
+            self.events.kept(span);
+        }
+    }
+
+    fn enter(&mut self, number: u64, spec: &Spec<'_>) {
+        if matches!(spec.holds, Holds::Map { .. }) || self.in_map > 0 {
+            self.in_map += 1;
+        } else {
+            self.events.enter(number);
+        }
+    }
+
+    fn leave(&mut self, _number: u64, _spec: &Spec<'_>, span: (usize, usize)) {
+        match self.in_map {
+            0 => self.events.leave(),
+            1 => {
+                self.in_map = 0;
+                self.events.kept(span);
+            }
+            _ => self.in_map -= 1,
+        }
+    }
+}
+
+impl SchemaSet {
+    /// Walk `bytes` read as `message`, telling `events` what they hold. The bytes are read and
+    /// refused as [`Self::decode`] reads and refuses them, and the walk allocates nothing unless
+    /// they are refused; what is kept of them is `events`'s.
+    ///
+    /// # Errors
+    ///
+    /// The [`WireError`] [`Self::decode`] gives for the same bytes. What `events` was told before
+    /// it is all it is told.
+    pub(crate) fn walk_fields<'b, F: FieldEvents<'b>>(
+        &self,
+        message: SchemaMessage,
+        bytes: &'b [u8],
+        events: &mut F,
+    ) -> Result<(), WireError> {
+        let mut walk = Events { events, in_map: 0 };
+        Reader {
+            msgs: &self.msgs,
+            enums: &self.enums,
+        }
+        .walk(Owner::Message(message.0), bytes, 0, 0, &mut walk)
     }
 }
 
