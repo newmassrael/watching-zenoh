@@ -120,6 +120,27 @@ impl SessionRuntime for PlainRuntime {
     type Shared<U> = Arc<U>;
     type IterationWork = ();
     type EntropyDraw = NoEntropy;
+    type Flag = core::sync::atomic::AtomicBool;
+    type Word = core::sync::atomic::AtomicU64;
+    type Local<T>
+        = std::sync::Mutex<T>
+    where
+        T: Send + 'static;
+
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static,
+    {
+        Self::new_mutex(value)
+    }
+
+    // Counted as a hold of a lock, as the threaded runtimes' local is one.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        Self::with_mutex_mut(local, f)
+    }
 
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 

@@ -679,7 +679,9 @@ impl BatchLendCounts {
 /// The waker is a `core::task::Waker`, so the same slot wakes a tokio task on
 /// the AP profile and a cooperative task on the MCU one.
 pub struct OutOfBand<R: SessionRuntime> {
-    state: R::Mutex<OutOfBandState>,
+    /// Behind the runtime's local: a lock where the session's holders are threads, a cell where
+    /// they are one task, whose drive loop and senders take turns.
+    state: R::Local<OutOfBandState>,
     /// A close for congestion has been ORDERED of this session, ever: the sticky half of
     /// `tx_congested`, which the drive loop clears when it raises the event. zenoh 1.10.2 marks
     /// the transport's pipelines disabled at the moment it decides to close an unresponsive
@@ -687,7 +689,7 @@ pub struct OutOfBand<R: SessionRuntime> {
     /// `wait_before_close` (`io/zenoh-transport/src/unicast/universal/tx.rs` @
     /// `tl.pipeline.mark_disabled();`); this is what the send gate reads for it. Outside
     /// `state`, because every data send reads it and none needs the requests with it.
-    congestion_close_ordered: crate::send_gate::Latch,
+    congestion_close_ordered: crate::send_gate::Latch<R::Flag>,
 }
 
 /// The requests an [`OutOfBand`] can hold, and the waker of the loop parked on
@@ -774,14 +776,14 @@ impl ParkedLoops {
 impl<R: SessionRuntime> OutOfBand<R> {
     fn new() -> Self {
         Self {
-            state: R::new_mutex(OutOfBandState::default()),
+            state: R::new_local(OutOfBandState::default()),
             congestion_close_ordered: crate::send_gate::Latch::new(),
         }
     }
 
     /// Stage a request (`set` marks it) and wake the loops parked on it.
     fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
-        let parked = R::with_mutex_mut(&self.state, |s| {
+        let parked = R::with_local(&self.state, |s| {
             set(s);
             core::mem::take(&mut s.parked)
         });
@@ -793,12 +795,12 @@ impl<R: SessionRuntime> OutOfBand<R> {
     /// stay, so the wakers of loops that have ended do not pile up in the set.
     #[cfg(feature = "transport-multilink")]
     fn wake_parked(&self) {
-        R::with_mutex_mut(&self.state, |s| core::mem::take(&mut s.parked)).wake();
+        R::with_local(&self.state, |s| core::mem::take(&mut s.parked)).wake();
     }
 
     /// Take a request (`take` reads and clears it).
     fn take<U>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
-        R::with_mutex_mut(&self.state, take)
+        R::with_local(&self.state, take)
     }
 
     /// Resolves once any request is staged — the branch a parked drive loop
@@ -835,7 +837,7 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
     ) -> core::task::Poll<()> {
         #[cfg(feature = "transport-multilink")]
         let deletion_owed = self.deletion_owed;
-        R::with_mutex_mut(&self.slot.state, |s| {
+        R::with_local(&self.slot.state, |s| {
             #[cfg(feature = "transport-multilink")]
             if deletion_owed && s.transport_deleted {
                 return core::task::Poll::Ready(());
@@ -855,18 +857,18 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
 /// window flag they share.
 pub struct TxConduits<R: SessionRuntime> {
     /// `zp_batch_start` .. `zp_batch_stop` window flag
-    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). An atomic rather than a
-    /// field of a conduit, because the window spans every conduit and no
+    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). The runtime's flag rather
+    /// than a field of a conduit, because the window spans every conduit and no
     /// conduit's lock may stand for the others.
     #[cfg(feature = "transport-batching")]
-    active: core::sync::atomic::AtomicBool,
+    active: R::Flag,
     /// The link's writer pulls what the conduits stage (see
     /// [`BoxedLinkDriver::set_idle_flush`]), so the window is open for as long as
     /// the session lives and no caller opens or closes it. Its own flag rather than
     /// `active`: `zp_batch_stop` closes the window the caller opened and must not
     /// close this one, which is the link's and not the caller's.
     #[cfg(feature = "transport-batching")]
-    auto: core::sync::atomic::AtomicBool,
+    auto: R::Flag,
     /// A control message was left in the Control conduit's open frame, for the control messages
     /// after it to join, and a message staged on another conduit is to follow that frame out.
     /// Raised by the sender of the control message once it has staged it, lowered under the
@@ -874,7 +876,7 @@ pub struct TxConduits<R: SessionRuntime> {
     /// sender one flush of an empty conduit, while lowered with a frame open would let data pass
     /// a declaration staged before it, which is the order this is kept for.
     #[cfg(feature = "transport-batching")]
-    control_open: core::sync::atomic::AtomicBool,
+    control_open: R::Flag,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
     /// Per conduit, whether a SENDER holds it: one staging its message, writing its frame or
     /// waiting for room for it ([`SenderInside`]). A conduit is also held by what is not a
@@ -895,7 +897,7 @@ pub struct TxConduits<R: SessionRuntime> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    sending: [core::sync::atomic::AtomicBool; TX_CONDUITS],
+    sending: [R::Flag; TX_CONDUITS],
 }
 
 /// A sender inside its conduit, marked for as long as this lives: set when the sender has taken
@@ -909,7 +911,8 @@ pub struct TxConduits<R: SessionRuntime> {
 /// lock's acquire keeps the mark after the previous holder's clear, and its release keeps the
 /// clear before the next holder's mark. A reader that sees the flag late spins once more, or drops
 /// the message as zenoh-pico's try-lock does when it loses to a sender that is just leaving, and
-/// a stronger ordering would change neither: no ordering makes a store visible sooner.
+/// a stronger ordering would change neither: no ordering makes a store visible sooner. The flag
+/// is the runtime's (`R::Flag`): a cell where the senders are one task, which orders nothing.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -922,7 +925,7 @@ pub struct TxConduits<R: SessionRuntime> {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
+struct SenderInside<'a, F: crate::runtime_cell::FlagCell>(&'a F);
 
 #[cfg(any(
     feature = "codec-push",
@@ -936,8 +939,8 @@ struct SenderInside<'a>(&'a core::sync::atomic::AtomicBool);
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-impl<'a> SenderInside<'a> {
-    fn mark(flag: &'a core::sync::atomic::AtomicBool) -> Self {
+impl<'a, F: crate::runtime_cell::FlagCell> SenderInside<'a, F> {
+    fn mark(flag: &'a F) -> Self {
         flag.store(true, core::sync::atomic::Ordering::Relaxed);
         Self(flag)
     }
@@ -955,7 +958,7 @@ impl<'a> SenderInside<'a> {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-impl Drop for SenderInside<'_> {
+impl<F: crate::runtime_cell::FlagCell> Drop for SenderInside<'_, F> {
     fn drop(&mut self) {
         self.0.store(false, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1159,11 +1162,11 @@ impl<R: SessionRuntime> TxConduits<R> {
     fn new() -> Self {
         Self {
             #[cfg(feature = "transport-batching")]
-            active: core::sync::atomic::AtomicBool::new(false),
+            active: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             #[cfg(feature = "transport-batching")]
-            auto: core::sync::atomic::AtomicBool::new(false),
+            auto: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             #[cfg(feature = "transport-batching")]
-            control_open: core::sync::atomic::AtomicBool::new(false),
+            control_open: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             // A blocking sender keeps its conduit while it waits for room (a chain's fragments
             // keep their sequence numbers), and a probe takes it without waiting
             // (`DispatchStage::Probe`): the lock is one held across a wait for an event.
@@ -1180,7 +1183,9 @@ impl<R: SessionRuntime> TxConduits<R> {
                 feature = "declare-interest",
                 feature = "liveliness-token",
             ))]
-            sending: core::array::from_fn(|_| core::sync::atomic::AtomicBool::new(false)),
+            sending: core::array::from_fn(|_| {
+                <R::Flag as crate::runtime_cell::FlagCell>::new(false)
+            }),
         }
     }
 
@@ -1197,7 +1202,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn sender_flag(&self, priority: Priority) -> &core::sync::atomic::AtomicBool {
+    fn sender_flag(&self, priority: Priority) -> &R::Flag {
         conduit_row(&self.sending, priority)
     }
 
@@ -1289,13 +1294,17 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn is_active(&self) -> bool {
-        self.active.load(core::sync::atomic::Ordering::SeqCst) || self.is_auto()
+        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
+            || self.is_auto()
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_active(&self, active: bool) {
-        self.active
-            .store(active, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.active,
+            active,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// The link pulls the staged frames itself (the `auto` field). Read where
@@ -1303,12 +1312,16 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// ([`SessionLinkActions::batch_stop`]), which asks such a link for the flush.
     #[cfg(feature = "transport-batching")]
     fn is_auto(&self) -> bool {
-        self.auto.load(core::sync::atomic::Ordering::Relaxed)
+        crate::runtime_cell::FlagCell::load(&self.auto, core::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_auto(&self, auto: bool) {
-        self.auto.store(auto, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.auto,
+            auto,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// The caller's window alone (`zp_batch_start` .. `zp_batch_stop`), without the link's.
@@ -1319,7 +1332,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// not one of them, so the writer reads this to know when to stay its hand.
     #[cfg(feature = "transport-batching")]
     fn caller_window_open(&self) -> bool {
-        self.active.load(core::sync::atomic::Ordering::SeqCst)
+        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
     }
 
     /// Raise the `control_open` mark: read and raised where [`Self::is_auto`] is read, by the
@@ -1340,8 +1353,11 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn leave_control_open(&self) {
-        self.control_open
-            .store(true, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.control_open,
+            true,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Whether a control message may still be in the Control conduit's open frame (the
@@ -1362,15 +1378,21 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn control_left_open(&self) -> bool {
-        self.control_open.load(core::sync::atomic::Ordering::SeqCst)
+        crate::runtime_cell::FlagCell::load(
+            &self.control_open,
+            core::sync::atomic::Ordering::SeqCst,
+        )
     }
 
     /// Lower the `control_open` mark: called with the Control conduit's lock held, as its open
     /// frame is taken.
     #[cfg(feature = "transport-batching")]
     fn control_taken(&self) {
-        self.control_open
-            .store(false, core::sync::atomic::Ordering::SeqCst);
+        crate::runtime_cell::FlagCell::store(
+            &self.control_open,
+            false,
+            core::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Every conduit back to its initial state, the window closed. The
@@ -1516,9 +1538,11 @@ impl BatchLendCounts {
 }
 
 /// R311y214 — the unicast outbound Frame SN generator, SPLIT per
-/// reliability channel: the atomic twin of the plain-`u64` multicast
+/// reliability channel: the shared twin of the plain-`u64` multicast
 /// [`crate::sn::TxSn`] (which the single-task multicast drive loop mints
-/// under no lock). Both zenoh and zenoh-pico split the TX SN by
+/// under no lock), over the runtime's word (`W`, `SessionRuntime::Word`):
+/// atomic where the senders are threads, a cell where they are one task.
+/// Both zenoh and zenoh-pico split the TX SN by
 /// reliability even at one priority conduit: zenoh's non-QoS
 /// `TransportPriorityTx { reliable, best_effort }` still holds two
 /// generators (`io/zenoh-transport/src/common/priority.rs`), and pico's
@@ -1536,26 +1560,26 @@ impl BatchLendCounts {
 /// pairs with). R311y215 arrays this per `Priority` conduit behind
 /// `transport-qos`.
 #[derive(Debug)]
-pub struct AtomicTxSn {
+pub struct ConduitTxSn<W: crate::runtime_cell::WordCell> {
     /// Next SN for the reliable channel (pico `_sn_tx_reliable`).
-    reliable: AtomicU64,
+    reliable: W,
     /// Next SN for the best-effort channel (pico `_sn_tx_best_effort`).
-    best_effort: AtomicU64,
+    best_effort: W,
 }
 
-impl AtomicTxSn {
+impl<W: crate::runtime_cell::WordCell> ConduitTxSn<W> {
     /// Seed both channels at `initial_sn` (the OpenSyn/OpenAck origin) so
     /// the first Frame on either channel is exactly `initial_sn` — the peer
     /// seeds its per-channel RX gate one before this ([`crate::sn::RxSn::seed`]).
     pub fn new(initial_sn: u64) -> Self {
         Self {
-            reliable: AtomicU64::new(initial_sn),
-            best_effort: AtomicU64::new(initial_sn),
+            reliable: W::new(initial_sn),
+            best_effort: W::new(initial_sn),
         }
     }
 
     /// Mint the next SN on `reliable`'s channel as a ring position of
-    /// `mask`, advancing that channel one step (the atomic twin of
+    /// `mask`, advancing that channel one step (the shared twin of
     /// [`crate::sn::TxSn::mint`]). Masking a raw monotonic `fetch_add` IS
     /// the ring walk — `(n + 1) & mask` is the ring successor of `n & mask`
     /// across the `u64` boundary too.
@@ -1608,7 +1632,7 @@ impl AtomicTxSn {
 }
 
 /// R311y215 (transport-qos) — the outbound Frame SN generators: ONE
-/// [`AtomicTxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh
+/// [`ConduitTxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh
 /// `priority_tx: Arc<[TransportPriorityTx]>`, `universal/transport.rs`), else the
 /// single R311y214 conduit. The array SHAPE is compile-time behind the feature
 /// so an MCU no-alloc build never sizes a heap array by the runtime `is_qos`
@@ -1622,28 +1646,28 @@ impl AtomicTxSn {
 /// so a reliable+high and a reliable+low Frame ride SEPARATE SN rings gated on
 /// SEPARATE RX conduits — no cross-link stale-drop. Splitting ONE conduit across
 /// links (a load-balancer) would reintroduce the hazard and is forbidden.
-pub struct FrameTxConduits {
+pub struct FrameTxConduits<W: crate::runtime_cell::WordCell> {
     #[cfg(feature = "transport-qos")]
-    conduits: [AtomicTxSn; Priority::NUM],
+    conduits: [ConduitTxSn<W>; Priority::NUM],
     #[cfg(not(feature = "transport-qos"))]
-    conduit: AtomicTxSn,
+    conduit: ConduitTxSn<W>,
 }
 
-impl FrameTxConduits {
+impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
     /// Seed every conduit at `initial_sn` (the OpenSyn/OpenAck origin).
     pub fn new(initial_sn: u64) -> Self {
         Self {
             #[cfg(feature = "transport-qos")]
-            conduits: core::array::from_fn(|_| AtomicTxSn::new(initial_sn)),
+            conduits: core::array::from_fn(|_| ConduitTxSn::new(initial_sn)),
             #[cfg(not(feature = "transport-qos"))]
-            conduit: AtomicTxSn::new(initial_sn),
+            conduit: ConduitTxSn::new(initial_sn),
         }
     }
 
     /// The `(priority)` conduit — `conduits[priority]` under `transport-qos`,
     /// the single conduit otherwise (priority ignored, no cfg-skew).
     #[inline]
-    fn select(&self, _priority: Priority) -> &AtomicTxSn {
+    fn select(&self, _priority: Priority) -> &ConduitTxSn<W> {
         #[cfg(feature = "transport-qos")]
         {
             _priority.of(&self.conduits)
@@ -1654,7 +1678,7 @@ impl FrameTxConduits {
         }
     }
 
-    /// Mint the next SN for `(priority, reliable)` — see [`AtomicTxSn::mint`].
+    /// Mint the next SN for `(priority, reliable)` — see [`ConduitTxSn::mint`].
     pub fn mint(&self, priority: Priority, reliable: bool, mask: u64) -> u64 {
         self.select(priority).mint(reliable, mask)
     }
@@ -1665,7 +1689,7 @@ impl FrameTxConduits {
     }
 
     /// Give back the SN the last mint on `(priority, reliable)` handed out, for a
-    /// send refused before any byte of it left — see [`AtomicTxSn::unmint`].
+    /// send refused before any byte of it left — see [`ConduitTxSn::unmint`].
     pub fn unmint(&self, priority: Priority, reliable: bool) {
         self.select(priority).unmint(reliable);
     }
@@ -1798,9 +1822,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`LinkState::pending_batch`](LinkState): a close ends the session, and
     /// an aggregated session's second link must not be able to survive it.
     ///
-    /// Behind `R::Mutex` rather than an atomic for the reason the whole struct
-    /// gives: ARMv6-M has no `target_has_atomic = "ptr"` and every other
-    /// set-once slot here uses the same seam.
+    /// Behind the runtime's local (`R::Local`) rather than an atomic: ARMv6-M has
+    /// no `target_has_atomic = "ptr"`, and the requests are read and cleared
+    /// together with the waker of the loop parked on them.
     ///
     /// R2922 — the request now lives in [`OutOfBand`], which also WAKES the
     /// drive loop. It used to be a bare flag that no production loop read:
@@ -1919,11 +1943,11 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// fragment walk (`frame_encode::fragment_body`). R311kb
     /// realized the R121e explicit-modulo carry via zenoh-pico
     /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
-    /// [`AtomicTxSn`], split per reliability channel (pico/zenoh parity).
+    /// [`ConduitTxSn`], split per reliability channel (pico/zenoh parity).
     /// R311y215 — [`FrameTxConduits`]: one such pair per `Priority` conduit
     /// under `transport-qos` (else the single R311y214 pair); the
     /// `(priority, reliable)` of each mint selects the conduit + channel.
-    pub outbound_frame_sn: FrameTxConduits,
+    pub outbound_frame_sn: FrameTxConduits<R::Word>,
     /// Whether the peer's `DeclareFinal` of the initial interest has arrived on
     /// this session: the one fact the RX SN gate needs from the declaration
     /// plane, which sits after the gate and cannot be asked from it. Read by the
@@ -2956,7 +2980,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// an aggregated session does meanwhile; and when the link itself goes, its
     /// drop gives back whatever it still holds, so no path leaks a slot.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-    pub(crate) batch_slots: [LentRecord; TX_CONDUITS],
+    pub(crate) batch_slots: [LentRecord<R::Word>; TX_CONDUITS],
     /// This link's place in its node's [`crate::link_admission::LinkAdmission`], which the node
     /// installs before the handshake ([`SessionLinkActions::install_link_admission`]) and asks while
     /// the link is still being established. `None` for a node that decides the question after the
@@ -2985,25 +3009,26 @@ impl<R: SessionRuntime> Drop for LinkState<R> {
 /// batch frame, as the link records it (`LinkState::batch_slots`): the slot's
 /// name, and whether the link holds one for that conduit.
 ///
-/// Atomics only so that a shared `&LinkState` can be written: every read and
-/// write of a conduit's record is made under that conduit's lock (the open, the
-/// appends, the flush, the abort of a reopen and the move off a leaving link all
-/// hold it), or by the link's drop, which has the link alone. The lock orders
-/// them, so they are `Relaxed`: no record is read by a thread that did not take
-/// that lock after the last write to it.
+/// One word of the runtime's (`W`, `SessionRuntime::Word`): the slot's name plus one, and
+/// zero while the link holds none. The runtime's word only so that a shared `&LinkState` can be
+/// written: every write of a conduit's record is made under that conduit's lock (the open, the
+/// appends, the flush, the abort of a reopen and the move off a leaving link all hold it), or by
+/// the link's drop, which has the link alone. The lock orders them, so they are `Relaxed`: no
+/// record is read by a thread that did not take that lock after the last write to it.
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-pub(crate) struct LentRecord {
-    held: core::sync::atomic::AtomicBool,
-    slot: core::sync::atomic::AtomicU32,
+pub(crate) struct LentRecord<W: crate::runtime_cell::WordCell> {
+    slot: W,
 }
 
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-impl LentRecord {
-    const fn new() -> Self {
-        Self {
-            held: core::sync::atomic::AtomicBool::new(false),
-            slot: core::sync::atomic::AtomicU32::new(0),
-        }
+impl<W: crate::runtime_cell::WordCell> LentRecord<W> {
+    fn new() -> Self {
+        Self { slot: W::new(0) }
+    }
+
+    /// The word that names `slot` as held.
+    fn word_of(slot: crate::link::TxSlot) -> u64 {
+        u64::from(slot.0) + 1
     }
 
     /// Record `slot` as held for the conduit: the open of a batch frame in a lent slot, which
@@ -3022,30 +3047,41 @@ impl LentRecord {
     ))]
     fn hold(&self, slot: crate::link::TxSlot) {
         self.slot
-            .store(slot.0, core::sync::atomic::Ordering::Relaxed);
-        self.held.store(true, core::sync::atomic::Ordering::Relaxed);
+            .store(Self::word_of(slot), core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Whether the link holds a slot for the conduit.
+    /// Whether the link holds a slot for the conduit. Read by the send of a link's open batches
+    /// alone, which exists where a data send does.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     fn is_held(&self) -> bool {
-        self.held.load(core::sync::atomic::Ordering::Relaxed)
+        self.slot.load(core::sync::atomic::Ordering::Relaxed) != 0
     }
 
     /// Whether the link holds exactly `slot` for the conduit.
     fn holds(&self, slot: crate::link::TxSlot) -> bool {
-        self.is_held() && self.slot.load(core::sync::atomic::Ordering::Relaxed) == slot.0
+        self.slot.load(core::sync::atomic::Ordering::Relaxed) == Self::word_of(slot)
     }
 
     /// Clear the record, with the slot it held.
     fn take(&self) -> Option<crate::link::TxSlot> {
-        if !self.is_held() {
-            return None;
-        }
-        self.held
-            .store(false, core::sync::atomic::Ordering::Relaxed);
-        Some(crate::link::TxSlot(
-            self.slot.load(core::sync::atomic::Ordering::Relaxed),
-        ))
+        // The word is a `u32` name plus one (`Self::word_of`), so the name fits.
+        let held = self
+            .slot
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1)?;
+        self.slot.store(0, core::sync::atomic::Ordering::Relaxed);
+        Some(crate::link::TxSlot(held as u32))
     }
 }
 
@@ -4959,7 +4995,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "session-extshm")]
                 shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
                 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-                batch_slots: [const { LentRecord::new() }; TX_CONDUITS],
+                batch_slots: core::array::from_fn(|_| LentRecord::new()),
                 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
                 link_lease: R::new_mutex(None),
             } in_place {}
@@ -11719,7 +11755,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and advances THAT channel's counter by one — zenoh-pico
     /// `_z_sn_increment` parity, closing the R121e explicit-modulo carry.
     /// R311y214 — the reliable and best-effort channels are independent
-    /// rings ([`AtomicTxSn`]); `reliable` picks which.
+    /// rings ([`ConduitTxSn`]); `reliable` picks which.
     ///
     /// The first call on each channel returns `params.initial_sn & sn_mask`
     /// (both channels are seeded by `new_session_actions`; a conforming
@@ -12430,7 +12466,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // conduit. The PRIORITY half is now the stage index, so only
                     // the RELIABILITY half can still mismatch here: a non-QoS
                     // session has two reliability conduits, each its own Frame-SN
-                    // ring (`AtomicTxSn { reliable, best_effort }`), so a
+                    // ring (`ConduitTxSn { reliable, best_effort }`), so a
                     // best-effort message must not ride a reliable frame (or vice
                     // versa) even without transport-qos — read the open frame's own
                     // R flag so no stage field is needed. A mismatch flushes. This
@@ -12618,11 +12654,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // Dropped only behind another SENDER, as pico's try-lock fails only on a
                     // lock another send holds; a holder that is not one (the writer's flush of
                     // what is staged) lets go once it has written, and is waited for.
-                    if self
-                        .tx_conduits
-                        .sender_flag(priority)
-                        .load(core::sync::atomic::Ordering::Relaxed)
-                    {
+                    if crate::runtime_cell::FlagCell::load(
+                        self.tx_conduits.sender_flag(priority),
+                        core::sync::atomic::Ordering::Relaxed,
+                    ) {
                         held_dropped = true;
                         break Ok(UnicastPush::Congested);
                     }
@@ -20172,6 +20207,17 @@ mod sender_inside_tests {
         }));
         assert!(unwound.is_err(), "CONTROL: the staging did unwind");
         assert!(!flag.load(Ordering::Relaxed), "lowered on the unwind");
+    }
+
+    /// The flag of a runtime of one task, a cell, is raised and lowered as the atomic one is.
+    #[test]
+    fn a_cell_flag_is_raised_while_a_sender_is_inside_and_lowered_when_it_leaves() {
+        let flag = core::cell::Cell::new(false);
+        {
+            let _inside = SenderInside::mark(&flag);
+            assert!(flag.get(), "raised inside");
+        }
+        assert!(!flag.get(), "lowered once it leaves");
     }
 }
 

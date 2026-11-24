@@ -1973,6 +1973,37 @@ pub trait SessionRuntime: Runtime + Sized {
     /// one; everything else is the owning profile's business.
     type IterationWork: Default;
 
+    /// A flag the session's holders write without a lock (a sender inside its conduit, the
+    /// batching window, a close ordered for congestion), in the form the profile's concurrency
+    /// needs, as [`Self::Shared`] is: `AtomicBool` where the holders are threads, `Cell<bool>`
+    /// where they are one task (the cooperative profile, whose handles are not `Send`), which
+    /// pays no atomic instruction and needs none of the target.
+    type Flag: crate::runtime_cell::FlagCell + Send;
+
+    /// A word the session's holders write without a lock (a conduit's sequence numbers, the slot
+    /// a link lent for a conduit's frame), in the form [`Self::Flag`] is: `AtomicU64` or
+    /// `Cell<u64>`. A target without 64-bit atomics has a profile of one task, which binds the
+    /// cell.
+    type Word: crate::runtime_cell::WordCell + Send;
+
+    /// A value the session's holders reach one at a time, by [`Self::with_local`]: the
+    /// profile's [`Runtime::Mutex`] where the holders are threads, a `RefCell` where they are
+    /// one task and a lock would keep out no one.
+    type Local<T>
+    where
+        T: Send + 'static;
+
+    /// `value` in a new [`Self::Local`].
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static;
+
+    /// Run `f` on the value of `local`, which no other holder reaches meanwhile. `f` must
+    /// not reach the same value again.
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static;
+
     /// The session's one entropy source, as each of its links' handshake bindings holds it
     /// ([`SessionActionsBinding`](crate::session_actions::SessionActionsBinding)): what every
     /// InitAck the session sends draws its cookie nonce and its challenges from. A link's bundle

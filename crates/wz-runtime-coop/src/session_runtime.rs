@@ -142,6 +142,31 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     // could name itself.
     type IterationWork = ();
 
+    // The session's holders are one task at a time: its handles are not `Send`, and an engine
+    // that hands a session to another thread does so behind a lock of its own. So what they write
+    // without a lock is a cell (no atomic instruction, and none of 64 bits that an ARMv6-M or a
+    // Cortex-M7 lacks), and what they reach one at a time needs no lock either.
+    type Flag = core::cell::Cell<bool>;
+    type Word = core::cell::Cell<u64>;
+    type Local<T>
+        = core::cell::RefCell<T>
+    where
+        T: Send + 'static;
+
+    fn new_local<T>(value: T) -> Self::Local<T>
+    where
+        T: Send + 'static,
+    {
+        core::cell::RefCell::new(value)
+    }
+
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        f(&mut *local.borrow_mut())
+    }
+
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
     // the single-task sync drive loop shares the bundle only with its own FSM
     // binding, never across threads (`alloc::sync::Arc` requires

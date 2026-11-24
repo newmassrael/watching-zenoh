@@ -1191,8 +1191,13 @@ pub mod inbound;
 
 /// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
 /// session's [`send_gate::Latch`] for a close ordered for congestion. Unconditional, no_std and
-/// no_alloc: two `AtomicBool`s, which every target the crate builds for loads and stores.
+/// no_alloc: a gate is an `AtomicBool`, which every target the crate builds for loads and
+/// stores, and a latch is the runtime's flag ([`runtime_cell::FlagCell`]).
 pub mod send_gate;
+
+/// The flags and words a session's holders write without a lock, as an atomic or as a cell,
+/// whichever the runtime's concurrency asks for. Unconditional, no_std and no_alloc.
+pub mod runtime_cell;
 
 /// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
 /// is what an outbound encoder writes to, `Vec<u8>` is its heap form, and
