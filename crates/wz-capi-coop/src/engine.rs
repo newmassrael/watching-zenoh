@@ -6922,14 +6922,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             }
         };
         // A new Interest is asked of each link from its row; one held already was asked.
-        if watching.interest.is_some() {
-            let interest = tables(&core.session.registry)
-                .matching_listeners()
-                .get(watching.handle)
-                .and_then(|row| row.interest());
-            if let Some(interest) = interest {
-                core.announce_interest(interest);
-            }
+        if let Some(opened) = watching.interest {
+            core.announce_interest(opened.handle);
         }
         // A listener that matches already is told so as it is declared, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
@@ -7016,16 +7010,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let spent = if ask.is_some() {
-            let interest = watching.interest.and_then(|_| {
-                tables(&core.session.registry)
-                    .write_filters()
-                    .get(watching.handle)
-                    .and_then(|row| row.interest())
-            });
-            if let Some(interest) = interest {
-                core.announce_interest(interest);
+            if let Some(opened) = watching.interest {
+                core.announce_interest(opened.handle);
             }
-            watching.interest.map(u64::from)
+            watching.interest.map(|opened| u64::from(opened.id))
         } else {
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides: a filter that finds none left is
