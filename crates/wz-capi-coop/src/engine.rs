@@ -3317,6 +3317,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 join,
                 transport,
                 input_gate,
+                lane: self.lane.clone(),
                 params,
                 policy: self.policy,
                 limits: resolve_limits(&self.config),
