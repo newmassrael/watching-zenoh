@@ -4067,7 +4067,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
                 DispatchStage::Fresh,
                 qos.priority(),
                 /*reliable=*/ true,
-                OutMessage {
+                &OutMessage {
                     qos,
                     worst_case_payload: size,
                     stats_class: crate::stats::NetworkStatsClass::unread(),
@@ -4180,7 +4180,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 DispatchStage::Fresh,
                 Priority::Control,
                 /*reliable=*/ true,
-                OutMessage {
+                &OutMessage {
                     qos: crate::sample::QosLevel::DEFAULT,
                     worst_case_payload: crate::declare::local_token::token_reply_len(
                         token_id,
@@ -4229,7 +4229,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                     DispatchStage::Fresh,
                     Priority::Control,
                     /*reliable=*/ true,
-                    OutMessage {
+                    &OutMessage {
                         qos: crate::sample::QosLevel::DEFAULT,
                         worst_case_payload: crate::tx_buf::encoded_len(as_encoder(&reply)),
                         stats_class: crate::stats::NetworkStatsClass::control(
@@ -6025,7 +6025,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         route: Priority,
         reliable: bool,
-        message: OutMessage<'_, P>,
+        message: &OutMessage<'_, P>,
     ) -> bool
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
@@ -6035,7 +6035,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             worst_case_payload,
             stats_class,
             encode_body,
-        } = message;
+        } = *message;
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
         let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
@@ -6114,7 +6114,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Scheduled,
             priority,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: body.len(),
                 stats_class,
@@ -11154,7 +11154,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         stage: DispatchStage,
         priority: Priority,
         reliable: bool,
-        message: OutMessage<'_, P>,
+        message: &OutMessage<'_, P>,
     ) -> Result<Dispatched, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
@@ -11225,7 +11225,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         stage: DispatchStage,
         priority: Priority,
         reliable: bool,
-        message: OutMessage<'_, P>,
+        message: &OutMessage<'_, P>,
     ) -> Result<Dispatched, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
@@ -11236,7 +11236,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             worst_case_payload,
             stats_class: _stats_class,
             encode_body,
-        } = message;
+        } = *message;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
@@ -11434,7 +11434,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 message_priority,
                 priority,
                 reliable,
-                OutMessage {
+                &OutMessage {
                     qos,
                     worst_case_payload,
                     stats_class: _stats_class,
@@ -12891,7 +12891,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Fresh,
             priority,
             reliable,
-            OutMessage {
+            &OutMessage {
                 // R2923 — every arm's congestion control comes off the message's
                 // OWN ext_qos, as upstream's `congestion_control()` reads it
                 // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
@@ -12922,7 +12922,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stage,
             priority,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos: crate::declare_ext_qos::read_push_qos(push),
                 // What THIS message can encode to, and not the codec's reserve hint for any message
                 // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
@@ -13342,7 +13342,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Probe,
             priority,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos: encoded.qos(),
                 worst_case_payload: push.encoded_len(),
                 stats_class: class,
@@ -13929,7 +13929,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
             Priority::Control,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos: crate::declare_ext_qos::read_declare_qos(declare),
                 worst_case_payload: len,
                 // Control plane: `n_msgs` only, no payload cell (upstream's payload
@@ -13971,7 +13971,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Fresh,
             Priority::Control,
             /*reliable=*/ true,
-            OutMessage {
+            &OutMessage {
                 qos: crate::declare_ext_qos::QOS_DECLARE,
                 worst_case_payload: what.encoded_len(),
                 stats_class: crate::stats::NetworkStatsClass::control(
@@ -14028,7 +14028,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
             Priority::Control,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos: crate::declare_ext_qos::read_oam_qos(oam),
                 worst_case_payload: len,
                 stats_class: crate::stats::NetworkStatsClass::control(
@@ -14081,7 +14081,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stage,
             qos.priority(),
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: len,
                 stats_class: class,
@@ -14143,7 +14143,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stage,
             qos.priority(),
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: len,
                 stats_class: class,
@@ -14198,7 +14198,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stage,
             qos.priority(),
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: len,
                 // A pure correlation marker — no key expression and no payload, so
@@ -14256,7 +14256,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
             Priority::Control,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos: crate::declare_ext_qos::read_interest_qos(interest),
                 worst_case_payload: len,
                 stats_class: crate::stats::NetworkStatsClass::control(
@@ -14287,7 +14287,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Fresh,
             Priority::Control,
             /*reliable=*/ true,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: crate::tx_buf::encoded_len(as_encoder(&encode_body)),
                 stats_class: crate::stats::NetworkStatsClass::control(
@@ -14553,7 +14553,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stage,
             priority,
             reliable,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: size,
                 stats_class: class,
@@ -14669,7 +14669,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 stage,
                 priority,
                 reliable,
-                OutMessage {
+                &OutMessage {
                     qos,
                     worst_case_payload: size,
                     stats_class: crate::stats::NetworkStatsClass::unread(),
@@ -14773,7 +14773,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 DispatchStage::Fresh,
                 priority,
                 reliable,
-                OutMessage {
+                &OutMessage {
                     // A Put built here carries no extension, so no `ext_qos`: the
                     // default QoS, which `read_push_qos` answers for the same message.
                     qos: crate::sample::QosLevel::DEFAULT,
@@ -14996,7 +14996,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 DispatchStage::Fresh,
                 Priority::DEFAULT,
                 reliable,
-                OutMessage {
+                &OutMessage {
                     qos: crate::sample::QosLevel::DEFAULT,
                     worst_case_payload: crate::lent_push::literal_del_len(keyexpr_suffix),
                     stats_class: crate::stats::NetworkStatsClass::unread(),
@@ -17097,7 +17097,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
-            OutMessage {
+            &OutMessage {
                 qos,
                 worst_case_payload: size,
                 stats_class: crate::stats::NetworkStatsClass::unread(),
@@ -17198,7 +17198,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     DispatchStage::Fresh,
                     qos.priority(),
                     /*reliable=*/ true,
-                    OutMessage {
+                    &OutMessage {
                         qos,
                         worst_case_payload: crate::lent_control::response_final_len(
                             request_id, qos,

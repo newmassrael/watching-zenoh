@@ -2051,7 +2051,7 @@ fn dispatch_datagram_unit<R: SessionRuntime, T: TimeSource>(
             payload_at,
             resume,
             kept,
-            InPlaceRx {
+            &mut InPlaceRx {
                 actions,
                 engine,
                 record,
@@ -2175,7 +2175,7 @@ where
                 unit,
                 resume,
                 true,
-                InPlaceRx {
+                &mut InPlaceRx {
                     actions,
                     engine,
                     record,
@@ -2190,7 +2190,7 @@ where
         unit,
         None,
         false,
-        InPlaceRx {
+        &mut InPlaceRx {
             actions,
             engine,
             record,
@@ -2207,7 +2207,7 @@ where
             &unit[at..],
             None,
             false,
-            InPlaceRx {
+            &mut InPlaceRx {
                 actions,
                 engine,
                 record,
@@ -2229,7 +2229,7 @@ fn dispatch_datagram_reassembling_unit<R, T, const SLOTS: usize, const CAP: usiz
     unit: &[u8],
     resume: Option<usize>,
     kept: bool,
-    rx: InPlaceRx<'_, R, T>,
+    rx: &mut InPlaceRx<'_, R, T>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
 ) -> (DatagramPath, usize, bool)
@@ -2238,19 +2238,17 @@ where
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
-    let InPlaceRx {
-        actions,
-        engine,
-        record,
-        on_event,
-    } = rx;
+    let actions = rx.actions;
+    let engine = &mut *rx.engine;
+    let record = &mut *rx.record;
+    let on_event = &mut *rx.on_event;
     match in_place_unit(unit, actions, true) {
         Ok(InPlaceUnit::Fragment(head, payload_at)) => (
             fragment_in_place(
                 unit,
                 head,
                 payload_at,
-                InPlaceRx {
+                &mut InPlaceRx {
                     actions,
                     engine,
                     record,
@@ -2268,7 +2266,7 @@ where
             payload_at,
             resume,
             kept,
-            InPlaceRx {
+            &mut InPlaceRx {
                 actions,
                 engine,
                 record,
@@ -2668,16 +2666,14 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     payload_at: usize,
     resume: Option<usize>,
     may_stop: bool,
-    rx: InPlaceRx<'_, R, T>,
+    rx: &mut InPlaceRx<'_, R, T>,
 ) -> (DatagramPath, usize, bool) {
     use crate::driver_loop::IterationEvent;
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let InPlaceRx {
-        actions,
-        engine,
-        record,
-        on_event,
-    } = rx;
+    let actions = rx.actions;
+    let engine = &mut *rx.engine;
+    let record = &mut *rx.record;
+    let on_event = &mut *rx.on_event;
     if resume.is_none() {
         account_unit_in_place(unit, actions);
         actions.stamp_rx_activity();
@@ -3080,7 +3076,7 @@ fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S>(
     unit: &[u8],
     head: crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
     payload_at: usize,
-    rx: InPlaceRx<'_, R, T>,
+    rx: &mut InPlaceRx<'_, R, T>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
 ) -> DatagramPath
@@ -3089,12 +3085,10 @@ where
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
-    let InPlaceRx {
-        actions,
-        engine,
-        record,
-        on_event,
-    } = rx;
+    let actions = rx.actions;
+    let engine = &mut *rx.engine;
+    let record = &mut *rx.record;
+    let on_event = &mut *rx.on_event;
     account_unit_in_place(unit, actions);
     actions.stamp_rx_activity();
     let priority = head.priority();
