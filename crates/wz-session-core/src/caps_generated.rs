@@ -109,6 +109,8 @@ pub(super) const MAX_CONNECTIVITY_REPLAY_EVENTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"), 8);
 pub(super) const MAX_FACE_WATCH_ROWS: usize =
     limit(option_env!("WZ_LIMIT_MAX_FACE_WATCH_ROWS"), 16);
+pub(super) const MAX_CONNECTIVITY_TOLD_ROWS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_CONNECTIVITY_TOLD_ROWS"), 8);
 pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
 pub(super) const MAX_PEER_NODES: usize = limit(option_env!("WZ_LIMIT_MAX_PEER_NODES"), 0);
 pub(super) const MAX_FACES: usize = limit(option_env!("WZ_LIMIT_MAX_FACES"), 1000);
