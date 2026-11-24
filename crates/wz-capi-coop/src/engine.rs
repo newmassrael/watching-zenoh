@@ -121,7 +121,9 @@ use wz_session_core::policy::KeyWireForm;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::push_build;
-use wz_session_core::qos::{CongestionControl, Priority};
+use wz_session_core::qos::CongestionControl;
+#[cfg(any(feature = "listen", feature = "group"))]
+use wz_session_core::qos::Priority;
 use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(feature = "listen")]
@@ -4693,7 +4695,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// faces in `skip`. Each face is sent the put, and one a face's link could not have carried is
     /// the one that is reported; a face whose link is down is skipped, as a send over it would.
     /// The face being sent to is marked as the one this publish holds ([`SendingOn`]) for as long
-    /// as its send takes.
+    /// as its send takes. What a handed leg is sent by, so a build that hands none has none.
+    #[cfg(any(feature = "listen", feature = "group"))]
     fn fan_out(
         &self,
         core: &Core<L, C>,
