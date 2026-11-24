@@ -106,8 +106,9 @@ pub struct TransportState<T: TransportFaces> {
     /// (the engine's publish to a link).
     #[cfg(feature = "listen")]
     pub tx_pool_short: bool,
-    /// The session's faces, the dial role's first, which is never removed, then the others in the
-    /// order they came, over the network their links are opened on: the faces' links, the dials
+    /// The session's faces, each at the place the session's tables name it by for as long as it
+    /// is held, the dial role's at the first, which is never taken out, over the network their
+    /// links are opened on: the faces' links, the dials
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
@@ -220,29 +221,26 @@ impl<T: TransportFaces> TransportState<T> {
     /// The dial role's face, which the session holds for its whole life: the first of the faces,
     /// placed by the open, so `None` is a session no open made.
     pub fn dial(&self) -> Option<&T::Face> {
-        self.links.faces().first()
+        self.links.face(0)
     }
 
     /// The actions of every face whose link is up, which is what the session sends through. A
     /// face whose link is dialled or waits to be is not among them: what is declared then is
     /// declared when it comes up.
     pub fn ups(&self) -> impl Iterator<Item = &SessionHandle<T::Clock>> {
-        self.links
-            .faces()
-            .iter()
-            .filter_map(|face| match face.link() {
-                Link::Up(wire) => Some(wire.actions()),
-                _ => None,
-            })
+        self.links.faces().filter_map(|face| match face.link() {
+            Link::Up(wire) => Some(wire.actions()),
+            _ => None,
+        })
     }
 
-    /// [`Self::ups`], each with the id of its face.
-    pub fn ups_by_id(&self) -> impl Iterator<Item = (FaceId, &SessionHandle<T::Clock>)> {
+    /// [`Self::ups`], each with its face's place, which the session's other tables of the face
+    /// keep too, and its id.
+    pub fn ups_at(&self) -> impl Iterator<Item = (usize, FaceId, &SessionHandle<T::Clock>)> {
         self.links
-            .faces()
-            .iter()
-            .filter_map(|face| match face.link() {
-                Link::Up(wire) => Some((face.id(), wire.actions())),
+            .placed()
+            .filter_map(|(at, face)| match face.link() {
+                Link::Up(wire) => Some((at, face.id(), wire.actions())),
                 _ => None,
             })
     }
@@ -258,7 +256,6 @@ impl<T: TransportFaces> TransportState<T> {
         }
         self.links
             .faces()
-            .iter()
             .filter(|face| matches!(face.link(), Link::Up(_)))
             .map(FaceRecord::id)
             .filter(|id| match after {
@@ -290,13 +287,10 @@ impl<T: TransportFaces> TransportState<T> {
     /// The actions of face `id` while its link is up.
     #[cfg(feature = "query")]
     pub fn up_actions(&self, id: FaceId) -> Option<&SessionHandle<T::Clock>> {
-        self.links
-            .faces()
-            .iter()
-            .find_map(|face| match face.link() {
-                Link::Up(wire) if face.id() == id => Some(wire.actions()),
-                _ => None,
-            })
+        self.links.faces().find_map(|face| match face.link() {
+            Link::Up(wire) if face.id() == id => Some(wire.actions()),
+            _ => None,
+        })
     }
 
     /// Where an answer to a query that came in under `generation` goes: the link of that
@@ -312,15 +306,12 @@ impl<T: TransportFaces> TransportState<T> {
         {
             return Some(sink);
         }
-        self.links
-            .faces()
-            .iter()
-            .find_map(|face| match face.link() {
-                Link::Up(wire) if wire.answers_as(generation) => {
-                    Some(&**wire.actions() as &dyn ResponseSink)
-                }
-                _ => None,
-            })
+        self.links.faces().find_map(|face| match face.link() {
+            Link::Up(wire) if wire.answers_as(generation) => {
+                Some(&**wire.actions() as &dyn ResponseSink)
+            }
+            _ => None,
+        })
     }
 
     /// Write on its group what the answers to a query that came in under `generation` put on the
@@ -590,16 +581,12 @@ impl<T: TransportFaces> TransportState<T> {
     /// The faces that stand: those whose links have completed their handshakes.
     #[cfg(feature = "connectivity")]
     pub fn standing_faces(&self) -> Vec<FaceSnapshot> {
-        let links = self
-            .links
-            .faces()
-            .iter()
-            .filter_map(|face| match face.link() {
-                Link::Up(wire) if wire.actions().is_established() => {
-                    FaceSnapshot::of_actions(&**wire.actions())
-                }
-                _ => None,
-            });
+        let links = self.links.faces().filter_map(|face| match face.link() {
+            Link::Up(wire) if wire.actions().is_established() => {
+                FaceSnapshot::of_actions(&**wire.actions())
+            }
+            _ => None,
+        });
         // And each member of a group the session joined, a transport of its own as both
         // upstreams report it (`group`).
         #[cfg(feature = "group")]
@@ -840,8 +827,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn end_peer_chains(&mut self, at: usize) {
         let peer = self
             .links
-            .faces()
-            .get(at)
+            .face(at)
             .and_then(|face| face.link().wire())
             // Read in place: a loss is taken after the open, where nothing is copied to the heap.
             .and_then(|wire| wire.actions().peer_session_zid());
