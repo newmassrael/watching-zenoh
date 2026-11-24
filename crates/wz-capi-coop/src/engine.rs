@@ -50,7 +50,7 @@ use crate::arena::HandedTable;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
-    SessionArena, SessionRows, TransportTables,
+    PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
@@ -703,8 +703,9 @@ impl SessionRows {
     }
 }
 
-/// Lay out the plan of the session opened with `config` under `policy` (`lay_out_open`, each
-/// link's cells `cell_bytes` large and the ABI's places `held`), reserve its arena in `memory`
+/// Lay out the plan of the session opened with `config` under `policy`, its tables' rows from
+/// `from` (`lay_out_open`, each link's cells `cell_bytes` large and the ABI's places `held`),
+/// reserve its arena in `memory`
 /// and lend from it every table of the session. One lender lends each layer its plain tables
 /// from the rows the plan counts for it: the transport's links, cells, reassembly and endpoints, the
 /// state's lane, declarations, keys and legs, and the ABI's places; it gives the tables after a
@@ -717,12 +718,16 @@ impl SessionRows {
 fn lend_session(
     cell_bytes: LinkCells<usize>,
     held: &HeldPlaces,
+    from: PlanFrom,
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
-    plan.count(config, resolve_limits(config))?;
+    match from {
+        PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
+        PlanFrom::Config => plan.count(config, resolve_limits(config))?,
+    }
     lay_out_open(&mut plan, cell_bytes, held)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
@@ -3847,6 +3852,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             OpenStorage {
                 memory,
                 held: HeldPlaces::NONE,
+                plan: PlanFrom::Config,
             },
         )
     }
@@ -3904,14 +3910,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<Arc<Self>, OpenError> {
-        let OpenStorage { memory, held } = storage;
+        let OpenStorage {
+            memory,
+            held,
+            plan: from,
+        } = storage;
         let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let mut lent = lend_session(link_cells::<C>(&links), &held, memory, &config, &policy)
-            .map_err(OpenError::Arena)?;
+        let mut lent = lend_session(
+            link_cells::<C>(&links),
+            &held,
+            from,
+            memory,
+            &config,
+            &policy,
+        )
+        .map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.

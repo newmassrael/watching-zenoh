@@ -572,6 +572,88 @@ pub struct OpenStorage {
     pub memory: &'static dyn ArenaMemory,
     /// The ABI's places the arena holds after every table.
     pub held: HeldPlaces,
+    /// Where the rows of the session's tables come from.
+    pub plan: PlanFrom,
+}
+
+/// Where the rows of an open's arena come from ([`OpenStorage::plan`]). The links' cells and the
+/// ABI's places are laid out after them at the open either way ([`ArenaPlan::holding_cells`],
+/// [`ArenaPlan::holding`]).
+#[derive(Clone, Copy, Debug)]
+pub enum PlanFrom {
+    /// The region the build laid out when it was compiled: an open of a config that dials more
+    /// endpoints than it holds rows for, or whose other numbers or limits are not the region's,
+    /// is refused under the limit that differs.
+    Region(&'static ArenaRegion),
+    /// The config the open is handed, laid out at the open ([`ArenaPlan::count`]).
+    Config,
+}
+
+/// The rows of a session's tables a build knows when it is compiled: the plan of a session of
+/// `shape` under `limits` ([`ArenaPlan::planned`]), evaluated where the region is a constant,
+/// so an open by it runs none of the walk.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ArenaRegion {
+    plan: ArenaPlan,
+    shape: PlanShape,
+    limits: SessionLimits,
+}
+
+impl ArenaRegion {
+    /// The region of a session of `shape` under `limits`, refused as [`ArenaPlan::planned`]
+    /// refuses it.
+    pub const fn of(shape: PlanShape, limits: SessionLimits) -> Result<Self, ArenaRefused> {
+        match ArenaPlan::planned(shape, &limits) {
+            Ok(plan) => Ok(Self {
+                plan,
+                shape,
+                limits,
+            }),
+            Err(refused) => Err(refused),
+        }
+    }
+
+    /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
+    /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
+    /// and limits. A region holds a row of text for each endpoint it may dial, so a config that
+    /// dials fewer leaves rows unwritten, and one that dials more is refused under
+    /// `MAX_STATIC_CONNECT`; any other number of the config, or limits, not the region's is
+    /// refused under [`ArenaLimit::ShapeDiffersFromBuild`] or
+    /// [`ArenaLimit::LimitsDifferFromBuild`], whose rows would be sized for another session.
+    pub(crate) fn lay_out_on<E: EndpointList>(
+        &self,
+        plan: &mut ArenaPlan,
+        config: &CoopConfig<E>,
+    ) -> Result<(), ArenaRefused> {
+        let shape = PlanShape::of(config);
+        hold(ArenaLimit::MaxStaticConnect, shape.dials, self.shape.dials)?;
+        // The handshakes a config admits size nothing for a session that listens on nothing
+        // (`links_for`), which a region of no listener lays out for any.
+        let accept_pending = if shape.listens == 0 {
+            self.shape.accept_pending
+        } else {
+            shape.accept_pending
+        };
+        let undialled = PlanShape {
+            dials: self.shape.dials,
+            accept_pending,
+            ..shape
+        };
+        if undialled != self.shape {
+            return Err(ArenaRefused::Limit {
+                limit: ArenaLimit::ShapeDiffersFromBuild,
+                why: UnlentRows::NoCeiling,
+            });
+        }
+        if config.limits != self.limits {
+            return Err(ArenaRefused::Limit {
+                limit: ArenaLimit::LimitsDifferFromBuild,
+                why: UnlentRows::NoCeiling,
+            });
+        }
+        plan.clone_from(&self.plan);
+        Ok(())
+    }
 }
 
 impl HeldPlaces {
@@ -683,6 +765,13 @@ pub enum ArenaLimit {
     MaxPendingDeclares,
     RxPoolBuffers,
     TxPoolSlots,
+    /// The config's limits are not those of the region the build laid out when it was compiled
+    /// ([`ArenaRegion`]): the build lays out no arena for any other.
+    LimitsDifferFromBuild,
+    /// A number of the config besides the endpoints it dials ([`PlanShape`]) is not that of the
+    /// region the build laid out when it was compiled ([`ArenaRegion`]): the build lays out no
+    /// arena for any other.
+    ShapeDiffersFromBuild,
 }
 
 impl ArenaLimit {
@@ -730,6 +819,8 @@ impl ArenaLimit {
             Self::MaxPendingDeclares => "MAX_PENDING_DECLARES",
             Self::RxPoolBuffers => "RX_POOL_BUFFERS",
             Self::TxPoolSlots => "TX_POOL_SLOTS",
+            Self::LimitsDifferFromBuild => "LIMITS_DIFFER_FROM_BUILD",
+            Self::ShapeDiffersFromBuild => "SHAPE_DIFFERS_FROM_BUILD",
         }
     }
 }
@@ -1287,7 +1378,7 @@ impl Iterator for HeldPlacesWalk {
 /// What a session's arena holds, row by row, and the rows each layer lends its tables from
 /// ([`Self::transport`], [`Self::session`], [`Self::places`]). The arena is the sum of the rows'
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
     /// The rows laid out, in order, the first `len` of them: a row is written when it is laid
     /// out, and the rows past `len` are [`UNLAID_ROW`] in every plan, so two plans of the same rows
@@ -3266,6 +3357,8 @@ mod tests {
             MaxPendingDeclares,
             RxPoolBuffers,
             TxPoolSlots,
+            LimitsDifferFromBuild,
+            ShapeDiffersFromBuild,
         ];
         let mut names = alloc::vec::Vec::new();
         for limit in all {
