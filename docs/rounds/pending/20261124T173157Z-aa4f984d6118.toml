@@ -1,0 +1,28 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport", "watching-zenoh/local-ci-gates"]
+decision = '''
+The pico C ABI release (coop engine, nostd, profile host-peer-ext) takes a second integration toward docs/c-abi-architecture.md, and the two hosted reds of the previous main (Fuzz, Mutation) are paid in it.
+
+Reds: the fuzz targets build against the engine's current port traits, a stream past its link's bound is handed over in smaller calls, and two Push names are gated by their one reader's cfg. The mutation scopes of the codecs and the pico doors commit their first rows, with tests that kill the mutants each scope missed, and the deploy files state the task ceiling the code is compiled with.
+
+Sessions and driver: a dial's endpoint is handed over when the dial ends rather than copied, a dial holds its link's place rather than its whole shape, a heap link's driver is made in its claimed cell, a datagram is admitted in one body for both reads, a face's role is read off its row, the transport's lent tables are held whole, an arena plan's and a group's member rows are bounded lists.
+
+Transport: a link's three time stamps sit under one lock and are reached through doors; a received handshake step's facts, its OpenAck admission and its bound are judged in one hold; the SN gate judges once whatever the mode. Moving a reassembly slot's chunk drive out of line was measured to keep a second copy of the engine step (+723 bytes) and is reverted.
+
+Doors: pico's canonize refusal codes and its out-of-memory refusal past the key bound are answered as pico answers them; the time family, zid rendering, channel pull and free, VLE encoding, deserialisation and a key's wire declaration drop share one body each; a publisher and a querier reach the session through their filter.
+
+The size ledger reads 1.7196 times zenoh-pico in total (from 1.7599): sessions 3.0887, doors 2.6543, transport 3.0393, driver 1.7328, and its rows are tightened to that reading.
+'''
+changes = '''
+crates/wz-session-core: session_actions.rs (LinkStamps under one lock, OpenAck admission in one hold), drive.rs, reassembly_dispatch.rs, round.rs, bounded table rows; tests for the stamps.
+crates/wz-runtime-coop: face_life.rs, faces.rs (end_dial, read_face role), transport/state.rs, ip_stack.rs (LinkPlace), link_cells.rs, udp_link.rs.
+crates/wz-capi-coop: engine.rs (carry_out takes a FaceStep, lent transport tables whole), engine/group.rs, arena plan rows.
+crates/wz-capi-pico: platform.rs, os/unix.rs, bytes.rs, zid.rs, pubsub.rs, querier.rs, handlers.rs, codec.rs, serde.rs, keyexpr.rs, endpoint and canonize refusal codes; tests.
+crates/wz-codecs and crates/wz-capi-pico tests that kill the missed mutants; crates/wz-fuzz targets; crates/wz-runtime-tokio follows the stamp doors.
+deploy/mutation_ratchet.json first rows; deploy/mcu_client_and_group.yaml and mcu_session_acceptor.yaml task ceiling; deploy/size_ledger.json rows tightened; docs/reason-review-pins.md three session-close-ingress rows re-read.
+'''
+verification = '''
+Run through bx from the integration worktree on fd18d93f2 (the tip before the ledger row commit): the integration verify sweep passed every lane (28: clippy of each changed crate with -D warnings, the changed crates' tests, the coop, pico and lwIP feature combinations, Layer C1nh). The size ledger --measure on fd18d93f2: sessions 97,905 / doors 55,773 / transport 44,804 / driver 32,512 / keyexpr 11,776 / codec 31,652 / language 18,777 bytes against zenoh-pico, total 1.7196. The transport rise on 917c59d2e (45,527) was attributed by a per-module read of both builds to the out-of-line chunk drive and reverted. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate, upstream_citation_anchor_gate, prose_named_identifier_gate, logic_census_coverage_gate, totality_debt_gate, wz_config.py --check.
+'''
+carry = '''
+Open: the size areas above zenoh-pico are sessions 3.09, transport 3.04, doors 2.65 and driver 1.73. Twenty-three generated extension walk markers decode the same way and link 89 bytes each, which the codec generator can share (an SCE item); the SCE pin move for the runtime size branch, TD-063, TD-109, TD-003 and the parent-tag flag of a gated body still waits on the SCE queue. A key composed from a mapped id and a suffix is assembled on the heap after open in the release; Layer C1nh has no family that receives one, and both are being fixed. The pico ABI performance matrix was started and not yet read.
+'''
