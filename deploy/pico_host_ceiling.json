@@ -168,14 +168,26 @@
       }
     },
     "pico-release-windows-x64": {
-      "ratio_at_most": null,
+      "ratio_at_most": 4.797,
       "debt": "debt-pico-host-size-ceiling",
-      "reading": null
+      "reading": {
+        "date": "2026-11-24",
+        "wz_text": 1963810,
+        "pico_text": 409384,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
+      }
     },
     "pico-release-windows-x86": {
-      "ratio_at_most": null,
+      "ratio_at_most": 5.6461,
       "debt": "debt-pico-host-size-ceiling",
-      "reading": null
+      "reading": {
+        "date": "2026-11-24",
+        "wz_text": 1793955,
+        "pico_text": 317739,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
+      }
     }
   }
 }
