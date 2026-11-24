@@ -434,6 +434,10 @@ pub struct LinkTables {
     /// group claims when it is joined; `None` when the session lent none, and a group's stack
     /// then gives it a buffer of its own.
     group_rx: Option<LentByteCells>,
+    /// The slots the session's udp ports read their datagrams into and hold them in until the
+    /// links of their peers take them, which the ports share; `None` when the session lent none,
+    /// and a port's stack then gives it memory of its own.
+    port_rx: Option<LentByteCells>,
 }
 
 impl LinkTables {
@@ -446,6 +450,7 @@ impl LinkTables {
             places: None,
             slot_len,
             group_rx: None,
+            port_rx: None,
         }
     }
 
@@ -458,6 +463,7 @@ impl LinkTables {
             places: Some(places),
             slot_len: tx.size(),
             group_rx: None,
+            port_rx: None,
         }
     }
 
@@ -469,6 +475,24 @@ impl LinkTables {
             group_rx: Some(group_rx),
             ..self
         }
+    }
+
+    /// These tables with `port_rx`, the slots the session's udp ports share for their datagrams:
+    /// a port claims one to read a datagram into, holds it while the datagram waits for its peer's
+    /// link, and gives it back once the link took it.
+    #[must_use]
+    pub const fn with_port_rx(self, port_rx: LentByteCells) -> Self {
+        Self {
+            port_rx: Some(port_rx),
+            ..self
+        }
+    }
+
+    /// The table the session's udp ports claim their datagrams' slots from: `None` when the
+    /// session lent none, and a port's stack gives it memory of its own. A datagram that finds
+    /// every slot of a lent table held is dropped and counted, as a full socket buffer drops one.
+    pub const fn port_rx(&self) -> Option<LentByteCells> {
+        self.port_rx
     }
 
     /// The table a group the session joins claims its receive buffer from: `None` when the

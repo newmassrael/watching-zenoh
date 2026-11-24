@@ -47,6 +47,9 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
+//! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
+//!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
+//!   build's), each a link's batch long, which the ports share, lent with the links' tables;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
 //!   state's tables (`SessionRows::lane_bytes`);
@@ -186,6 +189,9 @@ const LANE_ROWS: usize = 5;
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
+/// The slots of the datagrams the udp ports of a session that listens hold, and their flags
+/// (`listen`).
+const PORT_RX_ROWS: usize = 2 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
@@ -227,6 +233,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LANE_ROWS
     + REASSEMBLY_ROWS
     + GROUP_RX_ROWS
+    + PORT_RX_ROWS
     + HANDED_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
@@ -559,6 +566,9 @@ pub struct TransportRows {
     /// The receive buffers of the groups the session may join: how many, and the bytes of each.
     #[cfg(feature = "group")]
     group_rx: (usize, usize),
+    /// The slots of the datagrams the session's udp ports hold: how many, and the bytes of each.
+    #[cfg(feature = "listen")]
+    port_rx: (usize, usize),
 }
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
@@ -617,7 +627,23 @@ impl TransportRows {
         let tables = LinkTables::pooled(rx, tx, lend.byte_cells(0, self.links));
         #[cfg(not(feature = "listen"))]
         let tables = LinkTables::new(rx, tx, self.link_bytes);
-        self.group_rx_from(tables, lend)
+        let tables = self.group_rx_from(tables, lend);
+        self.port_rx_from(tables, lend)
+    }
+
+    /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
+    /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
+    /// ports share them, a slot of the links' batch each.
+    #[cfg(feature = "listen")]
+    fn port_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+        let (slots, bytes) = self.port_rx;
+        tables.with_port_rx(lend.byte_cells(bytes, slots))
+    }
+
+    /// A build that listens on no port lends no port a slot.
+    #[cfg(not(feature = "listen"))]
+    fn port_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+        tables
     }
 
     /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
@@ -788,6 +814,8 @@ impl ArenaPlan {
                 handed_legs: 0,
                 #[cfg(feature = "group")]
                 group_rx: (0, 0),
+                #[cfg(feature = "listen")]
+                port_rx: (0, 0),
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -909,6 +937,26 @@ impl ArenaPlan {
                 "PICO_MULTICAST_BATCH_BYTES",
                 buffers,
                 bytes,
+            );
+        }
+        // The slots the udp ports of a session that listens read their datagrams into and hold
+        // them in until the links of their peers take them, lent with the links' tables
+        // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
+        // session that listens on nothing holds none.
+        #[cfg(feature = "listen")]
+        {
+            let slots = plan.lent(
+                "UDP_PORT_SLOTS",
+                Quota::at_most(limits.udp_port_slots()),
+                caps::UDP_PORT_SLOTS,
+            );
+            let slots = if config.listen.count() > 0 { slots } else { 0 };
+            plan.transport.port_rx = (slots, link_bytes);
+            plan.put_table(
+                ["link port datagram flags", "link port datagram slots"],
+                "UDP_PORT_SLOTS",
+                slots,
+                link_bytes,
             );
         }
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
