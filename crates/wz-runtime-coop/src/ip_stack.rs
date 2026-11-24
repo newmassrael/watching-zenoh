@@ -411,15 +411,30 @@ impl LinkPlace {
         })
     }
 
-    /// A datagram link as the stack opens it: waited on by its owner when the stack says so.
-    fn datagram<U: DatagramSocket>(
+    /// The datagram link over `socket`, over the buffers `rx` and `tx`, as the stack opens it:
+    /// its replies go to `peer` (a dial's end, a port's source), or to whoever first opens a
+    /// session when there is none (an acceptor's); refused when the build's rows do not name both
+    /// its ends, made in a cell when the stack was lent some, and waited on by its owner when the
+    /// stack says so. Left to the compiler to inline: a build that only dials has one caller, and
+    /// a body of its own there would add a call and save nothing.
+    fn datagram<U: DatagramSocket + 'static>(
         &self,
-        mut link: UdpDriver<U, RxBuffer, TxBuffer>,
-    ) -> UdpDriver<U, RxBuffer, TxBuffer> {
-        if self.owner_waits {
-            link.wait_by_owner();
-        }
-        link
+        socket: U,
+        peer: Option<SocketAddr>,
+        rx: RxBuffer,
+        tx: TxBuffer,
+    ) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        heap_link(
+            self.cells.as_ref(),
+            datagram_ends_fit(&socket, peer),
+            || {
+                let mut link = UdpDriver::with_peer(socket, peer, rx, tx);
+                if self.owner_waits {
+                    link.wait_by_owner();
+                }
+                link
+            },
+        )
     }
 }
 
@@ -545,15 +560,7 @@ where
                 let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(dial_bind(self.local, to.at)).map_err(bind_refused::<U>)?;
-                heap_link(
-                    self.shape.place.cells.as_ref(),
-                    datagram_ends_fit(&socket, Some(to.at)),
-                    || {
-                        self.shape
-                            .place
-                            .datagram(UdpDriver::initiator_in(socket, to.at, rx, tx))
-                    },
-                )
+                self.shape.place.datagram(socket, Some(to.at), rx, tx)
             }
             LinkProto::Tcp if !D::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tcp => {
@@ -607,15 +614,7 @@ where
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
-        heap_link(
-            self.shape.place.cells.as_ref(),
-            datagram_ends_fit(&socket, None),
-            || {
-                self.shape
-                    .place
-                    .datagram(UdpDriver::acceptor_in(socket, rx, tx))
-            },
-        )
+        self.shape.place.datagram(socket, None, rx, tx)
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
@@ -869,16 +868,10 @@ impl<U: DatagramSocket + 'static> LinkListener<HeapLink> for IpUdpListener<U> {
         // As the `tcp/` listener's: the source is off the port before the buffers are claimed, so
         // one the session's tables have none left for is let go of, not left waiting.
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
-        heap_link(
-            self.shape.place.cells.as_ref(),
-            datagram_ends_fit(&share, Some(peer)),
-            || {
-                self.shape
-                    .place
-                    .datagram(UdpDriver::initiator_in(share, peer, rx, tx))
-            },
-        )
-        .map(Some)
+        self.shape
+            .place
+            .datagram(share, Some(peer), rx, tx)
+            .map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
@@ -2547,6 +2540,43 @@ mod tests {
         assert!(
             accepting.link_endpoints().is_none(),
             "no peer until an InitSyn names one"
+        );
+    }
+
+    /// An acceptor of links lent cells is placed in one, as a dialled link is, and has no peer
+    /// until an `InitSyn` names one; an acceptor past the cells is refused as exhausted.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_acceptor_of_links_lent_cells_is_placed_in_one() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        let size = links.link_cell_bytes();
+        let bytes = Arena::byte_cells_bytes(size, 1).expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every link placed in it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let cells = arena.lend_byte_cells(size, 1).expect("one cell");
+        links.lend_cells(cells);
+
+        let accepting = links
+            .open_acceptor(7447)
+            .expect("an accepting link in the cell");
+        assert_eq!(cells.in_use(), 1, "the acceptor took the cell");
+        assert!(
+            accepting.sink.link_endpoints().is_none(),
+            "no peer until an InitSyn names one"
+        );
+        assert!(
+            matches!(links.open_acceptor(7448), Err(LinkOpenError::Exhausted)),
+            "an acceptor past the cells is refused"
         );
     }
 

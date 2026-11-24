@@ -666,11 +666,70 @@ impl Settled {
     }
 }
 
-/// A cell taken for a task: the cell, where its future lies and where its output will.
-struct Claimed {
+/// A free cell taken for a task of type `F` (`Spawning`), its future not yet written: the place
+/// the future is made in, so a task of some size is built where it will be polled and not in a
+/// frame of its spawn and then moved. It is started once, by a call that consumes it; let go of
+/// unstarted, it gives its cell back, and whatever was written in its place is not dropped.
+pub(crate) struct ClaimedPlace<F: Future + 'static> {
     cell: &'static TaskCell,
     buf: *mut u8,
     out_off: usize,
+    task: PhantomData<fn() -> F>,
+}
+
+impl<F: Future + 'static> ClaimedPlace<F> {
+    /// Where the task's future is written: long enough and aligned for an `F`, with room for its
+    /// output behind it, and reached by nothing else until the task starts.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut F {
+        self.buf.cast::<F>()
+    }
+
+    /// Write `fut` in this place and start the task.
+    #[inline(always)]
+    pub(crate) fn start_with(mut self, fut: F) -> &'static TaskCell {
+        // SAFETY: the place is long enough and aligned for an `F` (the claim checked a fixed
+        // table's cells, or gave the cell the bytes) and only this claim reaches it, so the write
+        // leaves a whole `F` there that nothing else holds.
+        unsafe {
+            ptr::write(self.as_mut_ptr(), fut);
+            self.start_in()
+        }
+    }
+
+    /// Start the task whose future was written in this place: the cell is the task's from here,
+    /// and the task drops the future.
+    ///
+    /// # Safety
+    /// A whole `F` lies at `Self::as_mut_ptr`, written since the claim, and nothing else holds
+    /// it.
+    #[inline(always)]
+    pub(crate) unsafe fn start_in(self) -> &'static TaskCell {
+        // Kept from its drop: an unstarted claim gives its cell back, and this cell now holds a
+        // live task.
+        let this = ManuallyDrop::new(self);
+        let drop_output: Option<DropFn> = if core::mem::needs_drop::<F::Output>() {
+            Some(drop_erased::<F::Output>)
+        } else {
+            None
+        };
+        ExecutorState::go_live(
+            this.cell,
+            Ops {
+                poll: poll_erased::<F>,
+                drop_future: drop_erased::<F>,
+                drop_output,
+            },
+            this.out_off,
+        );
+        this.cell
+    }
+}
+
+impl<F: Future + 'static> Drop for ClaimedPlace<F> {
+    fn drop(&mut self) {
+        // Unstarted: no task lies in the cell, so nothing in it is dropped.
+        ExecutorState::release(self.cell);
+    }
 }
 
 /// A refused spawn, which hands the future back: the caller decides what the
@@ -954,38 +1013,29 @@ impl ExecutorState {
     ///
     /// The future is a value passed through here and handed back in the refusal, so a future of
     /// some size is copied through this frame and the caller's result: a large one is made in
-    /// the cell by [`Self::spawn_with`] instead.
+    /// the place [`Self::claim`] takes for it instead.
     pub(crate) fn spawn<F: Future + 'static>(
         &self,
         fut: F,
         set: u32,
     ) -> Result<&'static TaskCell, SpawnRefused<F>> {
         match self.claim::<F>(set) {
-            Ok(claimed) => Ok(Self::start(claimed, fut)),
+            Ok(place) => Ok(place.start_with(fut)),
             Err(why) => Err(SpawnRefused { future: fut, why }),
         }
     }
 
-    /// Make the future of a task IN a free cell and mark it ready, or refuse it, counted.
-    ///
-    /// `make` runs only once a cell is taken, and what it builds is written where the task will
-    /// poll it, so no frame of this call holds the future: a spawn that takes a future by value
-    /// and hands it back on a refusal puts it on the stack four times over (a session's task is
-    /// 4.7 KB, which was a 19 KB frame). A refusal drops `make` with what it captured.
-    pub(crate) fn spawn_with<F: Future + 'static>(
-        &self,
-        make: impl FnOnce() -> F,
-        set: u32,
-    ) -> Result<&'static TaskCell, SpawnRefusal> {
-        let claimed = self.claim::<F>(set)?;
-        Ok(Self::start(claimed, make()))
-    }
-
-    /// Take a free cell for a future of type `F`, or refuse, counted: the cell is `Spawning`,
-    /// held by this caller alone, and the offset its output will lie at comes with it. Only the
+    /// Take a free cell for a future of type `F`, or refuse, counted: the place the future is
+    /// made in, `Spawning` and held by this caller alone until it starts the task there or lets
+    /// go of the place, which gives the cell back. A task made in its place is not moved through
+    /// a frame: a spawn that takes a future by value and hands it back on a refusal puts it on
+    /// the stack four times over (a session's task is 4.7 KB, which was a 19 KB frame). Only the
     /// sizes are `F`'s; the search is [`Self::claim_bytes`], one body for every task type.
     #[inline(always)]
-    fn claim<F: Future + 'static>(&self, set: u32) -> Result<Claimed, SpawnRefusal> {
+    pub(crate) fn claim<F: Future + 'static>(
+        &self,
+        set: u32,
+    ) -> Result<ClaimedPlace<F>, SpawnRefusal> {
         let out_off = round_up(size_of::<F>(), align_of::<F::Output>());
         let need = out_off.saturating_add(size_of::<F::Output>());
         let align = if align_of::<F>() > align_of::<F::Output>() {
@@ -994,7 +1044,12 @@ impl ExecutorState {
             align_of::<F::Output>()
         };
         let (cell, buf) = self.claim_bytes(set, need, align)?;
-        Ok(Claimed { cell, buf, out_off })
+        Ok(ClaimedPlace {
+            cell,
+            buf,
+            out_off,
+            task: PhantomData,
+        })
     }
 
     /// Take a free cell for a task of `need` bytes at `align`, or refuse, counted.
@@ -1074,31 +1129,6 @@ impl ExecutorState {
         });
     }
 
-    /// Write `fut` into the cell `claimed` names and make the task live.
-    #[inline(always)]
-    fn start<F: Future + 'static>(claimed: Claimed, fut: F) -> &'static TaskCell {
-        let Claimed { cell, buf, out_off } = claimed;
-        // SAFETY: the cell is `Spawning`, which only the caller holds, and its bytes
-        // are long enough and aligned for `F` and its output, which `claim` checked
-        // (a fixed table) or gave the cell (a grown one).
-        unsafe { ptr::write(buf.cast::<F>(), fut) };
-        let drop_output: Option<DropFn> = if core::mem::needs_drop::<F::Output>() {
-            Some(drop_erased::<F::Output>)
-        } else {
-            None
-        };
-        Self::go_live(
-            cell,
-            Ops {
-                poll: poll_erased::<F>,
-                drop_future: drop_erased::<F>,
-                drop_output,
-            },
-            out_off,
-        );
-        cell
-    }
-
     /// Make the task whose future `cell` now holds live, driven by `ops`, its output to lie at
     /// `out_off`: one body for every task type.
     #[inline(never)]
@@ -1124,7 +1154,9 @@ impl ExecutorState {
 
     /// Look at `cell` inside the section `cs`, the pass that holds it: a live task that was
     /// aborted is to be swept and one whose wake flag is raised polled, either taken by the pass
-    /// (`Polling`); anything else is left as it is.
+    /// (`Polling`); anything else is left as it is. Out of line: a pass looks at a cell in its
+    /// section and again after a wake it gave, and the two looks are one body.
+    #[inline(never)]
     fn classify(cell: &'static TaskCell, cs: CriticalSection<'_>) -> Act {
         cell.meta_in(cs, |meta| {
             if meta.state != State::Live {
@@ -1147,7 +1179,9 @@ impl ExecutorState {
 
     /// Write how the pass left `cell` into its bookkeeping, inside the section `cs`: a task that
     /// waits is live again; a task that is over is `Done` for its handle, or, with no handle,
-    /// free, once an output that needs dropping is dropped ([`Settled::carry_out`]).
+    /// free, once an output that needs dropping is dropped ([`Settled::carry_out`]). Out of line:
+    /// a pass and a sweep of a set's tasks settle cells, and the settling is one body.
+    #[inline(never)]
     fn settle(cell: &'static TaskCell, left: Left, cs: CriticalSection<'_>) -> Settled {
         cell.meta_in(cs, |meta| {
             let mut settled = Settled::default();
@@ -1760,6 +1794,55 @@ mod tests {
         assert_eq!(state.capacity(), 2);
         ExecutorState::release(first);
         ExecutorState::release(second);
+    }
+
+    /// A place claimed and let go of unstarted gives its cell back; one started is the task's,
+    /// which is polled where it was written and keeps the cell. Turned red by a claim whose drop
+    /// keeps its cell, or by a start that lets the claim's drop give the cell back.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_claimed_place_let_go_unstarted_gives_its_cell_back_and_a_started_one_is_the_tasks() {
+        static POLLED_AT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        struct Here(u64);
+        impl Future for Here {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                assert_eq!(self.0, 7, "the task polled is the one written");
+                let at: *const Here = &*self;
+                POLLED_AT.store(at as usize, core::sync::atomic::Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+        let state = ExecutorState::reserved(1, 64);
+        let unstarted = state.claim::<Here>(0).expect("the one cell");
+        assert_eq!(
+            state.claim::<Here>(0).map(|_| ()),
+            Err(SpawnRefusal::NoTaskCell),
+            "the claim holds its cell"
+        );
+        drop(unstarted);
+        let mut place = state
+            .claim::<Here>(0)
+            .expect("the cell an unstarted claim gave back");
+        let at = place.as_mut_ptr();
+        // SAFETY: the place is this claim's alone, and a whole `Here` is written in it before the
+        // task starts.
+        let cell = unsafe {
+            at.write(Here(7));
+            place.start_in()
+        };
+        assert_eq!(
+            state.claim::<Here>(0).map(|_| ()),
+            Err(SpawnRefusal::NoTaskCell),
+            "the started task holds its cell"
+        );
+        state.run_until_idle();
+        assert_eq!(
+            POLLED_AT.load(core::sync::atomic::Ordering::SeqCst),
+            at as usize,
+            "the task is polled where it was written"
+        );
+        assert!(cell.with_meta(|meta| meta.state == State::Live));
     }
 
     /// A pass polls the task a waker raised and sweeps the one its handle aborted, and leaves the

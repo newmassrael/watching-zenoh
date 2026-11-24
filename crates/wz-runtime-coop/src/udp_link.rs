@@ -409,7 +409,9 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
         Self::with_peer(socket, Some(peer), rx_buf, tx)
     }
 
-    fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
+    /// [`Self::initiator_in`] when `peer` is known, [`Self::acceptor_in`] when it is not: what
+    /// a stack that opens both from one body asks.
+    pub(crate) fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.capacity();
         Self {
             socket,

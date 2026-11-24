@@ -29,7 +29,7 @@ use wz_runtime_core::RuntimeError;
 use alloc::rc::Rc;
 
 use crate::atomic::{AtomicBool, Ordering};
-use crate::executor::{flag_waker, SpawnRefusal, SpawnRefused, TaskJoin};
+use crate::executor::{flag_waker, ClaimedPlace, SpawnRefusal, SpawnRefused, TaskJoin};
 use crate::runtime_impl::CoopRuntime;
 use crate::time::ClockSource;
 
@@ -80,6 +80,37 @@ impl<T> Future for CoopLocalJoinHandle<T> {
 }
 
 impl<T> Unpin for CoopLocalJoinHandle<T> {}
+
+/// A cell a local set took for a task of type `F`, its future not yet made in it
+/// (`CoopLocalSet::claim_local`): the executor's claim, whose start answers the task's handle.
+/// Let go of unstarted, it gives the cell back.
+pub(crate) struct LocalPlace<F: Future + 'static>(ClaimedPlace<F>);
+
+impl<F: Future + 'static> LocalPlace<F> {
+    /// Write `fut` in this place and start the task.
+    fn start_with(self, fut: F) -> CoopLocalJoinHandle<F::Output> {
+        CoopLocalJoinHandle::new(TaskJoin::attached(self.0.start_with(fut)))
+    }
+
+    /// Where the task's future is written: long enough and aligned for an `F`, and reached by
+    /// nothing else until the task starts.
+    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut F {
+        self.0.as_mut_ptr()
+    }
+
+    /// Start the task whose future was written in this place, and answer its handle.
+    ///
+    /// # Safety
+    /// A whole `F` lies at `Self::as_mut_ptr`, written since the claim, and nothing else holds
+    /// it.
+    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    pub(crate) unsafe fn start_in(self) -> CoopLocalJoinHandle<F::Output> {
+        // SAFETY: the caller's contract, which is the claim's.
+        let cell = unsafe { self.0.start_in() };
+        CoopLocalJoinHandle::new(TaskJoin::attached(cell))
+    }
+}
 
 /// A `!Send` task pool bound to one [`CoopRuntime`]: a view of the runtime's task
 /// table that takes futures that need not be `Send`.
@@ -217,8 +248,21 @@ impl<C: ClockSource> CoopLocalSet<C> {
     where
         F: Future + 'static,
     {
-        let cell = self.runtime.inner.executor.spawn_with(make, self.set())?;
-        Ok(CoopLocalJoinHandle::new(TaskJoin::attached(cell)))
+        Ok(self.claim_local::<F>()?.start_with(make()))
+    }
+
+    /// Take a cell for a local task of type `F`, whose future the caller then makes in it, or
+    /// refuse, counted: what spawns a task whose parts are written in its cell one by one, so
+    /// neither the task nor a value it is built of is moved through a frame.
+    pub(crate) fn claim_local<F>(&self) -> Result<LocalPlace<F>, SpawnRefusal>
+    where
+        F: Future + 'static,
+    {
+        self.runtime
+            .inner
+            .executor
+            .claim::<F>(self.set())
+            .map(LocalPlace)
     }
 
     /// One executor pass: the runtime's timer table first, then every ready task

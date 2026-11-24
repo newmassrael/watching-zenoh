@@ -358,7 +358,9 @@ pub(crate) fn set_option<T>(fd: c_int, level: c_int, name: c_int, value: &T) -> 
     }
 }
 
-/// Switch the boolean socket option `name` of `level` on for `fd`.
+/// Switch the boolean socket option `name` of `level` on for `fd`. Out of line: every socket a
+/// stack opens sets its flags here, one body for the call and the read of `errno`.
+#[inline(never)]
 pub(crate) fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int> {
     set_option(fd, level, name, &(1 as c_int))
 }
@@ -367,7 +369,9 @@ pub(crate) fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int
 /// refuses. A socket is made this way and not by a flag of `socket` or `accept4`, which Neutrino
 /// does not have: the one call is the same on both kernels, and a connection a non-blocking
 /// listener hands over is made blocking here whether the kernel's accept passed the flag on (the
-/// BSD one does) or not (Linux's).
+/// BSD one does) or not (Linux's). Out of line: a dial, its connection made and each port's socket
+/// set it, and the two calls with their reads of `errno` are one copy.
+#[inline(never)]
 pub(crate) fn set_nonblocking(fd: c_int, on: bool) -> Result<(), c_int> {
     // SAFETY: plain system call with value arguments.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -1155,6 +1159,36 @@ mod tests {
         assert_eq!(
             get(v6.fd(), libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_HOPS),
             6
+        );
+    }
+
+    /// A flag is switched on and read back as on; a descriptor that is not one is the kernel's
+    /// refusal, with its errno.
+    #[test]
+    fn a_sockets_flag_is_switched_on_and_a_bad_descriptor_is_refused() {
+        let socket = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+        let read = |name: c_int| -> c_int {
+            let mut value: c_int = -1;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: `value` and `len` are live and writable, and `len` is `value`'s size.
+            let rc = unsafe {
+                libc::getsockopt(
+                    socket.fd(),
+                    libc::SOL_SOCKET,
+                    name,
+                    (&mut value as *mut c_int).cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0);
+            value
+        };
+        assert_eq!(read(libc::SO_BROADCAST), 0, "a fresh socket has it off");
+        set_flag(socket.fd(), libc::SOL_SOCKET, libc::SO_BROADCAST).expect("switched on");
+        assert_ne!(read(libc::SO_BROADCAST), 0);
+        assert_eq!(
+            set_flag(-1, libc::SOL_SOCKET, libc::SO_BROADCAST),
+            Err(libc::EBADF)
         );
     }
 
