@@ -277,9 +277,6 @@ pub trait Presence {
     /// it is not.
     fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> Self::Table<T>;
 
-    /// The bytes of an arena [`Self::lent_from`] takes for `rows`. `None` past the address space.
-    fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize>;
-
     /// Whether the kind is kept.
     const KEPT: bool;
 
@@ -322,18 +319,11 @@ impl<T> Unkept<T> {
 pub trait LentTable {
     /// The table of `rows` rows `lend` lends.
     fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self;
-
-    /// The bytes of an arena [`Self::lent_from`] takes for `rows`. `None` past the address space.
-    fn arena_bytes(rows: usize) -> Option<usize>;
 }
 
 impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
     fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
         SlotMap::lent_from(lend, rows)
-    }
-
-    fn arena_bytes(rows: usize) -> Option<usize> {
-        SlotMap::<K, T, N, Lent>::arena_bytes(rows)
     }
 }
 
@@ -358,10 +348,6 @@ impl Presence for Present {
 
     fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> T {
         T::lent_from(lend, rows)
-    }
-
-    fn arena_bytes<T: LentTable>(rows: usize) -> Option<usize> {
-        T::arena_bytes(rows)
     }
 
     const KEPT: bool = true;
@@ -425,10 +411,6 @@ impl Presence for Absent {
 
     fn lent_from<T: LentTable>(_lend: &mut TableLender<'_>, _rows: usize) -> AbsentTable<T> {
         AbsentTable::new()
-    }
-
-    fn arena_bytes<T: LentTable>(_rows: usize) -> Option<usize> {
-        Some(0)
     }
 
     const KEPT: bool = false;
@@ -1077,13 +1059,13 @@ pub struct TableRows {
 
 impl TableRows {
     /// The write filters' one table: a publisher's and a querier's each.
-    pub fn write_filters(&self) -> usize {
+    pub const fn write_filters(&self) -> usize {
         self.publishers.saturating_add(self.queriers)
     }
 
     /// The Interests: one for each write filter and each matching listener at most, so a filter or
     /// a listener the tables have room for always finds room for its Interest.
-    pub fn interests(&self) -> usize {
+    pub const fn interests(&self) -> usize {
         self.write_filters().saturating_add(self.matching_listeners)
     }
 }
@@ -1206,13 +1188,13 @@ pub enum LegEnded<R> {
 /// The bytes the table of held replies takes of an arena for `rows`; none in a build that holds
 /// none (no `storage-profile`).
 #[cfg(feature = "storage-profile")]
-fn held_arena_bytes(rows: usize) -> Option<usize> {
+const fn held_arena_bytes(rows: usize) -> Option<usize> {
     crate::reply_hold::HeldReplies::<PendingGetHandle, Lent>::arena_bytes(rows)
 }
 
 /// See the `storage-profile` form.
 #[cfg(not(feature = "storage-profile"))]
-fn held_arena_bytes(_rows: usize) -> Option<usize> {
+const fn held_arena_bytes(_rows: usize) -> Option<usize> {
     Some(0)
 }
 
@@ -3089,28 +3071,49 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 
     /// The bytes [`Self::lent`] takes of an arena for `rows`. `None` past the address space.
-    pub fn arena_bytes(rows: &TableRows) -> Option<usize> {
+    /// A const fn, so a build whose limits are fixed lays its session's arena out when it compiles.
+    pub const fn arena_bytes(rows: &TableRows) -> Option<usize> {
         let parts = [
             <Keyexprs<Lent>>::arena_bytes(rows.keyexprs),
             <Subscribers<F, Lent>>::arena_bytes(rows.subscribers),
-            <F::QueryablePresence as Presence>::arena_bytes::<Queryables<F, Lent>>(rows.queryables),
-            <F::LivelinessPresence as Presence>::arena_bytes::<Tokens<Lent>>(rows.tokens),
-            <F::LivelinessPresence as Presence>::arena_bytes::<LivelinessSubscribers<F, Lent>>(
+            kept_bytes::<F::QueryablePresence>(<Queryables<F, Lent>>::arena_bytes(rows.queryables)),
+            kept_bytes::<F::LivelinessPresence>(<Tokens<Lent>>::arena_bytes(rows.tokens)),
+            kept_bytes::<F::LivelinessPresence>(<LivelinessSubscribers<F, Lent>>::arena_bytes(
                 rows.liveliness_subscribers,
-            ),
-            <F::FilterPresence as Presence>::arena_bytes::<Interests<Lent>>(rows.interests()),
-            <F::FilterPresence as Presence>::arena_bytes::<WriteFilters<Lent>>(
+            )),
+            kept_bytes::<F::FilterPresence>(<Interests<Lent>>::arena_bytes(rows.interests())),
+            kept_bytes::<F::FilterPresence>(<WriteFilters<Lent>>::arena_bytes(
                 rows.write_filters(),
-            ),
-            <F::FilterPresence as Presence>::arena_bytes::<MatchingListeners<F, Lent>>(
+            )),
+            kept_bytes::<F::FilterPresence>(<MatchingListeners<F, Lent>>::arena_bytes(
                 rows.matching_listeners,
-            ),
-            <F::GetPresence as Presence>::arena_bytes::<PendingGets<F, Lent>>(rows.pending_gets),
+            )),
+            kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets)),
             held_arena_bytes(rows.held_replies),
         ];
-        parts
-            .iter()
-            .try_fold(0_usize, |sum, part| sum.checked_add((*part)?))
+        let mut sum = 0_usize;
+        let mut at = 0;
+        while at < parts.len() {
+            let Some(part) = parts[at] else {
+                return None;
+            };
+            let Some(next) = sum.checked_add(part) else {
+                return None;
+            };
+            sum = next;
+            at += 1;
+        }
+        Some(sum)
+    }
+}
+
+/// `bytes`, what a table of a kind takes of an arena, where the presence `K` keeps the kind, and
+/// none where it keeps none: a kind left out lends no table.
+const fn kept_bytes<K: Presence>(bytes: Option<usize>) -> Option<usize> {
+    if K::KEPT {
+        bytes
+    } else {
+        Some(0)
     }
 }
 
