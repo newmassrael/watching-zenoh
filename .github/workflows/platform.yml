@@ -677,7 +677,12 @@ jobs:
           # scalars out, no socket, no thread, no callback. It has no cfg(unix) arm, and no
           # hosted runner of either kind had built it before this list named it, so the claim
           # that it builds on Windows was a reading of its source. It owes what dissect owes.
-          for crate in wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect wz-capi-replay; do
+          #
+          # `wz-capi-port` is the port both C ABIs stand on, and its lock and condition variable
+          # are the part of it that differs by host: on macOS `std`'s boxes a pthread object the
+          # first time it is taken, so the port holds its in-place lock there. Its unit tests count
+          # what a lock's first take allocates, which each host answers for its own arm.
+          for crate in wz-capi-port wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect wz-capi-replay; do
             built=FAIL
             (cd crates && cargo build -p "$crate") && built=PASS
             verdict "$crate builds:" "$built"

@@ -14,12 +14,11 @@
 use wz_runtime_core::TimeSource;
 
 #[cfg(feature = "transport-keepalive")]
-use crate::drive::{check_keepalive_deadline, keepalive_wake_deadline};
-use crate::drive::{check_lease_deadline, lease_wake_deadline, SessionEngine};
+use crate::drive::{judge_keepalive, keepalive_deadlines, keepalive_wake_deadline};
+use crate::drive::{judge_lease, lease_deadlines, lease_wake_deadline, SessionEngine};
 use crate::driver_loop::{EventSink, IterationEvent};
 use crate::link::SessionRuntime;
 use crate::session_actions::SessionLinkActions;
-use crate::session_fsm_unicast::SessionFsmUnicastEvent;
 use crate::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 /// The timers of one unicast session, beside its machine ([`SessionEngine`]) and its actions
@@ -83,22 +82,19 @@ impl TransportTimers {
         on_event: &mut dyn EventSink,
     ) {
         // In Established the handshake tracker disarms and the lease's deadline applies: the later
-        // of the session's establishment and its last input, plus the adopted window, the same
-        // arithmetic the lease's check derives again.
-        let deadline: Option<(u64, Option<SessionFsmUnicastEvent>)> =
-            match self.handshake.poll(engine.get_current_state(), now_ms) {
-                Some((deadline_ms, event)) => Some((deadline_ms, Some(event))),
-                None => lease_wake_deadline(actions).map(|deadline_ms| (deadline_ms, None)),
-            };
-        if let Some((deadline_ms, kind)) = deadline {
-            if now_ms >= deadline_ms {
-                match kind {
-                    None => {
-                        let outcome = check_lease_deadline(actions, engine, now_ms);
+        // of the session's establishment and its last input, plus the adopted window. The check
+        // judges the deadlines the wake was read from, so the stamps are read once.
+        match self.handshake.poll(engine.get_current_state(), now_ms) {
+            Some((deadline_ms, event)) => {
+                if now_ms >= deadline_ms {
+                    engine.process_event(event);
+                }
+            }
+            None => {
+                if let Some(deadlines) = lease_deadlines(actions) {
+                    if now_ms >= deadlines.wake() {
+                        let outcome = judge_lease(actions, engine, now_ms, deadlines);
                         on_event.event(IterationEvent::Lease(outcome));
-                    }
-                    Some(event) => {
-                        engine.process_event(event);
                     }
                 }
             }
@@ -107,9 +103,12 @@ impl TransportTimers {
         // raises no event, and a session whose keep-alive worker has stopped (in Closing) arms no
         // deadline and sends nothing after its Close.
         #[cfg(feature = "transport-keepalive")]
-        if let Some(deadline_ms) = keepalive_wake_deadline(actions) {
-            if now_ms >= deadline_ms {
-                let outcome = check_keepalive_deadline(actions, now_ms);
+        if let Some(deadlines) = keepalive_deadlines(actions) {
+            if deadlines
+                .earliest()
+                .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+            {
+                let outcome = judge_keepalive(actions, now_ms, deadlines);
                 on_event.event(IterationEvent::KeepAlive(outcome));
             }
         }

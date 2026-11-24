@@ -158,7 +158,7 @@ fn a_device_dials_a_router_that_pins_its_certificate_and_each_names_the_others_k
     // A length and a batch, as the stream link writes them, and their echo.
     let batch = [0xa5u8; 1024];
     stream
-        .send_parts(&[&1024u16.to_le_bytes(), &batch])
+        .write_all(&[&1024u16.to_le_bytes()[..], &batch[..]].concat())
         .expect("the batch leaves");
     let mut echoed = Vec::new();
     let mut buf = [0u8; 512];

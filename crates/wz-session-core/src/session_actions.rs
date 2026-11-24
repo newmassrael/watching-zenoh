@@ -12873,7 +12873,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the slot of an open window answers its refusal as a message past the budget. It is
         // refused typed, before a byte leaves, with the SN the caller minted for it given back,
         // as `emit_fragment_chain` gives it back for a message past the reassembly cap.
-        let body_len = match crate::frame_encode::encoded_body_len(encode) {
+        let body_len = match crate::tx_buf::try_encoded_len(encode) {
             Ok(len) => len,
             Err(refused) => {
                 self.outbound_frame_sn
@@ -13016,14 +13016,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // at the SN the abandoned fragment would have had, reserved first unless the fragment
         // reserved it already, and the answer the abandon gives.
         let (stop_sn, reserve_stop, abandoned) = loop {
-            if plan.remaining_fragments() == 0 {
-                return Ok(UnicastPush::Pushed);
-            }
-            // Read the SN BEFORE drawing, so it names the fragment
+            // The span is taken before the draw, so its SN names the fragment
             // this iteration is about to send — which is also the SN
             // the stop fragment takes if the draw fails, keeping the
-            // conduit's ring gapless across the abandon.
-            let this_sn = plan.next_sn();
+            // conduit's ring gapless across the abandon. The plan is not read
+            // again once a draw fails.
+            let Some(span) = plan.next_span() else {
+                return Ok(UnicastPush::Pushed);
+            };
+            let this_sn = span.sn;
             // R2926 — each further fragment waits for room against the
             // message's ONE deadline, as upstream's chain waits for a
             // batch per fragment (`io/zenoh-transport/src/common/pipeline.rs`
@@ -13069,12 +13070,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // requires of every accepted transport message.
                 break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
             }
-            // `remaining_fragments() > 0` and `next_span() == None` are the same predicate
-            // negated, so the `None` arm is unreachable; answering rather than panicking keeps
-            // the no_std profiles free of a formatter.
-            let Some(span) = plan.next_span() else {
-                return Ok(UnicastPush::Pushed);
-            };
             if emitted > 0 {
                 self.outbound_frame_sn.reserve_next(priority, reliable);
             }
@@ -14067,7 +14062,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             };
             let encode_body = crate::frame_encode::push_body(push);
             #[cfg(feature = "transport-tx-lend")]
-            let body_len = crate::frame_encode::encoded_body_len(as_encoder(&encode_body));
+            let body_len = crate::tx_buf::try_encoded_len(as_encoder(&encode_body));
             #[cfg(not(feature = "transport-tx-lend"))]
             let body_len = {
                 let mut buf = alloc::vec::Vec::new();
@@ -18642,13 +18637,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// a window to where the snapshot holds another.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
+        self.watch_deadline(self.link.stamps().established_at, window_ms)
+    }
+
+    /// [`Self::declaration_watch_deadline`] of a link established at `established`, for a reader
+    /// that holds the link's stamps already: the lease reads them once for both its deadlines.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn declaration_watch_deadline_after(&self, established: Option<u64>) -> Option<u64> {
+        self.watch_deadline(
+            established,
+            self.params.limits.declaration_sync_rx_no_progress_ms() as u64,
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn watch_deadline(&self, established: Option<u64>, window_ms: u64) -> Option<u64> {
         let progress = self
             .peer_declaration_progress_ms
             .load(core::sync::atomic::Ordering::Acquire);
         if progress == u64::MAX {
             return None;
         }
-        let established = self.link.stamps().established_at?;
+        let established = established?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),

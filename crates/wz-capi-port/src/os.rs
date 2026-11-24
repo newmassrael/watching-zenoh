@@ -21,7 +21,8 @@
 //!
 //! What `std` gives is what the engine had before this seam, so a host build behaves as it did:
 //! the same `std::sync::Mutex` (a poisoned one recovered, as the engine always did), the same
-//! `std::thread`.
+//! `std::thread`. On macOS the lock is the one a host library without `std` holds instead, as
+//! `std`'s boxes a pthread object the first time it is taken and the port's lock takes no memory.
 //!
 //! The functions an image provides without `std`:
 //!
@@ -50,6 +51,19 @@ pub use host::*;
 #[cfg(not(feature = "std"))]
 pub use system::*;
 
+// `std`'s lock and condition variable lie in their own bytes where the system waits on an address
+// (Linux's futex, Windows' slim lock). On macOS they are pthread objects, which must not move once
+// used, so `std` boxes each the first time it is taken: an object made after a session opened
+// would allocate on its first lock. There a `std` build holds the in-place lock a host library
+// without `std` holds, so taking a lock takes no memory on every host.
+#[cfg(any(
+    all(feature = "std", target_os = "macos"),
+    all(not(feature = "std"), feature = "os-sys")
+))]
+pub use in_place::{Condvar, Mutex, MutexGuard};
+#[cfg(all(feature = "std", not(target_os = "macos")))]
+pub use std_lock::{Condvar, Mutex, MutexGuard};
+
 // Without `std` the same names are a kernel's, through the functions an image links, or a host's
 // own calls' in a host library built without `std` (`os-sys`): the feature chooses how the names
 // are answered, not which names there are.
@@ -61,8 +75,6 @@ use sys as system;
 /// The host's: `std`.
 #[cfg(feature = "std")]
 mod host {
-    use std::sync::PoisonError;
-
     /// The identity of a thread, comparable with another's.
     pub type ThreadId = std::thread::ThreadId;
 
@@ -108,6 +120,12 @@ mod host {
     pub fn sleep_ms(ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
+}
+
+/// The host's lock and condition variable where `std`'s lie in their own bytes: `std`'s.
+#[cfg(all(feature = "std", not(target_os = "macos")))]
+mod std_lock {
+    use std::sync::PoisonError;
 
     /// The process's mutex, as the engine held it before this seam.
     pub struct Mutex<T>(std::sync::Mutex<T>);
@@ -117,7 +135,7 @@ mod host {
 
     impl<T> Mutex<T> {
         /// `value`, behind a new mutex.
-        pub fn new(value: T) -> Self {
+        pub const fn new(value: T) -> Self {
             Self(std::sync::Mutex::new(value))
         }
 
@@ -504,9 +522,9 @@ mod kernel {
 }
 
 /// A host's, over its own calls (`os-sys`): for a host library built without `std`, which runs on
-/// a system with threads but has no `std::thread` or `std::sync` to reach them by. The lock and
-/// the condition variable are `wz-host-sync`'s one word each; a thread is the system's, its body
-/// and the word its end sets (which the system answers only by joining it) in a record of
+/// a system with threads but has no `std::thread` or `std::sync` to reach them by. Its lock and
+/// condition variable are the in-place ones (`in_place`); a thread is the system's, its body and
+/// the word its end sets (which the system answers only by joining it) in a record of
 /// `wz-host-sync`'s static pool. Nothing here allocates.
 #[cfg(any(
     all(not(feature = "std"), feature = "os-sys"),
@@ -515,13 +533,6 @@ mod kernel {
 // A test build with `std` compiles this module for its own tests, which do not reach every item.
 #[cfg_attr(all(test, feature = "std"), allow(dead_code))]
 mod sys {
-    use core::cell::UnsafeCell;
-    use core::mem::MaybeUninit;
-    use core::ops::{Deref, DerefMut};
-    use core::ptr::addr_of_mut;
-
-    use wz_host_sync::{RawCondvar, RawLock};
-
     /// The identity of a thread, comparable with another's: the system's number of it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ThreadId(usize);
@@ -567,6 +578,92 @@ mod sys {
     pub fn sleep_ms(ms: u64) {
         wz_host_sync::sleep_ms(ms);
     }
+
+    #[cfg(test)]
+    mod tests {
+        extern crate std;
+
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        use super::*;
+        use crate::os::in_place::{Condvar, Mutex};
+
+        /// A spawned thread runs under an identity of its own, which is the one its spawn gave; it
+        /// reads as running until its body has returned, and as finished after.
+        #[test]
+        fn a_spawned_thread_has_its_own_identity_and_reports_its_end() {
+            let here = current();
+            let go = Arc::new(AtomicBool::new(false));
+            let seen = Arc::new(Mutex::new(None));
+            let (handle, there) = {
+                let go = Arc::clone(&go);
+                let seen = Arc::clone(&seen);
+                spawn(move || {
+                    while !go.load(Ordering::Acquire) {
+                        sleep_ms(1);
+                    }
+                    *seen.lock() = Some(current());
+                })
+                .expect("a host gives a thread")
+            };
+            assert_ne!(here, there, "the spawned thread has an identity of its own");
+            assert!(!handle.is_finished(), "the body has not returned");
+            go.store(true, Ordering::Release);
+            let started = std::time::Instant::now();
+            while !handle.is_finished() {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "the thread never ended"
+                );
+                sleep_ms(1);
+            }
+            handle.join();
+            assert_eq!(
+                *seen.lock(),
+                Some(there),
+                "the thread is the one its spawn named"
+            );
+            assert_eq!(current(), here);
+        }
+
+        #[test]
+        fn a_waiter_on_the_condvar_sees_what_the_notifier_wrote_under_the_mutex() {
+            let shared = Arc::new((Mutex::new(false), Condvar::new()));
+            let notifier = Arc::clone(&shared);
+            let (handle, _) = spawn(move || {
+                sleep_ms(20);
+                *notifier.0.lock() = true;
+                notifier.1.notify_one();
+            })
+            .expect("a host gives a thread");
+            let mut ready = shared.0.lock();
+            while !*ready {
+                ready = shared.1.wait(ready);
+            }
+            drop(ready);
+            handle.join();
+        }
+    }
+}
+
+/// The host's lock and condition variable in place: `wz-host-sync`'s one word each, the value in
+/// the lock's own bytes, so making, taking, waiting on and notifying one take no memory. A host
+/// library without `std` holds them (`os-sys`), and so does a `std` build on macOS, whose own lock
+/// boxes a pthread object the first time it is taken. Every host's test build tests them.
+#[cfg(any(
+    all(feature = "std", target_os = "macos"),
+    all(not(feature = "std"), feature = "os-sys"),
+    all(test, feature = "os-sys"),
+    all(test, feature = "std", any(unix, windows))
+))]
+mod in_place {
+    use core::cell::UnsafeCell;
+    use core::mem::MaybeUninit;
+    use core::ops::{Deref, DerefMut};
+    use core::ptr::addr_of_mut;
+
+    use wz_host_sync::{RawCondvar, RawLock};
 
     /// The host's lock around a value.
     pub struct Mutex<T> {
@@ -723,65 +820,8 @@ mod sys {
         extern crate std;
 
         use alloc::sync::Arc;
-        use core::sync::atomic::{AtomicBool, Ordering};
 
         use super::*;
-
-        /// A spawned thread runs under an identity of its own, which is the one its spawn gave; it
-        /// reads as running until its body has returned, and as finished after.
-        #[test]
-        fn a_spawned_thread_has_its_own_identity_and_reports_its_end() {
-            let here = current();
-            let go = Arc::new(AtomicBool::new(false));
-            let seen = Arc::new(Mutex::new(None));
-            let (handle, there) = {
-                let go = Arc::clone(&go);
-                let seen = Arc::clone(&seen);
-                spawn(move || {
-                    while !go.load(Ordering::Acquire) {
-                        sleep_ms(1);
-                    }
-                    *seen.lock() = Some(current());
-                })
-                .expect("a host gives a thread")
-            };
-            assert_ne!(here, there, "the spawned thread has an identity of its own");
-            assert!(!handle.is_finished(), "the body has not returned");
-            go.store(true, Ordering::Release);
-            let started = std::time::Instant::now();
-            while !handle.is_finished() {
-                assert!(
-                    started.elapsed() < std::time::Duration::from_secs(5),
-                    "the thread never ended"
-                );
-                sleep_ms(1);
-            }
-            handle.join();
-            assert_eq!(
-                *seen.lock(),
-                Some(there),
-                "the thread is the one its spawn named"
-            );
-            assert_eq!(current(), here);
-        }
-
-        #[test]
-        fn a_waiter_on_the_condvar_sees_what_the_notifier_wrote_under_the_mutex() {
-            let shared = Arc::new((Mutex::new(false), Condvar::new()));
-            let notifier = Arc::clone(&shared);
-            let (handle, _) = spawn(move || {
-                sleep_ms(20);
-                *notifier.0.lock() = true;
-                notifier.1.notify_one();
-            })
-            .expect("a host gives a thread");
-            let mut ready = shared.0.lock();
-            while !*ready {
-                ready = shared.1.wait(ready);
-            }
-            drop(ready);
-            handle.join();
-        }
 
         /// A mutex made in its place holds the value its maker wrote there, and its lock is the
         /// lock a mutex made by value has.
@@ -807,6 +847,46 @@ mod sys {
             assert!(mutex.try_lock().is_none(), "a held mutex is not given");
             drop(guard);
             assert_eq!(mutex.try_lock().map(|value| *value), Some(6));
+        }
+
+        /// A waiter on the condition variable sees what its notifier wrote under the mutex, by
+        /// `notify_one` and by `notify_all`, and a timed wait no notification ends runs out.
+        /// Turned red by a wait that misses a notification (the test does not end) or a timed
+        /// wait that reads the time running out as a notification.
+        #[test]
+        fn a_waiter_sees_what_its_notifier_wrote_and_a_timed_wait_runs_out() {
+            let shared = Arc::new((Mutex::new(false), Condvar::new()));
+            let (guard, timed_out) = shared.1.wait_timeout_ms(shared.0.lock(), 20);
+            assert!(timed_out, "nothing notified");
+            drop(guard);
+            for all in [false, true] {
+                *shared.0.lock() = false;
+                let notifier = Arc::clone(&shared);
+                let thread = std::thread::spawn(move || {
+                    std::thread::sleep(core::time::Duration::from_millis(20));
+                    *notifier.0.lock() = true;
+                    if all {
+                        notifier.1.notify_all();
+                    } else {
+                        notifier.1.notify_one();
+                    }
+                });
+                let mut ready = shared.0.lock();
+                if all {
+                    let mut ran_out = false;
+                    while !*ready && !ran_out {
+                        (ready, ran_out) = shared.1.wait_timeout_ms(ready, 5_000);
+                    }
+                    assert!(!ran_out, "the notification ended the wait");
+                } else {
+                    while !*ready {
+                        ready = shared.1.wait(ready);
+                    }
+                }
+                assert!(*ready, "the wait ends once the flag is set");
+                drop(ready);
+                thread.join().expect("the notifier");
+            }
         }
     }
 }
@@ -953,5 +1033,96 @@ mod tests {
         let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(1));
         let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
         Mutex::new_in(&mut place, |_| elsewhere);
+    }
+
+    /// A lock and a condition variable made, the lock taken for the first time, tried, waited on
+    /// with a timeout and the condition variable notified: what an object made after a session
+    /// opened does with its own.
+    macro_rules! first_use {
+        ($mutex:ident, $condvar:ident) => {
+            || {
+                let mutex = $mutex::new(0_u32);
+                let condvar = $condvar::new();
+                *mutex.lock() += 1;
+                drop(mutex.try_lock());
+                let (guard, _) = condvar.wait_timeout_ms(mutex.lock(), 1);
+                drop(guard);
+                condvar.notify_one();
+                condvar.notify_all();
+            }
+        };
+    }
+
+    /// Every allocation of the calling thread while `run` runs, counted.
+    fn allocations(run: impl FnOnce()) -> usize {
+        COUNTING.with(|count| count.set(Some(0)));
+        run();
+        COUNTING.with(|count| count.take()).unwrap_or(0)
+    }
+
+    std::thread_local! {
+        static COUNTING: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+    }
+
+    /// The test binary's allocator: the system's, counting on a thread that asked
+    /// ([`allocations`]).
+    struct Counting;
+
+    // SAFETY: every call is the system allocator's; the count is a thread's own cell.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = COUNTING.try_with(|count| {
+                if let Some(seen) = count.get() {
+                    count.set(Some(seen.saturating_add(1)));
+                }
+            });
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: the caller's.
+            unsafe { std::alloc::System.dealloc(at, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// The host's lock takes no memory when it is first taken, nor its condition variable when it
+    /// is first waited on or notified, so an object made after a session opened allocates nothing
+    /// for its lock, on every host.
+    ///
+    /// # Control
+    ///
+    /// The host's lock as `std::sync::Mutex` on macOS, which boxes a pthread mutex on its first
+    /// take, counts an allocation; the box the second count makes is counted.
+    #[test]
+    fn the_hosts_lock_takes_no_memory_when_first_taken() {
+        assert_eq!(
+            allocations(first_use!(Mutex, Condvar)),
+            0,
+            "a lock and a condition variable live in their own bytes"
+        );
+        let control = allocations(|| drop(core::hint::black_box(alloc::boxed::Box::new(1_u64))));
+        assert_eq!(control, 1, "the allocator counts");
+    }
+
+    /// The in-place lock, which a host library without `std` and a `std` build on macOS hold,
+    /// takes no memory when first taken, waited on or notified, on the host the test runs on.
+    ///
+    /// # Control
+    ///
+    /// An in-place lock that kept its value or its waiters in a box of its own counts an
+    /// allocation.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_in_place_lock_takes_no_memory_when_first_taken() {
+        use super::in_place::{Condvar as InPlaceCondvar, Mutex as InPlaceMutex};
+        assert_eq!(
+            allocations(first_use!(InPlaceMutex, InPlaceCondvar)),
+            0,
+            "the in-place lock lives in its own bytes"
+        );
     }
 }

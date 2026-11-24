@@ -185,19 +185,18 @@ impl StreamSocket for ZephyrTcpSocket {
         self.peer
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ZephyrNetError> {
-        for part in parts {
-            let mut rest = *part;
-            while !rest.is_empty() {
-                // SAFETY: `rest` is live and readable for its length.
-                let sent = unsafe { send(self.fd, rest.as_ptr() as *const c_void, rest.len(), 0) };
-                if sent <= 0 {
-                    return Err(ZephyrNetError::Send(sent));
-                }
-                rest = &rest[sent as usize..];
+    // The socket blocks, so the write returns once the stack has taken every byte.
+    fn write(&self, bytes: &[u8]) -> Result<usize, ZephyrNetError> {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            // SAFETY: `rest` is live and readable for its length.
+            let sent = unsafe { send(self.fd, rest.as_ptr() as *const c_void, rest.len(), 0) };
+            if sent <= 0 {
+                return Err(ZephyrNetError::Send(sent));
             }
+            rest = &rest[sent as usize..];
         }
-        Ok(())
+        Ok(bytes.len())
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {

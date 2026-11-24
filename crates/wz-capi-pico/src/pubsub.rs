@@ -2835,7 +2835,7 @@ pub(crate) unsafe fn source_info_hint_of(
     // pico's `_z_source_info_check` is `_z_entity_global_id_check`, which is an
     // all-zero-zid test: an unset info must not reach the wire as a source
     // identity of zid 0.
-    if info._source_id.zid.id.iter().all(|b| *b == 0) {
+    if crate::zid::id_is_zero(info._source_id.zid.id) {
         return None;
     }
     Some(wz_session_core::sample::SourceInfo::new(

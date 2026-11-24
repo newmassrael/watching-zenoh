@@ -1374,8 +1374,8 @@ mod tests {
         fn peer(&self) -> SocketAddr {
             self.0
         }
-        fn send_parts(&self, _parts: &[&[u8]]) -> Result<(), ()> {
-            Ok(())
+        fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
+            Ok(bytes.len())
         }
         fn wait_readable(&self, _timeout_ms: c_int) {}
         fn try_read(&self, _buf: &mut [u8]) -> Result<Option<usize>, ()> {
@@ -1417,8 +1417,8 @@ mod tests {
         fn peer(&self) -> SocketAddr {
             self.0.peer()
         }
-        fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ()> {
-            self.0.send_parts(parts)
+        fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
+            self.0.write(bytes)
         }
         fn wait_readable(&self, timeout_ms: c_int) {
             self.0.wait_readable(timeout_ms)
@@ -2202,8 +2202,8 @@ mod tests {
             fn peer(&self) -> SocketAddr {
                 self.channel.peer()
             }
-            fn send_parts(&self, parts: &[&[u8]]) -> Result<(), ()> {
-                self.channel.send_parts(parts)
+            fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
+                self.channel.write(bytes)
             }
             fn wait_readable(&self, timeout_ms: c_int) {
                 self.channel.wait_readable(timeout_ms)

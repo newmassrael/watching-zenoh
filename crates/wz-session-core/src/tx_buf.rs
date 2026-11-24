@@ -255,13 +255,22 @@ impl TxBuf for CountTxBuf {
 /// compiled encoder serve the count and the slot.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
 pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -> usize {
+    try_encoded_len(encode).unwrap_or(0)
+}
+
+/// [`encoded_len`] with the encoder's refusal kept: the length a lent fragment chain is planned
+/// over, where a message its encoder refuses is answered with that error and not cut at all.
+///
+/// Kept out of line: it is the one count both forms share, and inlined it would be compiled
+/// again into each.
+#[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+#[inline(never)]
+pub fn try_encoded_len(
+    encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>,
+) -> Result<usize, CodecError> {
     let mut count = CountTxBuf::new();
-    let written = encode(&mut TxSink::new(&mut count)).is_ok();
-    if written {
-        count.len
-    } else {
-        0
-    }
+    encode(&mut TxSink::new(&mut count))?;
+    Ok(count.len)
 }
 
 /// Adapts a [`TxBuf`] to the codec's [`SceSink`].
@@ -531,6 +540,22 @@ mod tests {
         });
         assert_eq!(refused, 0);
         assert_eq!(encoded_len(&|_: &mut TxSink<'_>| Ok(())), 0);
+    }
+
+    #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+    #[test]
+    fn the_tried_length_keeps_the_encoders_refusal() {
+        let written = try_encoded_len(&|sink: &mut TxSink<'_>| {
+            sink.write_u8(0x7f)?;
+            sink.write_bytes(&[0u8; 300])
+        });
+        assert_eq!(written, Ok(301));
+        let refused = try_encoded_len(&|sink: &mut TxSink<'_>| {
+            sink.write_u8(1)?;
+            Err(CodecError::LengthOutOfRange)
+        });
+        assert_eq!(refused, Err(CodecError::LengthOutOfRange));
+        assert_eq!(try_encoded_len(&|_: &mut TxSink<'_>| Ok(())), Ok(0));
     }
 
     #[cfg(not(feature = "session-slot"))]

@@ -1180,7 +1180,11 @@ pub(crate) unsafe fn bytes_ref<'a>(ptr: *const z_loaned_bytes_t) -> Option<&'a B
 // --- bytes constructors ---------------------------------------------------
 
 /// Copy a buffer into an owned payload (pico `z_bytes_copy_from_buf`).
+///
+/// Out of line: the slice, string and one-octet doors end in this one, and each held a copy of
+/// its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_bytes_copy_from_buf(
     bytes: *mut z_owned_bytes_t,
     data: *const u8,
@@ -1995,7 +1999,10 @@ pub unsafe extern "C" fn z_string_copy_from_str(
 /// # Safety
 /// `str_out` must be valid and writable; `value` must be null or point at `len`
 /// readable bytes.
+///
+/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_string_copy_from_substr(
     str_out: *mut z_owned_string_t,
     value: *const c_char,

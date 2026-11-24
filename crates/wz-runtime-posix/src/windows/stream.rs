@@ -9,13 +9,13 @@
 //! connections on, yielding the same socket. Nothing here allocates: the socket is a handle and
 //! its two ends.
 //!
-//! The socket is non-blocking from its connect on, so a write can be tried without waiting
-//! ([`StreamSocket::send_parts_now`]: one `WSASend`, and `WSAEWOULDBLOCK` is nothing taken),
-//! which Winsock has no per-call flag for. The write that waits ([`StreamSocket::send_parts`])
-//! waits in `WSAPoll` for room and writes on, so it returns once Winsock has taken every byte (a
-//! length and its batch go out in one `WSASend`), as the POSIX half's does; a read is one `recv`
-//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`], and
-//! the owner's the same poll before the step's read. `TCP_NODELAY` is set, as zenoh and
+//! The socket is non-blocking from its connect on, so a write does not wait
+//! ([`StreamSocket::WRITES_NOW`]: one `WSASend`, and `WSAEWOULDBLOCK` is nothing taken), which
+//! Winsock has no per-call flag for; a writer that must have every byte taken waits for room in
+//! `WSAPoll` between writes ([`StreamSocket::write_all`]), as the POSIX half's does. A read is
+//! one `recv` that does not wait, the loop's wait being the poll of
+//! [`StreamSocket::wait_readable`], and the owner's the same poll before the step's read.
+//! `TCP_NODELAY` is set, as zenoh and
 //! zenoh-pico set it on every TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
 //! `IPPROTO_TCP, TCP_NODELAY`).
 
@@ -31,9 +31,6 @@ use super::{
     close, keep_from_children, last_error, name_of, open_socket, poll_readable, poll_writable,
     set_flag, set_nonblocking, RawAddr, WindowsNetError,
 };
-
-/// The most parts one write gathers: a length and its batch, with room to spare.
-const MAX_PARTS: usize = 4;
 
 /// One connected TCP socket on the host, of the family of the address it connected to.
 pub struct WindowsTcpSocket {
@@ -302,27 +299,6 @@ impl Drop for WindowsTcpListener {
     }
 }
 
-/// The buffers of `parts`, empty ones left out, and how many there are; more than `MAX_PARTS`, or
-/// a part longer than a `u32`, is refused as `WSAEMSGSIZE`.
-fn wsabufs(parts: &[&[u8]]) -> Result<([ws::WSABUF; MAX_PARTS], usize), WindowsNetError> {
-    let mut bufs = [ws::WSABUF {
-        len: 0,
-        buf: core::ptr::null_mut(),
-    }; MAX_PARTS];
-    let mut count = 0;
-    for part in parts.iter().filter(|part| !part.is_empty()) {
-        let (true, Ok(len)) = (count < MAX_PARTS, u32::try_from(part.len())) else {
-            return Err(WindowsNetError::Write(ws::WSAEMSGSIZE));
-        };
-        bufs[count] = ws::WSABUF {
-            len,
-            buf: part.as_ptr().cast_mut(),
-        };
-        count += 1;
-    }
-    Ok((bufs, count))
-}
-
 impl StreamSocket for WindowsTcpSocket {
     type Error = WindowsNetError;
 
@@ -342,68 +318,25 @@ impl StreamSocket for WindowsTcpSocket {
         self.peer
     }
 
-    fn send_parts(&self, parts: &[&[u8]]) -> Result<(), WindowsNetError> {
-        // The parts the stack has still to take; a short write moves the front forward.
-        let (mut bufs, count) = wsabufs(parts)?;
-        let mut first = 0;
-        while first < count {
-            let mut sent: u32 = 0;
-            // SAFETY: every buffer names a live slice of `parts` for its length, and the count
-            // passed is the number of them from `first`. No overlapped structure: the call takes
-            // what Winsock has room for at that moment, the socket being non-blocking.
-            let rc = unsafe {
-                ws::WSASend(
-                    self.socket,
-                    bufs[first..count].as_ptr(),
-                    (count - first) as u32,
-                    &mut sent,
-                    0,
-                    core::ptr::null_mut(),
-                    None,
-                )
-            };
-            if rc != 0 {
-                match last_error() {
-                    ws::WSAEINTR => continue,
-                    // No room now: this is the write that waits, so it waits for some.
-                    ws::WSAEWOULDBLOCK => {
-                        poll_writable(self.socket, -1);
-                        continue;
-                    }
-                    other => return Err(WindowsNetError::Write(other)),
-                }
-            }
-            let mut sent = sent as usize;
-            while first < count && sent >= bufs[first].len as usize {
-                sent -= bufs[first].len as usize;
-                first += 1;
-            }
-            if first < count {
-                // SAFETY: `sent` is less than this buffer's length, so the new start is inside it.
-                bufs[first].buf = unsafe { bufs[first].buf.add(sent) };
-                bufs[first].len -= sent as u32;
-            }
-        }
-        Ok(())
-    }
+    const WRITES_NOW: bool = true;
 
     // One `WSASend` on the non-blocking socket: Winsock takes what it has room for at that
-    // moment, and `WSAEWOULDBLOCK` is nothing taken.
-    fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, WindowsNetError>> {
-        let (bufs, count) = match wsabufs(parts) {
-            Ok(built) => built,
-            Err(refused) => return Some(Err(refused)),
+    // moment, and `WSAEWOULDBLOCK` is nothing taken. A write longer than a `u32` offers that much
+    // of it, and what it took says so.
+    fn write(&self, bytes: &[u8]) -> Result<usize, WindowsNetError> {
+        let buf = ws::WSABUF {
+            len: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+            buf: bytes.as_ptr().cast_mut(),
         };
         loop {
             let mut sent: u32 = 0;
-            // SAFETY: every buffer names a live slice of `parts` for its length, and `count` is
-            // the number of them. No overlapped structure, and the socket is non-blocking, so the
-            // call returns at once.
+            // SAFETY: the one buffer names live bytes of `bytes` for its length. No overlapped
+            // structure, and the socket is non-blocking, so the call returns at once.
             let rc = unsafe {
                 ws::WSASend(
                     self.socket,
-                    bufs[..count].as_ptr(),
-                    count as u32,
+                    &buf,
+                    1,
                     &mut sent,
                     0,
                     core::ptr::null_mut(),
@@ -411,12 +344,12 @@ impl StreamSocket for WindowsTcpSocket {
                 )
             };
             if rc == 0 {
-                return Some(Ok(sent as usize));
+                return Ok(sent as usize);
             }
             match last_error() {
                 ws::WSAEINTR => continue,
-                ws::WSAEWOULDBLOCK => return Some(Ok(0)),
-                other => return Some(Err(WindowsNetError::Write(other))),
+                ws::WSAEWOULDBLOCK => return Ok(0),
+                other => return Err(WindowsNetError::Write(other)),
             }
         }
     }
@@ -446,17 +379,13 @@ impl StreamSocket for WindowsTcpSocket {
         poll_readable(self.socket, timeout_ms);
     }
 
-    fn wait_writable(&self, timeout_us: u64) -> bool {
-        poll_writable(
+    // Timed on the host's monotonic clock, as the session's timers are.
+    fn wait_writable(&self, timeout_us: u64) -> (bool, u64) {
+        let started = super::WindowsClock.now_us();
+        let room = poll_writable(
             self.socket,
             i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
-        )
-    }
-
-    // Timed on the host's monotonic clock, as the session's timers are.
-    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
-        let started = super::WindowsClock.now_us();
-        let room = self.wait_writable(timeout_us);
+        );
         (room, super::WindowsClock.now_us().saturating_sub(started))
     }
 
@@ -674,7 +603,7 @@ mod tests {
         let (mut far, _) = listener.accept().expect("the far end");
         assert_eq!(near.peer(), listener.local_addr().unwrap());
         assert_eq!(near.local(), far.peer_addr().unwrap());
-        near.send_parts(&[b"made"])
+        near.write_all(b"made")
             .expect("a made connection carries bytes");
         let mut got = [0u8; 4];
         far.read_exact(&mut got).expect("the bytes");
@@ -714,22 +643,15 @@ mod tests {
     }
 
     #[test]
-    fn the_parts_of_a_send_arrive_in_order_as_one_stream() {
+    fn writes_arrive_in_order_as_one_stream() {
         let (near, mut far) = pair();
-        near.send_parts(&[b"\x03\x00", b"abc", b"", b"de"])
-            .expect("a send");
+        let parts: [&[u8]; 4] = [b"\x03\x00", b"abc", b"", b"de"];
+        for part in parts {
+            near.write_all(part).expect("a send");
+        }
         let mut got = [0u8; 7];
         far.read_exact(&mut got).expect("the bytes");
         assert_eq!(&got, b"\x03\x00abcde");
-    }
-
-    #[test]
-    fn more_parts_than_one_write_gathers_are_refused() {
-        let (near, _far) = pair();
-        assert_eq!(
-            near.send_parts(&[b"a", b"b", b"c", b"d", b"e"]),
-            Err(WindowsNetError::Write(ws::WSAEMSGSIZE))
-        );
     }
 
     #[test]
@@ -741,8 +663,9 @@ mod tests {
             far.read_to_end(&mut got).expect("the bytes");
             got.len()
         });
-        near.send_parts(&[&big[..1], &big[1..]])
-            .expect("a send of four MiB");
+        near.write_all(&big[..1]).expect("a send of one byte");
+        near.write_all(&big[1..])
+            .expect("a send of the rest of four MiB, waiting for room");
         near.shutdown();
         assert_eq!(reader.join().expect("the reader"), big.len());
     }
@@ -755,8 +678,8 @@ mod tests {
     fn a_write_that_does_not_wait_takes_what_the_stream_has_room_for() {
         let (near, mut far) = pair();
         assert_eq!(
-            near.send_parts_now(&[&b"he"[..], &b"llo"[..]]),
-            Some(Ok(5)),
+            near.write(b"hello"),
+            Ok(5),
             "a stream with room takes it all"
         );
         let mut got = [0u8; 5];
@@ -765,9 +688,9 @@ mod tests {
         let chunk = [0x5au8; 1024];
         let mut written = 0usize;
         loop {
-            match near.send_parts_now(&[&chunk]) {
-                Some(Ok(0)) => break,
-                Some(Ok(n)) => written += n,
+            match near.write(&chunk) {
+                Ok(0) => break,
+                Ok(n) => written += n,
                 other => panic!("a write to a sound stream: {other:?}"),
             }
             assert!(
@@ -872,7 +795,7 @@ mod tests {
             far.read_exact(&mut got).expect("the bytes");
             got
         });
-        near.send_parts(&[&big[..]])
+        near.write_all(&big)
             .expect("a send of one MiB that waits for room");
         assert_eq!(reader.join().expect("the reader"), big);
     }
@@ -910,10 +833,10 @@ mod tests {
             assert!(waits.wait_room(on, 1_000), "an empty stream takes bytes");
             let chunk = [0x5au8; 1024];
             let mut written = 0usize;
-            while near.wait_writable(1_000) {
-                near.send_parts(&[&chunk])
+            while near.wait_writable(1_000).0 {
+                written += near
+                    .write(&chunk)
                     .expect("a write the stream said it would take");
-                written += chunk.len();
                 assert!(
                     written < 256 << 20,
                     "the stream took {written} bytes and never filled"

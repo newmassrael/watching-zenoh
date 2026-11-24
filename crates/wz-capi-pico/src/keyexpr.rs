@@ -742,7 +742,10 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
 /// `z_view_keyexpr_from_substr_unchecked`). Same no-error-channel contract as
 /// [`z_view_keyexpr_from_str_unchecked`], including leaving the view EMPTY
 /// rather than storing bytes this crate could not later read as `&str`.
+///
+/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
@@ -1135,7 +1138,10 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
 /// # Safety
 /// `keyexpr` must be valid and writable; `name` must be null or point at
 /// `*len` readable bytes; `len` must be null or valid and writable.
+///
+/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,

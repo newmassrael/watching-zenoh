@@ -3335,37 +3335,47 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
-    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    if !actions
-        .link
-        .lease_armed
-        .load(core::sync::atomic::Ordering::SeqCst)
-    {
-        return LeaseCheckOutcome::NotMonitored;
+    // R311kx — deadline arithmetic shared with the loop wake computation
+    // (`lease_wake_deadline`): `deadline = baseline + adopted window`, so
+    // "the wake fired" and "the window elapsed" cannot drift apart.
+    match lease_deadlines(actions) {
+        Some(deadlines) => judge_lease(actions, engine, now_ms, deadlines),
+        None if lease_monitored(actions) => LeaseCheckOutcome::NoBaseline,
+        None => LeaseCheckOutcome::NotMonitored,
     }
+}
+
+/// Judge the lease of `actions`' link at `now_ms` by the deadlines a reader of its stamps found
+/// ([`lease_deadlines`]): what [`check_lease_deadline`] does once the monitor runs and a baseline
+/// exists, for a driver that read the deadlines to know whether to wake.
+pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    now_ms: u64,
+    deadlines: LeaseDeadlines,
+) -> LeaseCheckOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // The watch of the peer's initial declarations first: the wake may be its own, and a sync
     // taken as lost ends the link however long the lease still has.
     // A window that ends a link's sync as empty (an accepted link whose peer began none, under
     // `until-declarations-synced-when-begun`) ends the watch and nothing else.
     #[cfg(feature = "alloc")]
-    if actions
-        .declaration_watch_deadline()
+    if deadlines
+        .watch
         .is_some_and(|deadline_ms| now_ms >= deadline_ms)
         && actions.expire_declaration_watch() == crate::declaration_sync::WatchExpiry::LosesLink
     {
         engine.process_event(E::LinkLost);
         return LeaseCheckOutcome::DeclarationsStalled;
     }
-    // R311kx — deadline arithmetic shared with the loop wake computation
-    // (`lease_wake_deadline`): `deadline = baseline + adopted window`, so
-    // "the wake fired" and "the window elapsed" cannot drift apart.
-    match lease_expiry_deadline(actions) {
-        None => LeaseCheckOutcome::NoBaseline,
-        Some(deadline_ms) if now_ms >= deadline_ms => {
-            engine.process_event(E::LeaseExpired);
-            LeaseCheckOutcome::Expired
-        }
-        Some(_) => LeaseCheckOutcome::WithinLease,
+    // Only the watch asks the actions anything here.
+    #[cfg(not(feature = "alloc"))]
+    let _ = actions;
+    if now_ms >= deadlines.expiry {
+        engine.process_event(E::LeaseExpired);
+        LeaseCheckOutcome::Expired
+    } else {
+        LeaseCheckOutcome::WithinLease
     }
 }
 
@@ -3892,29 +3902,57 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
-    let lease = lease_expiry_deadline(actions)?;
-    #[cfg(feature = "alloc")]
-    if let Some(watch) = actions.declaration_watch_deadline() {
-        return Some(lease.min(watch));
-    }
-    Some(lease)
+    lease_deadlines(actions).map(LeaseDeadlines::wake)
 }
 
-/// The lease's own expiry, which [`lease_wake_deadline`] wakes for and [`check_lease_deadline`]
-/// judges: `None` while the monitor is not running or no baseline exists.
-fn lease_expiry_deadline<R: SessionRuntime, T: TimeSource>(
-    actions: &SessionLinkActions<R, T>,
-) -> Option<u64> {
-    if !actions
+/// What a link's lease is judged by, read from the link's stamps in one hold: the lease's own
+/// expiry and, where the build keeps it, the end of the watch of the peer's initial declarations.
+/// The wake ([`lease_wake_deadline`]) and the judgement ([`judge_lease`]) read the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LeaseDeadlines {
+    /// The later of the establishment and the last receipt, plus the adopted lease.
+    expiry: u64,
+    /// When the watch of the peer's initial declarations ends, while it runs.
+    #[cfg(feature = "alloc")]
+    watch: Option<u64>,
+}
+
+impl LeaseDeadlines {
+    /// The earlier of the two: when a driver wakes for the lease.
+    pub(crate) fn wake(self) -> u64 {
+        #[cfg(feature = "alloc")]
+        if let Some(watch) = self.watch {
+            return self.expiry.min(watch);
+        }
+        self.expiry
+    }
+}
+
+/// Whether the session machine runs the lease monitor of `actions`' link.
+fn lease_monitored<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) -> bool {
+    actions
         .link
         .lease_armed
         .load(core::sync::atomic::Ordering::SeqCst)
-    {
+}
+
+/// [`LeaseDeadlines`] of `actions`' link: `None` while the monitor is not running or no baseline
+/// exists. The watch has no deadline without the establishment stamp, which is a baseline itself,
+/// so no watch is lost to a `None`.
+pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> Option<LeaseDeadlines> {
+    if !lease_monitored(actions) {
         return None;
     }
     let stamps = actions.link.stamps();
-    max_stamp(stamps.established_at, stamps.last_inbound_at)
-        .map(|b| b.saturating_add(actions.adopted_lease_ms()))
+    let expiry = max_stamp(stamps.established_at, stamps.last_inbound_at)?
+        .saturating_add(actions.adopted_lease_ms());
+    Some(LeaseDeadlines {
+        expiry,
+        #[cfg(feature = "alloc")]
+        watch: actions.declaration_watch_deadline_after(stamps.established_at),
+    })
 }
 
 /// R311kx — absolute next keepalive TX deadline (ms):
@@ -3956,7 +3994,7 @@ pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
 /// traffic of one never stands in for the other's keepalive.
 #[cfg(feature = "transport-keepalive")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct KeepaliveDeadlines {
+pub(crate) struct KeepaliveDeadlines {
     /// The link's own: `None` before it has a baseline.
     link: Option<u64>,
     /// The companion's: `None` on a link without one.
@@ -3965,7 +4003,8 @@ struct KeepaliveDeadlines {
 
 #[cfg(feature = "transport-keepalive")]
 impl KeepaliveDeadlines {
-    fn earliest(self) -> Option<u64> {
+    /// The earlier of the two: when a driver wakes for the keepalive.
+    pub(crate) fn earliest(self) -> Option<u64> {
         match (self.link, self.companion) {
             (Some(link), Some(companion)) => Some(link.min(companion)),
             (deadline, None) | (None, deadline) => deadline,
@@ -3976,7 +4015,7 @@ impl KeepaliveDeadlines {
 /// [`KeepaliveDeadlines`] of `actions`' link, `None` while its keepalive worker
 /// is not running.
 #[cfg(feature = "transport-keepalive")]
-fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
+pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<KeepaliveDeadlines> {
     if !actions
@@ -4044,16 +4083,25 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
 ) -> crate::lease::KeepAliveCheckOutcome {
-    use crate::lease::KeepAliveCheckOutcome as K;
-    if !actions.link.transport_available.is_open() {
-        return K::Inactive;
-    }
     // `None`: the worker is not running, never started or stopped by the
     // machine's exit from Established.
-    let Some(deadlines) = keepalive_deadlines(actions) else {
-        return K::Inactive;
-    };
-    if deadlines.earliest().is_none() {
+    keepalive_deadlines(actions)
+        .map_or(crate::lease::KeepAliveCheckOutcome::Inactive, |deadlines| {
+            judge_keepalive(actions, now_ms, deadlines)
+        })
+}
+
+/// Judge the keepalive of `actions`' link at `now_ms` by the deadlines a reader of its stamps
+/// found ([`keepalive_deadlines`]): what [`check_keepalive_deadline`] does once the worker runs,
+/// for a driver that read the deadlines to know whether to wake.
+#[cfg(feature = "transport-keepalive")]
+pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    deadlines: KeepaliveDeadlines,
+) -> crate::lease::KeepAliveCheckOutcome {
+    use crate::lease::KeepAliveCheckOutcome as K;
+    if !actions.link.transport_available.is_open() || deadlines.earliest().is_none() {
         return K::Inactive;
     }
     let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
