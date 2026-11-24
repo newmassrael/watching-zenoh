@@ -814,9 +814,10 @@ impl<T: TransportFaces> TransportState<T> {
             .faces()
             .get(at)
             .and_then(|face| face.link().wire())
-            .and_then(|wire| wire.actions().peer_zid());
+            // Read in place: a loss is taken after the open, where nothing is copied to the heap.
+            .and_then(|wire| wire.actions().peer_session_zid());
         if let Some(zid) = peer {
-            self.router.abort_peer(&zid);
+            self.router.abort_peer(zid.as_slice());
         }
     }
 
