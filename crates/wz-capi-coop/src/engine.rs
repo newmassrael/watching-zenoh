@@ -7037,12 +7037,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             interest_rank(&tables, row.interest())
         };
-        let Some(interest_final) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
+        let Some(last_held) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
         else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (interest_final, place) {
+        if let (Some(interest), Some(at)) = (last_held, place) {
             core.retract(
                 Kind::Interest,
                 at,
