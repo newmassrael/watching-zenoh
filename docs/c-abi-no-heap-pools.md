@@ -610,8 +610,10 @@ suites (C1co, Layer Z) unchanged.
     lent array, `SCOUT_HELLO_LOCATORS` views and their text in one slot) are kinds of the pools,
     and so is an encoding (`Kind::Encoding`, `HELD_ENCODINGS`: its state and the room of its
     schema, `MAX_ENCODING_SCHEMA_BYTES`, in one slot, a longer schema refused with
-    `_Z_ERR_SYSTEM_OUT_OF_MEMORY`): a put sends the moved encoding from its slot, a declared
-    publisher keeps its own, and a kept sample or query keeps its schema in one.
+    `_Z_ERR_SYSTEM_OUT_OF_MEMORY`): a put sends the moved encoding from its slot and a declared
+    publisher keeps its own. An encoding of no schema is its well-known constant and takes no slot,
+    as zenoh-pico allocates only for a schema, and a kept sample, reply or query copies its schema
+    into the payloads' area with its other bytes.
     The bytes of payloads, strings and slices are blocks of one area beside them
     (`HELD_PAYLOAD_BYTES`, a buddy allocator, `bytes.rs` `Block` with its count in its head in
     place of `Arc<Backing>`); every constructor and copy is fallible and answers

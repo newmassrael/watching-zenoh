@@ -42,10 +42,9 @@ use crate::abi::{
     z_owned_bytes_t,
 };
 use crate::bytes::{ByteBuf, NoRoom};
-use crate::encoding::HeldEncoding;
+use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
-use crate::object_slot::Placed;
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
@@ -1283,9 +1282,9 @@ pub(crate) struct PlainPublisher {
 /// it wraps.
 #[derive(Debug)]
 pub(crate) struct PublisherQos {
-    /// The encoding the publisher was declared with, kept in its own slot of the pool of encodings
-    /// for as long as the publisher stands and lent to each put that names none.
-    encoding: Option<Placed<HeldEncoding>>,
+    /// The encoding the publisher was declared with, its constant or kept in its own slot of the pool
+    /// of encodings for as long as the publisher stands, and lent to each put that names none.
+    encoding: Option<OwnedEncoding>,
     congestion_control: wz_session_core::qos::CongestionControl,
     priority: wz_session_core::qos::Priority,
     is_express: bool,
@@ -1890,7 +1889,7 @@ unsafe fn publisher_put_options<'a>(
 #[derive(Default)]
 struct PutHeld {
     attachment: Option<MovedBytes<'static>>,
-    encoding: Option<Placed<HeldEncoding>>,
+    encoding: Option<OwnedEncoding>,
 }
 
 /// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
@@ -1921,7 +1920,7 @@ impl PutCarried {
         held.encoding = crate::encoding::take_moved_encoding(self.encoding);
         let held: &'a PutHeld = held;
         let attachment = held.attachment.as_deref().map(ByteBuf::as_slice);
-        let encoding = held.encoding.as_deref().map(HeldEncoding::view);
+        let encoding = held.encoding.as_ref().map(OwnedEncoding::view);
         let timestamp = timestamp_hint_of(self.timestamp);
         let source_info = source_info_hint_of(self.source_info);
         let carried = attachment.is_some()

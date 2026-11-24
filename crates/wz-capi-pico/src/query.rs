@@ -2260,6 +2260,10 @@ mod tests {
 
     impl HeldQuery for NoHold {
         fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
+
+        fn session_closed(&self) -> bool {
+            false
+        }
     }
 
     /// A query's payload and attachment are read where the view holds them, with nothing copied
@@ -2327,7 +2331,13 @@ mod tests {
         let held: Box<dyn HeldQuery> = Box::new(NoHold);
         let payload = marshal.payload.try_clone().expect("room for the copy");
         let attachment = marshal.attachment.try_clone().expect("room for the copy");
-        let mut kept = marshal.deep_copy_deferred(held, payload, attachment);
+        let encoding = marshal
+            .encoding
+            .as_ref()
+            .map(crate::encoding::EncodingState::kept)
+            .transpose()
+            .expect("room for the copy");
+        let mut kept = marshal.deep_copy_deferred(held, payload, attachment, encoding);
         drop(marshal);
         kept.bind();
         let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
@@ -2408,6 +2418,10 @@ mod tests {
         fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
             let mut out = KeyTap(self.0.clone());
             answer(&mut out);
+        }
+
+        fn session_closed(&self) -> bool {
+            false
         }
     }
 
