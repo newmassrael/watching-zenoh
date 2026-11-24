@@ -766,6 +766,34 @@ fn a_matching_listener_is_told_each_change_once() {
     );
 }
 
+/// A listener's verdict is read and recorded through a shared borrow of the tables, so an engine
+/// reads it beside what its peers declared, both borrowed from one owner. Turned red by a read that
+/// needs the tables to write, or that records no verdict.
+#[test]
+fn a_matching_verdict_is_recorded_through_shared_tables() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let listener = tables.declare_matching_listener(filter, 3).unwrap();
+    let peers = Peers::default();
+    peers.declares.set(true);
+    let shared: &Tables = &tables;
+    let mut cursor = 0;
+    assert_eq!(
+        shared.next_matching_change(&mut cursor, &peers),
+        Some((listener, true))
+    );
+    assert!(shared.matching_listeners().get(listener).unwrap().last());
+    let mut cursor = 0;
+    assert_eq!(
+        shared.next_matching_change(&mut cursor, &peers),
+        None,
+        "told once"
+    );
+}
+
 #[test]
 fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
     let mut tables = Tables::new();

@@ -6048,11 +6048,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// lock hands it: after a step that wrote the faces' tables, and after each declaration of the
     /// session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
-        let mut registry = core.session.registry.borrow_mut();
+        let registry = core.session.registry.borrow();
         core.session.matching_read.set(registry.faces_written());
-        let (tables, peers) = registry.tables_and_peers();
         let mut cursor = 0;
-        while let Some((handle, matching)) = tables.next_matching_change(&mut cursor, &peers) {
+        while let Some((handle, matching)) = registry
+            .app
+            .tables
+            .next_matching_change(&mut cursor, &*registry)
+        {
             self.matching.lock().flip(row_id(handle), matching);
         }
     }

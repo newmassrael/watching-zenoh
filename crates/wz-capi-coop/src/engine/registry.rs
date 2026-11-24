@@ -373,27 +373,8 @@ impl MatchingSink for NoWatch {
 /// arena at its open, each as many as the limit the open resolved.
 pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoWatch>;
 
-/// What every face's peer declared, read beside the application's tables while they are written
-/// ([`Registry::tables_and_peers`]): what a matching listener's verdict is read off.
-pub(super) struct FacesDeclared<'a> {
-    sets: &'a [FaceTables],
-    held: &'a [HeldSet],
-    written: u64,
-}
-
-impl PeerDeclarations for FacesDeclared<'_> {
-    fn declares(&self, plane: Plane, key: &str) -> bool {
-        let sets = self.sets;
-        faces_declare(self.held.iter().map(move |held| &sets[held.at]), plane, key)
-    }
-
-    fn written(&self) -> u64 {
-        self.written
-    }
-}
-
-/// What a write filter's verdict is read off: every face's peer's declarations, each search of
-/// them counted for the tests ([`Registry::peers_declare`]).
+/// What a write filter's verdict and a matching listener's are read off: every face's peer's
+/// declarations, each search of them counted for the tests ([`Registry::peers_declare`]).
 impl PeerDeclarations for Registry {
     fn declares(&self, plane: Plane, key: &str) -> bool {
         self.peers_declare(plane, key)
@@ -602,24 +583,6 @@ impl Registry {
         #[cfg(test)]
         self.peer_looks.set(self.peer_looks.get() + 1);
         faces_declare(self.faces(), plane, keyexpr)
-    }
-
-    /// The application's tables, to write, and what every face's peer declared beside them: what
-    /// the matching listeners' verdicts are read off and recorded in.
-    pub(super) fn tables_and_peers(&mut self) -> (&mut super::CoopTables, FacesDeclared<'_>) {
-        let Self {
-            app,
-            sets,
-            held,
-            faces_written,
-            ..
-        } = self;
-        let peers = FacesDeclared {
-            sets: &sets[..],
-            held: &held[..],
-            written: *faces_written,
-        };
-        (&mut app.tables, peers)
     }
 
     /// How often [`Self::peers_declare`] searched what the peers declared.
@@ -2094,38 +2057,6 @@ mod tests {
         }
         assert!(held.registry.peers_declare(Plane::Subscribers, "demo/5/1"));
         assert!(!held.registry.peers_declare(Plane::Subscribers, "demo/past"));
-    }
-
-    /// What the faces' peers declared, read beside the application's tables, answers as the
-    /// registry's own read does and at the registry's count of the faces' writes: a matching
-    /// listener's verdict and a write filter's are read off one set of declarations. Turned red by
-    /// a view that walks the dial face alone, or that keeps a count of its own.
-    #[test]
-    fn the_peers_beside_the_tables_answer_as_the_registry_does() {
-        let mut held = held(2);
-        held.registry
-            .add_face(5)
-            .expect("the open lent a set for the face");
-        declare_on(&mut held.registry, 5, 1, "demo/beside/1");
-        let written = held.registry.faces_written();
-        assert!(
-            held.registry
-                .peers_declare(Plane::Subscribers, "demo/beside/1"),
-            "CONTROL: the second face's peer declared it"
-        );
-        let (_, peers) = held.registry.tables_and_peers();
-        assert!(peers.declares(Plane::Subscribers, "demo/beside/1"));
-        assert!(!peers.declares(Plane::Subscribers, "demo/elsewhere"));
-        assert!(
-            !peers.declares(
-                Plane::Queryables {
-                    complete_required: false
-                },
-                "demo/beside/1"
-            ),
-            "a subscriber answers no querier"
-        );
-        assert_eq!(peers.written(), written);
     }
 
     /// A face that goes gives back to the session's pools exactly the rows its peer held, and the
