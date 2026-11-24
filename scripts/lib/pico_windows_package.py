@@ -168,6 +168,10 @@ STDLIBS = ("std", "nostd")
 DEFAULT_STDLIB = "nostd"
 RELEASE_STDLIBS = ("nostd",)
 NOSTD_FEATURE = "os-windows"
+# How a library with `std` is built for its release directory: the profile every artifact a deployer
+# receives is built with (crates/Cargo.toml: fat LTO, one codegen unit), and not `release`, the
+# thin-LTO build of daily work, whose copies of one generic per crate a shipped DLL does not carry.
+SHIP_PROFILE = "ship"
 # How a library without `std` is built (crates/Cargo.toml, crates/.cargo/capi-nostd.toml): the
 # release build with the `capi-nostd` profile (abort, fat LTO) and its configuration, and the debug
 # build with the dev profile told to abort, since nothing without `std` unwinds.
@@ -180,7 +184,7 @@ NOSTD_DEBUG_ENV = {"CARGO_PROFILE_DEV_PANIC": "abort"}
 # features and profile of `capability_cost_gate.py`'s `pico-client-coop` and
 # `pico-client-coop-nostd`, the second's form for Windows.
 SIZE_CASES = (
-    ("pico-client-coop-windows", "engine-coop,link-udp", ["--release"]),
+    ("pico-client-coop-windows", "engine-coop,link-udp", ["--profile", SHIP_PROFILE]),
     ("pico-client-coop-nostd-windows", f"{NOSTD_FEATURE},link-udp",
      ["--profile", NOSTD_PROFILE, "--config", NOSTD_CONFIG]),
 )
@@ -226,9 +230,9 @@ MANIFEST = "manifest.json"
 STATEMENT = "build-statement.json"
 
 # The two builds a package carries: (directory in the package, cargo's profile arguments).
-BUILDS = (("release", ["--release"]), ("debug", []))
+BUILDS = (("release", ["--profile", SHIP_PROFILE]), ("debug", []))
 # Full debug information in both builds: the symbols are in the PDB beside the DLL, not in it.
-DEBUG_INFO_ENV = {"CARGO_PROFILE_DEV_DEBUG": "full", "CARGO_PROFILE_RELEASE_DEBUG": "full",
+DEBUG_INFO_ENV = {"CARGO_PROFILE_DEV_DEBUG": "full", "CARGO_PROFILE_SHIP_DEBUG": "full",
                   "CARGO_PROFILE_CAPI_NOSTD_DEBUG": "full"}
 # Given to the link of the DLL alone (`cargo rustc`), so no dependency is rebuilt for them.
 LINK_ARGS = ["-C", "link-arg=/Brepro", "-C", "link-arg=/PDBALTPATH:%_PDB%"]
@@ -1784,6 +1788,13 @@ def selftest() -> int:
     expect("the size gate's client is measured in both forms, the one without `std` second",
            [case for case, _, _ in SIZE_CASES] == ["pico-client-coop-windows", "pico-client-coop-nostd-windows"]
            and SIZE_CASES[1][1] == "os-windows,link-udp" and NOSTD_PROFILE in SIZE_CASES[1][2])
+    expect("the release DLL with std and the client with std are built by the shipping profile",
+           dict(BUILDS)["release"] == ["--profile", SHIP_PROFILE]
+           and SIZE_CASES[0][2] == ["--profile", SHIP_PROFILE]
+           and "--release" not in dict(BUILDS)["release"] + SIZE_CASES[0][2])
+    expect("a release build's debug information is asked of the profile it is built with",
+           all(f"CARGO_PROFILE_{profile.upper().replace('-', '_')}_DEBUG" in DEBUG_INFO_ENV
+               for profile in (SHIP_PROFILE, NOSTD_PROFILE)))
 
     table = {"std": [], "engine-coop": ["std", "dep:x"], "engine-tokio": ["std"], "os-windows": ["dep:x"],
              "link-udp": ["x?/link-udp"], "peer": ["link-udp"], "clock-source": ["std"],
