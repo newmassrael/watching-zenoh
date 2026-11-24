@@ -81,7 +81,27 @@ pub fn publisher_adv_ke(
     meta: Option<&str>,
 ) -> String {
     let tail = meta.unwrap_or(KE_EMPTY);
-    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/{zid_hex}/{discriminator}/{tail}")
+    adv_ke(base, &[KE_ADV_PUB, zid_hex, discriminator, tail])
+}
+
+/// `<base>/@adv` and each of `chunks` after a `/`: every `@adv` key expression above, written
+/// without `core::fmt`.
+fn adv_ke(base: &str, chunks: &[&str]) -> String {
+    let mut ke = String::from(base);
+    ke.push('/');
+    ke.push_str(KE_ADV_PREFIX);
+    for chunk in chunks {
+        ke.push('/');
+        ke.push_str(chunk);
+    }
+    ke
+}
+
+/// `eid` in decimal, as `{eid}` prints it.
+fn eid_text(eid: u32) -> wz_session_core::text_out::FixedText<10> {
+    let mut text = wz_session_core::text_out::FixedText::new();
+    text.push_u64(u64::from(eid));
+    text
 }
 
 /// The subscriber's own detection KE:
@@ -101,7 +121,7 @@ pub fn publisher_adv_ke(
 /// single `_` chunk rather than being appended after it.
 pub fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>) -> String {
     let tail = meta.unwrap_or(KE_EMPTY);
-    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_SUB}/{zid_hex}/{eid}/{tail}")
+    adv_ke(base, &[KE_ADV_SUB, zid_hex, eid_text(eid).prefix(), tail])
 }
 
 /// The sample-driven / bounded recovery GET KE: `<base>/@adv/*/<zid_hex>/<eid>/**`.
@@ -109,7 +129,7 @@ pub fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>
 /// meta chunk, so it resolves a specific `(zid, eid)` source's cache (zenoh
 /// advanced_subscriber.rs:710-715).
 pub fn recovery_get_ke(base: &str, zid_hex: &str, eid: u32) -> String {
-    format!("{base}/{KE_ADV_PREFIX}/*/{zid_hex}/{eid}/**")
+    adv_ke(base, &["*", zid_hex, eid_text(eid).prefix(), "**"])
 }
 
 /// [`recovery_get_ke`] written into `out`, the source named by its zid's bytes, with no memory
@@ -128,7 +148,7 @@ pub fn write_recovery_get_ke(out: &mut dyn TextOut, base: &str, zid: &[u8], eid:
 /// The startup history GET KE: `<base>/@adv/**` (every cached sample under the
 /// `@adv` namespace, across all publishers).
 pub fn history_get_ke(base: &str) -> String {
-    format!("{base}/{KE_ADV_PREFIX}/**")
+    adv_ke(base, &["**"])
 }
 
 /// [`history_get_ke`] written into `out`, with no memory of its own.
@@ -151,7 +171,7 @@ pub fn write_history_get_ke(out: &mut dyn TextOut, base: &str) {
 /// R2816 — renamed from `heartbeat_sub_ke`: the old name was one consumer's, and the third
 /// consumer exists in every advanced-subscriber build, as upstream's does.
 pub fn publisher_detection_ke(base: &str) -> String {
-    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/**")
+    adv_ke(base, &[KE_ADV_PUB, "**"])
 }
 
 /// `true` when a DERIVED `@adv` keyexpr may go on the wire.
@@ -188,9 +208,34 @@ mod tests {
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     use super::{
-        adv_ke_is_outbound_safe, history_get_ke, publisher_detection_ke, recovery_get_ke,
-        write_history_get_ke, write_recovery_get_ke,
+        adv_ke_is_outbound_safe, history_get_ke, publisher_adv_ke, publisher_detection_ke,
+        recovery_get_ke, subscriber_adv_ke, write_history_get_ke, write_recovery_get_ke,
     };
+
+    /// Each `@adv` key expression is its chunks under `<base>/@adv`, one `/` between each.
+    /// Turned red by a chunk left out, doubled or out of order, or an id written other than in
+    /// decimal.
+    #[test]
+    fn each_adv_key_is_its_chunks_in_order() {
+        assert_eq!(
+            publisher_adv_ke("demo/data", "a0b1", "7", None),
+            "demo/data/@adv/pub/a0b1/7/_"
+        );
+        assert_eq!(
+            publisher_adv_ke("demo/data", "a0b1", "uhlc", Some("m/n")),
+            "demo/data/@adv/pub/a0b1/uhlc/m/n"
+        );
+        assert_eq!(
+            subscriber_adv_ke("demo/data", "a0b1", 4_294_967_295, None),
+            "demo/data/@adv/sub/a0b1/4294967295/_"
+        );
+        assert_eq!(
+            recovery_get_ke("demo/data", "a0b1", 0),
+            "demo/data/@adv/*/a0b1/0/**"
+        );
+        assert_eq!(history_get_ke("demo/data"), "demo/data/@adv/**");
+        assert_eq!(publisher_detection_ke("demo/data"), "demo/data/@adv/pub/**");
+    }
 
     /// The written keys are the owned spellings' texts, for a zid whose hex drops a leading zero
     /// and for one that keeps every digit; a buffer too short for the key reports it and hands no
