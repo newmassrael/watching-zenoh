@@ -67,6 +67,18 @@ impl<'a> NamedKey<'a> {
         })
     }
 
+    /// `text`, named by the declaration `declared` where that begins the text, and whole
+    /// otherwise: with no declaration, or one the text does not start with. `None` for an empty
+    /// text.
+    // Out of line: every key a session's tables name, by a row's declaration or by an id, is
+    // named through it.
+    #[inline(never)]
+    pub fn under_or_whole(text: &'a str, declared: Option<Prefix<'_>>) -> Option<Self> {
+        declared
+            .and_then(|prefix| Self::under(text, prefix))
+            .or_else(|| Self::literal(text))
+    }
+
     /// The whole text.
     pub const fn text(self) -> &'a str {
         self.text.as_str()
@@ -102,5 +114,28 @@ mod tests {
         );
         assert_eq!(NamedKey::under("away/temp", prefix), None);
         assert_eq!(NamedKey::literal(""), None);
+    }
+
+    /// A key is named under a declaration that begins it, and whole under one that does not or
+    /// with none; an empty text is no key either way.
+    #[test]
+    fn a_key_is_named_under_its_declaration_or_whole() {
+        let id = MappedId::new(7).unwrap();
+        let prefix = Prefix::of(id, "home/");
+        assert_eq!(
+            NamedKey::under_or_whole("home/temp", Some(prefix)),
+            NamedKey::under("home/temp", prefix)
+        );
+        assert_eq!(
+            NamedKey::under_or_whole("away/temp", Some(prefix)),
+            NamedKey::literal("away/temp"),
+            "a declaration the text does not start with names it whole"
+        );
+        assert_eq!(
+            NamedKey::under_or_whole("home/temp", None),
+            NamedKey::literal("home/temp")
+        );
+        assert_eq!(NamedKey::under_or_whole("", Some(prefix)), None);
+        assert_eq!(NamedKey::under_or_whole("", None), None);
     }
 }

@@ -1692,10 +1692,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .prefix
             .and_then(|prefix| self.keyexprs.get(prefix))
             .and_then(|row| Some(Prefix::of(MappedId::new(row.id)?, text(&row.key))));
-        match declared {
-            Some(prefix) => NamedKey::under(whole, prefix).or_else(|| NamedKey::literal(whole)),
-            None => NamedKey::literal(whole),
-        }
+        NamedKey::under_or_whole(whole, declared)
     }
 
     /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
@@ -1707,10 +1704,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             let row = self.keyexprs.get(handle)?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
-        match declared {
-            Some(prefix) => NamedKey::under(key, prefix).or_else(|| NamedKey::literal(key)),
-            None => NamedKey::literal(key),
-        }
+        NamedKey::under_or_whole(key, declared)
     }
 
     // ---- entities --------------------------------------------------------------------------
