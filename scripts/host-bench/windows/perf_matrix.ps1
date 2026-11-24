@@ -22,7 +22,8 @@ the runs a disturbed cell is given, the settle, the tail, the readiness bound), 
 restates them.
 
 Arm P is zenoh-pico from -PicoSource (an export of the pinned vendor/zenoh-pico), configured by
-CMake's Visual Studio generator for x64, Release, shared, without examples and tests, with the plan's
+CMake's generator of the newest Visual Studio vswhere names, on that installation (-Generator names
+another, whose installation CMake picks), for x64, Release, shared, without examples and tests, with the plan's
 switches: the configuration capability_cost_gate.pico_reference_tree gives it on Linux. The cache
 entries of pico's own options and every switch pico built otherwise than asked are recorded. Arm W is
 the package's release DLL. perf_probe.c is compiled against each with MSVC.
@@ -66,7 +67,7 @@ param(
     [int]$TimeoutMs = 100,
     [string]$GroupInterface = '',
     [string]$CMake = '',
-    [string]$Generator = 'Visual Studio 17 2022',
+    [string]$Generator = '',
     [double]$IdleSeconds = 10,
     [int]$PerSide = 4
 )
@@ -846,12 +847,51 @@ function Get-ReportLines($rows) {
 
 # -- the build -------------------------------------------------------------------------------------------
 
-function Find-VsRoot {
+# What a failed step wrote, printed: a log that is only named hides the cause from a run read later. The
+# lines that state an error come first, since the summary MSBuild ends with can push them out of the tail.
+function Show-Log([string]$path) {
+    $lines = @((Read-Text $path) -split "\r?\n" | Where-Object { $_.Trim() -ne '' })
+    if ($lines.Count -eq 0) { Say "$path is empty or missing"; return }
+    $errors = @($lines | Where-Object { $_ -match 'CMake Error|\berror [A-Z]{1,4}[0-9]+\b|fatal error' } |
+                Select-Object -First 40)
+    Say "$path, the first $($errors.Count) lines that state an error:"
+    foreach ($line in $errors) { [Console]::Out.WriteLine("  $line") }
+    $tail = @($lines | Select-Object -Last 60)
+    Say "$path, its last $($tail.Count) lines:"
+    foreach ($line in $tail) { [Console]::Out.WriteLine("  $line") }
+}
+
+# A step run by Invoke-InVs failed: its log printed, and the environment's own when cl was never found,
+# since that is where vcvarsall.bat said why.
+function Fail-WithLog([string]$why, [string]$log) {
+    Show-Log $log
+    if ((Read-Text $log) -notmatch '\\cl\.exe') { Show-Log ($log + '.vcvars') }
+    Fail "$why (see $log)"
+}
+
+function Find-VsWhere {
     $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path -LiteralPath $vswhere)) { Fail 'no vswhere.exe: the MSVC toolchain is not installed' }
+    return $vswhere
+}
+
+function Find-VsRoot([string]$vswhere) {
     $found = & $vswhere -latest -products '*' -property installationPath | Select-Object -First 1
     if (-not $found) { Fail 'vswhere names no Visual Studio installation' }
     return "$found".Trim()
+}
+
+# The generator of the installation vcvarsall.bat is taken from, as this CMake names it: a host moves to
+# the next Visual Studio on its own schedule, so a generator named here once outlives it.
+function Find-Generator([string]$vswhere, [string]$cmakeExe) {
+    $version = & $vswhere -latest -products '*' -property installationVersion | Select-Object -First 1
+    if ("$version".Trim() -notmatch '^([0-9]+)\.') { Fail "vswhere names no version of the Visual Studio installation ('$version')" }
+    $major = $Matches[1]
+    $named = @(& $cmakeExe --help | ForEach-Object {
+        if ("$_" -match "^\*?\s+(Visual Studio $major [0-9]{4})(?=\s|$)") { $Matches[1] }
+    } | Select-Object -First 1)
+    if ($named.Count -ne 1) { Fail "$cmakeExe names no generator of Visual Studio $major; name one with -Generator" }
+    return $named[0]
 }
 
 function Find-CMake {
@@ -931,9 +971,19 @@ function Invoke-Build {
         $picoTree = $picoTops[0].FullName
     }
     if (-not (Test-Path -LiteralPath (Join-Path $picoTree 'CMakeLists.txt'))) { Fail "$picoTree is no zenoh-pico tree (no CMakeLists.txt)" }
-    $script:VcVars = Join-Path (Find-VsRoot) 'VC\Auxiliary\Build\vcvarsall.bat'
+    $vswhere = Find-VsWhere
+    $vsRoot = Find-VsRoot $vswhere
+    $script:VcVars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvarsall.bat'
     if (-not (Test-Path -LiteralPath $script:VcVars)) { Fail "no vcvarsall.bat at $script:VcVars" }
     $cmakeExe = Find-CMake
+    # A derived generator is held to the installation it was derived from; a named one is CMake's to place.
+    if ($Generator) {
+        $generatorName = $Generator
+        $instance = ''
+    } else {
+        $generatorName = Find-Generator $vswhere $cmakeExe
+        $instance = ' ' + $Q + '-DCMAKE_GENERATOR_INSTANCE=' + $vsRoot.Replace('\', '/') + $Q
+    }
 
     # Arm W: the package the plan was made from, and no other.
     $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $Package).Hash.ToLowerInvariant()
@@ -959,11 +1009,11 @@ function Invoke-Build {
     if (Test-Path -LiteralPath $build) { Remove-Item -Recurse -Force -LiteralPath $build }
     $switches = @($script:PlanDoc.reference_switches.PSObject.Properties | Sort-Object Name)
     $defines = ($switches | ForEach-Object { '-D' + $_.Name + '=' + $_.Value }) -join ' '
-    $configure = $Q + $cmakeExe + $Q + ' -S ' + $Q + $picoTree + $Q + ' -B ' + $Q + $build + $Q + ' -G ' + $Q + $Generator + $Q +
-                 ' -A x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ' + $defines
+    $configure = $Q + $cmakeExe + $Q + ' -S ' + $Q + $picoTree + $Q + ' -B ' + $Q + $build + $Q + ' -G ' + $Q + $generatorName + $Q +
+                 ' -A x64' + $instance + ' -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ' + $defines
     $compile = $Q + $cmakeExe + $Q + ' --build ' + $Q + $build + $Q + ' --config Release --parallel'
     $log = Join-Path $script:WorkDir 'build-reference.log'
-    if ((Invoke-InVs 'build-reference' @($configure, $compile) $log) -ne 0) { Fail "the zenoh-pico reference did not build (see $log)" }
+    if ((Invoke-InVs 'build-reference' @($configure, $compile) $log) -ne 0) { Fail-WithLog 'the zenoh-pico reference did not build' $log }
     $dll = @(Get-ChildItem -LiteralPath $build -Recurse -Filter 'zenohpico.dll' | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' })
     $implib = @(Get-ChildItem -LiteralPath $build -Recurse -Filter 'zenohpico.lib' | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' })
     if ($dll.Count -ne 1 -or $implib.Count -ne 1) {
@@ -995,7 +1045,7 @@ function Invoke-Build {
         $line = $cl + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
                 ' ws2_32.lib psapi.lib /Fo:' + $Q + (Join-Path $objects 'perf_probe.obj') + $Q + ' /Fe:' + $Q + $exe + $Q
         $log = Join-Path $script:WorkDir "build-probe-$($arm.Arm).log"
-        if ((Invoke-InVs "build-probe-$($arm.Arm)" @($line) $log) -ne 0) { Fail "perf_probe against arm $($arm.Arm) did not build (see $log)" }
+        if ((Invoke-InVs "build-probe-$($arm.Arm)" @($line) $log) -ne 0) { Fail-WithLog "perf_probe against arm $($arm.Arm) did not build" $log }
     }
 
     # The toolchain, in the words the record gives it: cl's banner (it exits non-zero with no input) and CMake's.
@@ -1006,7 +1056,7 @@ function Invoke-Build {
     $maker = @($said | Where-Object { $_ -match '^cmake version' } | Select-Object -First 1)
     $record = [ordered]@{
         reference_pin = $script:PlanDoc.reference_pin
-        reference_toolchain = ('{0}; {1}; generator {2} x64' -f "$compiler".Trim(), "$maker".Trim(), $Generator)
+        reference_toolchain = ('{0}; {1}; generator {2} x64' -f "$compiler".Trim(), "$maker".Trim(), $generatorName)
         reference_switches = $script:PlanDoc.reference_switches
         reference_refused = $refused
         reference_cache = Get-CacheOptions (Read-Text (Join-Path $build 'CMakeCache.txt'))

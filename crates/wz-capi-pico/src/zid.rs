@@ -376,11 +376,17 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// "public API only" export policy would miss.
 #[no_mangle]
 pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
+    // At most the id's sixteen bytes, so the length fits a byte.
+    id_len(id.id) as u8
+}
+
+/// The length of the id `id` up to its last non-zero byte, as zenoh writes an id: 0 for the
+/// id of zero bytes.
+pub(crate) fn id_len(id: [u8; Z_ID_SIZE]) -> usize {
     // The bytes read as one little-endian number, whose leading zero bytes are the id's trailing
     // ones: a count of its leading zero bits rather than a walk over the sixteen bytes.
-    let trailing_zeros = u128::from_le_bytes(id.id).leading_zeros() >> 3;
-    // At most the id's sixteen bytes, so the length fits a byte.
-    Z_ID_SIZE.saturating_sub(trailing_zeros as usize) as u8
+    let trailing_zeros = u128::from_le_bytes(id).leading_zeros() >> 3;
+    Z_ID_SIZE.saturating_sub(trailing_zeros as usize)
 }
 
 /// Build an owned zid closure from a callback + drop + context (pico

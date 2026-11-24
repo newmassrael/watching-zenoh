@@ -1286,6 +1286,79 @@ mod link_stamps {
         );
     }
 
+    /// The watch of the peer's initial declarations counts from the establishment stamp the lease
+    /// read, so a running watch adds no hold of the stamps. Turned red by a watch that reads the
+    /// stamps again.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_declaration_watch_reads_the_stamps_the_lease_read() {
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        // A first event noted: the watch runs from the establishment.
+        actions
+            .peer_declaration_progress_ms
+            .store(0, core::sync::atomic::Ordering::Release);
+        let expiry = 100 + actions.adopted_lease_ms();
+        let watch = actions.declaration_watch_deadline();
+        let mut deadline = None;
+        let holds = holds_in(|| deadline = crate::drive::lease_wake_deadline(&*actions));
+        assert_eq!(
+            deadline,
+            Some(watch.map_or(expiry, |watch| watch.min(expiry))),
+            "the earlier of the expiry and the watch"
+        );
+        assert_eq!(
+            holds, 2,
+            "the stamps in one hold, the peer's lease in another"
+        );
+    }
+
+    /// A due lease is judged by the deadlines its wake was read from: the stamps and the peer's
+    /// lease are read once, and the expiry is what the driver is told. Turned red by timers that
+    /// read the deadlines again to judge them, or that judge a lease before it is due.
+    #[test]
+    fn a_due_lease_is_judged_by_the_deadlines_its_wake_read() {
+        use crate::driver_loop::IterationEvent;
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = crate::drive::new_session_engine::<super::PlainRuntime, super::StillClock>(
+            &actions,
+            super::NoEntropy,
+        );
+        engine.initialize().unwrap_or_else(|never| match never {});
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let expiry = 100 + actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut outcomes = alloc::vec::Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Lease(outcome) = event {
+                outcomes.push(outcome);
+            }
+        };
+        timers.fire_due(&mut engine, &actions, expiry - 1, &mut sink);
+        let holds = holds_in(|| timers.fire_due(&mut engine, &actions, expiry, &mut sink));
+        assert_eq!(
+            outcomes,
+            [LeaseCheckOutcome::Expired],
+            "nothing before the expiry, the expiry at it"
+        );
+        assert_eq!(
+            holds, 2,
+            "the stamps in one hold, the peer's lease in another"
+        );
+    }
+
     /// The keepalive deadline counts from the later of the establishment and the last emit, and
     /// reads the two in one hold. Turned red by a deadline that reads each stamp in a hold of its
     /// own.
