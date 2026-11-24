@@ -51,10 +51,6 @@ impl RoundCall for Call {
 }
 
 impl SampleCall for Call {
-    fn same_row(&self, other: &Self) -> bool {
-        self.row == other.row
-    }
-
     fn hand(&self, sample: &dyn SampleView) {
         self.log
             .note(format!("{} sample {}", self.row, sample.keyexpr()));
