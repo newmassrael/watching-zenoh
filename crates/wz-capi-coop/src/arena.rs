@@ -372,9 +372,12 @@ impl HeldPlaces {
         }
     }
 
-    /// These places, with a place of `layout` for each row the session keeps of `kind`.
-    pub fn with_entity(mut self, kind: EntityKind, layout: Layout) -> Self {
-        if let Some(place) = self.entities.get_mut(kind as usize) {
+    /// These places, with a place of `layout` for each row the session keeps of `kind`. A
+    /// `const fn`, so an ABI whose places are known when it is built states them as a constant
+    /// and its open lays none of them out at run time.
+    pub const fn with_entity(mut self, kind: EntityKind, layout: Layout) -> Self {
+        // The kind's place is the first past the places of the kinds before it.
+        if let Some((_, [place, ..])) = self.entities.split_at_mut_checked(kind as usize) {
             *place = Some(layout);
         }
         self
@@ -2360,6 +2363,27 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// A kind's place lies at the kind's own index, the first kind's and the last's alike, in a
+    /// constant as at run time. Turned red by a place laid at a neighbour's index, or at none.
+    #[test]
+    fn each_kinds_place_lies_at_its_own_index() {
+        const PLACE: Layout = Layout::new::<[u64; 3]>();
+        const LAST: HeldPlaces =
+            HeldPlaces::NONE.with_entity(EntityKind::LinkEventsListener, PLACE);
+        for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
+            let held = HeldPlaces::NONE.with_entity(kind, PLACE);
+            for (index, place) in held.entities.iter().enumerate() {
+                assert_eq!(
+                    *place,
+                    (index == at).then_some(PLACE),
+                    "{kind:?} at {index}"
+                );
+            }
+        }
+        assert_eq!(LAST.entities[ENTITY_KINDS - 1], Some(PLACE));
+        assert_eq!(LAST.entities[..ENTITY_KINDS - 1], [None; ENTITY_KINDS - 1]);
     }
 
     /// A plan lays out each table of cells once, its flags before its cells, in the order of
