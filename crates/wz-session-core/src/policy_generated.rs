@@ -1011,8 +1011,7 @@ impl Default for KeyWireForm {
 /// that one transport's full queue drops is still queued on the session's other transports:
 /// `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a
 /// droppable message that finds it held is dropped for all of them (`vendor/zenoh-
-/// pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl ==
-/// Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
+/// pico/src/transport/common/tx.c` @ `Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldPublishDrop {
     /// `held-faces`.
@@ -1186,9 +1185,8 @@ pub struct SessionPolicy {
     /// so a droppable message that one transport's full queue drops is still queued on the
     /// session's other transports: `held-faces`. zenoh-pico's peers of one unicast
     /// transport share one transmit lock, and a droppable message that finds it held is
-    /// dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret =
-    /// _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-
-    /// face`.
+    /// dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `Z_CONGESTION_CONTROL_BLOCK);`): `every-face`.
     held_publish_drop: HeldPublishDropBound,
 }
 
