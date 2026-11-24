@@ -31,7 +31,7 @@ use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
-use crate::face_life::{Phase, Signals};
+use crate::face_life::{FaceRole, Phase, Signals};
 use crate::link_cells::CellRc;
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
@@ -410,9 +410,11 @@ impl<D> Dial<D> {
 /// still being made.
 pub type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
 
-/// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): where its link
-/// stands, what it did since, and the answer of its dial, kept for the link it made.
+/// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): its role, where its
+/// link stands, what it did since, and the answer of its dial, kept for the link it made.
 pub struct FaceRead<P> {
+    /// Which face it is: the dial role's, or one taken besides.
+    pub role: FaceRole,
     /// Where the face's link stands.
     pub phase: Phase,
     /// What the link did since the face was last read.
@@ -661,10 +663,19 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             .any(|face| face.link().wire().is_some_and(Wire::holds_input))
     }
 
-    /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
-    /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
-    /// made. A face past the table reads as one that waits with no time to dial again.
+    /// What the face at `at`, numbered `id`, holds: its role, where its link stands, what it did
+    /// since (`Signals`), and the answer of a dial under way, which is asked here and kept for the
+    /// link it made. A face past the table reads as one taken besides the dial role's that waits
+    /// with no time to dial again. The role is the row's: the first face is the dial role's, placed
+    /// by [`Self::new`] and never removed ([`Self::remove_face`]).
+    // Out of line, so its caller reads the role as a value and takes one path for either role.
+    #[inline(never)]
     pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
+        let role = if at == 0 {
+            FaceRole::Dial
+        } else {
+            FaceRole::Taken
+        };
         let phase = self
             .faces
             .get(at)
@@ -689,6 +700,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             signals.node_held = self.node_is_held(node.as_slice(), id);
         }
         FaceRead {
+            role,
             phase,
             signals,
             answer,
@@ -1240,6 +1252,22 @@ mod tests {
         assert_eq!(past.phase, Phase::Waiting { at_us: u64::MAX });
         assert_eq!(past.signals, Signals::default());
         assert!(past.answer.is_none());
+    }
+
+    /// A face is read in the role of its row: the first, which the table never lets go of, is the
+    /// dial role's, and any other, or one past the table, one taken besides. Turned red by a role
+    /// read off anything but the row.
+    #[test]
+    fn a_face_is_read_in_the_role_of_its_row() {
+        let mut faces = supervisor(Link::Waiting { at_us: 0 }, 2);
+        let taken = TestFace {
+            id: 1,
+            link: Link::Waiting { at_us: 0 },
+        };
+        assert!(faces.push_face(taken).is_ok());
+        assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
+        assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face

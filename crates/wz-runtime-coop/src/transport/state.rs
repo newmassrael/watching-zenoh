@@ -39,7 +39,7 @@ use wz_session_core::unicast_rx::RouterLend;
 #[cfg(feature = "group")]
 use super::GroupRecord;
 use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
-use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
+use crate::face_life::{FaceEffect, FaceLife, Next, Turn};
 #[cfg(feature = "listen")]
 use crate::faces::Accepted;
 use crate::faces::{
@@ -618,22 +618,22 @@ impl<T: TransportFaces> TransportState<T> {
         }
     }
 
-    /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us`, and
-    /// what the face does about it (`FaceLife`), `redials` when the session dials its endpoints
-    /// again: the session carries it out, with the answer of the dial when one was asked. A dial
-    /// that is over is let go of here, with what it held for its link (a socket, the link's
-    /// buffers), before the face is dialled anew.
+    /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us` with
+    /// the face's role, and what the face does about it (`FaceLife`), `redials` when the session
+    /// dials its endpoints again: the session carries it out, with the answer of the dial when one
+    /// was asked. A dial that is over is let go of here, with what it held for its link (a socket,
+    /// the link's buffers), before the face is dialled anew.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn face_step(
         &mut self,
         at: usize,
         id: FaceId,
-        role: FaceRole,
         redials: bool,
         now_us: u64,
     ) -> FaceStep<PumpOf<T>> {
         let FaceRead {
+            role,
             phase,
             signals,
             answer,
