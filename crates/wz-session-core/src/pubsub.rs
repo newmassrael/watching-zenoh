@@ -3738,7 +3738,8 @@ impl<P: Storage> InterestSide<P> {
                 .push(SubInterestReply::Final { interest_id })
                 .is_err()
         {
-            self.staged.truncate(start);
+            // Take back what this chain staged; `truncate` is the byte list's alone.
+            while self.staged.len() > start && self.staged.pop().is_some() {}
             self.count_refused_chain();
             return 0;
         }

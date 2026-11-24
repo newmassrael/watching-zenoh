@@ -433,7 +433,8 @@ impl<P: Storage> LocalTokenRegistry<P> {
                 .push(DeclResponseItem::Final { interest_id })
                 .is_err()
         {
-            pending.truncate(start);
+            // Take back what this chain staged; `truncate` is the byte list's alone.
+            while pending.len() > start && pending.pop().is_some() {}
             return Err(CapacityFull(()));
         }
         Ok(matching)
