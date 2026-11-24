@@ -72,26 +72,30 @@ pub unsafe extern "C" fn z_free(ptr: *mut c_void) {
 /// sleeps that again, as pico's Zephyr backend does.
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_us(time: usize) -> ZResult {
-    guard_val(Z_OK, || {
-        os::sleep(Unit::Micro, time);
-        Z_OK
-    })
+    sleep_for(time, Unit::Micro)
 }
 
 /// Sleep for `time` milliseconds (pico `z_sleep_ms`).
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_ms(time: usize) -> ZResult {
-    guard_val(Z_OK, || {
-        os::sleep(Unit::Milli, time);
-        Z_OK
-    })
+    sleep_for(time, Unit::Milli)
 }
 
 /// Sleep for `time` seconds (pico `z_sleep_s`).
 #[no_mangle]
 pub unsafe extern "C" fn z_sleep_s(time: usize) -> ZResult {
+    sleep_for(time, Unit::Second)
+}
+
+/// The shared body of the three `z_sleep_*` exports.
+///
+/// Out of line, as are the shared bodies of the clock and wall-time families below: inlined, each
+/// export would carry its own copy of the body specialised to its unit, and the unit last leaves
+/// the export's own arguments where the body reads them, so an export is one load and a jump.
+#[inline(never)]
+fn sleep_for(time: usize, unit: Unit) -> ZResult {
     guard_val(Z_OK, || {
-        os::sleep(Unit::Second, time);
+        os::sleep(unit, time);
         Z_OK
     })
 }
@@ -131,6 +135,7 @@ pub unsafe extern "C" fn z_clock_elapsed_s(instant: *mut z_clock_t) -> c_ulong {
 /// The shared body of the three `z_clock_elapsed_*` exports. One body rather than
 /// three keeps the clamp and the null guard from drifting between siblings, the
 /// asymmetry this crate has already been bitten by once.
+#[inline(never)]
 unsafe fn elapsed_since(instant: *mut z_clock_t, unit: Unit) -> c_ulong {
     // Upstream's own definition: `z_clock_elapsed_X(i)` IS
     // `zp_clock_elapsed_X_since(&now, i)` (`system.c:249-268`). Delegating
@@ -187,6 +192,7 @@ pub unsafe extern "C" fn zp_clock_elapsed_s_since(
 
 /// The shared body of the `zp_clock_elapsed_*_since` trio, and — through
 /// [`elapsed_since`] — of the `z_clock_elapsed_*` trio too.
+#[inline(never)]
 unsafe fn elapsed_between(instant: *mut z_clock_t, epoch: *mut z_clock_t, unit: Unit) -> c_ulong {
     guard_val(0, || {
         if instant.is_null() || epoch.is_null() {
@@ -210,7 +216,7 @@ unsafe fn elapsed_between(instant: *mut z_clock_t, epoch: *mut z_clock_t, unit: 
 /// `clock` must be null or a valid, writable `z_clock_t`.
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_us(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(clock, Unit::Micro, duration);
+    advance(clock, duration, Unit::Micro);
 }
 
 /// Move a clock reading forward by `duration` milliseconds (pico
@@ -220,7 +226,7 @@ pub unsafe extern "C" fn z_clock_advance_us(clock: *mut z_clock_t, duration: c_u
 /// As [`z_clock_advance_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_ms(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(clock, Unit::Milli, duration);
+    advance(clock, duration, Unit::Milli);
 }
 
 /// Move a clock reading forward by whole seconds (pico `z_clock_advance_s`).
@@ -229,11 +235,12 @@ pub unsafe extern "C" fn z_clock_advance_ms(clock: *mut z_clock_t, duration: c_u
 /// As [`z_clock_advance_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_s(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(clock, Unit::Second, duration);
+    advance(clock, duration, Unit::Second);
 }
 
 /// The shared body of the three `z_clock_advance_*` exports.
-unsafe fn advance(clock: *mut z_clock_t, unit: Unit, duration: c_ulong) {
+#[inline(never)]
+unsafe fn advance(clock: *mut z_clock_t, duration: c_ulong, unit: Unit) {
     let _ = guarded(|| {
         if clock.is_null() {
             return Z_OK;
@@ -328,6 +335,7 @@ pub unsafe extern "C" fn z_time_elapsed_s(time: *mut z_time_t) -> c_ulong {
 }
 
 /// The shared body of the three `z_time_elapsed_*` exports.
+#[inline(never)]
 unsafe fn wall_elapsed(time: *mut z_time_t, unit: Unit) -> c_ulong {
     guard_val(0, || {
         if time.is_null() {

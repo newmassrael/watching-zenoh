@@ -58,16 +58,35 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     libc::realloc(ptr, size)
 }
 
+const NANOS_PER_SECOND: c_ulong = 1_000_000_000;
+
+/// How many of `unit` make a second.
+fn units_per_second(unit: Unit) -> c_ulong {
+    match unit {
+        Unit::Micro => 1_000_000,
+        Unit::Milli => 1_000,
+        Unit::Second => 1,
+    }
+}
+
+/// `count` of `unit` as whole seconds and the nanoseconds left over, which are below a second.
+///
+/// One reading of a table rather than an arm per unit, so the one body the three exports of a unit
+/// family share does one division whatever the unit.
+fn split_seconds(count: c_ulong, unit: Unit) -> (c_ulong, c_ulong) {
+    let per_second = units_per_second(unit);
+    // `units_per_second` is one or more, so no division refuses.
+    let whole = count.checked_div(per_second).unwrap_or(0);
+    let left = count.checked_rem(per_second).unwrap_or(0);
+    let scale = NANOS_PER_SECOND.checked_div(per_second).unwrap_or(0);
+    (whole, left.wrapping_mul(scale))
+}
+
 /// Sleep at least `time` of `unit`, as pico's `usleep` and `sleep` do: `nanosleep`, slept again for
 /// what is left when a signal cuts it short, where `usleep` would report the interruption.
 pub fn sleep(unit: Unit, time: usize) {
-    let time = time as u64;
-    let (secs, nanos) = match unit {
-        // A remainder of a second scaled to nanoseconds is below 1e9.
-        Unit::Micro => (time / 1_000_000, (time % 1_000_000).wrapping_mul(1_000)),
-        Unit::Milli => (time / 1_000, (time % 1_000).wrapping_mul(1_000_000)),
-        Unit::Second => (time, 0),
-    };
+    // A Unix `unsigned long` is as wide as a `usize`.
+    let (secs, nanos) = split_seconds(time as c_ulong, unit);
     let mut ask = libc::timespec {
         tv_sec: libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX),
         // Below a second, which a `long` of any width holds.
@@ -149,14 +168,7 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
 /// wrap into the host's `time_t` as that cast does, and the nanoseconds part is below 1e9, which
 /// a `long` holds on every host, so the sum with `tv_nsec` stays below 2e9 on a 32-bit one too.
 pub fn clock_advance(clock: &mut Clock, unit: Unit, duration: c_ulong) {
-    let (secs, nsecs) = match unit {
-        Unit::Micro => (
-            duration / 1_000_000,
-            (duration % 1_000_000).wrapping_mul(1_000),
-        ),
-        Unit::Milli => (duration / 1_000, (duration % 1_000).wrapping_mul(1_000_000)),
-        Unit::Second => (duration, 0),
-    };
+    let (secs, nsecs) = split_seconds(duration, unit);
     clock.tv_sec = clock.tv_sec.wrapping_add(secs as libc::time_t);
     // Below 2e9, as said above, and back below 1e9 after the one carry.
     clock.tv_nsec = clock.tv_nsec.wrapping_add(nsecs as libc::c_long);
@@ -648,6 +660,17 @@ mod tests {
     /// An `unsigned long` of this host as `u64`, whichever width it has.
     fn as_u64<T: Into<u64>>(value: T) -> u64 {
         value.into()
+    }
+
+    /// Each unit splits into the whole seconds and the nanoseconds of the rest, and a whole second
+    /// has no rest.
+    #[test]
+    fn a_count_splits_into_whole_seconds_and_the_nanoseconds_left() {
+        assert_eq!(split_seconds(2_500_001, Unit::Micro), (2, 500_001_000));
+        assert_eq!(split_seconds(1_500, Unit::Milli), (1, 500_000_000));
+        assert_eq!(split_seconds(999, Unit::Milli), (0, 999_000_000));
+        assert_eq!(split_seconds(7, Unit::Second), (7, 0));
+        assert_eq!(split_seconds(0, Unit::Micro), (0, 0));
     }
 
     /// The carry in `clock_advance` is ONE borrow, and it has to fire when the
