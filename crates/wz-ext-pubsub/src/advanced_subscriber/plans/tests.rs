@@ -195,3 +195,50 @@ fn a_recovered_sample_holds_the_storage_its_reply_holds() {
         "and so is the attachment"
     );
 }
+
+/// A recovered reply read as a view hands on the reply's own bytes and its encoding, and a sample
+/// copied out of that view keeps the encoding, which the view gives only as its parts.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_recovered_view_reads_the_reply_where_it_lies() {
+    use wz_session_core::link::RxBytes;
+    use wz_session_core::reply::{InboundReply, InboundReplyBody};
+    use wz_session_core::sample::EncodingHint;
+    use wz_session_core::sample_kind::SampleKind;
+    use wz_session_core::sink::SampleView;
+
+    let reply = InboundReply {
+        rid: 1,
+        keyexpr_literal: "demo/recovered".into(),
+        body: InboundReplyBody::Put {
+            payload: RxBytes::from(b"PAYLOAD".to_vec()),
+            attachment: None,
+            encoding: Some((0x0B, Some(b"text".to_vec()))),
+            source_info: None,
+            timestamp: None,
+        },
+        responder: None,
+        qos: None,
+        stamp: Default::default(),
+    };
+
+    let view = RecoveredView::of(&reply).expect("a Put reply recovers");
+    assert_eq!(view.kind(), SampleKind::Put);
+    assert_eq!(view.keyexpr(), "demo/recovered");
+    assert_eq!(
+        view.payload().as_ptr(),
+        ReplyView::payload(&reply).as_ptr(),
+        "the view reads the reply's bytes where they lie"
+    );
+    assert_eq!(view.encoding_parts(), Some((0x0B, Some(&b"text"[..]))));
+
+    let sample = recovered_sample_from_reply(&reply).expect("a Put reply recovers");
+    assert_eq!(
+        sample.encoding,
+        Some(EncodingHint {
+            packed_id: 0x0B,
+            schema: Some(b"text".to_vec()),
+        }),
+        "a sample copied out of the view keeps the encoding the view gives as parts"
+    );
+}

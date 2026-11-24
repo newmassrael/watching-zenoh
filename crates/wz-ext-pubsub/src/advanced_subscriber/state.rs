@@ -892,6 +892,17 @@ impl State {
         self.admit(Delivery::Held(&mut sample), live, now_ms)
     }
 
+    /// Ingest a RECOVERED sample read where its reply lies (a recovery or history get's reply),
+    /// as [`Self::ingest`] does an owned one: `live = false`, as the get that produced it is the
+    /// one in flight. A sample handed on at once is not copied.
+    pub fn handle_recovered(
+        &mut self,
+        view: &dyn SampleView,
+        now_ms: u64,
+    ) -> Option<RecoveryRequest> {
+        self.admit(Delivery::Lent(view), false, now_ms)
+    }
+
     /// [`Self::ingest`] of a sample lent or held.
     fn admit(&mut self, sample: Delivery<'_>, live: bool, now_ms: u64) -> Option<RecoveryRequest> {
         let (source, sn, sample) = self.route_sample(sample, now_ms)?;
