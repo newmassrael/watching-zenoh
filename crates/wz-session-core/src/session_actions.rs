@@ -17278,6 +17278,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // extension chain on the heap, once for every query answered.
         #[cfg(feature = "codec-response-final")]
         {
+            let encode = |sink: &mut crate::tx_buf::TxSink<'_>| {
+                crate::lent_control::response_final(request_id, qos).encode(sink)
+            };
+            // The lend-only build counts with the encoder it sends with
+            // (`frame_encode::push_capacity_hint` says why).
+            #[cfg(all(feature = "alloc", feature = "tx-lend-only"))]
+            let len = crate::tx_buf::encoded_len(as_encoder(&encode));
+            #[cfg(not(all(feature = "alloc", feature = "tx-lend-only")))]
+            let len = crate::lent_control::response_final_len(request_id, qos);
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
@@ -17286,13 +17295,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         reliable: true,
                     },
                     qos,
-                    crate::lent_control::response_final_len(request_id, qos),
+                    len,
                     crate::stats::NetworkStatsClass::control(
                         crate::stats::MessageLabel::ResponseFinal,
                     ),
-                    as_encoder(&|sink| {
-                        crate::lent_control::response_final(request_id, qos).encode(sink)
-                    }),
+                    as_encoder(&encode),
                 )
                 .map(|_| ());
         }

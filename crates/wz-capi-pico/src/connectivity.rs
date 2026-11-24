@@ -810,13 +810,13 @@ impl Connectivity {
         let registered = {
             let mut table = lock(&self.transports);
             let id = table.last_id.wrapping_add(1);
-            match table.rows.iter_mut().find(|row| row.is_none()) {
-                Some(row) => {
+            match table.rows.iter().position(Option::is_none) {
+                Some(at) => {
                     table.last_id = id;
                     // SAFETY: the owner holds the place; the id is written before the entry
                     // can be read.
                     unsafe { (*object).id = id };
-                    *row = Some(TransportEntry { id, object, held });
+                    table.rows[at] = Some(TransportEntry { id, object, held });
                     true
                 }
                 None => {
@@ -834,7 +834,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
-            for snapshot in connected(engine) {
+            for snapshot in connected(Arc::as_ref(engine)) {
                 delivery.call(z_loaned_transport_event_t {
                     kind: Z_SAMPLE_KIND_PUT,
                     transport: transport_of(&snapshot),

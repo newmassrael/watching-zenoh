@@ -2220,3 +2220,41 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
     let row = tables.interests().get(interest).unwrap();
     assert_eq!((row.mapping_id(), row.suffix()), (9, None), "no rest");
 }
+
+/// A matching listener's callback is reached to change through its handle while the listener
+/// stands, and not through that handle once the listener is undeclared, even after another took its
+/// slot. Turned red by an accessor that reads a retired row or ignores the handle's generation.
+#[test]
+fn a_listeners_callback_is_reached_by_its_handle_until_it_goes() {
+    let mut tables = Tables::new();
+    let first = tables
+        .declare_matching_listener_on(Plane::Subscribers, "m", false, 1)
+        .unwrap();
+    if let Some(callback) = tables.matching_listener_callback_mut(first.handle) {
+        *callback = 2;
+    }
+    assert_eq!(
+        tables
+            .matching_listeners()
+            .get(first.handle)
+            .map(|row| *row.callback()),
+        Some(2),
+        "changed in its row"
+    );
+    let _ = tables.undeclare_matching_listener(first.handle);
+    assert_eq!(tables.matching_listener_callback_mut(first.handle), None);
+    let second = tables
+        .declare_matching_listener_on(Plane::Subscribers, "n", false, 3)
+        .unwrap();
+    assert_eq!(
+        tables.matching_listener_callback_mut(first.handle),
+        None,
+        "the undeclared listener's handle reaches no row that came since"
+    );
+    assert_eq!(
+        tables
+            .matching_listener_callback_mut(second.handle)
+            .copied(),
+        Some(3)
+    );
+}

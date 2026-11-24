@@ -62,8 +62,8 @@
 //!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
 //!   each a link's batch long, with their flags and a row beside each for the rest of the
 //!   publish (`wz_runtime_coop::handed`), lent with the links' tables;
-//! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): the key expressions it declares
+//! - the session's one table set, each declaration it announces and announces again over a new
+//!   link a row of it ([`EntityRows`]): the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
 //!   Interests those filters and listeners hold open, at most one for each of them;
@@ -137,7 +137,7 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
+use crate::engine::{CoopTables, FACE_SET_BYTES, HELD_SET_BYTES};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -212,9 +212,9 @@ const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): the session's
-/// one table set, write filters, matching listeners, interests and the key arena.
-const ENTITY_ROWS: usize = 5;
+/// The session's declarations ([`ArenaPlan::put_entities`]): the session's one table set and the
+/// key arena.
+const ENTITY_ROWS: usize = 2;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
@@ -257,11 +257,14 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
-    + CACHE_RING_ROWS;
+    + CACHE_RING_ROWS
+    + FINAL_ROWS;
 
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
+const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -804,6 +807,12 @@ impl SessionRows {
         self.key_bytes
     }
 
+    /// How many queries the session holds for its queryables' callbacks at once
+    /// (`MAX_PENDING_FINALS`): the rows of the Finals held and of the requests refused.
+    pub fn held_queries(&self) -> usize {
+        self.held_queries
+    }
+
     /// The bytes of the ring the session's advanced publishers' caches keep their samples in
     /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
     /// ([`CacheSpan::claimed`]).
@@ -1306,6 +1315,24 @@ impl ArenaPlan {
         } else {
             0
         };
+        // The Finals held for those queries and the requests a dispatch refused for want of a
+        // row, a row of each for each query held (`engine::query::FinalHolds`).
+        #[cfg(feature = "queryable")]
+        {
+            let held = plan.session.held_queries;
+            plan.put(
+                "held finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::FinalHold>(),
+            );
+            plan.put(
+                "refused finals",
+                "MAX_PENDING_FINALS",
+                held,
+                core::mem::size_of::<crate::engine::RefusedFinal>(),
+            );
+        }
         #[cfg(feature = "advanced-cache")]
         {
             plan.session.cache_bytes = plan.lent(
@@ -1362,32 +1389,12 @@ impl ArenaPlan {
         }
     }
 
-    /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
+    /// The rows of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) {
-        let rows = self.session.entities;
-        // The session's one table set, holding the kinds moved onto it so far.
+        // The session's one table set, holding the kinds moved onto it so far: the write filters,
+        // the matching listeners and the Interests they hold among them.
         let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
         self.put("session tables", "MAX_DECLARED_KEYEXPRS", 1, tables);
-        let filters = self.sized(rows.filters());
-        self.put(
-            "write filters",
-            "MAX_PUBLISHERS + MAX_QUERIERS",
-            filters,
-            EntryBytes::FILTER,
-        );
-        self.put(
-            "matching listeners",
-            "MAX_MATCHING_LISTENERS",
-            rows.matching_listeners,
-            EntryBytes::MATCH,
-        );
-        let interests = self.sized(rows.interests());
-        self.put(
-            "interests",
-            "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
-            interests,
-            EntryBytes::INTEREST,
-        );
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`TableLender::keys`), not a row of
         // each.
@@ -1421,6 +1428,8 @@ impl ArenaPlan {
             queryables: self.session.entities.queryables,
             tokens: self.session.entities.tokens,
             liveliness_subscribers: self.session.entities.liveliness_subscribers,
+            write_filters: self.session.entities.filters().unwrap_or(usize::MAX),
+            matching_listeners: self.session.entities.matching_listeners,
             ..TableRows::default()
         }
     }
@@ -1453,8 +1462,8 @@ impl ArenaPlan {
 
     /// How many queries the session holds for its queryables' callbacks at once
     /// (`MAX_PENDING_FINALS`), resolved as the arena's rows are and none in a build without
-    /// `queryable`. They are no row of the arena: the query plane holds them in a fixed table of
-    /// its own, as it is shared with what answers outside the session's lock.
+    /// `queryable`. Their Finals lie in rows of the arena, a row each, as do the requests a
+    /// dispatch refused for want of one.
     pub fn held_queries(&self) -> usize {
         self.session.held_queries
     }
