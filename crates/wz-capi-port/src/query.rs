@@ -40,14 +40,15 @@ pub trait HeldQuery: Send {
 }
 
 /// A query a C program keeps past its handler, as the engine that keeps it names it
-/// ([`QueryHolder::keep_query`]): plain values, so keeping one takes no memory of its own. Each
-/// keep is one hold of the query's `ResponseFinal`, given back once
-/// ([`crate::SessionEngine::release_held`]): a query kept twice is held twice under the same id.
+/// ([`QueryHolder::keep_query`]): plain values. Each keep is one hold of the query's
+/// `ResponseFinal`, given back once ([`crate::SessionEngine::release_held`]): a query kept twice
+/// is held twice, under one id or under two as the engine names its keeps.
 #[must_use = "a kept query holds its Final until it is released (`SessionEngine::release_held`)"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeldQueryId {
-    /// What the engine knows the query's route by: the cooperative engine's generation of the link
-    /// the query came in on.
+    /// What the engine knows the keep by beside its request id: the cooperative engine's
+    /// generation of the link the query came in on, or the row and its turn in an engine's
+    /// [`crate::HeldSlab`].
     pub generation: u64,
     /// The query's request id.
     pub rid: RequestId,
