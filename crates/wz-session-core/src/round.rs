@@ -1788,7 +1788,7 @@ impl<C: RoundCalls> Round<C> {
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub unsafe fn has_room(&self, records: usize, callbacks: usize) -> bool {
+    pub unsafe fn has_room_for(&self, records: usize, callbacks: usize) -> bool {
         // SAFETY: the caller's contract.
         (unsafe { self.writable() }).is_some_and(|table| {
             table.entries.free_slots() >= records && table.callbacks.free_slots() >= callbacks

@@ -497,10 +497,10 @@ fn a_declaration_is_held_once_for_its_watches_and_refused_where_watches_are_not(
         assert!(kept.offer_decl_watch(first, event, None));
         assert!(kept.offer_decl_watch(second, event, None));
         assert!(
-            kept.has_room(3, 2),
+            kept.has_room_for(3, 2),
             "the second watch joined the first one's record"
         );
-        assert!(!kept.has_room(4, 0), "one record was written");
+        assert!(!kept.has_room_for(4, 0), "one record was written");
         kept.seal();
     }
     assert!(kept.deliver());
@@ -595,7 +595,7 @@ fn a_sealed_round_has_no_room() {
     let kept = round::<Kept>();
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
-        assert!(kept.has_room(1, 1), "an empty round has room");
+        assert!(kept.has_room_for(1, 1), "an empty round has room");
         let event = DeclEvent {
             kind: DeclEventKind::Synced,
             id: 0,
@@ -608,12 +608,12 @@ fn a_sealed_round_has_no_room() {
         };
         assert!(kept.offer_decl_watch(call, event, None));
         kept.seal();
-        assert!(!kept.has_room(1, 0), "a sealed round takes nothing");
+        assert!(!kept.has_room_for(1, 0), "a sealed round takes nothing");
     }
     assert!(kept.deliver());
     // SAFETY: as above.
     assert!(
-        unsafe { kept.has_room(1, 1) },
+        unsafe { kept.has_room_for(1, 1) },
         "a delivered round has room again"
     );
 }
