@@ -728,6 +728,17 @@ pub fn push_text<const N: usize>(
     push_bytes(unsafe { text.as_mut_vec() }, s.as_bytes())
 }
 
+/// Where an append of `add` bytes to a heapless buffer of capacity `N` that holds `len` ends, or
+/// `None` when the buffer has no room for it: the one room check of [`push_bytes`], which a reader
+/// that refuses what such a buffer would not keep asks too.
+#[inline]
+pub const fn append_end<const N: usize>(len: usize, add: usize) -> Option<usize> {
+    match len.checked_add(add) {
+        Some(end) if end <= N => Some(end),
+        _ => None,
+    }
+}
+
 /// Append `s` to `bytes` with one copy, all or nothing: refused, `bytes` is left as it was.
 /// heapless's own `extend_from_slice` and `from_slice` copy a byte at a time, a loop each caller
 /// inlines; every heapless byte buffer of the crate, and every heapless text through
@@ -738,9 +749,8 @@ pub fn push_bytes<const N: usize>(
     s: &[u8],
 ) -> Result<(), CapacityFull<()>> {
     let len = bytes.len();
-    let end = match len.checked_add(s.len()) {
-        Some(end) if end <= N => end,
-        _ => return Err(CapacityFull(())),
+    let Some(end) = append_end::<N>(len, s.len()) else {
+        return Err(CapacityFull(()));
     };
     // SAFETY: the bytes are written into the buffer's room past its length, checked above, and
     // the length is set after them; `u8` needs no drop, so nothing is lost if the length is not.
@@ -2567,6 +2577,16 @@ mod tests {
             "three bytes past two of room"
         );
         assert_eq!(short.as_str(), "a");
+    }
+
+    /// The room check ends an append where it fits, at the capacity included, and answers none
+    /// past it or past the end of the address space.
+    #[test]
+    fn an_append_ends_inside_the_capacity_or_nowhere() {
+        assert_eq!(append_end::<4>(1, 3), Some(4));
+        assert_eq!(append_end::<4>(0, 0), Some(0));
+        assert_eq!(append_end::<4>(1, 4), None);
+        assert_eq!(append_end::<4>(usize::MAX, 1), None);
     }
 
     /// A heapless byte buffer takes a whole slice in one copy: an append that fits lands after what

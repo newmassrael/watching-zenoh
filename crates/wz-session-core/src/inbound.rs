@@ -2403,8 +2403,8 @@ fn refuse_oam(cursor: &mut SceCursor<'_>) -> Result<(), InboundParseError> {
     crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))
 }
 
-/// The refusal of a handshake cookie longer than the session keeps
-/// (`session_init_params::COOKIE_MAX`): what the slot profile's storing of the body answers
+/// The refusal of a handshake cookie longer than the session keeps, by the rule its storing keeps
+/// by (`session_init_params::keeps_cookie`): what the slot profile's storing of the body answers
 /// (`CapacityExceeded`), for a build that keeps the cookie in storage of the build's size without
 /// storing the body.
 #[cfg(all(
@@ -2417,7 +2417,7 @@ fn refuse_oam(cursor: &mut SceCursor<'_>) -> Result<(), InboundParseError> {
 ))]
 fn refuse_unkept_cookie(cookie: Option<&[u8]>) -> Result<(), InboundParseError> {
     match cookie {
-        Some(cookie) if cookie.len() > crate::session_init_params::COOKIE_MAX => {
+        Some(cookie) if !crate::session_init_params::keeps_cookie(cookie.len()) => {
             Err(InboundParseError::Codec(CodecError::CapacityExceeded))
         }
         _ => Ok(()),
