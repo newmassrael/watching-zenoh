@@ -1682,7 +1682,6 @@ enum TotalList {
 ///   unresolved for a reason that is the holding limit's and not the traffic's.
 ///   Refusing to go on would also make every call after the first trim cost the
 ///   whole holding, which is the cost a ceiling exists to remove.
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum TrimPolicy {
     /// A trim from a list's front ends the point: the fold begins again.
@@ -7993,7 +7992,6 @@ impl Dissection {
     /// [`Self::capture_order_since`] for a fold that holds the HISTORY of the
     /// messages it has taken and so may go on across a front trim: the same four
     /// conditions with the second one lifted. See [`TrimPolicy::Continue`].
-    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
     pub(crate) fn capture_order_since_across_trims(
         &self,
         prev: Option<&OrderMarks>,
