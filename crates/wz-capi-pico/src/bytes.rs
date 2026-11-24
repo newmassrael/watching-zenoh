@@ -16,9 +16,10 @@
 //! borrowed shape a view string (from `z_keyexpr_as_view_string`) produces.
 //!
 //! The bytes a payload, a string or a slice holds lie in a block (`Block`): in a library with
-//! the process pools, one of their payloads' area (`HELD_PAYLOAD_BYTES`), so making or copying one
-//! allocates nothing once the pools are reserved and is refused with
-//! `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the area has no block for it; in one without, the heap's.
+//! the process pools, one of their pools of payload blocks (`HELD_SMALL_PAYLOAD_BLOCKS` and the
+//! two larger), so making or copying one allocates nothing once the pools are reserved and is
+//! refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when no pool has a free block that holds it; in one
+//! without, the heap's.
 
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
@@ -76,7 +77,7 @@ impl Drop for Release {
 }
 
 /// No room for an owned value's bytes, or for its place: what a constructor or a copy of a payload,
-/// a string or a slice meets when the payloads' area of the process pools, or the pool of its
+/// a string or a slice meets when the process pools' payload blocks, or the pool of its
 /// kind, has none free; the call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and leaves its output null.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NoRoom;
@@ -109,7 +110,7 @@ struct BlockHead {
 }
 
 /// The bytes of a block's head, after which its contents lie aligned to 16.
-const HEAD: usize = core::mem::size_of::<BlockHead>();
+pub(crate) const HEAD: usize = core::mem::size_of::<BlockHead>();
 
 /// Set in [`BlockHead::room`] when the block holds the record of the caller's bytes.
 const ALIAS: usize = 1 << (usize::BITS - 1);
@@ -122,7 +123,7 @@ struct Alias {
     _release: Release,
 }
 
-/// A block of at least `bytes` bytes aligned to 16 from the payloads' area of the process pools,
+/// A block of at least `bytes` bytes aligned to 16 from the pools of payload blocks,
 /// and the bytes it has; `None` when the area has no free block that large.
 #[cfg(wz_process_pools)]
 fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
@@ -135,7 +136,10 @@ fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
 /// `at` and `bytes` are a block [`take_block`] handed out, given back once.
 #[cfg(wz_process_pools)]
 unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
-    crate::process_pool::give_back_block(at, bytes);
+    // A pool's block is found by its address; its bytes are the heap's to know.
+    let _ = bytes;
+    let given = crate::process_pool::give_back(at);
+    debug_assert!(given, "a payload block goes back to the pool it lies in");
 }
 
 /// A block of `bytes` bytes aligned to 16 from the heap: a library without the process pools keeps
@@ -2465,14 +2469,17 @@ mod block_tests {
         assert_eq!(unsafe { *empty.self_view._start }, 0);
     }
 
-    /// With the process pools, a payload's bytes lie in their payloads' area, not on the heap.
+    /// With the process pools, a payload's bytes lie in their pools of payload blocks, not on the
+    /// heap.
     #[cfg(wz_process_pools)]
     #[test]
     fn a_payloads_bytes_lie_in_the_process_pools() {
-        let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the area");
+        let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the pools");
         let Some(block) = &*payload.block else {
             panic!("a payload of bytes holds a block");
         };
-        assert!(crate::process_pool::lies_in_area(block.head.cast::<u8>()));
+        assert!(crate::process_pool::lies_in_payloads(
+            block.head.cast::<u8>()
+        ));
     }
 }

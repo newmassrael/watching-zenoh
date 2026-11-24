@@ -328,7 +328,7 @@ fn main() {
         .allowlist_function("pbuf_free")
         .allowlist_function("pbuf_take")
         .allowlist_function("pbuf_copy_partial")
-        // Shrink a pbuf a sender wrote into to the bytes it wrote
+        // Shrink a pool slot's pbuf to the bytes copied into it
         // (`LwipUdpSocket::send_tx_payload`).
         .allowlist_function("pbuf_realloc")
         // netif lifecycle (deploy-managed at runtime; R311az-2 uses
@@ -372,10 +372,6 @@ fn main() {
         // R2841 — a link's routed source address and bound port (`shim.c`).
         .allowlist_function("wz_lwip_route_src")
         .allowlist_function("wz_lwip_udp_local_port")
-        // ARCHITECTURE section 9.1 -- counted payload pbufs lent to a sender.
-        .allowlist_function("wz_lwip_tx_pbuf_alloc")
-        .allowlist_function("wz_lwip_tx_pbuf_free")
-        .allowlist_function("wz_lwip_tx_pbufs_out")
         // ARCHITECTURE section 9.1 -- a pbuf over one transmit pool slot.
         .allowlist_function("wz_lwip_tx_slot_capacity")
         .allowlist_function("wz_lwip_tx_slot_pbuf")

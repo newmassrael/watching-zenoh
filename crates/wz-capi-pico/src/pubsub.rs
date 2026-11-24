@@ -2834,8 +2834,8 @@ pub(crate) unsafe fn source_info_hint_of(
     if crate::zid::id_is_zero(info._source_id.zid.id) {
         return None;
     }
-    Some(wz_session_core::sample::SourceInfo::new(
-        &info._source_id.zid.id,
+    Some(wz_session_core::sample::SourceInfo::of_padded(
+        info._source_id.zid.id,
         info._source_id.eid,
         info._source_sn,
     ))

@@ -61,7 +61,14 @@
 /// (`wz_ext_resource_reading_t`) took one too, which the library sets before it calls the source.
 /// From 5 on a field is added at the end, read or written only in a struct whose `struct_size`
 /// holds it, so adding one does not move the revision.
-pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 5;
+///
+/// It moved to 6 when the bytes of payload became three pools of fixed blocks: the counts a
+/// program states (`wz_ext_object_pool_counts_t`) gave `payload_bytes` up, refusing one not zero
+/// with `Z_EINVAL`, and took `small_payload_blocks`, `medium_payload_blocks` and
+/// `large_payload_blocks` at the end; and the report of a size class counts the payload blocks of
+/// its size among its slots. So a program built against 5 that states payload bytes has its
+/// counts refused.
+pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 6;
 
 wz_abi_stamp::stamp!(
     family = "capi-pico",

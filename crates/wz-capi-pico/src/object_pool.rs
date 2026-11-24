@@ -29,11 +29,23 @@
 //!
 //! # Reading
 //!
-//! The pools are reported by size class (`wz_ext_object_pool_class`), the kinds whose slots a
-//! class holds together: the class's largest slot, their slots and the bytes those take (a slot is
-//! its object's own size, so the slots of one class differ), those in use, the most in use at once
-//! and the objects refused for want of a free slot. A pool whose slots are larger than the largest
-//! class is reported by none, and neither is the payloads' area.
+//! The pools are reported by size class (`wz_ext_object_pool_class`), the pools whose slots a
+//! class holds together, the kinds' and the payload blocks': the class's largest slot, their slots
+//! and the bytes those take (a slot is its object's own size, so the slots of one class differ),
+//! those in use, the most in use at once and the objects refused for want of a free slot. A
+//! payload refused is counted in the class of the smallest pool of payload blocks that holds it,
+//! or of its own bytes when none does. A pool whose slots are larger than the largest class is
+//! reported by none.
+//!
+//! # Payload blocks
+//!
+//! The bytes the payloads, strings and slices a program holds carry lie in three pools of fixed
+//! blocks, small, middle and largest, whose counts the program states
+//! (`small_payload_blocks`, `medium_payload_blocks`, `large_payload_blocks`). The sizes are the
+//! build's: `PAYLOAD_SMALL_BLOCK_BYTES`, `PAYLOAD_MEDIUM_BLOCK_BYTES`, and a largest block that
+//! holds the largest message a session of the build delivers. `payload_bytes`, which stated one
+//! area of blocks split and joined in halves, is refused with `Z_EINVAL` when it is not zero: its
+//! bytes say nothing of how many blocks of each size they are, and are not read as if they did.
 //!
 //! # Releasing
 //!
@@ -98,8 +110,9 @@ pub struct wz_ext_object_pool_counts_t {
     pub configs: usize,
     /// Hellos the program keeps (`z_hello_clone`).
     pub hellos: usize,
-    /// The bytes the payloads, strings and slices the program holds carry together, in blocks of
-    /// power-of-two sizes from 32 bytes, each the smallest that holds its bytes and a 16-byte head.
+    /// Zero. A count of bytes of payload is no count of blocks of the three pools of payload
+    /// blocks (`small_payload_blocks` and the two after it), so one not zero is refused with
+    /// `Z_EINVAL` by every door that reads counts.
     pub payload_bytes: usize,
     /// Queriers of each session, at most its `MAX_QUERIERS`.
     pub queriers: usize,
@@ -127,6 +140,14 @@ pub struct wz_ext_object_pool_counts_t {
     /// Link events listeners of each session, at most its `MAX_LINK_EVENTS_LISTENERS`; none taken
     /// in a build without `connectivity`.
     pub link_events_listeners: usize,
+    /// Blocks of `PAYLOAD_SMALL_BLOCK_BYTES` bytes, the smallest pool of payload blocks, for all
+    /// sessions together.
+    pub small_payload_blocks: usize,
+    /// Blocks of `PAYLOAD_MEDIUM_BLOCK_BYTES` bytes, the middle pool of payload blocks.
+    pub medium_payload_blocks: usize,
+    /// Blocks of the largest pool of payload blocks, each holding the largest message a session of
+    /// the build delivers and its 16-byte head.
+    pub large_payload_blocks: usize,
 }
 
 /// The bytes of the counts every program states, `struct_size` to `encodings`: the struct as it was
@@ -163,6 +184,9 @@ impl Default for wz_ext_object_pool_counts_t {
             decl_watches: 0,
             transport_events_listeners: 0,
             link_events_listeners: 0,
+            small_payload_blocks: 0,
+            medium_payload_blocks: 0,
+            large_payload_blocks: 0,
         }
     }
 }
@@ -185,7 +209,11 @@ impl wz_ext_object_pool_counts_t {
             hellos: self.hellos,
             queriers: self.queriers,
             keyexprs: self.keyexprs,
-            payload_bytes: self.payload_bytes,
+            payload_blocks: [
+                self.small_payload_blocks,
+                self.medium_payload_blocks,
+                self.large_payload_blocks,
+            ],
             encodings: self.encodings,
             gets: self.gets,
             liveliness_gets: self.liveliness_gets,
@@ -291,19 +319,24 @@ unsafe fn stated(
     Ok(read)
 }
 
-/// The pools `counts` make.
+/// The pools `counts` make; `Z_EINVAL` for counts that state payload bytes, which no pool reads.
 ///
 /// # Safety
 /// As [`stated`].
 unsafe fn planned(counts: *const wz_ext_object_pool_counts_t) -> Result<Plan, ZResult> {
-    process_pool::plan_of(&stated(counts)?.counts()).map_err(code_of)
+    let stated = stated(counts)?;
+    if stated.payload_bytes != 0 {
+        return Err(Z_EINVAL);
+    }
+    process_pool::plan_of(&stated.counts()).map_err(code_of)
 }
 
 /// The bytes the pools of `counts` take, in `out_bytes` (zero on every error): what memory a
 /// program hands `wz_ext_object_pool_place`. `Z_OK`; `Z_ERR_NULL` for a NULL argument;
 /// `_Z_ERR_CONFIG_INVALID_VALUE` for counts that make no pool (a count left at zero whose limit
 /// holds no bound, or no slot at all); `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for more than the address
-/// space holds; `Z_EINVAL` for a `struct_size` short of the counts up to `encodings`.
+/// space holds; `Z_EINVAL` for a `struct_size` short of the counts up to `encodings`, or for a
+/// `payload_bytes` not zero.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_object_pool_bytes(
     counts: *const wz_ext_object_pool_counts_t,
@@ -327,7 +360,8 @@ pub unsafe extern "C" fn wz_ext_object_pool_bytes(
 /// Reserve the pools of `counts` from the heap, in one allocation. `Z_OK`; `Z_ERR_NULL` for a
 /// NULL `counts`; `_Z_ERR_CONFIG_INVALID_VALUE` for counts that make no pool;
 /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the heap has not the memory; `Z_EINVAL` when pools are
-/// reserved already, or for a `struct_size` short of the counts up to `encodings`. Every refusal
+/// reserved already, for a `struct_size` short of the counts up to `encodings`, or for a
+/// `payload_bytes` not zero. Every refusal
 /// leaves the heap as it was.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_object_pool_reserve(
@@ -343,7 +377,7 @@ pub unsafe extern "C" fn wz_ext_object_pool_reserve(
 /// the library uses until `wz_ext_object_pool_release` and the program must not touch meanwhile.
 /// `Z_OK`; `Z_ERR_NULL` for a NULL argument; `_Z_ERR_CONFIG_INVALID_VALUE` for counts that make
 /// no pool; `Z_EINVAL` for a `base` not aligned to 16 bytes, when pools are reserved already, or
-/// for a `struct_size` short of the counts up to `encodings`;
+/// for a `struct_size` short of the counts up to `encodings` or a `payload_bytes` not zero;
 /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for a `len` under what `wz_ext_object_pool_bytes` answers. A
 /// refused call writes nothing at `base`.
 #[cfg(feature = "object-pool-region")]
@@ -451,6 +485,9 @@ mod tests {
             decl_watches: 20,
             transport_events_listeners: 21,
             link_events_listeners: 22,
+            small_payload_blocks: 23,
+            medium_payload_blocks: 24,
+            large_payload_blocks: 25,
         };
         assert_eq!(
             stated.counts(),
@@ -469,7 +506,7 @@ mod tests {
                 hellos: 12,
                 queriers: 14,
                 keyexprs: 15,
-                payload_bytes: 13,
+                payload_blocks: [23, 24, 25],
                 encodings: 16,
                 gets: 17,
                 liveliness_gets: 18,
@@ -510,6 +547,9 @@ mod tests {
             decl_watches: 20,
             transport_events_listeners: 21,
             link_events_listeners: 22,
+            small_payload_blocks: 23,
+            medium_payload_blocks: 24,
+            large_payload_blocks: 25,
         }
     }
 
@@ -519,7 +559,7 @@ mod tests {
         assert_eq!(COUNTS_BASE_BYTES, 17 * size_of::<usize>());
         assert_eq!(
             size_of::<wz_ext_object_pool_counts_t>(),
-            COUNTS_BASE_BYTES + 6 * size_of::<usize>()
+            COUNTS_BASE_BYTES + 9 * size_of::<usize>()
         );
         assert_eq!(
             wz_ext_object_pool_counts_t::default().struct_size,
@@ -529,7 +569,7 @@ mod tests {
 
     /// A program compiled before `gets` was added hands a struct that ends at `encodings`: its
     /// counts are read, and the bytes past its size, which are not its struct's, are not, so the
-    /// six later counts read as zero (their limits' bounds).
+    /// nine later counts read as zero (their limits' bounds, and no payload blocks).
     #[test]
     fn an_older_struct_has_only_its_own_counts_read() {
         let older = every_count(COUNTS_BASE_BYTES);
@@ -544,6 +584,9 @@ mod tests {
                 decl_watches: 0,
                 transport_events_listeners: 0,
                 link_events_listeners: 0,
+                small_payload_blocks: 0,
+                medium_payload_blocks: 0,
+                large_payload_blocks: 0,
                 ..every_count(COUNTS_BASE_BYTES)
             }
         );
@@ -628,6 +671,40 @@ mod tests {
         assert_eq!(code_of(Unplanned::TooLarge), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(refused_code(Refused::Reserved), Z_EINVAL);
         assert_eq!(refused_code(Refused::NoMemory), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    }
+
+    /// Counts that state payload bytes are refused with `Z_EINVAL` by every door that reads counts,
+    /// which sizes and reserves nothing, rather than read as blocks of some size; the same counts
+    /// with no payload bytes are planned, their payload blocks among the bytes. Turned red by a
+    /// door that reads the bytes, or ignores them, or by a plan that leaves the blocks out.
+    #[test]
+    fn counts_that_state_payload_bytes_are_refused() {
+        let full = size_of::<wz_ext_object_pool_counts_t>();
+        let stating = every_count(full);
+        assert_ne!(stating.payload_bytes, 0);
+        let mut bytes = 7usize;
+        // SAFETY: both arguments are live locals.
+        let code = unsafe { wz_ext_object_pool_bytes(&stating, &mut bytes) };
+        assert_eq!((code, bytes), (Z_EINVAL, 0));
+        // SAFETY: a live local; refused before anything is reserved.
+        assert_eq!(unsafe { wz_ext_object_pool_reserve(&stating) }, Z_EINVAL);
+
+        let blocks = wz_ext_object_pool_counts_t {
+            payload_bytes: 0,
+            ..stating
+        };
+        let none = wz_ext_object_pool_counts_t {
+            small_payload_blocks: 0,
+            medium_payload_blocks: 0,
+            large_payload_blocks: 0,
+            ..blocks
+        };
+        // SAFETY: live locals.
+        let with = unsafe { planned(&blocks) }.expect("planned");
+        // SAFETY: live locals.
+        let without = unsafe { planned(&none) }.expect("planned");
+        let grown = with.bytes().expect("bytes") - without.bytes().expect("bytes");
+        assert!(grown >= 25 * process_pool::LARGEST_BLOCK, "{grown}");
     }
 
     /// Counts of nothing are refused by the door that sizes them, which writes zero.

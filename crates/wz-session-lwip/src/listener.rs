@@ -113,19 +113,37 @@ pub struct AcceptPass {
     pub strays: u32,
 }
 
-/// What the image is given for an `InitSyn` it may admit: the driver of the new
-/// session, which reads and sends through the listener's socket, and the lane
-/// that keeps the session's peer apart from the others'. Both go into the
-/// session (`SessionHost::open`); dropping them, which is what a refusal does,
+/// What the image is given for an `InitSyn` it may admit: what the driver of the
+/// new session is made of, the listener's socket it reads and sends through, and
+/// the lane that keeps the session's peer apart from the others'. Both go into the
+/// session (`SessionHost::admit`), the driver made in the session's slot
+/// ([`Self::driver_in`]); dropping the admission, which is what a refusal does,
 /// gives the lane back.
 pub struct Admission {
-    /// The link driver of the session about to be built.
-    pub driver: LwipUdpDriver,
+    /// The listener's socket the session reads and sends through.
+    socket: &'static RefCell<SessionRxSocket>,
     /// The lane the session reads its datagrams through.
     pub lane: LaneGuard,
 }
 
 impl Admission {
+    /// The link driver of the session, made in `place`, the place it is kept: it
+    /// carries its link's outbound slot, which made here and moved there would be a
+    /// value in each frame it passed through.
+    pub fn driver_in(
+        socket: &'static RefCell<SessionRxSocket>,
+        peer: (u32, u16),
+        place: &mut core::mem::MaybeUninit<LwipUdpDriver>,
+    ) -> &mut LwipUdpDriver {
+        LwipUdpDriver::new_in(place, SessionSocket::listened(socket), peer.0, peer.1)
+    }
+
+    /// The listener's socket and the lane, apart, for the session's open to make
+    /// the driver from the one and keep the other.
+    pub fn into_parts(self) -> (&'static RefCell<SessionRxSocket>, LaneGuard) {
+        (self.socket, self.lane)
+    }
+
     /// The peer that sent the `InitSyn`, as lwIP names it (the address word in
     /// network byte order, and the port).
     pub fn peer(&self) -> (u32, u16) {
@@ -335,8 +353,7 @@ impl<const LANES: usize> SessionListener<LANES> {
                 pass.refused += 1;
                 continue;
             };
-            let driver = LwipUdpDriver::new(SessionSocket::listened(socket), peer.0, peer.1);
-            match admit(Admission { driver, lane }) {
+            match admit(Admission { socket, lane }) {
                 Ok(()) => {
                     self.count(|counts| counts.admitted = counts.admitted.saturating_add(1));
                     pass.admitted += 1;

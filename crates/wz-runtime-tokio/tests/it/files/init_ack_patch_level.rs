@@ -126,8 +126,13 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (Option<u8>, u8) {
     let cookie = cookie
         .expect("the acceptor mints a carrying cookie")
         .to_vec();
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
+    let carried = decode_accept_cookie(
+        fixture_session_init_params()
+            .cookie_signing_key
+            .signing_key(),
+        &cookie,
+    )
+    .expect("the acceptor's own cookie verifies");
     let negotiated = carried
         .negotiated
         .patch

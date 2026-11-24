@@ -139,7 +139,10 @@ pub fn chain_headers<S: MsgPutStorage>(
             (SceList::as_slice(extensions.as_ref()?.inner()), None)
         }
     };
-    let (before, after) = entries.split_at(place.unwrap_or(entries.len()));
+    // A place past the last entry is read as the place after it.
+    let (before, after) = entries
+        .split_at_checked(place.unwrap_or(entries.len()))
+        .unwrap_or((entries, &[]));
     Some(
         before
             .iter()

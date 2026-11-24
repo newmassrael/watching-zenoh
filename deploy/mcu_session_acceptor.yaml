@@ -36,7 +36,7 @@ machines:
       local_queryables: 8
       pending_queries: 8
       tx_queue: 16
-      tx_lend_slots: 2
+      tx_lend_slots: 1
       peer_keyexpr_aliases: 16
       remote_decls: 16
       pending_replies: 8

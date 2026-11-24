@@ -5,13 +5,14 @@
 //! (`listen`, `group`) does, and the registry's tests. A session of its dial role's face alone
 //! holds the set the registry is made with, and its text has none of this.
 
-use super::{names_face, FaceId, HeldFace, Registry, NO_FACE};
+use super::held::{Holders, ManyHolders};
+use super::{names_face, FaceId, HeldFace, RegistryOf, NO_FACE};
 
 /// A face past the sets the open lent: the session refuses it as one past `max_faces`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::engine) struct FacesFull;
 
-impl Registry {
+impl RegistryOf<ManyHolders> {
     /// Tables for a face that has come: the first set the arena lent that no face holds and no
     /// tomb keeps, empty, as its peer has said nothing yet; the key of the face, whose place its
     /// link and its room keep as well. [`FacesFull`] when every set is held: the open lent one
@@ -22,10 +23,11 @@ impl Registry {
         // free set.
         let at = self
             .holders
+            .rows()
             .iter()
             .position(|holder| *holder == NO_FACE)
             .ok_or(FacesFull)?;
-        let holder = self.holders.get_mut(at).ok_or(FacesFull)?;
+        let holder = self.holders.rows_mut().get_mut(at).ok_or(FacesFull)?;
         *holder = id;
         self.writing();
         Ok(HeldFace::new(at, id))

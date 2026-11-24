@@ -5,7 +5,8 @@
 //! (fixed-memory step S4, ARCHITECTURE section 9.1).
 //!
 //! A real session pair over the host lwIP loopback, an initiator and an
-//! acceptor, each over a socket whose driver LENDS the pbuf lwIP will send. The
+//! acceptor, each over a socket whose driver LENDS the slot it reserves for its
+//! link, out of which the send copies the datagram into the pbuf lwIP sends. The
 //! messages a session sends, each run on its own under a counting
 //! `#[global_allocator]`:
 //!
@@ -30,7 +31,7 @@
 //! the wire.
 //!
 //! With `tx-lend-only` the refusal is witnessed too. A send for which the link
-//! lends no slot (both of the driver's slots out) or that is past the link's
+//! lends no slot (the driver's one slot out) or that is past the link's
 //! budget with no fragmentation to cut it up in is an explicit
 //! `LinkRefused(NoTxSlot | Oversize)`, counted in `tx_refusals()`, with nothing
 //! on the wire, nothing allocated, and no slot lost: the next send finds one.
@@ -211,7 +212,8 @@ fn params(zid: u8) -> SessionInitParams {
         policy: wz_session_core::policy::SessionPolicy::defaults(),
         limits: wz_session_core::limits::SessionLimits::BUILD,
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
-            .expect("key"),
+            .expect("key")
+            .into(),
         region: None,
     }
 }
@@ -736,9 +738,9 @@ mod refusal {
     use wz_session_core::session_actions::TxRefusalCounts;
 
     /// Take every slot the driver will lend, and hold them: the driver has
-    /// `LENT_MAX` (two), and the table is exactly that full when the next ask is
-    /// refused, which is the fill-to-N half of the exhaustion case R5 (the
-    /// refusals counted below are its N+1).
+    /// `LENT_MAX` (one, the slot it reserves for its link), and it is exactly
+    /// that full when the next ask is refused, which is the fill-to-N half of the
+    /// exhaustion case R5 (the refusals counted below are its N+1).
     fn hold_every_slot(side: &Side) -> Vec<wz_session_core::link::TxSlotGrant> {
         let mut held = Vec::new();
         while let Some(grant) = side.sink.tx_slot_acquire(8, Priority::DEFAULT) {
@@ -845,12 +847,12 @@ mod refusal {
         );
         assert!(acceptor.received().is_empty(), "nothing reached the wire");
 
-        // The slot that refusal took was given back: both are still lent.
+        // The slot that refusal took was given back: it is lent again.
         let held = hold_every_slot(&initiator);
-        assert!(
-            held.len() >= 2,
-            "the refused send left every slot the driver has: {} lent",
-            held.len()
+        assert_eq!(
+            held.len(),
+            wz_session_lwip::driver::LENT_MAX,
+            "the refused send left every slot the driver has"
         );
         for grant in held {
             initiator.sink.tx_slot_abort(grant.slot);

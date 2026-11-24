@@ -757,7 +757,7 @@ impl NodeIdentity {
             link_rx: LinkRxConf::default(),
             policy: *policy,
             limits: *limits,
-            cookie_signing_key: self.key.clone(),
+            cookie_signing_key: self.key.clone().into(),
             region: None,
         }
     }

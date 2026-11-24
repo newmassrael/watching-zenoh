@@ -497,8 +497,8 @@ impl RxConduits {
 /// @ `pub ext_qos: Option<ext::QoSType>`).
 ///
 /// DIVERGENCE from the unicast [`crate::session_actions::FrameTxConduits`]: that
-/// mirror uses `AtomicTxSn` because the unicast writer is reached concurrently
-/// (the writer task vs the caller); the multicast drive loop is a SINGLE task
+/// mirror is shared through `&` (the runtime's word: atomic where the writer task
+/// and the caller are threads); the multicast drive loop is a SINGLE task
 /// that owns `&mut` its conduits, so a plain non-atomic [`TxSn`] is sufficient
 /// and cheaper (no atomics on the MCU no-alloc profile's hot path).
 #[derive(Debug, Clone, PartialEq, Eq)]

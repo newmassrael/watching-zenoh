@@ -329,11 +329,13 @@ fn session_params(policy: &SessionPolicy) -> Result<SessionInitParams, ClientErr
         cookie: Vec::new(),
         policy: *policy,
         limits: wz_session_core::limits::SessionLimits::BUILD,
-        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
-            ClientError::new(format!(
-                "no operating system entropy for a signing key: {e}"
-            ))
-        })?,
+        cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)
+            .map_err(|e| {
+                ClientError::new(format!(
+                    "no operating system entropy for a signing key: {e}"
+                ))
+            })?
+            .into(),
         region: None,
     })
 }
