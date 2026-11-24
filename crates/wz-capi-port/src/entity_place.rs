@@ -8,7 +8,7 @@
 use core::ptr::NonNull;
 
 /// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
-pub const ENTITY_KINDS: usize = 11;
+pub const ENTITY_KINDS: usize = 13;
 
 /// A kind of the session's own entities whose rows an ABI may hold a place of its own beside, one
 /// for each the session's limit of the kind admits.
@@ -38,6 +38,10 @@ pub enum EntityKind {
     /// A listener told when a transport to a peer opens or closes
     /// (`MAX_TRANSPORT_EVENTS_LISTENERS`).
     TransportEventsListener,
+    /// An advanced publisher (`MAX_ADVANCED_PUBLISHERS`).
+    AdvancedPublisher,
+    /// An advanced subscriber, owned or background (`MAX_ADVANCED_SUBSCRIBERS`).
+    AdvancedSubscriber,
 }
 
 impl EntityKind {
@@ -54,6 +58,8 @@ impl EntityKind {
         Self::MatchingListener,
         Self::DeclWatch,
         Self::TransportEventsListener,
+        Self::AdvancedPublisher,
+        Self::AdvancedSubscriber,
     ];
 }
 

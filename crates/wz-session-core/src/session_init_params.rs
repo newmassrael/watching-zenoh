@@ -82,6 +82,20 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
+/// [`session_bytes`] written into `slot` where it lies: `slot` holds a copy of `src` after, or
+/// `None` when `N` cannot hold it. A slot of the fixed form is `N` bytes wide, and a value built
+/// beside it and moved in was one more such copy in the frame of every caller.
+pub fn store_session_bytes<const N: usize>(slot: &mut Option<SessionBytes<N>>, src: &[u8]) {
+    let held = slot.get_or_insert_with(SessionBytes::<N>::new);
+    held.clear();
+    #[cfg(not(feature = "session-fixed-storage"))]
+    held.extend_from_slice(src);
+    #[cfg(feature = "session-fixed-storage")]
+    if held.extend_from_slice(src).is_err() {
+        *slot = None;
+    }
+}
+
 /// A cookie for [`SessionInitParams::cookie`] from an array the caller wrote, written the
 /// same way on every profile. An array longer than [`COOKIE_MAX`] does not build; a cookie
 /// read at run time is copied with [`session_bytes`], whose refusal the caller reports.
@@ -858,7 +872,7 @@ mod keep_alive_tests {
 
 #[cfg(test)]
 mod cookie_bound_tests {
-    use super::{session_bytes, COOKIE_FIELD_MAX, COOKIE_MAX};
+    use super::{session_bytes, store_session_bytes, SessionBytes, COOKIE_FIELD_MAX, COOKIE_MAX};
 
     /// `COOKIE_FIELD_MAX` is the capacity the INIT body declares for its cookie, read from its
     /// source, so a codec that changed it would fail here and not leave the bound's ceiling a copy of
@@ -906,6 +920,24 @@ mod cookie_bound_tests {
         assert!(too_long.is_none());
         #[cfg(not(feature = "session-fixed-storage"))]
         assert_eq!(too_long.map(|b| b.len()), Some(9));
+    }
+
+    /// A slot written in place holds what was written last, whatever it held before; one written
+    /// a value the fixed form cannot hold holds none, as `session_bytes` answers.
+    #[test]
+    fn a_slot_written_in_place_holds_the_last_value_that_fits() {
+        let mut slot: Option<SessionBytes<8>> = None;
+        store_session_bytes(&mut slot, &[1, 2, 3]);
+        assert_eq!(slot.as_deref(), Some(&[1u8, 2, 3][..]));
+        store_session_bytes(&mut slot, &[9; 8]);
+        assert_eq!(slot.as_deref(), Some(&[9u8; 8][..]));
+        store_session_bytes(&mut slot, &[4]);
+        assert_eq!(slot.as_deref(), Some(&[4u8][..]));
+        store_session_bytes(&mut slot, &[7; 9]);
+        #[cfg(feature = "session-fixed-storage")]
+        assert_eq!(slot, None);
+        #[cfg(not(feature = "session-fixed-storage"))]
+        assert_eq!(slot.as_deref(), Some(&[7u8; 9][..]));
     }
 }
 

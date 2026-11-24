@@ -33,8 +33,10 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// written in `wz-capi-core`), shared with the zenoh-c ABI and with every engine that issues a
 /// get, and it gained what this crate's copy lacked: `cancel` WAITS for every registered get's
 /// callbacks to be dropped, which pico's `_z_cancellation_token_cancel` does
-/// (`_z_sync_group_wait` after running the handlers). The take-once handler storage and the
-/// registration refusal after cancel has started are unchanged in meaning.
+/// (`_z_sync_group_wait` after running the handlers). A get's registration is its fan, which
+/// lies in the get's place and is linked into the token's list there, and a registration is
+/// still refused once a cancel has started. The token a program creates is shared by its handles
+/// and is the one allocation the plane keeps.
 pub(crate) use wz_capi_port::cancellation::CancellationToken;
 
 /// Consume a MOVED cancellation token, yielding the state it named.

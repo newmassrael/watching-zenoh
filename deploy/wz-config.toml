@@ -3505,6 +3505,62 @@ value = 1552
 reason = "Ten records of the samples zenoh-pico's tests put into a cache of ten (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`): the longest key they publish on, 58 bytes, and a payload of one byte (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `put_str(z_loan(pub), \"1\");`), 88 bytes of header and 59 of key and payload, 152 with the padding to 8, ten of them and the ring's 32 bytes."
 
 [[limit]]
+id = "MAX_ADVANCED_PUBLISHERS"
+kconfig = "WZ_LIMIT_MAX_ADVANCED_PUBLISHERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The advanced publishers a session holds at once, each the C object over
+the publisher, its cache and its detection token, which are counted in
+their own tables. Declaring one more is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the advanced publishers a session declares, and zenoh-pico keeps each on the heap with no constant of its own; the default holds eight, more than any of zenoh-pico's own tests holds on one session at once."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its advanced publishers by no count; its advanced publish and subscribe test holds one advanced publisher on a session at once, beside the other entities of the plane (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `ASSERT_OK(ze_declare_advanced_publisher(z_loan(s), &pub, z_loan(k), &pub_opts));`)."
+
+[[limit]]
+id = "MAX_ADVANCED_SUBSCRIBERS"
+kconfig = "WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 8
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The advanced subscribers a session holds at once, owned or background,
+each the C object over the subscriber, its history and recovery and its
+detection token, which are counted in their own tables. Declaring one more
+is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the advanced subscribers a session declares, and zenoh-pico keeps each on the heap with no constant of its own; the default holds eight, more than any of zenoh-pico's own tests holds on one session at once."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its advanced subscribers by no count; its advanced publish and subscribe test holds one advanced subscriber on a session at once, beside the other entities of the plane (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `ASSERT_OK(ze_declare_advanced_subscriber(z_loan(s), &sub, z_loan(k), z_move(closure), &sub_opts));`)."
+
+[[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
 kind = "bound"

@@ -922,15 +922,18 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             return outcome;
         }
     }
-    // The peer's chain is read once for every reader below: its patch level off an Init (some
-    // for every Init), and, for the readers of a slice of owned entries that the extensions a
-    // build with an allocator negotiates take, the chain made owned once.
+    // The peer's chain is read once for every reader below: its patch level and its region
+    // identity off an Init in one walk (some for every Init), and, for the readers of a slice of
+    // owned entries that the extensions a build with an allocator negotiates take, the chain
+    // made owned once.
     #[cfg(feature = "codec-init-body")]
-    let peer_patch = match facts {
+    let (peer_patch, peer_region) = match facts {
         crate::inbound::ControlFacts::Init(init) => {
-            Some(crate::extpatch::peer_patch_in(init.extensions.entries()))
+            let (patch, region) =
+                crate::extregion::peer_patch_and_region_in(init.extensions.entries());
+            (Some(patch), Some(region))
         }
-        _ => None,
+        _ => (None, None),
     };
     #[cfg(any(
         all(
@@ -1191,9 +1194,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // one sits after its own reject: a refused Init must not have
     // its other extensions merged into the session first.
     #[cfg(feature = "codec-init-body")]
-    if let crate::inbound::ControlFacts::Init(crate::inbound::InitFacts { extensions, .. }) = facts
-    {
-        if !actions.admit_peer_region_in(extensions.entries()) {
+    if let Some(region) = peer_region {
+        if !actions.admit_read_peer_region(region) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::InitRegionRejected;
         }
@@ -1984,30 +1986,43 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
     let mut at = resume.map_or(0, |resume| resume.unit);
     let mut next_record = resume.and_then(|resume| resume.record);
     let mut path = None;
-    while at < datagram.len() {
-        if path.is_some() && !on_event.takes_another() {
-            actions.set_datagram_resume(DatagramResume {
-                unit: at,
-                record: None,
-            });
-            break;
+    // Where the dispatch stopped, noted once after the walk: the host asked for no more before a
+    // unit, or a `Frame` stopped before a record.
+    let mut stop = None;
+    // The host is asked before each unit after the first, so the question closes the loop and
+    // the walk has one call of `unit_at`.
+    if at < datagram.len() {
+        loop {
+            let Some(rest) = datagram.get(at..) else {
+                break;
+            };
+            let (read_by, used, stopped) = unit_at(rest, next_record.take(), &mut *on_event);
+            path.get_or_insert(read_by);
+            if stopped {
+                stop = Some(DatagramResume {
+                    unit: at,
+                    record: Some(used),
+                });
+                break;
+            }
+            if used == 0 {
+                break;
+            }
+            at = at.saturating_add(used);
+            if at >= datagram.len() {
+                break;
+            }
+            if !on_event.takes_another() {
+                stop = Some(DatagramResume {
+                    unit: at,
+                    record: None,
+                });
+                break;
+            }
         }
-        let Some(rest) = datagram.get(at..) else {
-            break;
-        };
-        let (read_by, used, stopped) = unit_at(rest, next_record.take(), &mut *on_event);
-        path.get_or_insert(read_by);
-        if stopped {
-            actions.set_datagram_resume(DatagramResume {
-                unit: at,
-                record: Some(used),
-            });
-            break;
-        }
-        if used == 0 {
-            break;
-        }
-        at = at.saturating_add(used);
+    }
+    if let Some(stop) = stop {
+        actions.set_datagram_resume(stop);
     }
     path.unwrap_or(DatagramPath::InPlace)
 }
@@ -2162,15 +2177,13 @@ where
             )
         });
     }
-    // One hand-off for every unit of the datagram.
+    // One hand-off and one call for every unit of the datagram: a datagram that holds more than
+    // one message is read on where it lies, as [`dispatch_datagram`] reads it.
     let mut hand = through_hand_off(reasm, actions, now_ms, on_event);
-    let (path, used, _) =
-        dispatch_datagram_reassembling_unit(unit, None, false, engine, record, &mut hand);
-    // The rest of a datagram that holds more than one message, as
-    // [`dispatch_datagram`] reads it.
-    let mut at = used;
-    while at > 0 && at < unit.len() {
-        let (_, used, _) = dispatch_datagram_reassembling_unit(
+    let mut path = None;
+    let mut at = 0;
+    loop {
+        let (read_by, used, _) = dispatch_datagram_reassembling_unit(
             &unit[at..],
             None,
             false,
@@ -2178,9 +2191,13 @@ where
             record,
             &mut hand,
         );
-        at = if used == 0 { unit.len() } else { at + used };
+        path.get_or_insert(read_by);
+        at += used;
+        if used == 0 || at >= unit.len() {
+            break;
+        }
     }
-    path
+    path.unwrap_or(DatagramPath::InPlace)
 }
 
 /// [`dispatch_datagram_reassembling`] for the unit at the front of `unit`, with the

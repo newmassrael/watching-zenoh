@@ -1473,7 +1473,7 @@ impl Engine {
     /// What stops the legs of a query that is about to be asked.
     fn new_query_fan(&self) -> Arc<QueryFan> {
         match self {
-            Engine::Tokio(_) | Engine::Router(_) => QueryFan::new(),
+            Engine::Tokio(_) | Engine::Router(_) => Arc::new(QueryFan::new()),
         }
     }
 

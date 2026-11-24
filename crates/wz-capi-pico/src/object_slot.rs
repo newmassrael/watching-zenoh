@@ -81,6 +81,10 @@ pub(crate) enum Kind {
     /// (`crate::connectivity::TransportPlace`).
     #[cfg(feature = "connectivity")]
     TransportEventsListener = 19,
+    /// An advanced publisher (`crate::advanced::AdvPubState`). Its number follows those the
+    /// listeners and the watches take.
+    #[cfg(feature = "advanced")]
+    AdvancedPublisher = 20,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -321,6 +325,11 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::TransportEventsListener,
             InSession::<crate::connectivity::TransportPlace>::LAYOUT,
         )),
+        #[cfg(feature = "advanced")]
+        Kind::AdvancedPublisher => Some((
+            EntityKind::AdvancedPublisher,
+            InSession::<crate::advanced::AdvPubState>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -364,6 +373,10 @@ const DECL_WATCH: Option<Kind> = None;
 const TRANSPORT_EVENTS: Option<Kind> = Some(Kind::TransportEventsListener);
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "connectivity")))]
 const TRANSPORT_EVENTS: Option<Kind> = None;
+#[cfg(all(not(feature = "engine-tokio"), feature = "advanced"))]
+const ADVANCED_PUBLISHER: Option<Kind> = Some(Kind::AdvancedPublisher);
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "advanced")))]
+const ADVANCED_PUBLISHER: Option<Kind> = None;
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
@@ -383,6 +396,7 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         Some(Kind::MatchingListener),
         DECL_WATCH,
         TRANSPORT_EVENTS,
+        ADVANCED_PUBLISHER,
     ]
     .into_iter()
     .flatten()

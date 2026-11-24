@@ -146,6 +146,10 @@ ticker = []
 # (`wz_capi_port::CacheBytes`), so a cache's put copies its sample into the session's memory. A
 # build with no advanced publisher leaves it out, and its plan has no row for it.
 advanced-cache = []
+# The advanced publishers and subscribers an ABI holds (`MAX_ADVANCED_PUBLISHERS`,
+# `MAX_ADVANCED_SUBSCRIBERS`): a place of the session's arena for each, laid out at its open, and
+# the ring their caches keep their samples in. A build with no advanced plane has no row for them.
+advanced = ["advanced-cache"]
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the

@@ -1152,42 +1152,38 @@ where
         } else {
             slot.open.take()
         };
-        let handed_up = taken.and_then(
-            |OpenChain {
-                 key,
-                 last_sn,
-                 deadline_ms,
-                 opened,
-                 chain,
-             }| match Self::hand_up(staging, chain, hand) {
+        // A chain the arena cannot hand up is held here, out of its slot, and delivered borrowed
+        // and released after, as a chain asked borrowed is: put back into the slot, its whole open
+        // state was moved out and in again.
+        let mut held = None;
+        let handed_up = match taken {
+            Some(open) => match Self::hand_up(staging, open.chain, hand) {
                 Ok(bytes) => Some(bytes),
                 Err(chain) => {
-                    slot.open = Some(OpenChain {
-                        key,
-                        last_sn,
-                        deadline_ms,
-                        opened,
-                        chain,
-                    });
+                    held = Some(chain);
                     None
                 }
             },
-        );
+            None => None,
+        };
         let released_first = handed_up.is_some();
         if released_first {
             slot.release_or_replace(staging);
         }
         // One call of `deliver` for both hands, so the delivery is compiled in here once.
         let bytes = handed_up.or_else(|| {
-            slot.open
-                .as_ref()
-                .map(|open| ChainBytes::Borrowed(staging.bytes(&open.chain)))
+            held.as_ref()
+                .or(slot.open.as_ref().map(|open| &open.chain))
+                .map(|chain| ChainBytes::Borrowed(staging.bytes(chain)))
         });
         if let Some(bytes) = bytes {
             deliver(bytes);
         }
         if !released_first {
             slot.release_or_replace(staging);
+            if let Some(chain) = held {
+                staging.release(chain);
+            }
         }
         IngestOutcome::Reassembled
     }
@@ -2249,6 +2245,31 @@ mod tests {
         assert_eq!(LentStaging::<4, 64>::none().available(), 0);
     }
 
+    /// A chain that starts after an earlier one ended takes the place that chain left, and the
+    /// count of open chains is over every place: a place held after the free one still counts.
+    #[test]
+    fn a_lent_staging_counts_every_held_place_when_a_chain_starts() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let cells = lent_cells(8, 4);
+        let mut staging = LentStaging::<4, 64>::over(&cells, 2);
+        let first = staging.acquire().expect("a buffer");
+        let _second = staging.acquire().expect("another buffer");
+        staging.release(first);
+        assert_eq!((staging.available(), cells.in_use()), (1, 1));
+        let _third = staging.acquire().expect("the place the first left");
+        assert_eq!(cells.in_use(), 2);
+        assert!(
+            staging.acquire().is_none(),
+            "two chains open: the table has two buffers free and the staging takes no third chain"
+        );
+        assert_eq!(cells.in_use(), 2, "the refused chain claimed nothing");
+        assert!(
+            LentStaging::<4, 64>::none().acquire().is_none(),
+            "a staging of no table refuses every chain"
+        );
+    }
+
     /// The stagings of two links over their session's one table share its buffers: a chain of one
     /// link that finds every buffer held by the other's is refused, and the buffer the other's
     /// chain gives back when it ends serves it.
@@ -2364,6 +2385,16 @@ mod tests {
         assert!(
             borrowed,
             "CONTROL: an arena that cannot keep lends for the call"
+        );
+        assert_eq!(
+            heap.active_chains(),
+            0,
+            "the slot is free once the delivery returns"
+        );
+        assert_eq!(
+            heap.staging_available(),
+            4,
+            "the chain the arena could not keep is released to it after the delivery"
         );
     }
 

@@ -117,6 +117,10 @@ pub(crate) struct Counts {
     pub(crate) decl_watches: usize,
     /// Transport events listeners of each session.
     pub(crate) transport_events_listeners: usize,
+    /// Advanced publishers of each session.
+    pub(crate) advanced_publishers: usize,
+    /// Advanced subscribers of each session, owned and background.
+    pub(crate) advanced_subscribers: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -191,6 +195,8 @@ pub(crate) struct Bounds {
     matching_listeners: Option<usize>,
     decl_watches: Option<usize>,
     transport_events_listeners: Option<usize>,
+    advanced_publishers: Option<usize>,
+    advanced_subscribers: Option<usize>,
 }
 
 impl Bounds {
@@ -209,6 +215,8 @@ impl Bounds {
             matching_listeners: limits.max_matching_listeners().most(),
             decl_watches: limits.max_decl_watches().most(),
             transport_events_listeners: limits.max_transport_events_listeners().most(),
+            advanced_publishers: limits.max_advanced_publishers().most(),
+            advanced_subscribers: limits.max_advanced_subscribers().most(),
         }
     }
 }
@@ -342,12 +350,24 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.transport_events_listeners,
             bounds.transport_events_listeners,
         )),
+        advanced_publishers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_publishers,
+            bounds.advanced_publishers,
+        )),
+        advanced_subscribers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_subscribers,
+            bounds.advanced_subscribers,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 20;
+const KINDS: usize = 22;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,6 +470,13 @@ impl Plan {
             plan = plan.with::<crate::connectivity::TransportPlace>(
                 Kind::TransportEventsListener,
                 objects.transport_events_listeners,
+            );
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        {
+            plan = plan.with::<crate::advanced::AdvPubState>(
+                Kind::AdvancedPublisher,
+                objects.advanced_publishers,
             );
         }
         let mut kind = 0;
@@ -975,6 +1002,12 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         transport_events_listeners: each::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
             limits.max_transport_events_listeners(),
         ),
+        advanced_publishers: each::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            limits.max_advanced_publishers(),
+        ),
+        advanced_subscribers: each::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            limits.max_advanced_subscribers(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -1003,6 +1036,8 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         matching_listeners: 0,
         decl_watches: 0,
         transport_events_listeners: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1249,6 +1284,8 @@ mod tests {
         matching_listeners: Some(10),
         decl_watches: Some(11),
         transport_events_listeners: Some(12),
+        advanced_publishers: Some(10),
+        advanced_subscribers: Some(11),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1263,6 +1300,8 @@ mod tests {
         matching_listeners: None,
         decl_watches: None,
         transport_events_listeners: None,
+        advanced_publishers: None,
+        advanced_subscribers: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1364,6 +1403,8 @@ mod tests {
             matching_listeners: 1,
             decl_watches: 1,
             transport_events_listeners: 1,
+            advanced_publishers: 1,
+            advanced_subscribers: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1797,6 +1838,12 @@ mod tests {
             Kind::TransportEventsListener,
             core::mem::size_of::<crate::connectivity::TransportPlace>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_publisher",
+            Kind::AdvancedPublisher,
+            core::mem::size_of::<crate::advanced::AdvPubState>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1992,6 +2039,8 @@ mod tests {
         check(Kind::DeclWatch);
         #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
         check(Kind::TransportEventsListener);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedPublisher);
         assert_eq!(pools.held(), 0);
     }
 
@@ -2022,6 +2071,14 @@ mod tests {
         assert_eq!(
             bounds.transport_events_listeners,
             limits.max_transport_events_listeners().most()
+        );
+        assert_eq!(
+            bounds.advanced_publishers,
+            limits.max_advanced_publishers().most()
+        );
+        assert_eq!(
+            bounds.advanced_subscribers,
+            limits.max_advanced_subscribers().most()
         );
     }
 

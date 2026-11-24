@@ -736,23 +736,21 @@ pub(crate) unsafe fn liveliness_get_on(
         let fan = match &token {
             None => None,
             Some(token) => {
-                let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token)
-                else {
+                let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
                     return crate::result::Z_EGENERIC;
                 };
-                Some((fan, std::sync::Arc::new(registration)))
+                Some(fan)
             }
         };
-        let registration = fan.as_ref().map(|(_, r)| std::sync::Arc::clone(r));
-        let fan = fan.map(|(f, _)| f);
 
-        // Each leg owns its share of the closure, the gate and the registration, and its drop is
-        // that leg's end, which covers a real final, a timeout sweep and a face death alike.
+        // Each leg owns its share of the closure, the gate and the fan (the get's registration on
+        // its token), and its drop is that leg's end, which covers a real final, a timeout sweep
+        // and a face death alike.
         let mut leg = || -> LegCallback {
             let per_leg = crate::get::LegReply {
                 closure: closure.clone(),
                 gate: gate.clone(),
-                _registration: registration.clone(),
+                _fan: fan.clone(),
             };
             Box::new(move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
                 per_leg.fire(view);
@@ -762,9 +760,9 @@ pub(crate) unsafe fn liveliness_get_on(
             .shared
             .liveliness_get_on_links(&ke, timeout_ms, links, fan.as_deref(), &mut leg);
         // `closure` is the C thread's own clone, held across the walk; it goes before the
-        // registration for the reason `crate::get::issue_get` gives.
+        // fan for the reason `crate::get::issue_get` gives.
         drop(closure);
-        drop(registration);
+        drop(fan);
         crate::result::Z_OK
     })
 }
@@ -787,10 +785,10 @@ fn liveliness_get_on_node(
     let _registration = match &token {
         None => None,
         Some(token) => {
-            let Some((_fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
                 return crate::result::Z_EGENERIC;
             };
-            Some(registration)
+            Some(fan)
         }
     };
     let gate = crate::get::ReplyGate {

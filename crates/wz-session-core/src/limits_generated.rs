@@ -668,6 +668,52 @@ const _: LimitDomain = MaxMulticastReplies::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxMulticastRepliesHeld = Limited<MaxMulticastReplies, { MaxMulticastReplies::HELD }>;
 
+/// `MAX_ADVANCED_PUBLISHERS`: The advanced publishers a session holds at once, each the C
+/// object over the publisher, its cache and its detection token, which are counted in their
+/// own tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxAdvancedPublishers;
+
+impl LimitSpec for MaxAdvancedPublishers {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_ADVANCED_PUBLISHERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ADVANCED_PUBLISHERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxAdvancedPublishers::DOMAIN;
+
+/// How `MAX_ADVANCED_PUBLISHERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxAdvancedPublishersHeld =
+    Limited<MaxAdvancedPublishers, { MaxAdvancedPublishers::HELD }>;
+
+/// `MAX_ADVANCED_SUBSCRIBERS`: The advanced subscribers a session holds at once, owned or
+/// background, each the C object over the subscriber, its history and recovery and its
+/// detection token, which are counted in their own tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxAdvancedSubscribers;
+
+impl LimitSpec for MaxAdvancedSubscribers {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_ADVANCED_SUBSCRIBERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ADVANCED_SUBSCRIBERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxAdvancedSubscribers::DOMAIN;
+
+/// How `MAX_ADVANCED_SUBSCRIBERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxAdvancedSubscribersHeld =
+    Limited<MaxAdvancedSubscribers, { MaxAdvancedSubscribers::HELD }>;
+
 /// `MAX_LOCATOR_LEN`: The longest locator, in bytes, a node stores: one it is told to
 /// connect to, or one it listens on (for example udp/192.168.1.10:7447).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1746,6 +1792,10 @@ pub struct SessionLimits {
     max_reply_payload_bytes: MaxReplyPayloadBytesHeld,
     /// `MAX_MULTICAST_REPLIES`.
     max_multicast_replies: MaxMulticastRepliesHeld,
+    /// `MAX_ADVANCED_PUBLISHERS`.
+    max_advanced_publishers: MaxAdvancedPublishersHeld,
+    /// `MAX_ADVANCED_SUBSCRIBERS`.
+    max_advanced_subscribers: MaxAdvancedSubscribersHeld,
     /// `MAX_FACES`.
     max_faces: MaxFacesHeld,
     /// `MAX_ACCEPT_PENDING`.
@@ -1853,6 +1903,8 @@ impl SessionLimits {
             max_pending_finals: Limited::build_default(),
             max_reply_payload_bytes: Limited::build_default(),
             max_multicast_replies: Limited::build_default(),
+            max_advanced_publishers: Limited::build_default(),
+            max_advanced_subscribers: Limited::build_default(),
             max_faces: Limited::build_default(),
             max_accept_pending: Limited::build_default(),
             rx_pool_buffers: Limited::build_default(),
@@ -1951,6 +2003,14 @@ impl SessionLimits {
         max_pending_finals: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
         max_reply_payload_bytes: Limited::build_default(),
         max_multicast_replies: Limited::build_default(),
+        max_advanced_publishers: Limited::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ),
+        max_advanced_subscribers: Limited::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ),
         max_faces: Limited::preset_or_build(Quota::at_most(10), LimitValue::Integer(10)),
         max_accept_pending: Limited::preset_or_build(Quota::at_most(1), LimitValue::Integer(1)),
         rx_pool_buffers: Limited::preset_or_build(2, LimitValue::Integer(2)),
@@ -2515,6 +2575,46 @@ impl SessionLimits {
     /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_multicast_replies = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_ADVANCED_PUBLISHERS` as this snapshot holds it.
+    pub const fn max_advanced_publishers(&self) -> Quota {
+        self.max_advanced_publishers.get()
+    }
+
+    /// `MAX_ADVANCED_PUBLISHERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_advanced_publishers_held(&self) -> MaxAdvancedPublishersHeld {
+        self.max_advanced_publishers
+    }
+
+    /// Selects `MAX_ADVANCED_PUBLISHERS`, when the build's domain holds `value`.
+    pub fn select_max_advanced_publishers(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.max_advanced_publishers = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_ADVANCED_SUBSCRIBERS` as this snapshot holds it.
+    pub const fn max_advanced_subscribers(&self) -> Quota {
+        self.max_advanced_subscribers.get()
+    }
+
+    /// `MAX_ADVANCED_SUBSCRIBERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_advanced_subscribers_held(&self) -> MaxAdvancedSubscribersHeld {
+        self.max_advanced_subscribers
+    }
+
+    /// Selects `MAX_ADVANCED_SUBSCRIBERS`, when the build's domain holds `value`.
+    pub fn select_max_advanced_subscribers(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.max_advanced_subscribers = Limited::select(value)?;
         Ok(())
     }
 
@@ -3500,6 +3600,26 @@ impl LimitField<SessionLimits> for MaxMulticastReplies {
     }
 }
 
+impl LimitField<SessionLimits> for MaxAdvancedPublishers {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_advanced_publishers(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_advanced_publishers()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_advanced_subscribers(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_advanced_subscribers()
+    }
+}
+
 impl LimitField<SessionLimits> for MaxFaces {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_max_faces(value)
@@ -3861,7 +3981,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 65;
+pub const SESSION_LIMIT_COUNT: usize = 67;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -3895,6 +4015,8 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxPendingFinals>(),
     LimitEntry::of::<MaxReplyPayloadBytes>(),
     LimitEntry::of::<MaxMulticastReplies>(),
+    LimitEntry::of::<MaxAdvancedPublishers>(),
+    LimitEntry::of::<MaxAdvancedSubscribers>(),
     LimitEntry::of::<MaxFaces>(),
     LimitEntry::of::<MaxAcceptPending>(),
     LimitEntry::of::<RxPoolBuffers>(),

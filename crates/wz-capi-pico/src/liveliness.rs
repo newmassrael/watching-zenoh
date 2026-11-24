@@ -640,7 +640,7 @@ pub unsafe extern "C" fn z_liveliness_get(
             crate::object_slot::Kind::LivelinessGet,
             closure,
             gate,
-            token,
+            token.map(wz_capi_port::cancellation::TokenRef::shared),
             |asked, fan, leg| {
                 engine.liveliness_get_on_wire(asked, &WireKey::literal(), timeout_ms, fan, leg)
             },
