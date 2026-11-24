@@ -1147,8 +1147,13 @@ dependencies = [
 name = "wz-app-frame"
 version = "0.1.0"
 dependencies = [
+ "wz-app-schema",
  "wz-session-core",
 ]
+
+[[package]]
+name = "wz-app-schema"
+version = "0.1.0"
 
 [[package]]
 name = "wz-capi-c"

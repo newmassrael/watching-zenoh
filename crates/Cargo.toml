@@ -100,6 +100,10 @@ members = [
     # profiles. Below `wz-capture`, which re-exports it, and built on the core,
     # so a session runtime or a C ABI can use it without the capture crate.
     "wz-app-frame",
+    # The readers of an application's payload schema (the `.proto` tokenizer, parser and linker),
+    # run once when a schema is handed over, below `wz-app-frame`, which re-exports them; their own
+    # crate so the release profiles build them for size and the per-sample code for speed.
+    "wz-app-schema",
     # Round 1998 (item 470) — Linux packet I/O: the `AF_PACKET` socket, the
     # raweth link over it, and the capture tap. Split out of `wz-runtime-tokio`,
     # which never drove either and whose MANDATORY `tokio` is what kept the tap
@@ -433,6 +437,19 @@ panic = "abort"
 inherits = "release"
 panic = "abort"
 lto = "fat"
+
+# The code that interprets a document once, when a node is handed it, built for size: the schema's
+# tokenizer, parser and linker (`wz-app-schema`). What reads and writes every sample keeps the
+# profile's `opt-level = 3`; the crate boundary is the line between the two. Stated for each profile
+# a release library is built with, so no profile builds the crate otherwise.
+[profile.release.package.wz-app-schema]
+opt-level = "s"
+
+[profile.capi-small.package.wz-app-schema]
+opt-level = "s"
+
+[profile.capi-nostd.package.wz-app-schema]
+opt-level = "s"
 
 # socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has
 # no `TCP_KEEPALIVE`, `unpcbid` or `LOCAL_PEEREID` there. ring 0.17.14 compiles for QNX but has no

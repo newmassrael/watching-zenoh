@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-app-schema — the READERS of the documents an application describes its payloads by, run once
+# when a node opens what it was handed: the `.proto` tokenizer, parser and schema linker, whose
+# type tables the application frame's typed reader and writer read for every sample.
+#
+# Its own crate so the code that interprets a document once can be built for size while the code
+# that reads and writes every sample keeps the speed it is built for: the release profiles build
+# this crate at `opt-level = "s"` (`crates/Cargo.toml`). `wz-app-frame` depends on it and
+# re-exports its modules at the paths they had there (`wz_app_frame::proto_schema` and the rest),
+# so no consumer names this crate.
+#
+# No dependency, `no_std` and `alloc`.
+[package]
+name = "wz-app-schema"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Readers of an application's payload schema: the .proto tokenizer, parser and linker."
+
+[lib]
+name = "wz_app_schema"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
