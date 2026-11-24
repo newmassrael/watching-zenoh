@@ -85,6 +85,7 @@ pub mod entity_place;
 pub mod group;
 pub mod held_key;
 pub mod listeners;
+pub mod lodge;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
 #[cfg(any(

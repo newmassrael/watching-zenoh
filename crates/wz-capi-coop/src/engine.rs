@@ -8040,7 +8040,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             feature = "declarations-synced-event"
         ))]
         let watches = self.decl_watches.close();
+        // A closed session runs no periodic job, so each ends with it, and what it holds (a place
+        // of the session's, which goes back under this lock) is let go of with no lock held.
+        #[cfg(feature = "ticker")]
+        let jobs = core.tickers.take_all();
         drop(guard);
+        #[cfg(feature = "ticker")]
+        drop(jobs);
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"

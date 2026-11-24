@@ -42,7 +42,8 @@ use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::Write as _;
-use core::mem::ManuallyDrop;
+use core::mem::{ManuallyDrop, MaybeUninit};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
@@ -71,10 +72,12 @@ use super::plans::{
     RecoveredView,
 };
 use super::state::{
-    Delivery, Miss, MissHandlers, OnSample, RecoveryRequest, SampleMissListener, State, StateCell,
+    Delivery, Miss, MissHandlers, OnSample, RecoveryRequest, SampleMissListener, State,
 };
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
+
+use wz_capi_port::lodge::{Lodging, Strong, WeakRef};
 
 /// Why declaring an advanced subscriber on an engine failed.
 #[derive(Debug, PartialEq, Eq)]
@@ -150,6 +153,8 @@ struct Shared<E: SessionEngine + ?Sized> {
     dest: Locality,
     /// The timeout of every get, in milliseconds.
     timeout_ms: u32,
+    /// The bounds of a detected late publisher's history get: its depth and its age.
+    late: (Option<usize>, Option<f64>),
 }
 
 impl<E: SessionEngine + ?Sized> Shared<E> {
@@ -170,6 +175,7 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
             base_keyexpr,
             dest,
             timeout_ms,
+            late: (None, None),
         }
     }
 
@@ -201,13 +207,6 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
     }
 }
 
-/// A miss listener reaches the state through the subscriber, which holds it.
-impl<E: SessionEngine + ?Sized> StateCell for Shared<E> {
-    fn state_cell(&self) -> &Mutex<State> {
-        &self.state
-    }
-}
-
 /// What the machine does when a get is over.
 enum Finish {
     /// The startup get, or a late publisher's whose source is not identified.
@@ -236,8 +235,9 @@ struct GetSlot<E: SessionEngine + ?Sized> {
     taken: AtomicBool,
     /// The holders of the get: its issuer while it issues, and each leg not yet ended.
     holders: AtomicUsize,
-    /// The subscriber whose table the slot is in, as a leg reaches it.
-    owner: UnsafeCell<*const Shared<E>>,
+    /// The subscriber whose table the slot is in, as a leg reaches it: its lodging, which a leg
+    /// holds a count of.
+    owner: UnsafeCell<*const c_void>,
     /// What ends the get; taken by its end.
     finish: UnsafeCell<Option<Finish>>,
     /// The get's legs as one thing to cancel, and its registration on the teardown's token: held
@@ -270,10 +270,10 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     /// # Safety
     /// The caller took the slot ([`Shared::claim`]) for `owner`, whose table it is in, and has
     /// handed out no leg of it.
-    unsafe fn open(&self, owner: &Arc<Shared<E>>, finish: Finish) -> &CancellableFan {
+    unsafe fn open(&self, owner: &Strong<Shared<E>>, finish: Finish) -> &CancellableFan {
         // SAFETY: the caller's: nothing else reaches the slot yet.
         unsafe {
-            *self.owner.get() = Arc::as_ptr(owner);
+            *self.owner.get() = Strong::as_raw(owner);
             *self.finish.get() = Some(finish);
             self.holders.store(1, Ordering::Release);
             (*self.fan.get()).insert(CancellableFan::new())
@@ -287,7 +287,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     unsafe fn owner(&self) -> &Shared<E> {
         // SAFETY: the caller's: `owner` was written before the get had a holder but its issuer,
         // and the subscriber stands while the get does.
-        unsafe { &**self.owner.get() }
+        unsafe { Strong::<Shared<E>>::value_of(*self.owner.get()) }
     }
 
     /// One leg's callback, holding the get and the subscriber until the engine lets it go
@@ -296,10 +296,10 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     /// # Safety
     /// The caller is the issuer of the slot's get and still holds it; `owner` is the subscriber
     /// the slot is in.
-    unsafe fn leg(&self, owner: &Arc<Shared<E>>) -> ReplyCallback {
+    unsafe fn leg(&self, owner: &Strong<Shared<E>>) -> ReplyCallback {
         self.holders.fetch_add(1, Ordering::AcqRel);
         // The count of the subscriber the leg holds, let go of by `end_leg`.
-        let _ = Arc::into_raw(Arc::clone(owner));
+        let _ = Strong::into_raw(owner.clone());
         let context = core::ptr::from_ref(self).cast_mut().cast::<c_void>();
         // SAFETY: the context is this slot, which the leg holds until `end_leg` runs, once, after
         // its last call; a call reads the subscriber through a shared borrow, which it admits from
@@ -366,31 +366,29 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
         let slot = &*context.cast_const().cast::<GetSlot<E>>();
         let owner = *slot.owner.get();
         slot.release();
-        drop(Arc::from_raw(owner));
+        drop(Strong::<Shared<E>>::from_raw(owner.cast_mut()));
     }
 }
 
 /// A subscription callback of the subscriber's own, in the engine's raw form over a count of the
 /// subscriber, which the engine lets go of with the callback: no memory is taken for it.
 fn own_sink<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     call: unsafe fn(context: *mut c_void, sample: &dyn SampleView),
 ) -> SubscriberSink {
-    let context = Arc::into_raw(Arc::clone(shared))
-        .cast_mut()
-        .cast::<c_void>();
+    let context = Strong::into_raw(shared.clone());
     // SAFETY: the context is a count of the subscriber, let go of once by `let_go` after the last
     // call; a call reads the subscriber through a shared borrow, which it admits from any thread.
     unsafe { SubscriberSink::raw(call, context, Some(let_go::<E>)) }
 }
 
-/// The subscriber a callback's context holds a count of, as the `Arc` it is, the count left held.
+/// The subscriber a callback's context holds a count of, as the count it is, left held.
 ///
 /// # Safety
 /// `context` is a count of a subscriber ([`own_sink`]) not yet let go of.
-unsafe fn held<E: SessionEngine + ?Sized>(context: *mut c_void) -> ManuallyDrop<Arc<Shared<E>>> {
+unsafe fn held<E: SessionEngine + ?Sized>(context: *mut c_void) -> ManuallyDrop<Strong<Shared<E>>> {
     // SAFETY: the caller's; the count is not let go of here, as the value is never dropped.
-    ManuallyDrop::new(unsafe { Arc::from_raw(context.cast_const().cast::<Shared<E>>()) })
+    ManuallyDrop::new(unsafe { Strong::from_raw(context) })
 }
 
 /// Let go of the count of the subscriber a callback held.
@@ -448,6 +446,46 @@ unsafe fn on_heartbeat<E: SessionEngine + ?Sized>(context: *mut c_void, view: &d
     }
 }
 
+/// The late-publisher liveliness subscription's callback, in the engine's raw form over a count of
+/// the subscriber ([`own_sink`]'s, let go of by [`let_go`]).
+///
+/// # Safety
+/// As [`held`]'s.
+unsafe fn on_late_publisher<E: SessionEngine + ?Sized>(
+    context: *mut c_void,
+    sample: LivelinessSample<'_>,
+) {
+    // SAFETY: the caller's.
+    let shared = unsafe { held::<E>(context) };
+    if shared.is_closing() {
+        return;
+    }
+    let (depth, age) = shared.late;
+    on_late_publisher_detected(&shared, sample.kind, sample.keyexpr, depth, age);
+}
+
+/// A sample-miss listener's retraction, over a weak count of the subscriber: a subscriber already
+/// gone has nothing to retract.
+///
+/// # Safety
+/// `context` is a weak count of a subscriber ([`WeakRef::into_raw`]) not yet let go of.
+unsafe fn unregister_miss<E: SessionEngine + ?Sized>(context: *mut c_void, id: usize) {
+    // SAFETY: the caller's; the count is not let go of here.
+    let weak = ManuallyDrop::new(unsafe { WeakRef::<Shared<E>>::from_raw(context) });
+    if let Some(shared) = weak.upgrade() {
+        shared.lock().miss_handlers().unregister(id);
+    }
+}
+
+/// Let go of a sample-miss listener's weak count of its subscriber.
+///
+/// # Safety
+/// As [`unregister_miss`]'s, called once, last.
+unsafe fn let_go_weak<E: SessionEngine + ?Sized>(context: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(unsafe { WeakRef::<Shared<E>>::from_raw(context) });
+}
+
 /// A subscription (or liveliness subscription) the engine holds, retracted when this is dropped.
 struct Subscription<E: SessionEngine + ?Sized> {
     engine: Arc<E>,
@@ -489,7 +527,7 @@ struct Held<T> {
 /// The teardown of the gets in flight. Armed until the subscriber goes to the background, which
 /// leaves them running to their Final.
 struct GetCancel<E: SessionEngine + ?Sized> {
-    shared: Arc<Shared<E>>,
+    shared: Strong<Shared<E>>,
     armed: bool,
 }
 
@@ -498,6 +536,47 @@ impl<E: SessionEngine + ?Sized> Drop for GetCancel<E> {
         if self.armed {
             self.shared.closing.store(true, Ordering::Release);
             self.shared.token.cancel();
+        }
+    }
+}
+
+/// The place of what an advanced subscriber's callbacks and jobs share, which a host that keeps
+/// its objects in places of its own lends [`EngineSubscriber::declare_in`]: sized for it, and
+/// holding nothing until a declaration lodges the part there.
+#[repr(transparent)]
+pub struct SubscriberCore<E: SessionEngine + ?Sized>(MaybeUninit<Lodging<Shared<E>>>);
+
+impl<E: SessionEngine + ?Sized> SubscriberCore<E> {
+    /// A place holding no subscriber's part.
+    pub const fn vacant() -> Self {
+        Self(Lodging::vacant())
+    }
+}
+
+/// A [`SubscriberCore`] its host lends one declaration, and how the host takes it back.
+pub struct LentCore<E: SessionEngine + ?Sized> {
+    core: NonNull<SubscriberCore<E>>,
+    give_back: unsafe fn(*mut c_void),
+    context: *mut c_void,
+}
+
+impl<E: SessionEngine + ?Sized> LentCore<E> {
+    /// `core`, given back by `give_back(context)`.
+    ///
+    /// # Safety
+    /// `core` is valid for writes, holds no subscriber's part, and stands until
+    /// `give_back(context)` runs, which a declaration made with it does once. That may be on any
+    /// thread that lets go of the part last, the engine's among them as it lets a callback go with
+    /// no lock of its own held, so `give_back` takes no lock the engine holds then.
+    pub unsafe fn new(
+        core: NonNull<SubscriberCore<E>>,
+        give_back: unsafe fn(*mut c_void),
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            core,
+            give_back,
+            context,
         }
     }
 }
@@ -515,7 +594,7 @@ pub struct EngineSubscriber<E: SessionEngine + ?Sized = dyn SessionEngine> {
     late_publishers: Option<Held<Subscription<E>>>,
     heartbeat: Option<Held<Subscription<E>>>,
     detection_token: Option<Held<Token<E>>>,
-    shared: Arc<Shared<E>>,
+    shared: Strong<Shared<E>>,
     id: EntityGlobalId,
     /// Kept for [`Self::background`], which hands the names back to the host that made them.
     forms: Option<FormsHandle>,
@@ -593,49 +672,58 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         on_sample: OnSample,
         misses: MissHandlers,
     ) -> Result<Self, HostError> {
-        // Upstream's own config check opens its builder, before a single entity is declared.
-        if let Some(history) = options.history.as_ref() {
-            if history.sample_depth == Some(0) {
-                return Err(HostError::HistoryBoundZero {
-                    knob: "max_samples",
-                });
+        let base_keyexpr = admitted(engine, keyexpr.as_ref(), &options)?;
+        let part = shared_part(engine, base_keyexpr, &options, on_sample, misses);
+        Self::declare_over(engine, Strong::boxed(part), options)
+    }
+
+    /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
+    /// a place its host lends, and not in memory of its own: a host that keeps its objects in
+    /// places of its own declares with no memory taken for it.
+    ///
+    /// The place is given back once ([`LentCore::new`]): at once when the declaration is refused
+    /// before the part is made, and otherwise with the last of what holds the part.
+    pub fn declare_in(
+        engine: &Arc<E>,
+        keyexpr: impl AsRef<str>,
+        options: AdvancedSubscriberOptions,
+        on_sample: OnSample,
+        misses: MissHandlers,
+        core: LentCore<E>,
+    ) -> Result<Self, HostError> {
+        let base_keyexpr = match admitted(engine, keyexpr.as_ref(), &options) {
+            Ok(base_keyexpr) => base_keyexpr,
+            Err(refused) => {
+                drop((on_sample, misses));
+                // SAFETY: `LentCore::new`'s: nothing was lodged, so the place goes back now, once.
+                unsafe { (core.give_back)(core.context) };
+                return Err(refused);
             }
-            if history.max_age == Some(0.0) {
-                return Err(HostError::HistoryBoundZero { knob: "max_age" });
-            }
-        }
-        if engine.is_closed() {
-            return Err(HostError::Refused("the session is closed"));
-        }
-        let Some(base_keyexpr) = fixed_key(keyexpr.as_ref()) else {
-            return Err(HostError::Refused(
-                "the key expression is longer than a session stores",
-            ));
         };
+        let part = shared_part(engine, base_keyexpr, &options, on_sample, misses);
+        // SAFETY: `LentCore::new`'s; a `SubscriberCore` is the place of its lodging
+        // (`repr(transparent)`).
+        let shared = unsafe {
+            Strong::lodge(
+                core.core.cast::<MaybeUninit<Lodging<Shared<E>>>>(),
+                part,
+                core.give_back,
+                core.context,
+            )
+        };
+        Self::declare_over(engine, shared, options)
+    }
+
+    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made.
+    fn declare_over(
+        engine: &Arc<E>,
+        shared: Strong<Shared<E>>,
+        options: AdvancedSubscriberOptions,
+    ) -> Result<Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
-        let retransmission = recovery.is_some();
         let history = options.history;
-        let dest = options.get_locality;
-        let timeout_ms = recovery_query_timeout_ms(options.query_timeout);
         let forms = options.forms.clone();
-
-        let state = State::delivering_to(on_sample, misses)
-            .with_retransmission(retransmission)
-            .with_history(
-                usize::from(history.is_some()),
-                history
-                    .as_ref()
-                    .and_then(|h| h.sample_depth)
-                    .unwrap_or(usize::MAX),
-            );
-        let shared = Arc::new(Shared::new(
-            Arc::downgrade(engine),
-            state,
-            base_keyexpr,
-            dest,
-            timeout_ms,
-        ));
         let base = shared.base();
 
         // The live subscription.
@@ -652,7 +740,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         // The retention sweep and the periodic re-ask: jobs the engine runs.
         let retention = match recovery.map(|c| c.retention_period()) {
             Some(period) => {
-                let weak = Arc::downgrade(&shared);
+                let weak = Strong::downgrade(&shared);
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start_on(
@@ -677,7 +765,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         };
         let periodic = match recovery.and_then(|c| c.periodic_queries()) {
             Some(period) => {
-                let weak = Arc::downgrade(&shared);
+                let weak = Strong::downgrade(&shared);
                 let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
                 Some(
                     Ticker::start_on(
@@ -711,17 +799,16 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         let late_publishers = if history.is_some_and(|h| h.detect_late_publishers) {
             let keyexpr = crate::advanced_ke::publisher_detection_ke(base);
             let form = form_of(forms.as_ref(), |f| f.late_publishers(&keyexpr));
-            let (depth, age) = history
-                .map(|h| (h.sample_depth, h.max_age))
-                .unwrap_or((None, None));
-            let lp_shared = Arc::clone(&shared);
-            let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
-                let shared = &lp_shared;
-                if shared.is_closing() {
-                    return;
-                }
-                on_late_publisher_detected(shared, sample.kind, sample.keyexpr, depth, age);
-            });
+            // SAFETY: the context is a count of the subscriber, let go of once by `let_go` after
+            // the last call; a call reads the subscriber through a shared borrow, which it admits
+            // from any thread.
+            let sink = unsafe {
+                LivelinessSink::raw(
+                    on_late_publisher::<E>,
+                    Strong::into_raw(shared.clone()),
+                    Some(let_go::<E>),
+                )
+            };
             Some(declare_liveliness_subscription(
                 engine, &keyexpr, &form, true, sink,
             )?)
@@ -762,7 +849,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             periodic,
             retention,
             cancel: GetCancel {
-                shared: Arc::clone(&shared),
+                shared: shared.clone(),
                 armed: true,
             },
             late_publishers,
@@ -801,7 +888,10 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             .lock()
             .miss_handlers()
             .register(Box::new(callback));
-        SampleMissListener::new(id, Arc::downgrade(&self.shared))
+        let weak = WeakRef::into_raw(Strong::downgrade(&self.shared));
+        // SAFETY: the context is a weak count of the subscriber, let go of once by `let_go_weak`;
+        // a retraction upgrades it, which it admits from any thread.
+        unsafe { SampleMissListener::lent(id, weak, unregister_miss::<E>, let_go_weak::<E>) }
     }
 
     /// Undeclare this subscriber. Consuming and infallible: everything it holds retracts on drop.
@@ -848,6 +938,64 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
             retain(keeps);
         }
     }
+}
+
+/// The checks a declaration makes before anything is made for it: the history bounds, as
+/// upstream's builder checks them, a session still open, and a key a session stores, which it
+/// answers kept inline.
+fn admitted<E: SessionEngine + ?Sized>(
+    engine: &Arc<E>,
+    keyexpr: &str,
+    options: &AdvancedSubscriberOptions,
+) -> Result<FixedKey, HostError> {
+    if let Some(history) = options.history.as_ref() {
+        if history.sample_depth == Some(0) {
+            return Err(HostError::HistoryBoundZero {
+                knob: "max_samples",
+            });
+        }
+        if history.max_age == Some(0.0) {
+            return Err(HostError::HistoryBoundZero { knob: "max_age" });
+        }
+    }
+    if engine.is_closed() {
+        return Err(HostError::Refused("the session is closed"));
+    }
+    fixed_key(keyexpr).ok_or(HostError::Refused(
+        "the key expression is longer than a session stores",
+    ))
+}
+
+/// What a subscriber of `engine` on `base_keyexpr` shares among its callbacks and jobs, with the
+/// machine `options` asks for delivering to `on_sample` and `misses`.
+fn shared_part<E: SessionEngine + ?Sized>(
+    engine: &Arc<E>,
+    base_keyexpr: FixedKey,
+    options: &AdvancedSubscriberOptions,
+    on_sample: OnSample,
+    misses: MissHandlers,
+) -> Shared<E> {
+    let history = options.history;
+    let state = State::delivering_to(on_sample, misses)
+        .with_retransmission(options.recovery.is_some())
+        .with_history(
+            usize::from(history.is_some()),
+            history
+                .as_ref()
+                .and_then(|h| h.sample_depth)
+                .unwrap_or(usize::MAX),
+        );
+    let mut part = Shared::new(
+        Arc::downgrade(engine),
+        state,
+        base_keyexpr,
+        options.get_locality,
+        recovery_query_timeout_ms(options.query_timeout),
+    );
+    part.late = history
+        .map(|h| (h.sample_depth, h.max_age))
+        .unwrap_or((None, None));
+    part
 }
 
 /// The identity a subscriber reports: its host's, when the host has one, else its subscription's
@@ -976,7 +1124,7 @@ fn get_options<'a, E: SessionEngine + ?Sized>(
 /// session holds as many gets pending as it can, and the get is over before it starts, as one no
 /// leg was issued for.
 fn issue_get<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     keyexpr: &str,
     opts: &QueryOptionsOf<'_>,
     finish: Finish,
@@ -1044,7 +1192,7 @@ fn recovery_key(base: &str, zid: &[u8], eid: u32) -> FixedKey {
 /// Issue one get on the key written in `key`, as [`issue_get`] does; a key too long to write is
 /// a get no session sends, and it is over before it starts.
 fn issue_get_on<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     key: &FixedKey,
     opts: &QueryOptionsOf<'_>,
     finish: Finish,
@@ -1058,7 +1206,7 @@ fn issue_get_on<E: SessionEngine + ?Sized>(
 /// Issue a `_sn` recovery get against the gapped source's `@adv` cache: the open range from the
 /// next sequence number, or the bounded one a heartbeat asks for.
 fn issue_recovery_query<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     request: RecoveryRequest,
 ) {
     let key = recovery_key(shared.base(), &request.zid, request.eid);
@@ -1074,7 +1222,7 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
 
 /// Issue the startup get over `<base>/@adv/**`, capped and bounded as the history config says.
 fn issue_history_query<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     depth: Option<usize>,
     age: Option<f64>,
 ) {
@@ -1090,7 +1238,7 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
 
 /// Issue the history get of one detected late publisher `(zid, eid)`.
 fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     zid: Vec<u8>,
     eid: u32,
     depth: Option<usize>,
@@ -1105,7 +1253,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
 /// The timestamped twin: the target is the token's own key expression, which is the one the
 /// publisher declared its cache queryable on.
 fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     zid: Vec<u8>,
     depth: Option<usize>,
@@ -1119,7 +1267,7 @@ fn issue_timestamped_late_publisher_query<E: SessionEngine + ?Sized>(
 /// The get for a publisher whose token's zid does not decode: counted globally, since there is no
 /// source to count it against.
 fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     token_keyexpr: &str,
     depth: Option<usize>,
     age: Option<f64>,
@@ -1132,7 +1280,7 @@ fn issue_unidentified_late_publisher_query<E: SessionEngine + ?Sized>(
 /// The late-publisher liveliness callback: on a `Put`, open a slot for the detected publisher and
 /// issue its history get (outside the lock); on a `Delete`, only mark it gone.
 fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
-    shared: &Arc<Shared<E>>,
+    shared: &Strong<Shared<E>>,
     kind: LivelinessSampleKind,
     token_keyexpr: &str,
     depth: Option<usize>,
@@ -1186,7 +1334,7 @@ fn on_late_publisher_detected<E: SessionEngine + ?Sized>(
 
 /// One periodic recovery tick: collect each source's `_sn=last+1..` request under the state lock,
 /// then issue the gets with it released.
-fn run_periodic_tick<E: SessionEngine + ?Sized>(shared: &Arc<Shared<E>>) {
+fn run_periodic_tick<E: SessionEngine + ?Sized>(shared: &Strong<Shared<E>>) {
     let requests = shared.lock().periodic_requests();
     for request in requests {
         issue_recovery_query(shared, request);
