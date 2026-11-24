@@ -1122,8 +1122,10 @@ bool wz_ext_internal_instance_keyer_check(
  * A watch of subscribers or queryables is told first what each peer holds
  * when it is declared, as WZ_EXT_DECL_DECLARED events ahead of every live
  * event of that link, then what the peers declare and retract from then on,
- * on every link the session holds and every link that comes up later; each
- * declaration is told once. A watch of tokens hears only what comes after it
+ * on every link the session holds and every link that comes up later. Each
+ * declaration is told once, or, when the library had no room to hold the
+ * events a watch is owed, the watch is told how many it lost (WZ_EXT_DECL_LOST,
+ * the count in id) ahead of its next event. A watch of tokens hears only what comes after it
  * is declared. A watch declared after a link's peer finished its initial
  * declarations is not told WZ_EXT_DECL_SYNCED for that link. A link that is
  * lost tells no undeclaration for what its peer held, and the members of a
@@ -1133,6 +1135,7 @@ bool wz_ext_internal_instance_keyer_check(
 #define WZ_EXT_DECL_DECLARED 0
 #define WZ_EXT_DECL_UNDECLARED 1
 #define WZ_EXT_DECL_SYNCED 2
+#define WZ_EXT_DECL_LOST 3 /* added in minor version 3 */
 
 /* The kind of entity a watch is of. */
 #define WZ_EXT_DECL_SUBSCRIBER 0
@@ -1142,7 +1145,7 @@ bool wz_ext_internal_instance_keyer_check(
 /* One event, as the callback reads it: 48 bytes on a 64-bit target, 40 on a
  * 32-bit one. It and the key it points to are valid only for the call. */
 typedef struct wz_ext_decl_event_t {
-  uint8_t kind;      /* WZ_EXT_DECL_DECLARED, _UNDECLARED or _SYNCED */
+  uint8_t kind;      /* WZ_EXT_DECL_DECLARED, _UNDECLARED, _SYNCED or _LOST */
   uint8_t entity;    /* the kind the watch is of: WZ_EXT_DECL_SUBSCRIBER,
                         _QUERYABLE or _TOKEN */
   uint8_t zid_len;   /* how many bytes of zid name the peer; 0 when the peer
@@ -1150,9 +1153,10 @@ typedef struct wz_ext_decl_event_t {
   uint8_t reserved;
   uint32_t reserved2;
   uint64_t id;       /* the id the peer declared the entity under, which its
-                        undeclaration names again; 0 for _SYNCED */
+                        undeclaration names again; 0 for _SYNCED; the
+                        count of events lost for _LOST */
   const char *keyexpr; /* the key of a _DECLARED, not NUL-terminated; NULL for
-                          the other two */
+                          the others */
   size_t keyexpr_len;
   uint8_t zid[16];   /* the peer's zenoh id in the layout of z_id_t, zero past
                         zid_len */
@@ -1454,6 +1458,10 @@ typedef struct wz_ext_replay_subscriber_counts_t {
   uint64_t abandoned;
   uint64_t frames_given_up; /* segmented: a piece never came */
   uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
+  uint64_t declarations_lost; /* added in minor version 3: declarations of the
+                                 publishers' queryables the watch lost
+                                 (WZ_EXT_DECL_LOST); not zero, the rounds may
+                                 miss a publisher or wait on one that went */
 } wz_ext_replay_subscriber_counts_t;
 
 typedef struct wz_ext_owned_replay_subscriber_t {
@@ -1985,16 +1993,18 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers, queriers,
- * keyexprs, gets, liveliness_gets, matching_listeners, decl_watches and
- * transport_events_listeners) are per session and are multiplied by sessions;
- * the rest are for all sessions together. A session's subscribers,
- * queryables, liveliness tokens, liveliness subscribers, queriers, declared
- * key expressions, pending gets and liveliness gets, matching listeners,
- * declaration watches and transport events listeners are bounded by the
- * limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
+ * keyexprs, gets, liveliness_gets, matching_listeners, decl_watches,
+ * transport_events_listeners and link_events_listeners) are per session and
+ * are multiplied by sessions; the rest are for all sessions together. A
+ * session's subscribers, queryables, liveliness tokens, liveliness
+ * subscribers, queriers, declared key expressions, pending gets and
+ * liveliness gets, matching listeners, declaration watches and transport and
+ * link events listeners are bounded by the limits it opens under
+ * (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
  * MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS, MAX_DECLARED_KEYEXPRS,
  * MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS, MAX_MATCHING_LISTENERS,
- * MAX_DECL_WATCHES, MAX_TRANSPORT_EVENTS_LISTENERS): a count of
+ * MAX_DECL_WATCHES, MAX_TRANSPORT_EVENTS_LISTENERS,
+ * MAX_LINK_EVENTS_LISTENERS): a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
@@ -2055,6 +2065,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t matching_listeners;
   size_t decl_watches;
   size_t transport_events_listeners;
+  size_t link_events_listeners;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {
@@ -2598,7 +2609,7 @@ z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
  * side allocates is freed by the other. */
 
 #define WZ_EXT_INTERFACE_MAJOR 1
-#define WZ_EXT_INTERFACE_MINOR 2
+#define WZ_EXT_INTERFACE_MINOR 3
 
 typedef struct wz_ext_interface_version_t {
     uint32_t struct_size;

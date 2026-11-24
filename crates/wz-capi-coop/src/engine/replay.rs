@@ -194,15 +194,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// How many declarations of `kind` the session holds.
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
-            Kind::Keyexpr => super::tables(&self.registry).keyexprs().len(),
-            Kind::Subscriber => super::tables(&self.registry).subscribers().len(),
-            Kind::Interest => super::tables(&self.registry).interests().len(),
+            Kind::Keyexpr => super::tables(&self.session.registry).keyexprs().len(),
+            Kind::Subscriber => super::tables(&self.session.registry).subscribers().len(),
+            Kind::Interest => super::tables(&self.session.registry).interests().len(),
             #[cfg(feature = "queryable")]
-            Kind::Queryable => super::tables(&self.registry).queryables().len(),
+            Kind::Queryable => super::tables(&self.session.registry).queryables().len(),
             #[cfg(feature = "liveliness")]
-            Kind::Token => super::tables(&self.registry).tokens().len(),
+            Kind::Token => super::tables(&self.session.registry).tokens().len(),
             #[cfg(feature = "liveliness")]
-            Kind::LiveSub => super::tables(&self.registry).liveliness_subscribers().len(),
+            Kind::LiveSub => super::tables(&self.session.registry)
+                .liveliness_subscribers()
+                .len(),
         }
     }
 
@@ -231,14 +233,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             return match kind {
                 Kind::Keyexpr => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.keyexprs().iter().nth(left);
                     row.map_or(true, |(_, row)| {
                         actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
                     })
                 }
                 Kind::Subscriber => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.subscribers().iter().nth(left);
                     let told = row.map_or(true, |(_, row)| {
                         tables
@@ -248,14 +250,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     told
                 }
                 Kind::Interest => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.interests().iter().nth(left);
                     let told = row.map_or(true, |(_, row)| super::send_interest(row, actions));
                     told
                 }
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.queryables().iter().nth(left);
                     let told = row.map_or(true, |(_, row)| {
                         tables
@@ -266,7 +268,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 #[cfg(feature = "liveliness")]
                 Kind::Token => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.tokens().iter().nth(left);
                     let told = row.map_or(true, |(_, row)| {
                         tables.named(row.key()).is_some_and(|key| {
@@ -277,7 +279,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 #[cfg(feature = "liveliness")]
                 Kind::LiveSub => {
-                    let tables = super::tables(&self.registry);
+                    let tables = super::tables(&self.session.registry);
                     let row = tables.liveliness_subscribers().iter().nth(left);
                     let asked = row.map_or(true, |(_, row)| {
                         row.callback()
@@ -302,7 +304,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_ms: u64,
     ) -> TurnEnd {
         let owed = self.sequence_len();
-        self.links.faces_mut()[at].replay.begin(owed, now_ms);
+        self.transport.links.faces_mut()[at]
+            .replay
+            .begin(owed, now_ms);
         self.replay_turn(at, actions, now_ms)
     }
 
@@ -316,7 +320,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         actions: &McuActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
-        let replay = &self.links.faces()[at].replay;
+        let replay = &self.transport.links.faces()[at].replay;
         if replay.cursor.finished() || now_ms < replay.next_turn_ms {
             return TurnEnd::Kept;
         }
@@ -332,7 +336,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             told = true;
         }
-        self.links.faces_mut()[at]
+        self.transport.links.faces_mut()[at]
             .replay
             .settle(cursor, told, refused, now_ms)
     }
@@ -352,14 +356,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         send: &dyn Fn(&McuActions<C>) -> bool,
         undo: &dyn Fn(&McuActions<C>),
     ) -> bool {
-        announce_on(self.links.faces_mut(), place, on_refusal, send, undo)
+        announce_on(
+            self.transport.links.faces_mut(),
+            place,
+            on_refusal,
+            send,
+            undo,
+        )
     }
 
     /// The place in the replay's order of the subscriber `handle` names, the one past the last for
     /// a handle that names none: its rank in the table's slot order, which the replay tells them
     /// in.
     pub(super) fn subscriber_place(&self, handle: SubscriberHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let subscribers = tables.subscribers();
         let rank = subscribers
             .iter()
@@ -376,9 +386,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[inline(never)]
     pub(super) fn announce_subscriber(&mut self, handle: SubscriberHandle) {
         let place = self.subscriber_place(handle);
-        let registry = &self.registry;
+        let registry = &self.session.registry;
         announce_on(
-            self.links.faces_mut(),
+            self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
             &|actions| {
@@ -397,7 +407,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The place in the replay's order of the Interest `handle` names, the one past the last for a
     /// handle that names none: its rank in the table's slot order, which the replay asks them in.
     pub(super) fn interest_place(&self, handle: InterestHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let interests = tables.interests();
         let rank = interests
             .iter()
@@ -411,9 +421,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// tables stored it before any link is asked, and each link is asked from the row.
     pub(super) fn announce_interest(&mut self, handle: InterestHandle) {
         let place = self.interest_place(handle);
-        let registry = &self.registry;
+        let registry = &self.session.registry;
         announce_on(
-            self.links.faces_mut(),
+            self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
             &|actions| {
@@ -433,7 +443,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// in.
     #[cfg(feature = "queryable")]
     pub(super) fn queryable_place(&self, handle: QueryableHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let queryables = tables.queryables();
         let rank = queryables
             .iter()
@@ -448,9 +458,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "queryable")]
     pub(super) fn announce_queryable(&mut self, handle: QueryableHandle) {
         let place = self.queryable_place(handle);
-        let registry = &self.registry;
+        let registry = &self.session.registry;
         announce_on(
-            self.links.faces_mut(),
+            self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
             &|actions| {
@@ -485,7 +495,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     // Out of line: the declaration of a key expression measured smaller with its walk apart.
     #[inline(never)]
     pub(super) fn keyexpr_place(&self, handle: KeyexprHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let keyexprs = tables.keyexprs();
         let rank = keyexprs
             .iter()
@@ -498,7 +508,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// handle that names none: its rank in the table's slot order, which the replay tells them in.
     #[cfg(feature = "liveliness")]
     pub(super) fn token_place(&self, handle: TokenHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let tokens = tables.tokens();
         let rank = tokens
             .iter()
@@ -513,9 +523,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "liveliness")]
     pub(super) fn announce_token(&mut self, handle: TokenHandle) {
         let place = self.token_place(handle);
-        let registry = &self.registry;
+        let registry = &self.session.registry;
         announce_on(
-            self.links.faces_mut(),
+            self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
             &|actions| {
@@ -536,7 +546,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// asks them in.
     #[cfg(feature = "liveliness")]
     pub(super) fn liveliness_place(&self, handle: LivelinessSubscriberHandle) -> usize {
-        let tables = super::tables(&self.registry);
+        let tables = super::tables(&self.session.registry);
         let subscribers = tables.liveliness_subscribers();
         let rank = subscribers
             .iter()
@@ -551,9 +561,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "liveliness")]
     pub(super) fn announce_liveliness(&mut self, handle: LivelinessSubscriberHandle) {
         let place = self.liveliness_place(handle);
-        let registry = &self.registry;
+        let registry = &self.session.registry;
         announce_on(
-            self.links.faces_mut(),
+            self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
             &|actions| {
@@ -585,7 +595,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// none of the session's tables borrowed, and nothing is kept to send later.
     #[inline(never)]
     pub(super) fn retract_at(&mut self, place: usize, send: &dyn Fn(&McuActions<C>)) {
-        for face in self.links.faces_mut() {
+        for face in self.transport.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };

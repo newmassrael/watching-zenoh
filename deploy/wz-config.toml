@@ -2658,6 +2658,64 @@ value = 1
 reason = "zenoh-pico bounds its transport events listeners by no count; its info example holds one in the background, and its tests hold one at a time."
 
 [[limit]]
+id = "MAX_LINK_EVENTS_LISTENERS"
+kconfig = "WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS"
+kind = "bound"
+driven = "local"
+on_heap = "advisory"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The link events listeners a session holds at once, each told when a link
+to a peer comes up or goes. Declaring one more is refused while the table
+is full. Apart from the transport events listeners' bound, so a profile
+that holds more of one kind spends nothing on the other.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the link events listeners a session declares, and zenoh-pico has no constant for them; the default holds four, more than any of zenoh-pico's own examples or tests holds on one session at once."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its link events listeners by no count; its info example holds one in the background, and its tests hold one at a time."
+
+[[limit]]
+id = "MAX_DECL_WATCH_EVENTS"
+kconfig = "WZ_LIMIT_MAX_DECL_WATCH_EVENTS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 32
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The events of what the peers declare and retract that a session holds
+for its declaration watches until each watch is told, one row for each
+event however many watches it reaches. An event that finds every row
+taken is not held: each watch it would reach is told how many it lost
+before its next event. A watch declared while what the peers hold now
+does not fit is refused.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: the declaration watch is a door of wz, which no upstream library has; the default holds a burst of thirty-two declarations a frame carries before the watches are told."
+
+[limit.pico_preset]
+value = 8
+reason = "zenoh-pico has no declaration watch; the preset holds eight events, as small a ring as a device that watches one kind of entity of a few peers needs."
+
+[[limit]]
 id = "MAX_DECLARED_KEYEXPRS"
 kconfig = "WZ_LIMIT_MAX_DECLARED_KEYEXPRS"
 kind = "bound"

@@ -559,6 +559,115 @@ fn a_put_is_sent_without_the_heap_at_every_size() {
     costs.finish();
 }
 
+/// A ResponseFinal that names a QoS other than the default, the one a queryable sends when the
+/// query asked for one: it carries an `ext_qos` extension, which both profiles write from its two
+/// numbers into the slot the link lends, with no owned chain, so it costs the heap nothing in
+/// either, as a KeepAlive does, and leaves as a lent slot. On the wire it is the ResponseFinal
+/// the heap builder makes: the request id and the QoS.
+#[cfg(feature = "codec-response-final")]
+#[test]
+fn a_response_final_with_its_qos_is_sent_without_the_heap() {
+    use wz_session_core::declare_ext_qos::{read_response_final_qos, QOS_DECLARE};
+    use wz_session_core::sample::QosLevel;
+
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let (acceptor, initiator) = bound_pair(&link, 7616);
+    let m = Measurement::new();
+
+    assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
+    let before = initiator.actions.frame_lend_counts();
+    let ((), n) = m.count(|| initiator.actions.send_response_final(7, QOS_DECLARE));
+    println!("ResponseFinal with its QoS: {n} allocation(s)");
+    assert_eq!(n, 0, "a ResponseFinal is written into the lent slot");
+    let after = initiator.actions.frame_lend_counts();
+    assert_eq!(
+        after.slot_frames,
+        before.slot_frames + 1,
+        "the ResponseFinal left as the slot the link lent"
+    );
+    assert_eq!(
+        after.heap_frames, before.heap_frames,
+        "and no frame of it was built on the heap"
+    );
+    let InboundFrame::Frame { payload, .. } = parse_inbound(&acceptor.one()).expect("a Frame")
+    else {
+        panic!("a ResponseFinal leaves as a Frame");
+    };
+    let messages = parse_frame_payload(&payload).expect("the Frame decodes");
+    assert_eq!(messages.len(), 1, "one ResponseFinal to the Frame");
+    let NetworkMessage::ResponseFinal(response_final) = &messages[0] else {
+        panic!("a ResponseFinal");
+    };
+    assert_eq!(response_final.request_id, 7, "the request it ends");
+    assert_eq!(
+        read_response_final_qos(response_final),
+        QOS_DECLARE,
+        "the QoS it was sent with"
+    );
+}
+
+/// A get that names a QoS other than the default, as a querier's options may: its `ext_qos` is
+/// written from the query's borrowed description straight into the slot the link lends
+/// (`send_get_parts`), with no owned Request and no extension chain, so it costs the heap nothing
+/// in either profile and leaves as a lent slot. On the wire it is the Request the owned builder
+/// makes: the request id, the key and the QoS.
+#[cfg(feature = "query-queryable")]
+#[test]
+fn a_get_with_its_qos_is_sent_without_the_heap() {
+    use wz_session_core::declare_ext_qos::{read_request_qos, QOS_DECLARE};
+    use wz_session_core::query_parts::{GetParts, QueryParts};
+    use wz_session_core::sample::QosLevel;
+    use wz_session_core::wire_key::WireKey;
+
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let (acceptor, initiator) = bound_pair(&link, 7617);
+    let m = Measurement::new();
+
+    assert_ne!(QOS_DECLARE, QosLevel::DEFAULT, "a QoS that is carried");
+    let parts = GetParts {
+        rid: 9,
+        key: WireKey::literal(KEY).expect("a literal key"),
+        query: QueryParts {
+            qos: QOS_DECLARE,
+            ..QueryParts::PLAIN
+        },
+    };
+    let before = initiator.actions.frame_lend_counts();
+    let (sent, n) = m.count(|| initiator.actions.send_get_parts(parts));
+    println!("Get with its QoS: {n} allocation(s)");
+    assert_eq!(sent, Ok(()), "the get is sent");
+    assert_eq!(n, 0, "a get is written into the lent slot");
+    let after = initiator.actions.frame_lend_counts();
+    assert_eq!(
+        after.slot_frames,
+        before.slot_frames + 1,
+        "the get left as the slot the link lent"
+    );
+    assert_eq!(
+        after.heap_frames, before.heap_frames,
+        "and no frame of it was built on the heap"
+    );
+    let InboundFrame::Frame { payload, .. } = parse_inbound(&acceptor.one()).expect("a Frame")
+    else {
+        panic!("a Request leaves as a Frame");
+    };
+    let messages = parse_frame_payload(&payload).expect("the Frame decodes");
+    assert_eq!(messages.len(), 1, "one Request to the Frame");
+    let NetworkMessage::Request(request) = &messages[0] else {
+        panic!("a Request");
+    };
+    assert_eq!(request.rid, 9, "the request id its answers name");
+    let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(&request.keyexpr.body);
+    assert_eq!((id, suffix), (0, Some(KEY)), "the literal key");
+    assert_eq!(
+        read_request_qos(request),
+        QOS_DECLARE,
+        "the QoS it was sent with"
+    );
+}
+
 /// The instrument itself, both halves of its attribution.
 ///
 /// A window counts an allocation the measurement's own thread makes, and one it

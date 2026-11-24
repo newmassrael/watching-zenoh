@@ -748,6 +748,44 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "MAX_LINK_EVENTS_LISTENERS": {
+              "description": "The link events listeners a session holds at once, each told when a link to a peer comes up or goes.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECL_WATCH_EVENTS": {
+              "description": "The events of what the peers declare and retract that a session holds for its declaration watches until each watch is told, one row for each event however many watches it reaches.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_DECLARED_KEYEXPRS": {
               "description": "The key expressions a session declares to its peers at once, each held by the entities that name it and by the program's declarations.",
               "oneOf": [

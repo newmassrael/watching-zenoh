@@ -16,7 +16,9 @@
 //!   handshake gave (`zid` and `zid_len`); without it `zid_len` is 0, the peer unknown;
 //! * with `declarations-synced-event` a watch is told once per establishment of a link that the
 //!   peer has sent everything it held when the link came up (`WZ_EXT_DECL_SYNCED`); without it
-//!   that event is never told.
+//!   that event is never told;
+//! * a watch whose events the library had no room to hold is told how many it lost
+//!   (`WZ_EXT_DECL_LOST`, the count in `id`) ahead of its next event.
 //!
 //! What a watch hears, and what it does not, is the port's ([`wz_capi_port::decl_watch`]): of
 //! subscribers and queryables, what each peer holds when the watch is declared, told first as
@@ -55,6 +57,8 @@ pub const WZ_EXT_DECL_DECLARED: u8 = 0;
 pub const WZ_EXT_DECL_UNDECLARED: u8 = 1;
 /// The peer has sent every declaration it held when its link came up.
 pub const WZ_EXT_DECL_SYNCED: u8 = 2;
+/// The library had no room to hold events the watch was owed: `id` counts those lost.
+pub const WZ_EXT_DECL_LOST: u8 = 3;
 
 /// A watch of the peers' subscribers.
 pub const WZ_EXT_DECL_SUBSCRIBER: u8 = 0;
@@ -68,7 +72,7 @@ pub const WZ_EXT_DECL_TOKEN: u8 = 2;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct wz_ext_decl_event_t {
-    /// `WZ_EXT_DECL_DECLARED`, `_UNDECLARED` or `_SYNCED`.
+    /// `WZ_EXT_DECL_DECLARED`, `_UNDECLARED`, `_SYNCED` or `_LOST`.
     pub kind: u8,
     /// The kind of entity the watch was declared for: `WZ_EXT_DECL_SUBSCRIBER`, `_QUERYABLE` or
     /// `_TOKEN`.
@@ -81,10 +85,10 @@ pub struct wz_ext_decl_event_t {
     /// Zero.
     pub reserved2: u32,
     /// The id the peer declared the entity under, which its undeclaration names again; 0 for
-    /// `WZ_EXT_DECL_SYNCED`.
+    /// `WZ_EXT_DECL_SYNCED`; how many events were lost for `WZ_EXT_DECL_LOST`.
     pub id: u64,
     /// The key expression of a `WZ_EXT_DECL_DECLARED`, not NUL-terminated and valid only for the
-    /// call; null for the other two kinds.
+    /// call; null for the other kinds.
     pub keyexpr: *const c_char,
     /// The length of `keyexpr` in bytes; 0 when it is null.
     pub keyexpr_len: usize,
@@ -149,6 +153,7 @@ fn record_of(entity: u8, event: &DeclWatchEvent<'_>) -> wz_ext_decl_event_t {
         DeclWatchEvent::Declared { .. } => WZ_EXT_DECL_DECLARED,
         DeclWatchEvent::Undeclared { .. } => WZ_EXT_DECL_UNDECLARED,
         DeclWatchEvent::Synced { .. } => WZ_EXT_DECL_SYNCED,
+        DeclWatchEvent::Lost { .. } => WZ_EXT_DECL_LOST,
     };
     let (keyexpr, keyexpr_len) = match event.keyexpr() {
         Some(key) => (key.as_ptr().cast::<c_char>(), key.len()),
@@ -164,7 +169,7 @@ fn record_of(entity: u8, event: &DeclWatchEvent<'_>) -> wz_ext_decl_event_t {
         zid_len,
         reserved: 0,
         reserved2: 0,
-        id: event.declaration_id().unwrap_or(0),
+        id: event.declaration_id().or(event.lost()).unwrap_or(0),
         keyexpr,
         keyexpr_len,
         zid,
@@ -419,6 +424,18 @@ mod tests {
             not_a_zid.zid_len, 0,
             "bytes that are no zenoh id name no peer"
         );
+    }
+
+    #[test]
+    fn a_loss_is_told_with_its_count_and_no_key_or_peer() {
+        let lost = record_of(WZ_EXT_DECL_QUERYABLE, &DeclWatchEvent::Lost { count: 5 });
+        assert_eq!(lost.kind, WZ_EXT_DECL_LOST);
+        assert_eq!(lost.entity, WZ_EXT_DECL_QUERYABLE);
+        assert_eq!(lost.id, 5, "the count of events lost");
+        assert!(lost.keyexpr.is_null());
+        assert_eq!(lost.keyexpr_len, 0);
+        assert_eq!(lost.zid_len, 0, "a loss names no peer");
+        assert_eq!(lost.zid, [0u8; ZID_MAX]);
     }
 
     /// The engine's callback tells each event to the C closure kept in the watch's place, with the

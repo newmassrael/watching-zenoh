@@ -49,7 +49,7 @@ use wz_session_core::limit_binding::Quota;
 /// The major version of this interface.
 pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
 /// The minor version of this interface.
-pub const WZ_EXT_INTERFACE_MINOR: u16 = 2;
+pub const WZ_EXT_INTERFACE_MINOR: u16 = 3;
 
 /// `replay_reply_shape` of the session facts: one reply per frame, as it was sent.
 pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;

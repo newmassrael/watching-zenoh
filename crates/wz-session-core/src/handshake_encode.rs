@@ -321,13 +321,11 @@ const EMPTY_PARTS: ExtEntryParts<'static> = ExtEntryParts {
     body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtUnit(&NO_BODY),
 };
 
-/// How many held entries a build with no growable store presents: as many as a chain a session
+/// How many held entries are presented from holders on the stack: as many as a chain a session
 /// stages holds, one entry per kind of extension the build stages (a staged chain has one place
-/// per kind, so it is that long at most). A longer chain is refused.
-#[cfg(all(
-    any(feature = "codec-init-body", feature = "codec-open-body"),
-    any(not(feature = "alloc"), feature = "session-fixed-storage")
-))]
+/// per kind, so it is that long at most). A longer chain is refused where the store does not
+/// grow, and presented from holders on the heap where it does.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 const STACK_PARTS: usize = 3
     + cfg!(feature = "transport-qos") as usize
     + cfg!(feature = "transport-lowlatency") as usize
@@ -357,30 +355,37 @@ fn project_parts<'b, 'p>(
     parts.get(..filled).unwrap_or(&[])
 }
 
-/// Run `write` over `entries` presented as parts ([`HeldChain`]): in holders on the stack where
-/// the store does not grow, refusing a chain longer than a session stages, and in holders of the
-/// chain's own length on the heap profile. `write` is called at one place, so each caller's
-/// writer is compiled once.
+/// Run `write` over `entries` presented as parts ([`HeldChain`]): in holders on the stack for
+/// any chain a session stages, so a handshake a lend-only session sends costs the heap nothing
+/// in either storage profile. A longer chain, which only a caller of the public encoders can
+/// hand in, is refused where the store does not grow and presented from holders of its own
+/// length on the heap where it does. `write` is called at one place, so each caller's writer
+/// is compiled once.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn with_parts<R>(
     entries: ChainRef<'_>,
     write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
 ) -> Result<R, CodecError> {
-    #[cfg(any(not(feature = "alloc"), feature = "session-fixed-storage"))]
-    {
-        if entries.len() > STACK_PARTS {
-            return Err(CodecError::CapacityExceeded);
-        }
-        let mut bodies = [HeldBody::Unit; STACK_PARTS];
-        let mut parts = [EMPTY_PARTS; STACK_PARTS];
-        write(project_parts(entries, &mut bodies, &mut parts))
-    }
+    let mut stack_bodies = [HeldBody::Unit; STACK_PARTS];
+    let mut stack_parts = [EMPTY_PARTS; STACK_PARTS];
     #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
-    {
-        let mut bodies = alloc::vec![HeldBody::Unit; entries.len()];
-        let mut parts = alloc::vec![EMPTY_PARTS; entries.len()];
-        write(project_parts(entries, &mut bodies, &mut parts))
-    }
+    let (mut long_bodies, mut long_parts) = (alloc::vec::Vec::new(), alloc::vec::Vec::new());
+    let (bodies, parts): (&mut [HeldBody<'_>], &mut [ExtEntryParts<'_>]) =
+        if entries.len() <= STACK_PARTS {
+            (&mut stack_bodies[..], &mut stack_parts[..])
+        } else {
+            #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
+            {
+                long_bodies.resize(entries.len(), HeldBody::Unit);
+                long_parts.resize(entries.len(), EMPTY_PARTS);
+                (long_bodies.as_mut_slice(), long_parts.as_mut_slice())
+            }
+            #[cfg(any(not(feature = "alloc"), feature = "session-fixed-storage"))]
+            {
+                return Err(CodecError::CapacityExceeded);
+            }
+        };
+    write(project_parts(entries, bodies, parts))
 }
 
 /// An Init message as `transport_init` writes it: the body, and the chain where
@@ -1024,6 +1029,50 @@ mod tests {
                 "is_ack={is_ack}: no chain, no Z"
             );
         }
+    }
+
+    /// A chain as long as a session stages is presented from holders on the stack in every build;
+    /// one entry longer, which only a caller of the public encoders hands in, is written from
+    /// holders on the heap where the store grows, every entry in order with the last closing the
+    /// message, and refused where the store does not grow.
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
+    #[test]
+    fn a_chain_past_what_a_session_stages_is_written_from_the_heap_or_refused() {
+        use crate::extpatch::{encode_patch_ext_at, PATCH_EXT_ID};
+        let params = open_params(10_000);
+        let entry_header = PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64;
+        let longest = u8::try_from(super::STACK_PARTS).expect("a handful of kinds");
+        let chain: alloc::vec::Vec<_> = (0..=longest).map(encode_patch_ext_at).collect();
+
+        let staged = super::encode_init(&params, false, &chain[..super::STACK_PARTS], None)
+            .expect("a chain as long as a session stages");
+        assert_eq!(
+            &staged[staged.len() - 2..],
+            &[entry_header, longest - 1],
+            "its last entry closes the message"
+        );
+
+        let long = super::encode_init(&params, false, &chain, None);
+        #[cfg(not(feature = "session-fixed-storage"))]
+        {
+            let wire = long.expect("a longer chain is written where the store grows");
+            assert_eq!(
+                wire.len(),
+                staged.len() + 2,
+                "one more two-byte entry than the staged chain"
+            );
+            assert_eq!(
+                &wire[wire.len() - 2..],
+                &[entry_header, longest],
+                "the entry past the stack's holders closes the message"
+            );
+        }
+        #[cfg(feature = "session-fixed-storage")]
+        assert_eq!(
+            long,
+            Err(sce_forge_runtime::codec::CodecError::CapacityExceeded),
+            "a chain longer than any a session stages is refused where the store does not grow"
+        );
     }
 
     /// R311ku — encode_open derives the `_Z_FLAG_T_OPEN_T` flag from the

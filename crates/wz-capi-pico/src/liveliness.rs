@@ -43,6 +43,9 @@ use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSa
 use crate::abi::z_loaned_keyexpr_t;
 use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+// The engine's operations, which a build of the cooperative engine reaches as its own type; a
+// build that reaches it as the port's object calls them on that object.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 use crate::prelude::*;
 use crate::pubsub::{
     fill_subscriber_place, settle_subscriber, z_moved_closure_sample_t, z_owned_closure_sample_t,

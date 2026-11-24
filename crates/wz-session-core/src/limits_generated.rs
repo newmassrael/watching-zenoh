@@ -432,6 +432,50 @@ const _: LimitDomain = MaxTransportEventsListeners::DOMAIN;
 pub type MaxTransportEventsListenersHeld =
     Limited<MaxTransportEventsListeners, { MaxTransportEventsListeners::HELD }>;
 
+/// `MAX_LINK_EVENTS_LISTENERS`: The link events listeners a session holds at once, each
+/// told when a link to a peer comes up or goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxLinkEventsListeners;
+
+impl LimitSpec for MaxLinkEventsListeners {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_LINK_EVENTS_LISTENERS";
+    const DRIVEN: Option<Driven> = Some(Driven::Local);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_LINK_EVENTS_LISTENERS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxLinkEventsListeners::DOMAIN;
+
+/// How `MAX_LINK_EVENTS_LISTENERS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxLinkEventsListenersHeld =
+    Limited<MaxLinkEventsListeners, { MaxLinkEventsListeners::HELD }>;
+
+/// `MAX_DECL_WATCH_EVENTS`: The events of what the peers declare and retract that a session
+/// holds for its declaration watches until each watch is told, one row for each event
+/// however many watches it reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxDeclWatchEvents;
+
+impl LimitSpec for MaxDeclWatchEvents {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_DECL_WATCH_EVENTS";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_DECL_WATCH_EVENTS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxDeclWatchEvents::DOMAIN;
+
+/// How `MAX_DECL_WATCH_EVENTS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxDeclWatchEventsHeld = Limited<MaxDeclWatchEvents, { MaxDeclWatchEvents::HELD }>;
+
 /// `MAX_DECLARED_KEYEXPRS`: The key expressions a session declares to its peers at once,
 /// each held by the entities that name it and by the program's declarations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1770,6 +1814,10 @@ pub struct SessionLimits {
     max_decl_watches: MaxDeclWatchesHeld,
     /// `MAX_TRANSPORT_EVENTS_LISTENERS`.
     max_transport_events_listeners: MaxTransportEventsListenersHeld,
+    /// `MAX_LINK_EVENTS_LISTENERS`.
+    max_link_events_listeners: MaxLinkEventsListenersHeld,
+    /// `MAX_DECL_WATCH_EVENTS`.
+    max_decl_watch_events: MaxDeclWatchEventsHeld,
     /// `MAX_DECLARED_KEYEXPRS`.
     max_declared_keyexprs: MaxDeclaredKeyexprsHeld,
     /// `MAX_PENDING_LIVELINESS_GETS`.
@@ -1892,6 +1940,8 @@ impl SessionLimits {
             max_matching_listeners: Limited::build_default(),
             max_decl_watches: Limited::build_default(),
             max_transport_events_listeners: Limited::build_default(),
+            max_link_events_listeners: Limited::build_default(),
+            max_decl_watch_events: Limited::build_default(),
             max_declared_keyexprs: Limited::build_default(),
             max_pending_liveliness_gets: Limited::build_default(),
             max_pending_declares: Limited::build_default(),
@@ -1986,6 +2036,11 @@ impl SessionLimits {
             Quota::at_most(1),
             LimitValue::Integer(1),
         ),
+        max_link_events_listeners: Limited::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ),
+        max_decl_watch_events: Limited::preset_or_build(Quota::at_most(8), LimitValue::Integer(8)),
         max_declared_keyexprs: Limited::preset_or_build(
             Quota::at_most(306),
             LimitValue::Integer(306),
@@ -2376,6 +2431,43 @@ impl SessionLimits {
         value: Quota,
     ) -> Result<(), OutsideLimitDomain> {
         self.max_transport_events_listeners = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_LINK_EVENTS_LISTENERS` as this snapshot holds it.
+    pub const fn max_link_events_listeners(&self) -> Quota {
+        self.max_link_events_listeners.get()
+    }
+
+    /// `MAX_LINK_EVENTS_LISTENERS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_link_events_listeners_held(&self) -> MaxLinkEventsListenersHeld {
+        self.max_link_events_listeners
+    }
+
+    /// Selects `MAX_LINK_EVENTS_LISTENERS`, when the build's domain holds `value`.
+    pub fn select_max_link_events_listeners(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.max_link_events_listeners = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_DECL_WATCH_EVENTS` as this snapshot holds it.
+    pub const fn max_decl_watch_events(&self) -> Quota {
+        self.max_decl_watch_events.get()
+    }
+
+    /// `MAX_DECL_WATCH_EVENTS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_decl_watch_events_held(&self) -> MaxDeclWatchEventsHeld {
+        self.max_decl_watch_events
+    }
+
+    /// Selects `MAX_DECL_WATCH_EVENTS`, when the build's domain holds `value`.
+    pub fn select_max_decl_watch_events(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_decl_watch_events = Limited::select(value)?;
         Ok(())
     }
 
@@ -3490,6 +3582,26 @@ impl LimitField<SessionLimits> for MaxTransportEventsListeners {
     }
 }
 
+impl LimitField<SessionLimits> for MaxLinkEventsListeners {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_link_events_listeners(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_link_events_listeners()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxDeclWatchEvents {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_decl_watch_events(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_decl_watch_events()
+    }
+}
+
 impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_max_declared_keyexprs(value)
@@ -3981,7 +4093,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 67;
+pub const SESSION_LIMIT_COUNT: usize = 69;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -4004,6 +4116,8 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxMatchingListeners>(),
     LimitEntry::of::<MaxDeclWatches>(),
     LimitEntry::of::<MaxTransportEventsListeners>(),
+    LimitEntry::of::<MaxLinkEventsListeners>(),
+    LimitEntry::of::<MaxDeclWatchEvents>(),
     LimitEntry::of::<MaxDeclaredKeyexprs>(),
     LimitEntry::of::<MaxPendingLivelinessGets>(),
     LimitEntry::of::<MaxPendingDeclares>(),

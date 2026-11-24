@@ -144,7 +144,7 @@ use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 #[cfg(feature = "query")]
-use wz_session_core::reply_hold::HeldReplies;
+use wz_session_core::reply_hold::HeldReply;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,9 +224,9 @@ const HANDLE_ROWS: usize = 2;
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
 /// (`query`), pending liveliness gets (`liveliness-get`), matching listeners, declaration watches
-/// (`remote-declaration-watch` or `declarations-synced-event`), transport events listeners
-/// (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the ABI asks
-/// places of, at most these.
+/// (`remote-declaration-watch` or `declarations-synced-event`), transport and link events
+/// listeners (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the
+/// ABI asks places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
     * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
@@ -236,7 +236,7 @@ const ENTITY_PLACE_ROWS: usize = 2
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         )) as usize
-        + cfg!(feature = "connectivity") as usize
+        + 2 * cfg!(feature = "connectivity") as usize
         + 2 * cfg!(feature = "advanced") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
@@ -328,6 +328,11 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "advanced subscriber place flags",
             "advanced subscriber places",
             "MAX_ADVANCED_SUBSCRIBERS",
+        ),
+        EntityKind::LinkEventsListener => (
+            "link events listener place flags",
+            "link events listener places",
+            "MAX_LINK_EVENTS_LISTENERS",
         ),
     }
 }
@@ -473,6 +478,9 @@ pub struct EntityRows {
     /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
     /// advanced publishers; none in a build without `advanced`.
     pub advanced_subscribers: usize,
+    /// The link events listeners (`MAX_LINK_EVENTS_LISTENERS`); none in a build without
+    /// `connectivity`.
+    pub link_events_listeners: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -568,6 +576,7 @@ impl EntityRows {
             EntityKind::TransportEventsListener => self.transport_events_listeners,
             EntityKind::AdvancedPublisher => self.advanced_publishers,
             EntityKind::AdvancedSubscriber => self.advanced_subscribers,
+            EntityKind::LinkEventsListener => self.link_events_listeners,
         }
     }
 
@@ -1232,8 +1241,8 @@ impl ArenaPlan {
                 core::mem::size_of::<crate::engine::PendingGet>(),
             );
         }
-        // The replies the gets that consolidate hold to their Finals: one table of rows shared by
-        // every get, tagged with its leg (`engine::get::LegHold`).
+        // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
+        // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
         #[cfg(feature = "query")]
         {
             plan.session.held_replies = plan.lent(
@@ -1241,10 +1250,12 @@ impl ArenaPlan {
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
-            let held = plan.sized(HeldReplies::<u64, Lent>::arena_bytes(
+            plan.put(
+                "held replies",
+                "MAX_PENDING_REPLIES",
                 plan.session.held_replies,
-            ));
-            plan.put("held replies", "MAX_PENDING_REPLIES", 1, held);
+                core::mem::size_of::<HeldReply<u64, Lent>>(),
+            );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
@@ -1769,6 +1780,14 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
                 "MAX_ADVANCED_SUBSCRIBERS",
                 limits.max_advanced_subscribers(),
+            )?
+        } else {
+            0
+        },
+        link_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+                "MAX_LINK_EVENTS_LISTENERS",
+                limits.max_link_events_listeners(),
             )?
         } else {
             0

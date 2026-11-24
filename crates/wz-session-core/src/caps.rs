@@ -248,9 +248,22 @@ pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 /// past it is refused, having installed nothing.
 pub const MAX_DECL_WATCHES: usize = generated::MAX_DECL_WATCHES;
 
+/// The events of what the peers declare and retract a session holds for its declaration watches
+/// until each watch is told, one row for each event however many watches it reaches. An event
+/// that finds every row taken is not held, and each watch it would reach is told how many it lost.
+/// A row holds the event's key inline (`MAX_KEYEXPR_BYTES`) and a flag for each watch
+/// (`MAX_DECL_WATCHES`): about 304 bytes at the defaults of 256 and 4 on a 64-bit target, so
+/// the default 32 rows take about 9.7 KB of each session that watches declarations, and none of a
+/// build without the declaration watch.
+pub const MAX_DECL_WATCH_EVENTS: usize = generated::MAX_DECL_WATCH_EVENTS;
+
 /// The transport events listeners a session holds at once. A listener past it is refused, having
 /// been told nothing.
 pub const MAX_TRANSPORT_EVENTS_LISTENERS: usize = generated::MAX_TRANSPORT_EVENTS_LISTENERS;
+
+/// The link events listeners a session holds at once, apart from the transport events
+/// listeners' bound. A listener past it is refused, having been told nothing.
+pub const MAX_LINK_EVENTS_LISTENERS: usize = generated::MAX_LINK_EVENTS_LISTENERS;
 
 /// The distinct key expressions a session declares to its peers at once (each held by every
 /// entity that names it). A declaration of one more distinct key is refused, having sent nothing.

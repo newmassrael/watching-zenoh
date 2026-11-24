@@ -40,6 +40,10 @@ pub(super) const MAX_MATCHING_LISTENERS: usize =
 pub(super) const MAX_DECL_WATCHES: usize = limit(option_env!("WZ_LIMIT_MAX_DECL_WATCHES"), 4);
 pub(super) const MAX_TRANSPORT_EVENTS_LISTENERS: usize =
     limit(option_env!("WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS"), 4);
+pub(super) const MAX_LINK_EVENTS_LISTENERS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_LINK_EVENTS_LISTENERS"), 4);
+pub(super) const MAX_DECL_WATCH_EVENTS: usize =
+    limit(option_env!("WZ_LIMIT_MAX_DECL_WATCH_EVENTS"), 32);
 pub(super) const MAX_DECLARED_KEYEXPRS: usize =
     limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 332);
 pub(super) const HELD_SESSIONS: usize = limit(option_env!("WZ_LIMIT_HELD_SESSIONS"), 4);
