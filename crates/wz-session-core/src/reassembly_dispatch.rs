@@ -881,10 +881,23 @@ where
     ) -> &mut Self {
         use core::ptr::addr_of_mut;
         let at = place.as_mut_ptr();
+        // A field added to the Router and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |router: &Self| {
+            let Self {
+                slots: _,
+                config: _,
+                staging: _,
+                capacity_refusals: _,
+                opened: _,
+                displaced: _,
+            } = router;
+        };
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`). An array of `SLOTS`
         // slots has the layout of `SLOTS` consecutive slots, so each is written once through its
-        // own address, as is every other field; `every_field_is_written` holds the list of fields
-        // to the struct's, so `place` is fully written before it is lent back.
+        // own address, as is every other field the list above names, so `place` is fully written
+        // before it is lent back.
         unsafe {
             let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
             for index in 0..SLOTS {
@@ -901,21 +914,6 @@ where
             addr_of_mut!((*at).displaced).write(None);
             place.assume_init_mut()
         }
-    }
-
-    /// A field added to the Router and not written by [`Self::init_in`] would be read
-    /// uninitialised. This destructures the struct with no `..`, so adding a field without naming
-    /// it here (and so without writing it there) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(router: Self) {
-        let Self {
-            slots: _,
-            config: _,
-            staging: _,
-            capacity_refusals: _,
-            opened: _,
-            displaced: _,
-        } = router;
     }
 
     /// The open chain the last ingest ended for a fragment that was not of
