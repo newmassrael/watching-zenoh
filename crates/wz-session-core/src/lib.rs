@@ -2213,12 +2213,6 @@ pub mod session_slot;
 // signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types across feature states (R311g1).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-// Totality debt TD-076 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod reconnect;
 
 /// What a session still waits for from its peer before its declarations are SYNCED:
