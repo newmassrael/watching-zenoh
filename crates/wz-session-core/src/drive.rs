@@ -3023,11 +3023,13 @@ where
         ..
     } = head;
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
-    // reaches the hand-off, which clears the channel's chain.
+    // reaches the hand-off, which clears the channel's chain, and whose report is
+    // the one instance every receive reaches.
     if let Some(refused) = refuse_frame_in_place(actions, engine, priority, reliable, sn) {
-        report_outcome_in_place(&refused, reasm, actions, now_ms, &mut |event| {
-            on_event.event(event)
-        });
+        crate::driver_loop::EventSink::event(
+            &mut through_hand_off(reasm, actions, now_ms, on_event),
+            IterationEvent::Poll(&refused),
+        );
         return DatagramPath::FragmentInPlace;
     }
     on_event.event(IterationEvent::InPlaceFragment(
