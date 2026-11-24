@@ -440,6 +440,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// [`Self::announce_with`] for a declaration stored at `place` that is not made when a link
     /// refuses it: whether it was made.
+    // Out of line: the key expression and entity declarations that may be undone announce through it.
     #[inline(never)]
     pub(super) fn announce_or_undo_at(
         &mut self,
@@ -453,6 +454,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The place in the replay's order of the key expression `handle` names, the one past the last
     /// for a handle that names none. The table's rows are walked in their slot order, which is the
     /// order the replay tells them in.
+    // Out of line: the declaration of a key expression measured smaller with its walk apart.
     #[inline(never)]
     pub(super) fn keyexpr_place(&self, handle: KeyexprHandle) -> usize {
         let tables = super::tables(&self.registry);
