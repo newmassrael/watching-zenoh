@@ -49,6 +49,8 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::entropy::EntropySource;
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::entropy::EntropyUnavailable;
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::link::ShareValues;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
@@ -91,6 +93,15 @@ impl<U> core::ops::Deref for NoShared<U> {
 /// `Rc<dyn BoxedLinkDriver>` shared by the single-task drive loop and
 /// its synchronous `LwipUdpSocket` driver; `!Send` is the intended
 /// shape (see module doc).
+// The slot profile has no pointer to share a value behind (its `Shared` has no value): the
+// bundle owns its kernel and its link, so the profile shares nothing and does not implement this.
+#[cfg(not(feature = "session-slot"))]
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> ShareValues for CoopRuntime<C, D> {
+    fn share<U>(value: U) -> Self::Shared<U> {
+        Rc::new(value)
+    }
+}
+
 impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for CoopRuntime<C, D> {
     // The driver is the runtime's own `D`: the trait object for the profile that picks its link at
     // run time (the default), the driver's own type where the build names it, which makes every
@@ -132,22 +143,6 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     // the kernel carries this as an associated type rather than as something it
     // could name itself.
     type IterationWork = ();
-
-    #[cfg(not(feature = "session-slot"))]
-    fn share<U>(value: U) -> Self::Shared<U> {
-        Rc::new(value)
-    }
-
-    // The slot profile has no pointer to share a value behind, and a value cannot
-    // be kept without one, so this is the one entry of the seam that does not
-    // return: nothing on the profile calls it (the unicast bundle's slot forms do
-    // not, and `transport-multilink`, the only other caller, is an AP feature that
-    // the slot profile does not compile), and a caller that did would be told so
-    // at the call and not by a pointer that dangled.
-    #[cfg(feature = "session-slot")]
-    fn share<U>(_value: U) -> Self::Shared<U> {
-        panic!("session-slot holds no shared pointer: the bundle owns its kernel and link")
-    }
 
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:
     // the single-task sync drive loop shares the bundle only with its own FSM

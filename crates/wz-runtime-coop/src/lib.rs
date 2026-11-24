@@ -229,8 +229,6 @@ pub use yield_now::{yield_now, YieldNow};
 // composes before the sync drive-loop consumer (`session_drive`) wires it
 // to live lwIP sockets.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-206 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod session_runtime;
 
 // R2915 — the cooperative unicast session drive loop, generic over the
