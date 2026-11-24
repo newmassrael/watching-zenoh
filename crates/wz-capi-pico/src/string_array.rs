@@ -67,7 +67,7 @@ impl StringArrayEntry {
             _start: bytes.as_ptr(),
             _len: bytes.len(),
         };
-        crate::object_slot::boxed(Self {
+        Box::new(Self {
             _bytes: bytes,
             view,
         })
@@ -104,7 +104,7 @@ enum Items {
 
 impl StringArrayState {
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
-        crate::object_slot::boxed(Self {
+        Box::new(Self {
             items: Items::Owned(
                 items
                     .into_iter()
@@ -131,11 +131,9 @@ impl StringArrayState {
             // SAFETY: an entry's view reads its own bytes, and a lent view a live string
             // (`Self::lent`).
             let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-            entries.push(StringArrayEntry::new(crate::object_slot::boxed_bytes(
-                bytes.unwrap_or(&[]),
-            )));
+            entries.push(StringArrayEntry::new(Box::from(bytes.unwrap_or(&[]))));
         }
-        crate::object_slot::boxed(Self {
+        Box::new(Self {
             items: Items::Owned(entries),
         })
     }
@@ -444,9 +442,7 @@ unsafe fn string_array_push(
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
         return len;
     };
-    entries.push(StringArrayEntry::new(crate::object_slot::boxed_bytes(
-        bytes,
-    )));
+    entries.push(StringArrayEntry::new(Box::from(bytes)));
     entries.len()
 }
 
