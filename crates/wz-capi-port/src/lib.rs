@@ -84,6 +84,7 @@ mod engine;
 pub mod entity_place;
 pub mod group;
 pub mod held_key;
+mod held_slab;
 pub mod listeners;
 pub mod lodge;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
@@ -114,6 +115,7 @@ pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, Session
 pub use engine::{DeclarationReach, KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
 pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
+pub use held_slab::HeldSlab;
 pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
 };
