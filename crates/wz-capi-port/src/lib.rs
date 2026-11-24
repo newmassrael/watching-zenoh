@@ -26,8 +26,8 @@
 //! [`SessionDrive`], the session as a C handle holds it (its close, and how it is driven).
 //!
 //! A queryable's callbacks are minted with what the face's queries are held through
-//! ([`QueryHolder`]), so a query a C program keeps past its handler ([`HeldQuery`]) answers on its
-//! own route whatever engine carried it.
+//! ([`QueryHolder`]), so a query a C program keeps past its handler ([`HeldQueryId`]) answers on
+//! its own route whatever engine carried it.
 //!
 //! What stays with an engine is everything that names its sessions: the liveliness sample of the
 //! tokio runtime, and the registry itself.
@@ -120,8 +120,8 @@ pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
 };
 pub use query::{
-    HeldQuery, HeldQueryId, QblId, QueryHolder, QueryableSink, RawQueryCallback, RawQueryFn,
-    ReplyCallback, SharedQueryFn,
+    HeldQueryId, QblId, QueryHolder, QueryableSink, RawQueryCallback, RawQueryFn, ReplyCallback,
+    SharedQueryFn,
 };
 pub use refusal::Refusal;
 pub use scout_ask::ScoutAsk;
