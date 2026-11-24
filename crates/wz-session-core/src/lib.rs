@@ -994,8 +994,6 @@ pub mod encoding_hint;
 /// plain-put facts, the typed refusal). Moved down from `wz-runtime-tokio`, which re-exports it,
 /// so a C ABI over the cooperative engine describes a publish without that engine.
 #[cfg(feature = "alloc")]
-// Totality debt TD-145 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable)]
 pub mod publish_options;
 
 /// What one query asks for, independent of the runtime that sends it (`QueryOptions`, the

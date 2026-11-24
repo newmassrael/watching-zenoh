@@ -3066,6 +3066,15 @@ fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
     assert_eq!(err, PublishAliasError::UnknownMapping(7));
 }
 
+/// A publish refused because the build has no Push codec keeps that reason through the aliased
+/// surface's projection. Turned red by a projection that folds it into another refusal.
+#[test]
+fn a_publish_refused_for_want_of_the_push_codec_projects_as_itself() {
+    let projected = PublishAliasError::from(PublishError::FeatureDisabled);
+    assert_eq!(projected, PublishAliasError::FeatureDisabled);
+    assert!(projected.to_string().contains("codec-push"), "{projected}");
+}
+
 #[test]
 fn publish_aliased_auto_error_display_names_the_violating_id() {
     // Display impl must surface the id so a logged error line is
