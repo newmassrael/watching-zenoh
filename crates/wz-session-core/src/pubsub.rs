@@ -1453,12 +1453,17 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     where
         C: SampleSink,
     {
+        // The rows the message reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
         if is_remote {
             return self.deliver_from_peer(
                 view.keyexpr(),
                 class,
                 PeerDelivery::default(),
-                |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
+                |id, row| {
+                    SampleDelivery::<C, _>::deliver(&mut (), id, row, view, turn);
+                    turn = FanOut::later();
+                },
             );
         }
         // The application's own message: no key gate, matched as it is.
@@ -1469,7 +1474,10 @@ impl<C, P: Storage> SubscriberTable<C, P> {
             view.keyexpr(),
             false,
             false,
-            |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
+            |id, row| {
+                SampleDelivery::<C, _>::deliver(&mut (), id, row, view, turn);
+                turn = FanOut::later();
+            },
         )
     }
 
@@ -9636,7 +9644,7 @@ mod local_subscribers_tests {
         };
         assert_eq!(
             table.fire_matching("a/b", true, false, |id, row: RowAccess<'_, BoxedSink>| {
-                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample, FanOut::begin())
             }),
             1
         );
@@ -9644,7 +9652,7 @@ mod local_subscribers_tests {
         assert_eq!(remote_heard.load(Ordering::Relaxed), 0);
         assert_eq!(
             table.fire_matching("a/b", false, false, |id, row: RowAccess<'_, BoxedSink>| {
-                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample, FanOut::begin())
             }),
             2
         );
