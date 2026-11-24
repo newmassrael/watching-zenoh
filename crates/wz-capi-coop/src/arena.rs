@@ -112,6 +112,8 @@
 //! pools reserve theirs); a region an image places is another implementation of it.
 
 use core::alloc::Layout;
+use core::fmt;
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
@@ -408,13 +410,58 @@ pub const LINK_TX_SLOTS: usize = 1;
 // A link of a pool holds one slot at a time (`wz_runtime_coop::link_storage::PooledTx`).
 const _: () = assert!(LINK_TX_SLOTS == 1);
 
-/// A row of a plan that has none yet.
-const NO_ROW: ArenaRow = ArenaRow {
-    part: "",
-    basis: "",
-    count: 0,
-    entry_bytes: 0,
-};
+/// The rows a plan has put, in the order it put them, at most [`ARENA_ROWS`]. A row is written
+/// when it is put and not before: a table of the rows filled whole at a plan's start is written row
+/// by row in the code of every plan made.
+#[derive(Clone, Copy)]
+struct PlanRows {
+    rows: [MaybeUninit<ArenaRow>; ARENA_ROWS],
+    len: usize,
+}
+
+impl PlanRows {
+    /// No row yet.
+    const fn new() -> Self {
+        Self {
+            rows: [MaybeUninit::uninit(); ARENA_ROWS],
+            len: 0,
+        }
+    }
+
+    /// Put `row` after the others; `false`, and nothing put, when every row is held.
+    fn push(&mut self, row: ArenaRow) -> bool {
+        match self.rows.get_mut(self.len) {
+            Some(slot) => {
+                slot.write(row);
+                self.len = self.len.saturating_add(1);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The rows put, in order.
+    fn as_slice(&self) -> &[ArenaRow] {
+        let len = self.len.min(ARENA_ROWS);
+        // SAFETY: `push` writes each row below `len` before it counts it, and never counts past
+        // `ARENA_ROWS`; a `MaybeUninit<ArenaRow>` has the layout of an `ArenaRow`.
+        unsafe { core::slice::from_raw_parts(self.rows.as_ptr().cast::<ArenaRow>(), len) }
+    }
+}
+
+impl PartialEq for PlanRows {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for PlanRows {}
+
+impl fmt::Debug for PlanRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
 
 /// Why a session's open reserved no arena, and so bound, joined and dialled nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -886,8 +933,7 @@ impl PlaceRows {
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArenaPlan {
-    rows: [ArenaRow; ARENA_ROWS],
-    len: usize,
+    rows: PlanRows,
     /// The first refusal met while the plan was laid out, kept as it came (the limit it names, or
     /// the address space), and the one its maker is told once the plan is settled
     /// ([`Self::settled`]): every row and every limit is put and read in one pass with no exit of
@@ -932,8 +978,7 @@ impl ArenaPlan {
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
         let link_bytes = link_batch(config, limits)?;
         let mut plan = Self {
-            rows: [NO_ROW; ARENA_ROWS],
-            len: 0,
+            rows: PlanRows::new(),
             refused: None,
             transport: TransportRows {
                 links,
@@ -1489,17 +1534,14 @@ impl ArenaPlan {
     /// as its refusal unless it holds an earlier one ([`Self::settled`]).
     #[inline(never)]
     fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
-        match self.rows.get_mut(self.len) {
-            Some(row) => {
-                *row = ArenaRow {
-                    part,
-                    basis,
-                    count,
-                    entry_bytes,
-                };
-                self.len = self.len.saturating_add(1);
-            }
-            None => self.refuse(ArenaRefused::TooLarge),
+        let row = ArenaRow {
+            part,
+            basis,
+            count,
+            entry_bytes,
+        };
+        if !self.rows.push(row) {
+            self.refuse(ArenaRefused::TooLarge);
         }
     }
 
@@ -1653,7 +1695,7 @@ impl ArenaPlan {
 
     /// The rows, in the order the plan laid them out.
     pub fn rows(&self) -> &[ArenaRow] {
-        self.rows.get(..self.len).unwrap_or(&[])
+        self.rows.as_slice()
     }
 
     /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
@@ -2315,8 +2357,7 @@ mod tests {
 
     fn empty_plan() -> ArenaPlan {
         ArenaPlan {
-            rows: [NO_ROW; ARENA_ROWS],
-            len: 0,
+            rows: PlanRows::new(),
             refused: None,
             transport: TransportRows::default(),
             session: SessionRows::default(),
@@ -2388,5 +2429,36 @@ mod tests {
         );
         assert_eq!(plan.rows()[1].entry_bytes, 40);
         assert_eq!(plan.rows()[3].count, 3);
+    }
+
+    /// A plan's rows are the ones put, in order, up to `ARENA_ROWS`, and two tables of rows are
+    /// equal when they hold the same rows. Turned red by a row read before it is put, a row put
+    /// past the table, or rows compared past the ones put.
+    #[test]
+    fn a_plans_rows_are_those_put_and_no_more() {
+        let row = |count| ArenaRow {
+            part: "part",
+            basis: "BASIS",
+            count,
+            entry_bytes: 8,
+        };
+        let mut rows = PlanRows::new();
+        assert!(rows.as_slice().is_empty());
+        for count in 0..ARENA_ROWS {
+            assert!(rows.push(row(count)));
+        }
+        assert!(!rows.push(row(ARENA_ROWS)));
+        assert_eq!(rows.as_slice().len(), ARENA_ROWS);
+        assert!(rows
+            .as_slice()
+            .iter()
+            .enumerate()
+            .all(|(at, put)| put.count == at));
+        let mut one = PlanRows::new();
+        assert!(one.push(row(0)));
+        let mut same = PlanRows::new();
+        assert!(same.push(row(0)));
+        assert_eq!(one, same);
+        assert_ne!(one, rows);
     }
 }
