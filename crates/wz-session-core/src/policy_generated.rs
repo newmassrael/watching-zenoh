@@ -27,9 +27,21 @@ use crate::policy_binding::{
 };
 use crate::policy_document::{Profile, Statement};
 
-/// Whether an allowance the build does not state keeps only the build default: what
-/// `WZ_POLICY_DOMAINS` states, else whether the target has no operating system.
-const DEFAULTS_ONLY: bool = policy_defaults_only(option_env!("WZ_POLICY_DOMAINS"));
+/// What `WZ_POLICY_DOMAINS` states: whether an allowance the build does not state keeps
+/// only the build default, else whether the target has no operating system; `None` for a
+/// word that is neither `full` nor `defaults`.
+const STATED_DOMAINS: Option<bool> = policy_defaults_only(option_env!("WZ_POLICY_DOMAINS"));
+
+/// Whether an allowance the build does not state keeps only the build default.
+const DEFAULTS_ONLY: bool = match STATED_DOMAINS {
+    Some(defaults_only) => defaults_only,
+    None => false,
+};
+
+const _: () = assert!(
+    STATED_DOMAINS.is_some(),
+    "WZ_POLICY_DOMAINS is neither `full` nor `defaults`"
+);
 
 /// `multicast-loopback`: Whether a datagram a node sends to a multicast group is also
 /// delivered to members of that group on the same host. `os-default` leaves the operating
@@ -61,17 +73,16 @@ impl MulticastLoopback {
     const CHOICES: [&str; 3] = ["os-default", "on", "off"];
     const ALL: [Self; 3] = [Self::OsDefault, Self::On, Self::Off];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_MULTICAST_LOOPBACK");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::OsDefault)
     }
 }
 
 impl Default for MulticastLoopback {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -132,17 +143,16 @@ impl ReliableGapReconnect {
         Self::UntilDeclarationsSyncedWhenBegun,
     ];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_RELIABLE_GAP_RECONNECT");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Off)
     }
 }
 
 impl Default for ReliableGapReconnect {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -183,17 +193,16 @@ impl SubscriberOverload {
     const CHOICES: [&str; 3] = ["block", "reject", "keep-latest"];
     const ALL: [Self; 3] = [Self::Block, Self::Reject, Self::KeepLatest];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Block)
     }
 }
 
 impl Default for SubscriberOverload {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -228,17 +237,16 @@ impl KeySet {
     const CHOICES: [&str; 2] = ["open", "closed"];
     const ALL: [Self; 2] = [Self::Open, Self::Closed];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_KEY_SET");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Open)
     }
 }
 
 impl Default for KeySet {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -284,17 +292,16 @@ impl SnResolution {
     const CHOICES: [&str; 4] = ["bits-32", "bits-8", "bits-16", "bits-64"];
     const ALL: [Self; 4] = [Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_SN_RESOLUTION");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Bits32)
     }
 }
 
 impl Default for SnResolution {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -326,17 +333,16 @@ impl SupervisionAfterExpiry {
     const CHOICES: [&str; 2] = ["latch", "rearm"];
     const ALL: [Self; 2] = [Self::Latch, Self::Rearm];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_SUPERVISION_AFTER_EXPIRY");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Latch)
     }
 }
 
 impl Default for SupervisionAfterExpiry {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -368,17 +374,16 @@ impl E2eSupervisionNotify {
     const CHOICES: [&str; 2] = ["status-only", "last-value"];
     const ALL: [Self; 2] = [Self::StatusOnly, Self::LastValue];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_E2E_SUPERVISION_NOTIFY");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::StatusOnly)
     }
 }
 
 impl Default for E2eSupervisionNotify {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -412,17 +417,16 @@ impl ReplayReplyShape {
     const CHOICES: [&str; 2] = ["frame-per-sample", "segmented"];
     const ALL: [Self; 2] = [Self::FramePerSample, Self::Segmented];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_REPLAY_REPLY_SHAPE");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::FramePerSample)
     }
 }
 
 impl Default for ReplayReplyShape {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -456,17 +460,16 @@ impl ReplayLiveBeforeAnswer {
     const CHOICES: [&str; 2] = ["deliver", "hold-back"];
     const ALL: [Self; 2] = [Self::Deliver, Self::HoldBack];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Deliver)
     }
 }
 
 impl Default for ReplayLiveBeforeAnswer {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -497,17 +500,16 @@ impl EventRingFull {
     const CHOICES: [&str; 2] = ["overwrite-oldest", "drop-newest"];
     const ALL: [Self; 2] = [Self::OverwriteOldest, Self::DropNewest];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_EVENT_RING_FULL");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::OverwriteOldest)
     }
 }
 
 impl Default for EventRingFull {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -541,17 +543,16 @@ impl ClockQualityStamping {
     const CHOICES: [&str; 2] = ["always", "trusted-only"];
     const ALL: [Self; 2] = [Self::Always, Self::TrustedOnly];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_CLOCK_QUALITY_STAMPING");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Always)
     }
 }
 
 impl Default for ClockQualityStamping {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -587,17 +588,16 @@ impl RoutingFaceDrive {
     const CHOICES: [&str; 2] = ["task-per-face", "one-task"];
     const ALL: [Self; 2] = [Self::TaskPerFace, Self::OneTask];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_ROUTING_FACE_DRIVE");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::TaskPerFace)
     }
 }
 
 impl Default for RoutingFaceDrive {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -635,17 +635,16 @@ impl RoutingTableSharing {
     const CHOICES: [&str; 2] = ["rwlock", "snapshot"];
     const ALL: [Self; 2] = [Self::Rwlock, Self::Snapshot];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_ROUTING_TABLE_SHARING");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Rwlock)
     }
 }
 
 impl Default for RoutingTableSharing {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -688,17 +687,16 @@ impl ReassemblyPoolOverflow {
     const CHOICES: [&str; 3] = ["reject", "diagnostic-event", "oldest-wins"];
     const ALL: [Self; 3] = [Self::Reject, Self::DiagnosticEvent, Self::OldestWins];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_REASSEMBLY_POOL_OVERFLOW");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Reject)
     }
 }
 
 impl Default for ReassemblyPoolOverflow {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -734,17 +732,16 @@ impl LinkTieOrder {
     const CHOICES: [&str; 2] = ["zid-number", "zid-bytes"];
     const ALL: [Self; 2] = [Self::ZidNumber, Self::ZidBytes];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_LINK_TIE_ORDER");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::ZidNumber)
     }
 }
 
 impl Default for LinkTieOrder {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -780,17 +777,16 @@ impl QueryUnanswerableFinal {
     const CHOICES: [&str; 2] = ["none", "empty-final"];
     const ALL: [Self; 2] = [Self::None, Self::EmptyFinal];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_QUERY_UNANSWERABLE_FINAL");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::None)
     }
 }
 
 impl Default for QueryUnanswerableFinal {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -825,17 +821,16 @@ impl ZidDerivation {
     const CHOICES: [&str; 2] = ["random", "address-ports"];
     const ALL: [Self; 2] = [Self::Random, Self::AddressPorts];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_ZID_DERIVATION");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Random)
     }
 }
 
 impl Default for ZidDerivation {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -879,17 +874,16 @@ impl HandshakeStrayMessage {
     const CHOICES: [&str; 3] = ["fail", "ignore", "ignore-and-replay"];
     const ALL: [Self; 3] = [Self::Fail, Self::Ignore, Self::IgnoreAndReplay];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_HANDSHAKE_STRAY_MESSAGE");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Fail)
     }
 }
 
 impl Default for HandshakeStrayMessage {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -927,17 +921,16 @@ impl HandshakeCookie {
     const CHOICES: [&str; 2] = ["stateless", "fixed"];
     const ALL: [Self; 2] = [Self::Stateless, Self::Fixed];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_HANDSHAKE_COOKIE");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Stateless)
     }
 }
 
 impl Default for HandshakeCookie {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -986,17 +979,16 @@ impl KeyWireForm {
     const CHOICES: [&str; 3] = ["declared", "shared", "literal"];
     const ALL: [Self; 3] = [Self::Declared, Self::Shared, Self::Literal];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_KEY_WIRE_FORM");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::Declared)
     }
 }
 
 impl Default for KeyWireForm {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -1034,17 +1026,16 @@ impl HeldPublishDrop {
     const CHOICES: [&str; 2] = ["held-faces", "every-face"];
     const ALL: [Self; 2] = [Self::HeldFaces, Self::EveryFace];
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<Self> {
         let stated = option_env!("WZ_POLICY_HELD_PUBLISH_DROP");
-        let index = policy_choice(stated, &Self::CHOICES, 0);
-        Self::ALL[index]
+        policy_choice(stated, &Self::CHOICES, &Self::ALL, Self::HeldFaces)
     }
 }
 
 impl Default for HeldPublishDrop {
     /// The build default; a machine reads the value of the snapshot it is handed instead.
     fn default() -> Self {
-        Self::stated()
+        Self::DEFAULT
     }
 }
 
@@ -1722,7 +1713,10 @@ impl PolicyValue for MulticastLoopback {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::OsDefault,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -1733,6 +1727,11 @@ impl PolicyValue for MulticastLoopback {
         self as usize
     }
 }
+
+const _: () = assert!(
+    MulticastLoopback::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<MulticastLoopback>(MulticastLoopback::DEFAULT as usize),
@@ -1780,9 +1779,9 @@ impl TxNoProgressDeadline {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -1820,7 +1819,10 @@ impl PolicyValue for TxNoProgressDeadline {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -1831,6 +1833,11 @@ impl PolicyValue for TxNoProgressDeadline {
         self as usize
     }
 }
+
+const _: () = assert!(
+    TxNoProgressDeadline::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<TxNoProgressDeadline>(TxNoProgressDeadline::DEFAULT as usize),
@@ -1878,9 +1885,9 @@ impl TxExpiryKeepsSession {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -1918,7 +1925,10 @@ impl PolicyValue for TxExpiryKeepsSession {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -1929,6 +1939,11 @@ impl PolicyValue for TxExpiryKeepsSession {
         self as usize
     }
 }
+
+const _: () = assert!(
+    TxExpiryKeepsSession::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<TxExpiryKeepsSession>(TxExpiryKeepsSession::DEFAULT as usize),
@@ -1976,9 +1991,9 @@ impl DeclarationSyncPacing {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_DECLARATION_SYNC_PACING");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2016,7 +2031,10 @@ impl PolicyValue for DeclarationSyncPacing {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Quiescent;
@@ -2027,6 +2045,11 @@ impl PolicyValue for DeclarationSyncPacing {
         self as usize
     }
 }
+
+const _: () = assert!(
+    DeclarationSyncPacing::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<DeclarationSyncPacing>(DeclarationSyncPacing::DEFAULT as usize),
@@ -2074,9 +2097,9 @@ impl DatagramFragmentPacing {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_DATAGRAM_FRAGMENT_PACING");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2114,7 +2137,10 @@ impl PolicyValue for DatagramFragmentPacing {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2125,6 +2151,11 @@ impl PolicyValue for DatagramFragmentPacing {
         self as usize
     }
 }
+
+const _: () = assert!(
+    DatagramFragmentPacing::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<DatagramFragmentPacing>(DatagramFragmentPacing::DEFAULT as usize),
@@ -2172,9 +2203,9 @@ impl MulticastLinkRequiresIface {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2213,7 +2244,10 @@ impl PolicyValue for MulticastLinkRequiresIface {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2224,6 +2258,11 @@ impl PolicyValue for MulticastLinkRequiresIface {
         self as usize
     }
 }
+
+const _: () = assert!(
+    MulticastLinkRequiresIface::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<MulticastLinkRequiresIface>(MulticastLinkRequiresIface::DEFAULT as usize),
@@ -2269,7 +2308,10 @@ impl PolicyValue for ReliableGapReconnect {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -2280,6 +2322,11 @@ impl PolicyValue for ReliableGapReconnect {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReliableGapReconnect::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReliableGapReconnect>(ReliableGapReconnect::DEFAULT as usize),
@@ -2327,9 +2374,9 @@ impl EntityLinkRestriction {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_ENTITY_LINK_RESTRICTION");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2367,7 +2414,10 @@ impl PolicyValue for EntityLinkRestriction {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2378,6 +2428,11 @@ impl PolicyValue for EntityLinkRestriction {
         self as usize
     }
 }
+
+const _: () = assert!(
+    EntityLinkRestriction::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<EntityLinkRestriction>(EntityLinkRestriction::DEFAULT as usize),
@@ -2425,9 +2480,9 @@ impl TargetedQuery {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_TARGETED_QUERY");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2465,7 +2520,10 @@ impl PolicyValue for TargetedQuery {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -2476,6 +2534,11 @@ impl PolicyValue for TargetedQuery {
         self as usize
     }
 }
+
+const _: () = assert!(
+    TargetedQuery::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<TargetedQuery>(TargetedQuery::DEFAULT as usize),
@@ -2523,9 +2586,9 @@ impl PublisherAdmissionRetry {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_PUBLISHER_ADMISSION_RETRY");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2564,7 +2627,10 @@ impl PolicyValue for PublisherAdmissionRetry {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -2575,6 +2641,11 @@ impl PolicyValue for PublisherAdmissionRetry {
         self as usize
     }
 }
+
+const _: () = assert!(
+    PublisherAdmissionRetry::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<PublisherAdmissionRetry>(PublisherAdmissionRetry::DEFAULT as usize),
@@ -2622,9 +2693,9 @@ impl MultiRouteAtomicTx {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_MULTI_ROUTE_ATOMIC_TX");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2662,7 +2733,10 @@ impl PolicyValue for MultiRouteAtomicTx {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -2673,6 +2747,11 @@ impl PolicyValue for MultiRouteAtomicTx {
         self as usize
     }
 }
+
+const _: () = assert!(
+    MultiRouteAtomicTx::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<MultiRouteAtomicTx>(MultiRouteAtomicTx::DEFAULT as usize),
@@ -2720,9 +2799,9 @@ impl EntityTimestampOptIn {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2760,7 +2839,10 @@ impl PolicyValue for EntityTimestampOptIn {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2771,6 +2853,11 @@ impl PolicyValue for EntityTimestampOptIn {
         self as usize
     }
 }
+
+const _: () = assert!(
+    EntityTimestampOptIn::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<EntityTimestampOptIn>(EntityTimestampOptIn::DEFAULT as usize),
@@ -2818,9 +2905,9 @@ impl ReplyAutoTimestamp {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_REPLY_AUTO_TIMESTAMP");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -2858,7 +2945,10 @@ impl PolicyValue for ReplyAutoTimestamp {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2869,6 +2959,11 @@ impl PolicyValue for ReplyAutoTimestamp {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReplyAutoTimestamp::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReplyAutoTimestamp>(ReplyAutoTimestamp::DEFAULT as usize),
@@ -2901,7 +2996,10 @@ impl PolicyValue for SubscriberOverload {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Block,
+    };
     const SCOPE: Scope = Scope::Entity;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2912,6 +3010,11 @@ impl PolicyValue for SubscriberOverload {
         self as usize
     }
 }
+
+const _: () = assert!(
+    SubscriberOverload::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<SubscriberOverload>(SubscriberOverload::DEFAULT as usize),
@@ -2943,7 +3046,10 @@ impl PolicyValue for KeySet {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Open,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2954,6 +3060,11 @@ impl PolicyValue for KeySet {
         self as usize
     }
 }
+
+const _: () = assert!(
+    KeySet::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<KeySet>(KeySet::DEFAULT as usize),
@@ -2987,7 +3098,10 @@ impl PolicyValue for SnResolution {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Bits32,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -2998,6 +3112,11 @@ impl PolicyValue for SnResolution {
         self as usize
     }
 }
+
+const _: () = assert!(
+    SnResolution::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<SnResolution>(SnResolution::DEFAULT as usize),
@@ -3029,7 +3148,10 @@ impl PolicyValue for SupervisionAfterExpiry {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Latch,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -3040,6 +3162,11 @@ impl PolicyValue for SupervisionAfterExpiry {
         self as usize
     }
 }
+
+const _: () = assert!(
+    SupervisionAfterExpiry::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<SupervisionAfterExpiry>(SupervisionAfterExpiry::DEFAULT as usize),
@@ -3071,7 +3198,10 @@ impl PolicyValue for E2eSupervisionNotify {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::StatusOnly,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3082,6 +3212,11 @@ impl PolicyValue for E2eSupervisionNotify {
         self as usize
     }
 }
+
+const _: () = assert!(
+    E2eSupervisionNotify::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<E2eSupervisionNotify>(E2eSupervisionNotify::DEFAULT as usize),
@@ -3113,7 +3248,10 @@ impl PolicyValue for ReplayReplyShape {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::FramePerSample,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3124,6 +3262,11 @@ impl PolicyValue for ReplayReplyShape {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReplayReplyShape::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReplayReplyShape>(ReplayReplyShape::DEFAULT as usize),
@@ -3171,9 +3314,9 @@ impl ReplayServeHoldsSends {
         }
     }
 
-    const fn stated() -> Self {
+    const fn stated() -> Option<bool> {
         let stated = option_env!("WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS");
-        Self::from_bool(policy_bool(stated))
+        policy_bool(stated)
     }
 }
 
@@ -3211,7 +3354,10 @@ impl PolicyValue for ReplayServeHoldsSends {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(on) => Self::from_bool(on),
+        None => Self::Off,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3222,6 +3368,11 @@ impl PolicyValue for ReplayServeHoldsSends {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReplayServeHoldsSends::stated().is_some(),
+    "a WZ_POLICY_* value of a bool policy is neither `on` nor `off`"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReplayServeHoldsSends>(ReplayServeHoldsSends::DEFAULT as usize),
@@ -3253,7 +3404,10 @@ impl PolicyValue for ReplayLiveBeforeAnswer {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Deliver,
+    };
     const SCOPE: Scope = Scope::Message;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3264,6 +3418,11 @@ impl PolicyValue for ReplayLiveBeforeAnswer {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReplayLiveBeforeAnswer::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReplayLiveBeforeAnswer>(ReplayLiveBeforeAnswer::DEFAULT as usize),
@@ -3295,7 +3454,10 @@ impl PolicyValue for EventRingFull {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::OverwriteOldest,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Quiescent;
@@ -3306,6 +3468,11 @@ impl PolicyValue for EventRingFull {
         self as usize
     }
 }
+
+const _: () = assert!(
+    EventRingFull::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<EventRingFull>(EventRingFull::DEFAULT as usize),
@@ -3337,7 +3504,10 @@ impl PolicyValue for ClockQualityStamping {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Always,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -3348,6 +3518,11 @@ impl PolicyValue for ClockQualityStamping {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ClockQualityStamping::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ClockQualityStamping>(ClockQualityStamping::DEFAULT as usize),
@@ -3379,7 +3554,10 @@ impl PolicyValue for RoutingFaceDrive {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::TaskPerFace,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3390,6 +3568,11 @@ impl PolicyValue for RoutingFaceDrive {
         self as usize
     }
 }
+
+const _: () = assert!(
+    RoutingFaceDrive::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<RoutingFaceDrive>(RoutingFaceDrive::DEFAULT as usize),
@@ -3421,7 +3604,10 @@ impl PolicyValue for RoutingTableSharing {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Rwlock,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3432,6 +3618,11 @@ impl PolicyValue for RoutingTableSharing {
         self as usize
     }
 }
+
+const _: () = assert!(
+    RoutingTableSharing::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<RoutingTableSharing>(RoutingTableSharing::DEFAULT as usize),
@@ -3464,7 +3655,10 @@ impl PolicyValue for ReassemblyPoolOverflow {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Reject,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Live;
     const MUTABILITY: Mutability = Mutability::Hot;
@@ -3475,6 +3669,11 @@ impl PolicyValue for ReassemblyPoolOverflow {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ReassemblyPoolOverflow::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ReassemblyPoolOverflow>(ReassemblyPoolOverflow::DEFAULT as usize),
@@ -3506,7 +3705,10 @@ impl PolicyValue for LinkTieOrder {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::ZidNumber,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3517,6 +3719,11 @@ impl PolicyValue for LinkTieOrder {
         self as usize
     }
 }
+
+const _: () = assert!(
+    LinkTieOrder::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<LinkTieOrder>(LinkTieOrder::DEFAULT as usize),
@@ -3548,7 +3755,10 @@ impl PolicyValue for QueryUnanswerableFinal {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::None,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3559,6 +3769,11 @@ impl PolicyValue for QueryUnanswerableFinal {
         self as usize
     }
 }
+
+const _: () = assert!(
+    QueryUnanswerableFinal::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<QueryUnanswerableFinal>(QueryUnanswerableFinal::DEFAULT as usize),
@@ -3590,7 +3805,10 @@ impl PolicyValue for ZidDerivation {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Random,
+    };
     const SCOPE: Scope = Scope::Runtime;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3601,6 +3819,11 @@ impl PolicyValue for ZidDerivation {
         self as usize
     }
 }
+
+const _: () = assert!(
+    ZidDerivation::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<ZidDerivation>(ZidDerivation::DEFAULT as usize),
@@ -3633,7 +3856,10 @@ impl PolicyValue for HandshakeStrayMessage {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Fail,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3644,6 +3870,11 @@ impl PolicyValue for HandshakeStrayMessage {
         self as usize
     }
 }
+
+const _: () = assert!(
+    HandshakeStrayMessage::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<HandshakeStrayMessage>(HandshakeStrayMessage::DEFAULT as usize),
@@ -3675,7 +3906,10 @@ impl PolicyValue for HandshakeCookie {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Stateless,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3686,6 +3920,11 @@ impl PolicyValue for HandshakeCookie {
         self as usize
     }
 }
+
+const _: () = assert!(
+    HandshakeCookie::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<HandshakeCookie>(HandshakeCookie::DEFAULT as usize),
@@ -3718,7 +3957,10 @@ impl PolicyValue for KeyWireForm {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::Declared,
+    };
     const SCOPE: Scope = Scope::Link;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3729,6 +3971,11 @@ impl PolicyValue for KeyWireForm {
         self as usize
     }
 }
+
+const _: () = assert!(
+    KeyWireForm::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<KeyWireForm>(KeyWireForm::DEFAULT as usize),
@@ -3760,7 +4007,10 @@ impl PolicyValue for HeldPublishDrop {
         Self::DEFAULT as usize,
         DEFAULTS_ONLY,
     );
-    const DEFAULT: Self = Self::stated();
+    const DEFAULT: Self = match Self::stated() {
+        Some(value) => value,
+        None => Self::HeldFaces,
+    };
     const SCOPE: Scope = Scope::Session;
     const BINDING: Binding = Binding::Open;
     const MUTABILITY: Mutability = Mutability::Fixed;
@@ -3771,6 +4021,11 @@ impl PolicyValue for HeldPublishDrop {
         self as usize
     }
 }
+
+const _: () = assert!(
+    HeldPublishDrop::stated().is_some(),
+    "a WZ_POLICY_* value is not one of its policy's choices"
+);
 
 const _: () = assert!(
     default_is_allowed::<HeldPublishDrop>(HeldPublishDrop::DEFAULT as usize),
