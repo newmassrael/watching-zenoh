@@ -122,7 +122,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: [0x0A, 0x0B, 0x0C, 0x0D].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: BATCH,
         lease_ms: 10_000,

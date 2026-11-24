@@ -59,6 +59,18 @@ impl SnResolution {
         }
     }
 
+    /// The width a two-bit `seq_num_res` code names, the inverse of [`Self::wire_code`]. Only
+    /// the field's two bits are read, so every byte names a width: a sized Init or a Join carries
+    /// the code in those bits, and a session settles on the smaller of two codes it holds.
+    pub const fn from_wire_code(code: u8) -> Self {
+        match code & 0x03 {
+            0x00 => Self::Bits8,
+            0x01 => Self::Bits16,
+            0x02 => Self::Bits32,
+            _ => Self::Bits64,
+        }
+    }
+
     /// Every width, in the order a test walks them.
     pub const WIDTHS: [Self; 4] = [Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
 
@@ -268,6 +280,20 @@ mod tests {
         assert_eq!(SnResolution::Bits8.wire_code(), 0);
         assert_eq!(SnResolution::Bits64.wire_code(), 3);
         assert_eq!(SnResolution::Bits16.id(), "bits-16");
+    }
+
+    /// Each width reads back from its two-bit code, and a byte is read by its two low bits
+    /// alone, as the field it stands in occupies them.
+    #[test]
+    fn each_sn_width_reads_back_from_its_two_bit_code() {
+        for width in SnResolution::WIDTHS {
+            assert_eq!(SnResolution::from_wire_code(width.wire_code()), width);
+            assert_eq!(
+                SnResolution::from_wire_code(width.wire_code() | 0xFC),
+                width,
+                "the bits above the field are not read"
+            );
+        }
     }
 
     /// Each width reads back from zenoh's spelling of it, and the texts zenoh refuses (the

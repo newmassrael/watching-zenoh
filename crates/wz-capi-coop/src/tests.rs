@@ -60,7 +60,7 @@ pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami,
         zid: [zid; 4].into(),
-        seq_num_res: 2,
+        seq_num_res: wz_session_core::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
@@ -2730,7 +2730,7 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
                     lease_ms: 10_000,
                     join_interval_ms: 2_500,
                     max_sessions: None,
-                    seq_num_res: 0x02,
+                    seq_num_res: wz_session_core::policy::SnResolution::Bits32,
                     req_id_res: 0x02,
                     batch_size: 2_048,
                     is_qos: false,

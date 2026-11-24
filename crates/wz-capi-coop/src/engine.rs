@@ -2839,7 +2839,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let params = SessionInitParams {
             whatami: self.config.whatami,
             zid: self.transport.wire_zid,
-            seq_num_res: self.config.sn_resolution.wire_code(),
+            seq_num_res: self.config.sn_resolution,
             req_id_res: 2,
             batch_size: self.config.batch_size,
             lease_ms: self.config.lease_ms,

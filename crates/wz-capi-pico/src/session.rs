@@ -267,7 +267,7 @@ fn pico_group(
         join_interval_ms: 2_500,
         // pico has no cap on a group's members: its list grows while its allocator gives.
         max_sessions: None,
-        seq_num_res: sn_resolution.wire_code(),
+        seq_num_res: sn_resolution,
         req_id_res: 0x02,
         batch_size: pico_multicast_batch(limits),
         is_qos: false,
@@ -3647,7 +3647,7 @@ mod build_numbers {
             (SnResolution::Bits64, 0x03),
         ] {
             let profile = pico_group(width, &limits);
-            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.seq_num_res.wire_code(), code, "{}", width.id());
             assert_eq!(profile.req_id_res, default.req_id_res);
             assert_eq!(profile.batch_size, default.batch_size);
             assert_eq!(profile.lease_ms, default.lease_ms);

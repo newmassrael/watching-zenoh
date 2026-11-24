@@ -120,7 +120,7 @@ fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
 fn r311kb_initack_capture_tightens_negotiated_sn_mask() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let mut params = fixture_session_init_params();
-    params.seq_num_res = 2; // own advertisement: 28-bit ring
+    params.seq_num_res = wz_session_core::policy::SnResolution::Bits32; // own advertisement: 28-bit ring
     let actions = new_session_actions(driver, params, TokioTime::new());
 
     assert_eq!(

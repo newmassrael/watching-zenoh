@@ -195,7 +195,7 @@ fn params() -> SessionInitParams {
     SessionInitParams {
         whatami: WhatAmI::Peer,
         zid: crate::session_zid::SessionZid::from_array([0x51; 4]),
-        seq_num_res: 2,
+        seq_num_res: crate::policy::SnResolution::Bits32,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
