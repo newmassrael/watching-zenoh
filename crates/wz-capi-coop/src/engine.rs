@@ -146,7 +146,7 @@ use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
-    query::{CoopHolder, Onward, QueryPlane, QueryableCall, QueryableRow},
+    query::{CoopHolder, Onward, QueryPlane, QueryableRow},
     wz_capi_port::{QblId, QueryableSink},
     wz_session_core::query::QueryResponder,
     wz_session_core::query_sink::ReplyError,
@@ -161,6 +161,8 @@ use wz_session_core::reply_stage::ReplyStage;
 
 #[cfg(feature = "queryable")]
 mod query;
+#[cfg(feature = "queryable")]
+pub(crate) use query::QueryableCall;
 
 #[cfg(feature = "group")]
 mod group;
@@ -1965,7 +1967,7 @@ impl wz_session_core::query::QueryDelivered<RoundDelivery, QueryableHandle> for 
         // The callback is the program's and never runs under the session's lock: the query is
         // held for it with a call begun on its row, read where it lies, and the replies it makes
         // go out through a responder of the plane's own.
-        cx.plane.arrive(id, row.row(), query);
+        cx.plane.arrive(&cx.round, id, row.row(), query);
     }
 }
 
@@ -4142,45 +4144,54 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(any(feature = "listen", feature = "group"))]
         let handed_at_most = core.config.tx_queue.sizes;
         let arena_bytes = core.arena.bytes();
-        Arc::new_cyclic(|this| Self {
-            core: CoreLock::new(core),
-            rooms,
-            wait_before_drop_us,
-            held_drop,
-            sending_on: AtomicU64::new(NOT_SENDING),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            handed: Mutex::new(VecDeque::new()),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            owed: AtomicBool::new(false),
-            input_held: AtomicBool::new(false),
-            #[cfg(any(feature = "listen", feature = "group"))]
-            handed_at_most,
-            #[cfg(feature = "transport-stats")]
-            unsent_drops: AtomicU64::new(0),
-            samples,
-            matching: Arc::new(Queued::new(MatchFlips::new())),
+        Arc::new_cyclic(|this| {
+            // The round hands the queries it holds to their queryables through the engine, which
+            // sends what they answer.
             #[cfg(feature = "queryable")]
-            plane,
-            #[cfg(feature = "query")]
-            gets,
-            #[cfg(feature = "connectivity")]
-            faces,
-            #[cfg(any(
-                feature = "remote-declaration-watch",
-                feature = "declarations-synced-event"
-            ))]
-            decl_watches,
-            zid: wire,
-            closed: AtomicBool::new(false),
-            #[cfg(any(feature = "query", feature = "ticker"))]
-            next_local: AtomicU64::new(1),
-            reader: Mutex::new(None),
-            deliveries: Deliveries::new(),
-            arena_bytes,
-            handle_place,
-            #[cfg(test)]
-            takes: Takes::default(),
-            this: this.clone(),
+            {
+                let answering: Weak<dyn crate::round::AnswersQueries> = this.clone();
+                samples.answer_queries_with(answering);
+            }
+            Self {
+                core: CoreLock::new(core),
+                rooms,
+                wait_before_drop_us,
+                held_drop,
+                sending_on: AtomicU64::new(NOT_SENDING),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                handed: Mutex::new(VecDeque::new()),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                owed: AtomicBool::new(false),
+                input_held: AtomicBool::new(false),
+                #[cfg(any(feature = "listen", feature = "group"))]
+                handed_at_most,
+                #[cfg(feature = "transport-stats")]
+                unsent_drops: AtomicU64::new(0),
+                samples,
+                matching: Arc::new(Queued::new(MatchFlips::new())),
+                #[cfg(feature = "queryable")]
+                plane,
+                #[cfg(feature = "query")]
+                gets,
+                #[cfg(feature = "connectivity")]
+                faces,
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                decl_watches,
+                zid: wire,
+                closed: AtomicBool::new(false),
+                #[cfg(any(feature = "query", feature = "ticker"))]
+                next_local: AtomicU64::new(1),
+                reader: Mutex::new(None),
+                deliveries: Deliveries::new(),
+                arena_bytes,
+                handle_place,
+                #[cfg(test)]
+                takes: Takes::default(),
+                this: this.clone(),
+            }
         })
     }
 
@@ -4747,9 +4758,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         handed || asked
     }
 
-    /// Hand each query the session queued to its queryable's callback, and send what it answered.
-    /// Whether one was handed.
-    #[cfg(feature = "queryable")]
+    /// Hand each get of the session's own it queued for a queryable whose callback the asking
+    /// thread was inside of to that callback, and send what it answered. Whether one was handed.
+    /// A link's queries are handed out with the round.
+    #[cfg(feature = "local-queryable")]
     fn hand_queries(&self) -> bool {
         let mut handed = false;
         while self.plane.queries.is_pending() {
@@ -4797,7 +4809,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// End `call`, with no lock of the session held: when it was the last call of a queryable
     /// undeclared meanwhile, its row is taken out of the tables under the session's lock and
     /// dropped after it, so a C program's `drop` never runs under the lock.
-    #[cfg(feature = "queryable")]
+    #[cfg(feature = "local-queryable")]
     fn end_query_call(&self, call: QueryableCall) {
         let Some(handle) = call.end() else {
             return;
@@ -4820,7 +4832,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// End each call of the queries no callback was handed yet, which go unanswered: what the
     /// session's close does before it lets go of its rows, as a row a call of which is owed is let
     /// go of only once the call ends.
-    #[cfg(feature = "queryable")]
+    #[cfg(feature = "local-queryable")]
     fn discard_queries(&self) {
         loop {
             let next = self.plane.queries.lock().pop_front();
@@ -4832,8 +4844,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// A build with no queryable is handed no query.
-    #[cfg(not(feature = "queryable"))]
+    /// A build whose session asks none of its own queryables queues no query: a link's are handed
+    /// out with the round.
+    #[cfg(not(feature = "local-queryable"))]
     fn hand_queries(&self) -> bool {
         false
     }
@@ -5337,6 +5350,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     };
                     drop(row);
                 }
+                #[cfg(feature = "queryable")]
+                LetGo::Queryable(handle) => {
+                    let row = {
+                        let guard = self.core.lock();
+                        let mut tables = tables_mut(&guard.0.registry);
+                        tables
+                            .release_queryable(handle)
+                            .map(|row| row.into_callback())
+                    };
+                    drop(row);
+                }
             }
             // Only now is the row's drop over, which a waiting undeclaration reads.
             drop(releasing);
@@ -5371,7 +5395,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn wait_for_queryable_release(&self, handle: QueryableHandle) {
         self.wait_until_let_go(
             |tables| tables.queryables().holds_slot(handle),
-            || self.plane.let_go_settled(),
+            // A query the round held ended its call there, and a get of the session's own here.
+            || self.plane.let_go_settled() && self.samples.released_settled(),
         );
     }
 
@@ -7645,7 +7670,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.let_go_of_released();
         // The queries no callback will now answer go first: each holds a call of its queryable's
         // row, which the row's undeclaration below would wait for.
-        #[cfg(feature = "queryable")]
+        #[cfg(feature = "local-queryable")]
         self.discard_queries();
         self.let_go_of_rows();
     }
@@ -7891,6 +7916,15 @@ pub trait ComposedLinks {
 impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G> {
     type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G>;
     type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
+}
+
+#[cfg(feature = "queryable")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> crate::round::AnswersQueries
+    for CoopEngine<L, C>
+{
+    fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64) {
+        self.run_queryable(call, query, generation);
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {

@@ -1499,6 +1499,26 @@ impl<'a> QueryResponder<'a> {
         }
     }
 
+    /// [`Self::new`] over a keyexpr borrowed for as long as the responder is: what a runtime that
+    /// hands a query its table holds to a callback after the dispatch builds, with nothing of the
+    /// key copied. `accept` and `qos` are required for the reasons [`Self::new`] gives.
+    pub fn borrowing(
+        rid: crate::wire_id::RequestId,
+        keyexpr: &'a str,
+        accept: ReplyKeyExpr,
+        qos: QosLevel,
+        replies: &'a mut dyn StagesReplies,
+    ) -> Self {
+        Self::over(
+            rid,
+            keyexpr,
+            crate::keyexpr_match::KeyFacts::of(keyexpr),
+            accept,
+            qos,
+            replies,
+        )
+    }
+
     /// [`Self::new`] over a keyexpr borrowed for as long as the responder is:
     /// what the registry's own fan-out builds, once per matched queryable.
     fn over(

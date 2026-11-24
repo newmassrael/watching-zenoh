@@ -83,6 +83,12 @@ use wz_session_core::bounded::Static;
 #[cfg(feature = "liveliness")]
 use wz_session_core::session_tables::LivelinessSubscriberHandle;
 use wz_session_core::session_tables::SubscriberHandle;
+#[cfg(feature = "queryable")]
+use {
+    crate::engine::QueryableCall, alloc::sync::Weak, core::cell::OnceCell,
+    wz_session_core::query_sink::QueryView, wz_session_core::sample::EncodingHint,
+    wz_session_core::session_tables::QueryableHandle,
+};
 
 /// The longest id of the clock that stamped a sample's timestamp the wire carries.
 #[cfg(not(feature = "rx-lent-only"))]
@@ -505,6 +511,24 @@ enum Held {
     /// A reply, for the callback of the leg of the get it answers.
     #[cfg(feature = "query")]
     Reply(HeldReply),
+    /// A query, for the callbacks of the queryables it reached.
+    #[cfg(feature = "queryable")]
+    Query(HeldQuery),
+}
+
+/// A query as a record of the round holds it: what it is besides its bytes, where its parts lie,
+/// and the generation of the link it came in on, which its answers go out on.
+#[cfg(feature = "queryable")]
+struct HeldQuery {
+    rid: wz_session_core::wire_id::RequestId,
+    qos: QosLevel,
+    generation: Word,
+    key: Span,
+    parameters: Option<Span>,
+    payload: Option<Span>,
+    attachment: Option<Span>,
+    encoding: Option<(u32, Option<Span>)>,
+    source_info: Option<SourceInfo>,
 }
 
 /// A record of the round: what it is, and the callbacks it owes, `owed` of them from `first` on.
@@ -557,6 +581,9 @@ enum Owed {
     /// A get's leg's.
     #[cfg(feature = "query")]
     Reply(Arc<ReplyCallback>),
+    /// A queryable's: the call begun on its row as the query reached it.
+    #[cfg(feature = "queryable")]
+    Query(QueryableCall),
 }
 
 impl Owed {
@@ -568,6 +595,17 @@ impl Owed {
             Self::Liveliness(_) => None,
             #[cfg(feature = "query")]
             Self::Reply(_) => None,
+            #[cfg(feature = "queryable")]
+            Self::Query(_) => None,
+        }
+    }
+
+    /// The call, when it is of a queryable's callback.
+    #[cfg(feature = "queryable")]
+    fn query(&self) -> Option<&QueryableCall> {
+        match self {
+            Self::Query(call) => Some(call),
+            _ => None,
         }
     }
 
@@ -948,6 +986,8 @@ impl Table {
                     Held::Liveliness { key, .. } => *key,
                     #[cfg(feature = "query")]
                     Held::Reply(reply) => reply.key,
+                    #[cfg(feature = "queryable")]
+                    Held::Query(query) => query.key,
                 };
                 if key.place == Place::Held {
                     // SAFETY: the record took one count of the block when it was written
@@ -984,15 +1024,34 @@ pub(crate) enum LetGo {
     /// A liveliness subscriber's row.
     #[cfg(feature = "liveliness")]
     LivelinessSubscriber(LivelinessSubscriberHandle),
+    /// A queryable's row.
+    #[cfg(feature = "queryable")]
+    Queryable(QueryableHandle),
+}
+
+/// What answers a query the round hands a queryable: the engine, which builds the responder the
+/// query's replies go out through on the link it came in on, and lets go of its Final's hold once
+/// the callback returned.
+#[cfg(feature = "queryable")]
+pub(crate) trait AnswersQueries {
+    /// Hand `query`, which arrived on the link of `generation`, to the callback `call` was
+    /// begun for, and send what it answers. The call is ended by the round.
+    fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64);
 }
 
 /// The rows waiting to be let go of: as many as the tables of the kinds whose calls the round
 /// ends hold.
-#[cfg(feature = "liveliness")]
-const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS + caps::MAX_LIVELINESS_SUBSCRIPTIONS;
-/// See the `liveliness` form.
-#[cfg(not(feature = "liveliness"))]
-const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS;
+const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS
+    + if cfg!(feature = "liveliness") {
+        caps::MAX_LIVELINESS_SUBSCRIPTIONS
+    } else {
+        0
+    }
+    + if cfg!(feature = "queryable") {
+        caps::MAX_QUERYABLES
+    } else {
+        0
+    };
 
 /// The rows whose last call ended after their entity was undeclared, by handle, for the session
 /// to let go of under its lock and drop after it ([`Round::take_released`]). Written by whoever
@@ -1029,6 +1088,14 @@ impl Released {
         }
     }
 
+    /// [`Self::end`] for a call of a queryable's callback.
+    #[cfg(feature = "queryable")]
+    fn end_query(&self, call: QueryableCall) {
+        if let Some(handle) = call.end() {
+            self.keep(LetGo::Queryable(handle));
+        }
+    }
+
     /// Keep `row`, whose last call ended, for the session to let go of.
     fn keep(&self, row: LetGo) {
         let kept = self.handles.with(|handles| {
@@ -1054,6 +1121,8 @@ impl Released {
             Owed::Liveliness(call) => self.end_liveliness(call),
             #[cfg(feature = "query")]
             Owed::Reply(callback) => drop(callback),
+            #[cfg(feature = "queryable")]
+            Owed::Query(call) => self.end_query(call),
         }
     }
 
@@ -1135,6 +1204,11 @@ pub(crate) struct Round {
     capturing: UnsafeCell<Option<Captured>>,
     /// The rows whose last call ended after their subscriber was undeclared ([`Released`]).
     released: Released,
+    /// What answers the queries the round hands their queryables, once the engine that sends the
+    /// answers is made ([`Self::answer_queries_with`]): the queries' replies go out on their links
+    /// and their Finals' holds are let go of there.
+    #[cfg(feature = "queryable")]
+    answering: Lock<Option<Weak<dyn AnswersQueries>>>,
     /// What was not handed a callback ([`RoundCounts`]).
     dropped: AtomicU64,
     held_over: AtomicU64,
@@ -1157,8 +1231,9 @@ pub(crate) struct Round {
 // filling, and by the one delivery that took it while it is delivering; `lending`, `rejoining`,
 // `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
 // kept buffers, whose claims belong to the session's task, are let go of on that task alone;
-// `released` behind its own lock; every other field is an atomic or never written after the round
-// is made. A call the table owes reads a row its table keeps where it lies until the call ends,
+// `released` and `answering` behind their own locks, `answering` naming the engine, whose
+// answering is made for any thread; every other field is an atomic or never written after the
+// round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
 // them.
@@ -1228,6 +1303,8 @@ impl Round {
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).released), Released::new());
+            #[cfg(feature = "queryable")]
+            ptr::write(addr_of_mut!((*at).answering), Lock::new(None));
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).held_over), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).unplaced), AtomicU64::new(0));
@@ -1270,6 +1347,8 @@ impl Round {
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
             released: _,
+            #[cfg(feature = "queryable")]
+                answering: _,
             dropped: _,
             held_over: _,
             unplaced: _,
@@ -1816,6 +1895,101 @@ impl Round {
         self.owes.load(Ordering::Acquire)
     }
 
+    /// Answer the queries the round hands their queryables through `answering`, the engine the
+    /// round is the session's of: told once, when the engine is made.
+    #[cfg(feature = "queryable")]
+    pub(crate) fn answer_queries_with(&self, answering: Weak<dyn AnswersQueries>) {
+        self.answering.with(|held| *held = Some(answering));
+    }
+
+    /// Hold `view`, a query of the link of `generation`, for `call`, the call begun on the
+    /// queryable's row it reached, each part read where it lies or written into the table: whether
+    /// the round took it. A query not taken is refused and counted as a record that holds its
+    /// sender, and its call is ended; the caller lets go of the hold it took on its Final.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    #[cfg(feature = "queryable")]
+    pub(crate) unsafe fn offer_query(
+        &self,
+        call: QueryableCall,
+        view: &dyn QueryView,
+        generation: u64,
+    ) -> bool {
+        // SAFETY: the caller's contract.
+        let lending = unsafe { self.lending() };
+        // SAFETY: the caller's contract.
+        let Some(table) = (unsafe { self.writable() }) else {
+            self.refuse(true);
+            self.released.end_query(call);
+            return false;
+        };
+        if !Self::takes(table, 1) {
+            self.refuse(true);
+            self.released.end_query(call);
+            return false;
+        }
+        let Some(query) = Self::place_query(table, view, generation, lending) else {
+            self.refuse_unplaced(true);
+            self.released.end_query(call);
+            return false;
+        };
+        let first = table.callbacks.len();
+        let kept = table
+            .entries
+            .push(Entry::owing_one(Held::Query(query), first))
+            .is_ok();
+        let owed = if kept {
+            table
+                .callbacks
+                .push(Owed::Query(call))
+                .err()
+                .map(|full| full.0)
+        } else {
+            Some(Owed::Query(call))
+        };
+        if let Some(owed) = owed {
+            self.released.settle(owed);
+        }
+        debug_assert!(kept, "the table had the room its checks found");
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.filled(table) };
+        kept
+    }
+
+    /// `view` placed in `table`; `None` when a part finds no place.
+    #[cfg(feature = "queryable")]
+    fn place_query(
+        table: &mut Table,
+        view: &dyn QueryView,
+        generation: u64,
+        lending: Option<Lending>,
+    ) -> Option<HeldQuery> {
+        let key = table.place_key(view.keyexpr().as_bytes(), lending)?;
+        let mut part = |bytes: Option<&[u8]>| match bytes {
+            Some(bytes) => table.place(bytes, lending).map(Some),
+            None => Some(None),
+        };
+        let parameters = part(view.parameters())?;
+        let payload = part(view.payload())?;
+        let attachment = part(view.attachment())?;
+        let encoding = match view.encoding() {
+            Some(hint) => Some((hint.packed_id, part(hint.schema.as_deref())?)),
+            None => None,
+        };
+        Some(HeldQuery {
+            rid: view.rid(),
+            qos: view.qos(),
+            generation: Word::of(generation),
+            key,
+            parameters,
+            payload,
+            attachment,
+            encoding,
+            source_info: view.source_info().cloned(),
+        })
+    }
+
     /// The records offered from here on lie in `message`, a message rejoined from its fragments and
     /// kept in its chain's buffer, until [`Self::end_rejoined`]; the datagram a link lends is lent
     /// again after it. A part is read there while the table reads no other rejoined message
@@ -2075,6 +2249,22 @@ impl Round {
                         callback.call(&view);
                     }
                 }
+                #[cfg(feature = "queryable")]
+                Held::Query(query) => {
+                    // The engine that sends the answers, once it is made; a query handed out
+                    // before, or after it went, is answered by none, its calls ended all the same.
+                    let answering = self.answering.with(|held| held.as_ref()?.upgrade());
+                    if let Some(answering) = answering {
+                        let view = RoundQuery {
+                            query,
+                            table,
+                            encoding: OnceCell::new(),
+                        };
+                        for call in owed.iter().filter_map(Owed::query) {
+                            answering.answer_query(call, &view, query.generation.get());
+                        }
+                    }
+                }
             }
         }
         #[cfg(all(test, feature = "std"))]
@@ -2166,6 +2356,55 @@ impl Round {
             Self::leaked_rows(events).writing_into(NonNull::from(area).cast::<u8>(), bytes)
         };
         Self::shared_over(rows)
+    }
+}
+
+/// A query of the round, read where its parts lie: what each queryable it reached is handed.
+#[cfg(feature = "queryable")]
+struct RoundQuery<'t> {
+    query: &'t HeldQuery,
+    table: &'t Table,
+    /// The encoding as the hint a queryable reads it by, made from the table's parts the first
+    /// time one asks for it.
+    encoding: OnceCell<EncodingHint>,
+}
+
+#[cfg(feature = "queryable")]
+impl QueryView for RoundQuery<'_> {
+    fn keyexpr(&self) -> &str {
+        self.table.text(self.query.key)
+    }
+
+    fn parameters(&self) -> Option<&[u8]> {
+        self.query.parameters.map(|span| self.table.bytes(span))
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        self.query.attachment.map(|span| self.table.bytes(span))
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.query.source_info.as_ref()
+    }
+
+    fn payload(&self) -> Option<&[u8]> {
+        self.query.payload.map(|span| self.table.bytes(span))
+    }
+
+    fn encoding(&self) -> Option<&EncodingHint> {
+        let (packed_id, schema) = self.query.encoding?;
+        Some(self.encoding.get_or_init(|| EncodingHint {
+            packed_id,
+            schema: schema.map(|span| self.table.bytes(span).to_vec()),
+        }))
+    }
+
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.query.rid
+    }
+
+    fn qos(&self) -> QosLevel {
+        self.query.qos
     }
 }
 
