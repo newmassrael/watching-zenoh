@@ -1320,7 +1320,9 @@ impl PublisherQos {
     }
 
     /// These QoS for another publisher of the same declaration, the encoding kept again in a slot
-    /// of its own: `None` when the pool of encodings has no slot free.
+    /// of its own: `None` when the pool of encodings has no slot free. An advanced publisher
+    /// declares its publisher with the QoS it was declared with (`crate::advanced_plane`).
+    #[cfg(feature = "advanced")]
     pub(crate) fn try_clone(&self) -> Option<Self> {
         let encoding = match &self.encoding {
             Some(encoding) => Some(crate::encoding::hold(encoding.view())?),

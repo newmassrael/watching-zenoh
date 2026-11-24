@@ -25,8 +25,8 @@
 //!
 //! ## The id lives PACKED, because that is what wz already had
 //!
-//! [`EncodingHint::packed_id`] is the WIRE word — `(id << 1) | has_schema` — and
-//! this module keeps encodings in exactly that shape rather than unpacking to a
+//! [`EncodingHint::packed_id`](wz_session_core::sample::EncodingHint::packed_id) is the WIRE
+//! word — `(id << 1) | has_schema` — and this module keeps encodings in exactly that shape rather than unpacking to a
 //! `(u16, Option<String>)` pair. Two reasons, and the second is the load-bearing
 //! one: the sample accessors hand a decoded `EncodingHint` straight through, so
 //! an unpacked intermediate would be a second representation to keep in step;
@@ -39,7 +39,7 @@
 
 use core::ffi::{c_char, c_void, CStr};
 
-use wz_session_core::sample::{BoundedEncoding, EncodingHint, EncodingRef};
+use wz_session_core::sample::{BoundedEncoding, EncodingRef};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_owned_string_t};
 use crate::bytes::{store_owned_string, ByteBuf, NoRoom};
@@ -298,7 +298,10 @@ impl OwnedEncoding {
 
 /// `encoding` held by value: its constant when it has one, else kept in a slot of the pool of
 /// encodings. What a publisher keeps of the encoding it was declared with. `None` when the schema
-/// is longer than the room a slot has or the pool has no slot free.
+/// is longer than the room a slot has or the pool has no slot free. Only an advanced publisher
+/// keeps a second copy of the encoding its publisher was declared with
+/// (`crate::pubsub::PublisherQos::try_clone`).
+#[cfg(any(feature = "advanced", test))]
 pub(crate) fn hold(encoding: EncodingRef<'_>) -> Option<OwnedEncoding> {
     if let Some(constant) = constant_of(encoding) {
         return Some(OwnedEncoding::Constant(as_constant(constant)));
@@ -435,8 +438,12 @@ pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<OwnedEnco
 }
 
 /// [`take_moved_encoding`] for a door whose options still keep the encoding as a hint of their
-/// own: the schema is copied out and the encoding let go.
-pub(crate) unsafe fn take_moved_encoding_copy(moved: *mut c_void) -> Option<EncodingHint> {
+/// own: the schema is copied out and the encoding let go. The advanced publisher's put is that
+/// door.
+#[cfg(feature = "advanced")]
+pub(crate) unsafe fn take_moved_encoding_copy(
+    moved: *mut c_void,
+) -> Option<wz_session_core::sample::EncodingHint> {
     take_moved_encoding(moved).map(|held| held.view().to_hint())
 }
 
@@ -807,6 +814,7 @@ pub unsafe extern "C" fn z_encoding_take_from_loaned(
 mod tests {
     use super::*;
     use crate::prelude::*;
+    use wz_session_core::sample::EncodingHint;
 
     /// What `z_encoding_from_str` stores for `s`: its bytes, split as pico's
     /// `_z_encoding_convert_from_substr` splits them.
