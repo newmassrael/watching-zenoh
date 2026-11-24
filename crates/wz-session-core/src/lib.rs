@@ -1165,8 +1165,6 @@ pub mod multicast_peer_arrived;
 // is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
 // `session-unicast` (it names the generated FSM event enum).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-066 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod inbound;
 
 /// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
