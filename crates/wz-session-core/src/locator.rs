@@ -93,6 +93,7 @@ use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::str::FromStr;
 
+pub use crate::locator_grammar::parse_dscp_value;
 use crate::locator_grammar::{
     read_serial_locator, read_unixpipe_locator, split_locator_parts, unixpipe_file_mask,
     write_serial_address_with_config, SerialAddress, SerialTextError, UnixpipeTextError,
@@ -1156,33 +1157,6 @@ fn pem_source(
         }
     }
     Ok(None)
-}
-
-/// R2590 — a `dscp` value in upstream's EXACT accepted set, or `None`.
-///
-/// Mirrors `parse_dscp`
-/// (`io/zenoh-link-commons/src/dscp.rs` @ `dscp.split('|')`): `|`-separated
-/// integers OR-ed together, each decimal, `0x`/`0X` hexadecimal, or `0B`
-/// binary. Upstream also lists a `0xb` binary prefix, but its `0x` arm is tried
-/// first and takes every string that prefix could match, so `0xb101` is
-/// hexadecimal there and here. Mirrored rather than corrected: an operator's
-/// string must mean the same thing to both implementations. Any part that does
-/// not parse refuses the whole value, as upstream's `reduce` over `Option`s does.
-pub fn parse_dscp_value(value: &str) -> Option<u32> {
-    fn part(s: &str) -> Option<u32> {
-        if let Some(hex) = ["0x", "0X"].iter().find_map(|p| s.strip_prefix(p)) {
-            u32::from_str_radix(hex, 16).ok()
-        } else if let Some(bin) = ["0xb", "0B"].iter().find_map(|p| s.strip_prefix(p)) {
-            u32::from_str_radix(bin, 2).ok()
-        } else {
-            s.parse::<u32>().ok()
-        }
-    }
-    value
-        .split('|')
-        .map(part)
-        .reduce(|a, b| Some(a? | b?))
-        .flatten()
 }
 
 /// R311y832 — the `#ttl=<n>` multicast hop limit from the CONFIG span.
