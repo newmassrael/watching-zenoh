@@ -1304,7 +1304,9 @@ jobs:
   # example and a check program are compiled against the package's own headers and import library
   # with MSVC's cl of the package's width (`vcvarsall.bat x64` or `x86`, chosen by the manifest's
   # target) and run, for both builds. The upload follows only a passing test, so a package this
-  # job publishes is one that passed it.
+  # job publishes is one that passed it, and precedes the size readings of the rows `nostd`, so the
+  # package a release ships is uploaded with the symbols of both builds (the PDB beside each DLL)
+  # whatever those readings say, and a size red can be read function by function from the same run.
   #
   # The rows `nostd` are the package a release ships (owner, 2026-11-23, docs/c-abi-engine-and-memory.md
   # E7, and the release workflow's `windows-packages`, which runs the same action on the same rows):
@@ -1360,8 +1362,6 @@ jobs:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
           stdlib: ${{ matrix.stdlib }}
-          measure: ${{ matrix.stdlib == 'nostd' }}
-          ceiling: ${{ matrix.stdlib == 'nostd' }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
@@ -1372,6 +1372,44 @@ jobs:
             ${{ steps.package.outputs.directory }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
+
+      # The size gate's client in both forms, for this width: the DLL's sizes read from its own
+      # section table, and the ratio of the form without `std` to the one with it. Printed, gating
+      # nothing yet; after the package's test and its upload, so a measurement never stands in for
+      # the test and a failing one never keeps the package from being uploaded.
+      - name: the sizes of the client with and without std (printed)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        shell: bash
+        env:
+          WZ_PACKAGE_ARCH: ${{ matrix.arch }}
+        run: python scripts/lib/pico_windows_package.py --measure --arch "$WZ_PACKAGE_ARCH"
+
+      # The release DLL's text against zenoh-pico's, both built on this runner in this job, held to the
+      # width's row of the ceiling (docs/upstream-parity.md D9). The plan derives the reference from the
+      # package's own manifest; the reference is built from an archive of the pinned submodule, as a
+      # Windows host given the same plan by hand builds it; the judge reads both DLLs and grades the
+      # ratio. A finding, an unfilled row or a ratio over its ratchet fails the step.
+      - name: the release DLL against zenoh-pico built as the same build, held to its ceiling row (gated)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        shell: bash
+        env:
+          WZ_PACKAGE_ARCH: ${{ matrix.arch }}
+          WZ_PACKAGE_OUT: ${{ steps.package.outputs.directory }}
+        run: |
+          out="$(cygpath -u "$WZ_PACKAGE_OUT")"
+          set -- "$out"/*-windows-"$WZ_PACKAGE_ARCH"-*.zip
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "pico-size-ceiling on Windows $WZ_PACKAGE_ARCH: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          zip="$(cygpath -w "$1")"
+          work="$(cygpath -u "$RUNNER_TEMP")/pico-size-$WZ_PACKAGE_ARCH"
+          rm -rf "$work"
+          mkdir -p "$work"
+          python scripts/lib/pico_windows_package.py --size-plan "$zip" "$(cygpath -w "$work/plan.json")"
+          git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$(cygpath -w "$work/zenoh-pico.zip")" HEAD
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/host-bench/windows/size_ceiling.ps1 -Plan "$(cygpath -w "$work/plan.json")" -PicoSource "$(cygpath -w "$work/zenoh-pico.zip")" -Work "$(cygpath -w "$work/build")" -Out "$(cygpath -w "$work/reading")"
+          python scripts/lib/pico_windows_package.py --size-judge "$zip" "$(cygpath -w "$work/reading")"
 
   # zenoh-pico's own API tests and example programs on the DLL a release ships
   # (scripts/lib/pico_upstream_programs.py; docs/release-proof-pico-windows.md, item W03): the
