@@ -687,15 +687,60 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     open: Option<OpenChain<S::Chain>>,
 }
 
-impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
-    fn new() -> Self {
-        let mut engine = Engine::new(ReassemblySlotPolicy::new_with_checked_session_id(
+/// A slot's machine.
+type SlotEngine = Engine<ReassemblySlotPolicy<SlotBinding>>;
+
+/// Build a slot machine in `cell` and enter its initial `Empty` leaf (W3C SCXML 3.3).
+///
+/// Not generic over the Router and out of line, so every Router type and every place a slot is
+/// built or put back in service share one copy of the machine's start, and the machine is written
+/// where the slot keeps it rather than built on a stack and moved there.
+#[inline(never)]
+fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
+    Engine::new_in_place(
+        cell,
+        ReassemblySlotPolicy::new_with_checked_session_id(
             REASSEMBLY_SLOT_SESSION_ID,
             SlotBinding::default(),
-        ));
-        // W3C SCXML 3.3: enter the initial `Empty` leaf.
-        engine.initialize().unwrap_or_else(|never| match never {});
-        Self { engine, open: None }
+        ),
+    )
+    .initialize()
+    .unwrap_or_else(|never| match never {});
+}
+
+impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
+    /// A free slot, built in `cell` where the Router keeps it. Whatever `cell` held is not
+    /// dropped.
+    fn init_in(cell: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
+        use core::ptr::addr_of_mut;
+        let at = cell.as_mut_ptr();
+        // SAFETY: `at` points at storage for one slot that holds no value. The machine is written
+        // in its field by `start_slot_engine` and the chain state beside it;
+        // `fields_are_written_by_init_in` names each field, so one added to the struct stops that
+        // from compiling until it is written here too. With both written the slot is whole.
+        unsafe {
+            start_slot_engine(
+                &mut *addr_of_mut!((*at).engine).cast::<core::mem::MaybeUninit<SlotEngine>>(),
+            );
+            addr_of_mut!((*at).open).write(None);
+            &mut *at
+        }
+    }
+
+    /// Names every field of the slot, so that [`Self::init_in`], which writes each by its address,
+    /// cannot miss one that is added.
+    #[allow(dead_code)]
+    fn fields_are_written_by_init_in(self) {
+        let Self { engine: _, open: _ } = self;
+    }
+
+    /// A free slot as a value, for the tests that drive one slot without its Router.
+    #[cfg(test)]
+    fn new() -> Self {
+        let mut cell = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut cell);
+        // SAFETY: `init_in` wrote the whole slot.
+        unsafe { cell.assume_init() }
     }
 
     fn is_free(&self) -> bool {
@@ -749,7 +794,16 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         if let Some(open) = self.open.take() {
             staging.release(open.chain);
         }
-        *self = Self::new();
+        let cell =
+            core::ptr::addr_of_mut!(self.engine).cast::<core::mem::MaybeUninit<SlotEngine>>();
+        // SAFETY: the machine is whole, so dropping it is sound, and its field is then storage
+        // that holds no value, which `start_slot_engine` fills with a whole machine before it
+        // returns. Nothing between the drop and the write can unwind: the machine's start cannot
+        // fail. The chain state was emptied above, as a fresh slot's is.
+        unsafe {
+            core::ptr::drop_in_place(cell.cast::<SlotEngine>());
+            start_slot_engine(&mut *cell);
+        }
     }
 
     /// [`Self::release`] from a state the chart makes terminal, and
@@ -806,14 +860,10 @@ where
     /// The arena must be EMPTY, with no chain of its own outstanding; the
     /// Router's accounting starts from all of `SLOTS` free.
     pub fn with_staging(config: ReassemblyConfig, staging: S) -> Self {
-        Self {
-            slots: core::array::from_fn(|_| Slot::new()),
-            config,
-            staging,
-            capacity_refusals: 0,
-            opened: 0,
-            displaced: None,
-        }
+        let mut place = core::mem::MaybeUninit::uninit();
+        Self::init_in(&mut place, config, staging);
+        // SAFETY: `init_in` wrote every field of the Router.
+        unsafe { place.assume_init() }
     }
 
     /// [`Self::with_staging`] built where `place` lies, and lent back: each slot is made in its
@@ -841,7 +891,11 @@ where
         unsafe {
             let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
             for index in 0..SLOTS {
-                slots.add(index).write(Slot::new());
+                Slot::<SLOTS, CAP, S>::init_in(
+                    &mut *slots
+                        .add(index)
+                        .cast::<core::mem::MaybeUninit<Slot<SLOTS, CAP, S>>>(),
+                );
             }
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).staging).write(staging);
@@ -2641,6 +2695,26 @@ mod duty_tests {
 
     fn state(slot: &TestSlot) -> State {
         slot.engine.get_current_state()
+    }
+
+    /// A slot put back in service in the middle of a chain is a fresh one where it stands: its
+    /// machine is at `Empty` with nothing posted, it holds no chain, and the next first fragment
+    /// begins a chain as on a slot never used.
+    #[test]
+    fn a_replaced_slot_is_fresh_in_its_own_place() {
+        let mut staging = <HeapStaging<1, 64> as BuildsOwnStorage<1, 64>>::new();
+        let mut slot = TestSlot::new();
+        assert_eq!(state(&slot), State::Empty);
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
+
+        slot.replace(&mut staging);
+        assert_eq!(state(&slot), State::Empty, "the machine was started again");
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
+        assert!(slot.is_free());
+        assert_eq!(staging.available(), 1, "the arena lent nothing");
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
     }
 
     /// Every transition of `reassembly_slot.scxml` posts exactly the duties of
