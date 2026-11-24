@@ -170,13 +170,12 @@ pub struct QosFilter {
 impl QosFilter {
     /// Whether a message carrying `qos` on a frame of the given reliability passes.
     pub fn matches(&self, qos: QosLevel, reliable: bool) -> bool {
-        // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
-        self.priority.map_or(true, |p| qos.priority() == p)
+        self.priority.is_none_or(|p| qos.priority() == p)
             && self
                 .congestion_control
-                .map_or(true, |c| qos.congestion() == c)
-            && self.express.map_or(true, |e| qos.is_express() == e)
-            && self.reliable.map_or(true, |r| reliable == r)
+                .is_none_or(|c| qos.congestion() == c)
+            && self.express.is_none_or(|e| qos.is_express() == e)
+            && self.reliable.is_none_or(|r| reliable == r)
     }
 }
 
@@ -193,7 +192,7 @@ pub struct PayloadRange {
 impl PayloadRange {
     /// Whether a payload of `size` bytes is inside the range.
     pub fn contains(&self, size: u64) -> bool {
-        self.start.map_or(true, |s| size >= s) && self.end.map_or(true, |e| size <= e)
+        self.start.is_none_or(|s| size >= s) && self.end.map_or(true, |e| size <= e)
     }
 }
 
@@ -229,7 +228,7 @@ impl QosOverwriteRule {
     /// zid test when it cannot read the zid, and installs the rewrite.
     fn governs_face(&self, ctx: &dyn InterceptorContext) -> bool {
         let zid_ok =
-            self.zids.is_empty() || ctx.subject().map_or(true, |zid| self.zids.contains(&zid));
+            self.zids.is_empty() || ctx.subject().is_none_or(|zid| self.zids.contains(&zid));
         zid_ok
             && LinkSubject::opt_matches_protocols(ctx.link_subject(), &self.link_protocols)
             && LinkSubject::opt_matches_interfaces(ctx.link_subject(), &self.interfaces)

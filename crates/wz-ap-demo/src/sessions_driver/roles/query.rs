@@ -70,7 +70,7 @@ async fn run(ctx: Ctx) {
     );
     ctx.say.line(&format!("declared key={key}"));
     let mut asked = 0u64;
-    while count.map_or(true, |n| asked < n) {
+    while count.is_none_or(|n| asked < n) {
         let n = asked + 1;
         let (replies, finals) = (ctx.say.clone(), ctx.say.clone());
         let answered = Arc::new(Notify::new());

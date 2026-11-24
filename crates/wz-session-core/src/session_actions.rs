@@ -8356,7 +8356,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // Strict `>` (zenoh tx.rs:56): a later equal-width band does
                     // NOT displace the incumbent, so ties resolve to first-seen =
                     // a stable, non-flapping pin (one-conduit=one-link).
-                    if full.map_or(true, |(_, prev)| prev > width) {
+                    if full.is_none_or(|(_, prev)| prev > width) {
                         full = Some((l, width));
                     }
                     continue;
@@ -11120,12 +11120,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `CloseReason::Invalid`, upstream's reason for this check.
     #[cfg(feature = "codec-init-body")]
     pub fn init_ack_zid_acceptable(&self, init_ack_zid: &[u8]) -> bool {
-        // A `match`, not `is_none_or`: that method is stable since 1.82 and
-        // this crate builds with 1.81.
-        match R::with_mutex_mut(&self.expected_peer_zid, |slot| *slot) {
-            None => true,
-            Some(expected) => crate::credential_identity::zid_is_bound(init_ack_zid, &expected),
-        }
+        R::with_mutex_mut(&self.expected_peer_zid, |slot| *slot).is_none_or(|expected| {
+            crate::credential_identity::zid_is_bound(init_ack_zid, &expected)
+        })
     }
 
     /// R311ke — per-channel inbound Frame/Fragment SN admission, the
@@ -17477,7 +17474,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn reply_gate_admits(&self, reply: crate::network_message::MessageRef<'_>) -> bool {
         R::with_mutex_mut(&self.egress_reply_gate, |slot| {
-            slot.as_ref().map_or(true, |gate| gate(reply))
+            slot.as_ref().is_none_or(|gate| gate(reply))
         })
     }
 

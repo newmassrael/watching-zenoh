@@ -4749,7 +4749,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// node's is before a client has come: synced is a statement about established sessions, not
     /// about whether a session exists.
     pub fn declarations_synced(&self) -> bool {
-        self.live().map_or(true, |core| {
+        self.live().is_none_or(|core| {
             core.0
                 .transport
                 .links
@@ -6767,7 +6767,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let usable = |id: ExprId| -> bool {
             #[cfg(feature = "shared-key-ids")]
             {
-                shared.map_or(true, |ids| ids.next_free_id(id) == Some(id))
+                shared.is_none_or(|ids| ids.next_free_id(id) == Some(id))
             }
             #[cfg(not(feature = "shared-key-ids"))]
             {

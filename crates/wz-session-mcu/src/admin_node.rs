@@ -222,7 +222,7 @@ where
         if self
             .acceptor
             .as_ref()
-            .map_or(true, |(handle, _)| handle.is_finished())
+            .is_none_or(|(handle, _)| handle.is_finished())
         {
             // Let go of the ended session (and its socket) before binding
             // the port again, its listing among the declared sessions too,

@@ -287,9 +287,9 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 
 TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
 fills a list of `N` zids from the text a build states. It reads the text by slice pattern; the row
-it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
-that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
-(`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
+it fills is written by index, because a `const fn` before Rust 1.83 takes no `&mut` and every
+write that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
+(`const_mut_refs`). The workspace's MSRV is 1.83, so the row is paid with `get_mut`.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
 is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
@@ -332,8 +332,8 @@ refuse, is framed through the codec's own vector sink, which refuses no write.
 TD-049 (`retry_period`) keeps `indexing_slicing` for `fixed_waits`, a `const fn` that fills an
 array of `N` waits when the build is compiled, and TD-102 (`ext_name`) keeps it for
 `identities_of`, a `const fn` that projects a row table into a `[u8; N]` of identities. Each
-writes an element of an array whose length is a generic, which a `const fn` of Rust 1.81 can do
-only by index, as TD-207 says; both are paid with `get_mut` when the MSRV is 1.83. TD-156
+writes an element of an array whose length is a generic, which a `const fn` before Rust 1.83 can
+do only by index, as TD-207 says; both are paid with `get_mut` at the MSRV of 1.83. TD-156
 (`process_pool`) keeps it for `Plan::with`, the `const fn` that writes a kind's slots and their
 bytes into the plan the build works out when it is compiled; its two writes are the module's last
 sites, paid with `get_mut` at the same MSRV.

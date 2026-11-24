@@ -22,7 +22,7 @@
 name = "host-slot-node"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.83"
 license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 description = "The fixed-memory client node run as a Linux process: shared MCU session code over the host's sockets, no allocator."

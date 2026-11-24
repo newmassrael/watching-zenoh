@@ -240,7 +240,7 @@ fn expected_wire_255() -> Vec<u8> {
     let mut v = Vec::with_capacity(257);
     v.push(0xFF);
     v.push(0x00);
-    v.extend(std::iter::repeat(0x42).take(255));
+    v.extend(std::iter::repeat_n(0x42, 255));
     v
 }
 
@@ -248,7 +248,7 @@ fn expected_wire_256() -> Vec<u8> {
     let mut v = Vec::with_capacity(258);
     v.push(0x00);
     v.push(0x01);
-    v.extend(std::iter::repeat(0x42).take(256));
+    v.extend(std::iter::repeat_n(0x42, 256));
     v
 }
 
@@ -256,7 +256,7 @@ fn expected_wire_300() -> Vec<u8> {
     let mut v = Vec::with_capacity(302);
     v.push(0x2C);
     v.push(0x01);
-    v.extend(std::iter::repeat(0x42).take(300));
+    v.extend(std::iter::repeat_n(0x42, 300));
     v
 }
 

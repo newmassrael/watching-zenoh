@@ -1196,7 +1196,7 @@ impl ExecutorState {
             // A cell nothing woke and nothing aborted is left out of the pass's sections when no
             // cell is owed its settling: a pass over a table at rest takes no section. A flag
             // raised after this look is seen by the next pass, as one raised after the section is.
-            let quiet = next.map_or(true, |cell| {
+            let quiet = next.is_none_or(|cell| {
                 !cell.wake.load(Ordering::Acquire) && !cell.cancel.load(Ordering::Acquire)
             });
             if quiet && owed.is_none() {

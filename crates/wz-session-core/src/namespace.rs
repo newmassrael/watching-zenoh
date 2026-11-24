@@ -679,16 +679,11 @@ impl NamespaceIngress {
             return !self.blocked_interests.remove(&i.interest_id);
         }
         let id = i.interest_id;
-        // Read before the mutable borrow of the same body below.
-        // A `match`, not `is_none_or`: that method is stable since 1.82 and this
-        // workspace's MSRV is 1.81 (`crates/Cargo.toml`), which
-        // `clippy::incompatible-msrv` enforces on this lane.
-        let sender = match interest_body(&i.header_c_or_f) {
-            Some(b) => (b.header & INTEREST_BODY_M) != 0,
-            // No body means no keyexpr, so the mapping is never consulted; this
-            // is the value the decoded variant would have reported anyway.
-            None => true,
-        };
+        // Read before the mutable borrow of the same body below. No body means no
+        // keyexpr, so the mapping is never consulted; `true` is the value the decoded
+        // variant would have reported anyway.
+        let sender =
+            interest_body(&i.header_c_or_f).is_none_or(|b| (b.header & INTEREST_BODY_M) != 0);
         match interest_body_mut(&mut i.header_c_or_f).and_then(|b| b.keyexpr.as_mut()) {
             Some(we) => {
                 if self.strip_mapped(we, None, sender) {

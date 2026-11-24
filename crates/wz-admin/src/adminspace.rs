@@ -713,7 +713,7 @@ fn push_plugins_object<W: TextOut + ?Sized>(plugins: &[AdminPlugin], out: &mut W
             if last.is_some_and(|last| candidate <= last) {
                 continue;
             }
-            if next.map_or(true, |best| candidate < best) {
+            if next.is_none_or(|best| candidate < best) {
                 next = Some(candidate);
             }
         }

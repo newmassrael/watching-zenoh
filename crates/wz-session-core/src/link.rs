@@ -1671,13 +1671,13 @@ impl LinkSubject {
     /// [`opt_matches_interfaces`](Self::opt_matches_interfaces). That is what
     /// makes both axes OPT-IN, as zenoh's `Option<NEVec<_>>` config fields are.
     pub fn opt_matches_protocols(subject: Option<&Self>, protocols: &[InterceptorLink]) -> bool {
-        protocols.is_empty() || subject.map_or(true, |s| s.matches_protocols(protocols))
+        protocols.is_empty() || subject.is_none_or(|s| s.matches_protocols(protocols))
     }
 
     /// [`matches_interfaces`](Self::matches_interfaces) over an OPTIONAL subject.
     /// See [`opt_matches_protocols`](Self::opt_matches_protocols).
     pub fn opt_matches_interfaces(subject: Option<&Self>, interfaces: &[String]) -> bool {
-        interfaces.is_empty() || subject.map_or(true, |s| s.matches_interfaces(interfaces))
+        interfaces.is_empty() || subject.is_none_or(|s| s.matches_interfaces(interfaces))
     }
 }
 
