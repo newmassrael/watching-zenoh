@@ -1451,6 +1451,32 @@ impl<
             return None;
         }
 
+        // One unit of input at most a step. Nothing left to read and the link is gone (a stream
+        // whose peer closed it): the session is told, after everything queued before the end has
+        // been read. The next step finds the engine final.
+        if !self.take_input(now_ms, on_event) {
+            if let Some(cause) = self.link.lost() {
+                let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
+                on_event.event(IterationEvent::Poll(&outcome));
+                return None;
+            }
+        }
+
+        // The session's timers are handed the time whether or not a unit was taken: a peer that
+        // sends faster than this end reads leaves a unit waiting at every step, and a step that
+        // ended on its unit would never send the keep-alive this end owes, so the peer's lease of
+        // this end would run out while its input is being read. The unit is taken first, so the
+        // lease is judged after what the peer sent last.
+        self.timers
+            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
+
+        None
+    }
+
+    /// Hand the session one unit of input, when the link has one: the parked remainder of the
+    /// last unit first, then the link's next datagram. Whether a unit was handed.
+    #[cfg(any(feature = "alloc", feature = "rx-in-place"))]
+    fn take_input<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> bool {
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
         // message until the peer sends again.
@@ -1472,7 +1498,7 @@ impl<
                 &mut *on_event,
             );
             if parked {
-                return None;
+                return true;
             }
         }
 
@@ -1502,14 +1528,13 @@ impl<
                 }
             });
             if received {
-                return None;
+                return true;
             }
         }
 
-        // Inbound datagram? Dispatch it and loop promptly for the next. It is
-        // the link's peer's: the link hands over nothing else. Unicast MCU
-        // session shell — one peer per link, so no source attribution is
-        // needed.
+        // Inbound datagram? Dispatch it. It is the link's peer's: the link hands
+        // over nothing else. Unicast MCU session shell — one peer per link, so no
+        // source attribution is needed.
         #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
         if let Some(frame) = self.link.try_recv() {
             self.rx.dispatch_frame(
@@ -1519,23 +1544,16 @@ impl<
                 now_ms,
                 &mut *on_event,
             );
-            return None;
+            return true;
         }
 
-        // Nothing left to read and the link is gone (a stream whose peer closed
-        // it): the session is told, after everything queued before the end has
-        // been read. The next step finds the engine final.
-        if let Some(cause) = self.link.lost() {
-            let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
-            on_event.event(IterationEvent::Poll(&outcome));
-            return None;
-        }
+        false
+    }
 
-        // No inbound: the session's timers are handed the time, and raise what has come due.
-        self.timers
-            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
-
-        None
+    /// A build with neither receive takes no input.
+    #[cfg(not(any(feature = "alloc", feature = "rx-in-place")))]
+    fn take_input<F: EventSink>(&mut self, _now_ms: u64, _on_event: &mut F) -> bool {
+        false
     }
 }
 
@@ -3064,6 +3082,166 @@ mod wake_budget_tests {
             "due: the timeout moved the machine on"
         );
         assert_eq!(events, 0, "the handshake's timeout is the machine's event");
+    }
+
+    /// An established session whose peer sends without pause owes the peer its keep-alives as an
+    /// idle one does: the peer leases this end on what it hears, and a receiver slower than its
+    /// sender finds a unit waiting at every step.
+    #[cfg(all(
+        feature = "transport-keepalive",
+        feature = "codec-keep-alive",
+        feature = "session-unicast-open"
+    ))]
+    mod flooded {
+        use alloc::rc::Rc;
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use core::cell::Cell;
+        use core::sync::atomic::{AtomicU64, Ordering};
+
+        use wz_session_core::driver_loop::IterationEvent;
+        use wz_session_core::handshake_encode::encode_keep_alive;
+        use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, RxFrame};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::session_fsm_unicast::{
+            SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
+        };
+        use wz_session_core::session_timeouts::SessionTimeouts;
+
+        use super::{params, Counting};
+        use crate::session_drive::{
+            SessionDatagramLink, SessionDriveConfig, SessionPump, SessionRole,
+        };
+        use crate::session_runtime::{new_session_actions, SessionEntropy};
+        use crate::time::{ClockSource, CoopTime};
+        use crate::CoopRuntime;
+
+        /// The clock's reading when the session is made, in microseconds.
+        const START_US: u64 = 1_000_000;
+
+        /// A clock the test moves.
+        struct Moved(Arc<AtomicU64>);
+
+        impl ClockSource for Moved {
+            fn now_us(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        /// The peer's side of the link: when `flooding`, a KeepAlive of the peer's is waiting at
+        /// every step, as a socket holds the backlog of a faster sender; otherwise nothing is.
+        struct Peer {
+            flooding: bool,
+            taken: Cell<u32>,
+        }
+
+        impl SessionDatagramLink for Peer {
+            fn service(&self) {}
+
+            fn try_recv(&self) -> Option<RxFrame> {
+                if !self.flooding {
+                    return None;
+                }
+                self.taken.set(self.taken.get() + 1);
+                Some(RxFrame::new(encode_keep_alive().to_vec()))
+            }
+        }
+
+        /// A driver that counts the KeepAlives the session sends through it.
+        struct KeepAlivesSent(Rc<Cell<u32>>);
+
+        impl BoxedLinkDriver for KeepAlivesSent {
+            fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                if bytes == encode_keep_alive() {
+                    self.0.set(self.0.get() + 1);
+                }
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        /// Step a dialled session, brought to Established, once every `TICK_MS` of its clock up
+        /// to `SPAN_MS`, short of its lease, its peer flooding it or silent; the instants of its
+        /// clock, in milliseconds after it was established, at which it sent a KeepAlive.
+        fn keepalives_sent(flooding: bool) -> Vec<u64> {
+            const TICK_MS: u64 = 500;
+            const SPAN_MS: u64 = 9_000;
+            let now_us = Arc::new(AtomicU64::new(START_US));
+            let runtime = CoopRuntime::new(Moved(Arc::clone(&now_us)));
+            let clock = CoopTime::new(&runtime);
+            let sent = Rc::new(Cell::new(0u32));
+            let sink = crate::link_cells::heap_sink(KeepAlivesSent(Rc::clone(&sent)));
+            let actions = new_session_actions(sink, params(), clock.clone());
+            assert!(
+                actions.keepalive_interval_ms() + TICK_MS < SPAN_MS,
+                "the span holds a keep-alive interval"
+            );
+            assert!(
+                SPAN_MS < actions.adopted_lease_ms(),
+                "the span ends inside the lease, so a silent peer leaves the session up"
+            );
+            let link = Rc::new(Peer {
+                flooding,
+                taken: Cell::new(0),
+            });
+            let config = SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Initiator,
+                max_iters: None,
+            };
+            let mut pump = SessionPump::new(
+                runtime,
+                Rc::clone(&link),
+                actions,
+                SessionEntropy::new(Counting(0)),
+                clock,
+                config,
+            );
+            pump.engine.process_event(E::InitAckReceived);
+            pump.engine.process_event(E::OpenAckReceived);
+            assert!(
+                pump.engine.get_current_state() == S::Established,
+                "the handshake's answers establish the dialled session"
+            );
+            let mut at = Vec::new();
+            let mut steps = 0u32;
+            let mut ms = 0;
+            while ms <= SPAN_MS {
+                now_us.store(START_US + ms * 1000, Ordering::SeqCst);
+                let before = sent.get();
+                assert_eq!(pump.step(&mut |_event: IterationEvent<'_, '_>| {}), None);
+                steps += 1;
+                if sent.get() > before {
+                    at.push(ms);
+                }
+                ms += TICK_MS;
+            }
+            assert!(
+                pump.engine.get_current_state() == S::Established,
+                "the session is still up at the end of the span"
+            );
+            let taken = link.taken.get();
+            assert_eq!(
+                taken,
+                if flooding { steps } else { 0 },
+                "a flooded session takes a unit at every step, and a silent one none"
+            );
+            at
+        }
+
+        /// Turned red by a step that hands the session's timers the time only when it found no
+        /// input: the flooded session then never sends a KeepAlive, and the peer's lease of it
+        /// runs out while it is reading.
+        #[test]
+        fn a_flooded_session_sends_its_keepalives_when_an_idle_one_does() {
+            let idle = keepalives_sent(false);
+            assert!(
+                !idle.is_empty(),
+                "CONTROL: an idle session sends a KeepAlive within the span"
+            );
+            assert_eq!(keepalives_sent(true), idle);
+        }
     }
 }
 
