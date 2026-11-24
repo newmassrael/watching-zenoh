@@ -3,6 +3,21 @@
   "schema": "wz-no-heap-ratchet/1",
   "tolerance": 0.05,
   "families": {
+    "advanced-put": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "advanced-subscriber-history": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "advanced-subscriber-receive": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "config-clone": {
       "allocs_per_round": 0,
       "locked": true,
