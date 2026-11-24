@@ -2711,6 +2711,33 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
     assert_eq!(open(KeyWireForm::Declared), Some(OpenError::NoEndpoint));
 }
 
+/// A width of sequence numbers the build's `sn-resolution` domain leaves out is refused at the
+/// open, before anything is reserved or dialled, and a width it holds goes on to the endpoints.
+#[test]
+fn a_width_outside_the_sn_resolution_domain_is_refused_at_the_open() {
+    use crate::OpenError;
+    use wz_session_core::policy::SnResolution;
+    use wz_session_core::policy_binding::{OutsideDomain, PolicyValue};
+
+    for width in SnResolution::WIDTHS {
+        let mut config = client_config();
+        config.sn_resolution = width;
+        let refused = Engine::open(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            config,
+        )
+        .err();
+        let want = if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+            OpenError::NoEndpoint
+        } else {
+            OpenError::SnResolution(OutsideDomain { value: width })
+        };
+        assert_eq!(refused, Some(want), "{}", width.id());
+    }
+}
+
 /// A build without groups refuses a session that names one by name, before it dials anything,
 /// and opens no group instead of it: the session would be missing the group it was told to join.
 #[cfg(not(feature = "group"))]

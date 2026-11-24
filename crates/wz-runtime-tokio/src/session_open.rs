@@ -4919,6 +4919,13 @@ pub enum OpenError {
     /// none at all, and the two call for different operator action (nobody is
     /// answering the group, versus the peer that answered will not accept).
     NoTargets,
+    /// The width of sequence numbers the session's parameters offer is one the build's
+    /// `sn-resolution` domain leaves out
+    /// ([`wz_session_core::sn::sn_resolution_admitted`]): the build holds no word for its ring.
+    /// Raised before the link is wired, so nothing of the session reaches the wire.
+    SnResolution(
+        wz_session_core::policy_binding::OutsideDomain<wz_session_core::policy::SnResolution>,
+    ),
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for
@@ -5563,6 +5570,10 @@ async fn initiate_installing<I>(
 where
     I: FnOnce(&Arc<SessionLinkActions>),
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
     let actions = new_session_actions(outbound, params, clock);
@@ -5949,6 +5960,10 @@ async fn initiator_open_offering<S>(
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     // R311y435 — the lean wiring is chosen at RUNTIME from the offer, but ONLY in
     // a build that has the lean transport at all. Without `transport-lowlatency`,
     // `apply_offer` rejects `TransportMode::LowLatency` below, so the branch is
@@ -6209,6 +6224,10 @@ pub async fn accept_and_open_session(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
@@ -6251,6 +6270,10 @@ pub async fn accept_and_open_session_with_auth(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
@@ -6487,6 +6510,10 @@ async fn accept_open_offering<S>(
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
 {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     // R311y435 — same compile-time elision as the initiator twin: without
     // `transport-lowlatency` the lean branch is unreachable (`apply_offer` rejects
     // the mode) and must not be compiled, or the lean wiring stops being dead code
@@ -6599,6 +6626,10 @@ pub async fn accept_and_open_session_with_namespace(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // A width the build's `sn-resolution` domain leaves out has no word to run its ring in: the
+    // opener is told before the link is wired.
+    wz_session_core::sn::sn_resolution_admitted(params.seq_num_res)
+        .map_err(OpenError::SnResolution)?;
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);

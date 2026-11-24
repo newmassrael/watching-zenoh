@@ -31,6 +31,10 @@ pub enum DialRefused {
     /// links, which a session of this runtime cannot hold. Decided by a connection manager from
     /// the list, before any dial.
     MultiLinkGroup,
+    /// The node's sessions offer a width of sequence numbers the build's `sn-resolution` domain
+    /// leaves out, so no endpoint can be dialled until the node's parameters change. Decided by
+    /// the dialer before it opens a link.
+    SnResolution,
 }
 
 impl DialRefused {
@@ -40,6 +44,7 @@ impl DialRefused {
             DialRefused::Unsupported => "unsupported",
             DialRefused::BadAddress => "bad_address",
             DialRefused::MultiLinkGroup => "multi_link_group",
+            DialRefused::SnResolution => "sn_resolution",
         }
     }
 }

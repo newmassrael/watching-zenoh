@@ -90,6 +90,7 @@ mod heap {
     use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::session_timeouts::SessionTimeouts;
+    use wz_session_core::sn::sn_resolution_admitted;
 
     use super::{dial_failed, parse_locator_for, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
@@ -235,12 +236,16 @@ mod heap {
             expected_zid: Option<DirectoryZid>,
         ) -> Result<UdpSession<C>, DialFailed> {
             let to = parse_locator_for(endpoint, L::IPV6).map_err(DialFailed::Refused)?;
+            // A width the build's domain leaves out is the node's to change, not the endpoint's:
+            // refused before a link is opened, and not retried.
+            let params = (self.params)();
+            sn_resolution_admitted(params.seq_num_res)
+                .map_err(|_| DialFailed::Refused(DialRefused::SnResolution))?;
             // The stack picks the local port, one per session, and may have none
             // left to give: that is a failed attempt of this outage, not a refusal.
             let OpenedLink { sink, pump } = self.links.open_initiator(to).map_err(dial_failed)?;
             let runtime = self.local.runtime();
-            let actions =
-                McuActions::<C>::new_generic(sink, (self.params)(), CoopTime::new(runtime));
+            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(runtime));
             if let Some(zid) = expected_zid {
                 actions.expect_peer_zid(zid);
             }
@@ -423,6 +428,45 @@ mod tests {
 
     fn quiet(_: &SessionHandle<FrozenClock>) -> EventSink {
         Box::new(|_| {})
+    }
+
+    /// A width of sequence numbers the build's `sn-resolution` domain leaves out is refused by
+    /// the dialer before it opens a link, as a refusal the manager does not retry; a width the
+    /// domain holds is dialled.
+    #[test]
+    fn a_width_outside_the_sn_resolution_domain_is_refused_before_the_dial() {
+        use wz_session_core::policy::SnResolution;
+        use wz_session_core::policy_binding::PolicyValue;
+
+        let net = MemoryNetwork::new();
+        let near = Rc::new(MemoryLinks::new(net, NODE));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        for width in SnResolution::WIDTHS {
+            let mut dialer = UdpDialer::new(
+                &local,
+                near.clone(),
+                SessionTimeouts::from_build(),
+                move || {
+                    let mut stated = params(0xc2);
+                    stated.seq_num_res = width;
+                    stated
+                },
+                quiet,
+                SessionEntropy::new(Counting(3)),
+            )
+            .with_max_iters(1);
+            let dialled = dialer.dial("udp/10.0.0.1:7496");
+            if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                std::assert!(dialled.is_ok(), "{}", width.id());
+            } else {
+                std::assert!(
+                    matches!(dialled, Err(DialFailed::Refused(DialRefused::SnResolution))),
+                    "{}",
+                    width.id()
+                );
+            }
+        }
     }
 
     /// A dial opens a real session towards the endpoint: an acceptor on the

@@ -22,13 +22,24 @@
 //! unconditional (like [`crate::reliability`]).
 
 use crate::policy::SnResolution;
-use crate::policy_binding::PolicyValue;
+use crate::policy_binding::{OutsideDomain, PolicyValue};
 
 /// Whether the build's `sn-resolution` domain holds `bits-64`, the one width whose ring does
 /// not fit 32 bits. A build that leaves it out never advertises it (it advertises at most
 /// [`SN_RES_WIDEST`]), and a unicast session runs the smaller of the two advertised widths.
 pub const SN_RESOLUTION_HAS_64: bool =
     <SnResolution as PolicyValue>::DOMAIN.contains_index(SnResolution::Bits64.position());
+
+/// Whether a session or a group may run `width`: the build's `sn-resolution` domain holds it.
+/// Each engine's open asks it of every width it is handed, so a width the build holds no word for
+/// ([`Sn`]) is refused to the opener before anything is wired, rather than run on another ring.
+pub fn sn_resolution_admitted(width: SnResolution) -> Result<(), OutsideDomain<SnResolution>> {
+    if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+        Ok(())
+    } else {
+        Err(OutsideDomain { value: width })
+    }
+}
 
 /// The word a sequence number is held in: wide enough for the widest ring the build can
 /// negotiate, so a build without `bits-64` steps its rings in 32-bit arithmetic.
@@ -1268,6 +1279,26 @@ mod tests {
         for wire in [0u64, 1, 0x0FFF_FFFF, u64::from(u32::MAX)] {
             assert_eq!(to_wire(from_wire(wire)), wire, "wire {wire}");
         }
+    }
+
+    /// A width is admitted exactly when the build's domain holds it, and a refused width is named
+    /// in the refusal.
+    #[test]
+    fn a_width_is_admitted_exactly_when_the_domain_holds_it() {
+        for width in SnResolution::WIDTHS {
+            let held = <SnResolution as PolicyValue>::DOMAIN.contains(width);
+            assert_eq!(
+                sn_resolution_admitted(width),
+                if held {
+                    Ok(())
+                } else {
+                    Err(OutsideDomain { value: width })
+                },
+                "{}",
+                width.id()
+            );
+        }
+        assert_eq!(sn_resolution_admitted(SnResolution::DEFAULT), Ok(()));
     }
 
     /// A gap count saturates at `u32::MAX` and is exact below it.
