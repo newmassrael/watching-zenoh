@@ -59,17 +59,12 @@
 //! `std`'s on a host, the host's own calls' in a host library without `std`,
 //! an MCU kernel's in an image. The fan only takes a lock ([`crate::sync::Lock`]).
 
-use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::sync::Lock;
-
-/// A one-shot undo of one leg, which an engine that keeps no key on its pending legs records.
-type OnCancel = Box<dyn FnOnce() + Send>;
 
 /// The token's state, under one lock so "cancel has started", "the fans are off the list" and
 /// "no registration can land" are one fact rather than three.
@@ -243,16 +238,12 @@ pub trait FanCanceller: Send + Sync {
 struct Cancelling {
     key: Option<FanKey>,
     canceller: Option<Weak<dyn FanCanceller>>,
-    undo: Vec<OnCancel>,
 }
 
 impl Cancelling {
     fn run(self) {
         if let (Some(key), Some(canceller)) = (self.key, self.canceller.and_then(|c| c.upgrade())) {
             canceller.cancel_fan(key);
-        }
-        for undo in self.undo {
-            undo();
         }
     }
 }
@@ -263,8 +254,6 @@ struct FanState {
     cancelled: bool,
     /// The engine that ends the legs tagged with the fan's key.
     canceller: Option<Weak<dyn FanCanceller>>,
-    /// The legs an engine that keeps no key on them recorded one undo for.
-    undo: Vec<OnCancel>,
     /// The fan's key, named where the fan lies the first time it is asked, so a fan moved after
     /// it was named is still told apart by the key its engine tagged its legs with.
     key: Option<FanKey>,
@@ -324,7 +313,6 @@ impl CancellableFan {
             state: Lock::new(FanState {
                 cancelled: false,
                 canceller: None,
-                undo: Vec::new(),
                 key: None,
             }),
             token: UnsafeCell::new(None),
@@ -396,28 +384,6 @@ impl CancellableFan {
         })
     }
 
-    /// Record one leg's undo, for an engine that keeps no key on its pending legs, or report that
-    /// the fan was cancelled while it was being issued, in which case `undo` runs HERE, since
-    /// the cancel that already ran could not have seen it.
-    pub fn record(&self, undo: impl FnOnce() + Send + 'static) -> bool {
-        let undo: OnCancel = Box::new(undo);
-        let refused = self.state.with(|state| {
-            if state.cancelled {
-                Some(undo)
-            } else {
-                state.undo.push(undo);
-                None
-            }
-        });
-        match refused {
-            None => true,
-            Some(undo) => {
-                undo();
-                false
-            }
-        }
-    }
-
     /// Whether the fan has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.state.with(|state| state.cancelled)
@@ -442,7 +408,6 @@ impl CancellableFan {
             Some(Cancelling {
                 key: Some(state.key_at(at)),
                 canceller: state.canceller.take(),
-                undo: core::mem::take(&mut state.undo),
             })
         })
     }
@@ -451,7 +416,7 @@ impl CancellableFan {
 impl Drop for CancellableFan {
     fn drop(&mut self) {
         let at = self.address();
-        // Not cancelled: its engine is told it is over, and its undos are forgotten with it.
+        // Not cancelled: its engine is told it is over.
         let (canceller, key) = self
             .state
             .with(|state| (state.canceller.take(), state.key_at(at)));
@@ -505,7 +470,6 @@ pub fn register_fan(token: &Arc<CancellationToken>) -> Option<Arc<CancellableFan
 mod tests {
     use super::*;
     // The tests' own shared state is std's; the token's lock is the port's.
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -622,27 +586,22 @@ mod tests {
         assert_eq!(token.active(), 0);
     }
 
-    /// An undo recorded before the cancel is run by it; one recorded after runs on the spot and
-    /// reports `false`.
+    /// A fan cancelled twice, by its owner and by its token, asks its engine to end its legs once,
+    /// by its key. Turned red by a second cancel that reaches the engine again.
     #[test]
-    fn a_recorded_undo_runs_once_whenever_the_fan_is_cancelled() {
-        let undone = Arc::new(AtomicUsize::new(0));
+    fn a_fan_cancelled_twice_asks_its_engine_once() {
+        let engine = Arc::new(Seen::default());
         let fan = CancellableFan::new();
-        let u = Arc::clone(&undone);
-        assert!(fan.record(move || {
-            u.fetch_add(1, Ordering::SeqCst);
-        }));
+        assert!(fan.attach(&canceller_of(&engine)));
+        let key = fan.key();
         fan.cancel();
         fan.cancel();
-        assert_eq!(undone.load(Ordering::SeqCst), 1);
-        let u = Arc::clone(&undone);
-        assert!(!fan.record(move || {
-            u.fetch_add(1, Ordering::SeqCst);
-        }));
+        assert_eq!(engine.taken(), vec![(key, "cancel")]);
+        drop(fan);
         assert_eq!(
-            undone.load(Ordering::SeqCst),
-            2,
-            "a late record undoes itself"
+            engine.taken(),
+            vec![(key, "cancel")],
+            "a cancelled fan is not over again at its drop"
         );
     }
 }

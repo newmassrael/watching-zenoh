@@ -43,6 +43,7 @@ use wz_session_core::bounded::{BoundedVec, Lent};
 
 use alloc::collections::VecDeque;
 
+use wz_capi_port::cancellation::FanKey;
 use wz_capi_port::sync::{Lock, SessionHeld};
 use wz_capi_port::ReplyCallback;
 use wz_session_core::reply::InboundReply;
@@ -378,12 +379,13 @@ pub(super) enum GetKind {
 }
 
 /// A leg the session has pending: the face it was asked of, the id its callback is held under,
-/// and its entry ([`GetKind`]). A row of a table the session's arena lent, one for each get its
+/// its entry ([`GetKind`]) and the key of the fan that cancels it, when a token can. A row of a table the session's arena lent, one for each get its
 /// tables of pending gets hold.
 pub(crate) struct PendingGet {
     pub(super) face: FaceId,
     pub(super) leg: u64,
     pub(super) kind: GetKind,
+    pub(super) fan: Option<FanKey>,
 }
 
 impl PendingGet {
