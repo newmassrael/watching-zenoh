@@ -41,7 +41,7 @@
 //!   a batch or something it was asked to keep; a pool of slots of that length to encode frames
 //!   into, as many as `TX_POOL_SLOTS` and no more than the links, of which a link holds
 //!   [`LINK_TX_SLOTS`] at a time from its grant to its send; and a place for each link; each table
-//!   with the flags that say which buffers are lent (`SessionArena::lend_links`). The batch is
+//!   with the flags that say which buffers are lent (`ArenaPlan::links_from`). The batch is
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
 //!   the rows lent when the session opens, first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
@@ -51,7 +51,7 @@
 //!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
 //!   arrives and given back when the chain ends, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
-//!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
+//!   ends one), with the flags that say which are lent (`ArenaPlan::reassembly_from`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): the key expressions it declares
@@ -108,12 +108,12 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
+use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
-use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 #[cfg(feature = "query")]
@@ -471,7 +471,7 @@ impl EntityRows {
 
 /// One of each table of a cell for each link: the link's driver's, its gates' and its session's
 /// actions'. A plan holds each table's cell bytes ([`ArenaPlan::holding_cells`]); an open, the
-/// tables the session's arena lends it (`SessionArena::lend_cells`).
+/// tables the session's arena lends it (`ArenaPlan::cells_from`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkCells<T> {
     /// The cells of the stack's drivers of the links.
@@ -670,7 +670,7 @@ impl ArenaPlan {
         let faces = plan.sized(faces_of(config));
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
-        // (`SessionArena::lend_endpoints`): one row of the plan, the two tables' spans.
+        // (`ArenaPlan::endpoints_from`): one row of the plan, the two tables' spans.
         let (dial_rows, listen_rows) = plan.endpoint_rows;
         let texts = plan.sized(
             Arena::table_bytes::<LocatorText>(dial_rows)
@@ -683,7 +683,7 @@ impl ArenaPlan {
             1,
             texts,
         );
-        // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
+        // The links' rows are lent when the session opens, in this order (`ArenaPlan::links_from`).
         plan.put_table(
             ["link receive flags", "link receive buffers"],
             RX_BASIS,
@@ -705,7 +705,7 @@ impl ArenaPlan {
             links,
             LentByteCells::FLAG_BYTES,
         );
-        // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
+        // The delivery lane's area, lent next (`ArenaPlan::lane_from`): one table of one buffer.
         plan.put_table(
             ["delivery lane flag", "delivery lane"],
             "DELIVERY_LANE_BYTES",
@@ -732,7 +732,7 @@ impl ArenaPlan {
             plan.round.key_bytes(),
         );
         // The session's reassembly buffers, which its links share, lent next
-        // (`SessionArena::lend_reassembly`).
+        // (`ArenaPlan::reassembly_from`).
         plan.put_table(
             ["reassembly flags", "reassembly buffers"],
             "PICO_FRAG_MAX_BYTES",
@@ -888,6 +888,104 @@ impl ArenaPlan {
         plan.settled()
     }
 
+    /// The tables of the links' buffers, lent by `lend`: the pool of receive buffers the links
+    /// share, each held by a link only while it holds something of its own in it, the pool of
+    /// outbound slots they share, each held by a link from its grant to its send
+    /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
+    /// session's links claim as they open and give back as they go.
+    pub(crate) fn links_from(&self, lend: &mut TableLender<'_>) -> LinkTables {
+        let rx = lend.byte_cells(self.link_bytes, self.rx_buffers);
+        let tx = lend.byte_cells(self.link_bytes, self.tx_slots);
+        #[cfg(feature = "listen")]
+        {
+            let places = lend.byte_cells(0, self.links);
+            LinkTables::pooled(rx, tx, places)
+        }
+        #[cfg(not(feature = "listen"))]
+        LinkTables::new(rx, tx, self.link_bytes)
+    }
+
+    /// The cells of the links' drivers, their gates and their actions ([`Self::holding_cells`]),
+    /// lent by `lend`, each `None` for a plan with no such table.
+    pub(crate) fn cells_from(
+        &self,
+        lend: &mut TableLender<'_>,
+    ) -> LinkCells<Option<LentByteCells>> {
+        let mut lent = [None, None, None];
+        for (bytes, cells) in self.cell_bytes.into_array().into_iter().zip(&mut lent) {
+            if bytes != 0 {
+                *cells = Some(lend.byte_cells(bytes, self.links));
+            }
+        }
+        LinkCells::from_array(lent)
+    }
+
+    /// The delivery lane's area, lent by `lend`: one table of one buffer of
+    /// `DELIVERY_LANE_BYTES`, claimed by [`Self::claim_lane_and_handle`].
+    pub(crate) fn lane_from(&self, lend: &mut TableLender<'_>) -> LentByteCells {
+        lend.byte_cells(self.lane_bytes, 1)
+    }
+
+    /// The session's reassembly buffers, lent by `lend`: a table the session holds for its life,
+    /// from which a link claims a buffer when a chain's first fragment arrives and gives it back
+    /// when the chain ends.
+    pub(crate) fn reassembly_from(&self, lend: &mut TableLender<'_>) -> LentByteCells {
+        lend.byte_cells(self.reassembly_bytes, self.reassembly_chains)
+    }
+
+    /// The rows of the texts of the endpoints the session dials and listens on, lent by `lend`,
+    /// none written: the session writes each once as it opens.
+    pub(crate) fn endpoints_from(&self, lend: &mut TableLender<'_>) -> EndpointTexts {
+        let (dials, listens) = self.endpoint_rows;
+        EndpointTexts::over(lend.table(dials), lend.table(listens))
+    }
+
+    /// The place for the ABI's handle ([`Self::holding`]), lent by `lend` as a table of one
+    /// buffer, claimed by [`Self::claim_lane_and_handle`]; `None` for a plan with no place.
+    pub(crate) fn handle_from(&self, lend: &mut TableLender<'_>) -> Option<LentByteCells> {
+        (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1))
+    }
+
+    /// The places for the ABI's entities ([`Self::holding`]), lent by `lend`, a table of each
+    /// kind the plan holds places of.
+    pub(crate) fn places_from(&self, lend: &mut TableLender<'_>) -> EntityPlaces {
+        let mut places = EntityPlaces::NONE;
+        for ((kind, bytes), cells) in EntityKind::ALL
+            .into_iter()
+            .zip(self.entity_bytes)
+            .zip(places.cells.iter_mut())
+        {
+            if bytes != 0 {
+                *cells = Some(lend.byte_cells(bytes, self.entities.of_kind(kind)));
+            }
+        }
+        places
+    }
+
+    /// The one buffer of each of `lane` and `handle`, tables of one buffer the plan's lender
+    /// lent whole, claimed for the session's life: the lane's place and length, and the handle's
+    /// place when the plan holds one. The claims are never given back: what holds a buffer holds
+    /// it until the session is let go, and a buffer dropped then would write its cell's flag into
+    /// an arena given back before it. Refused as an arena with no room for a table lent no buffer.
+    pub(crate) fn claim_lane_and_handle(
+        &self,
+        lane: LentByteCells,
+        handle: Option<LentByteCells>,
+    ) -> Result<((NonNull<u8>, usize), Option<HandlePlace>), ArenaRefused> {
+        let lane = claimed(lane);
+        let handle = handle.map(claimed);
+        match (lane, handle) {
+            (Some(lane), None) => Ok((lane, None)),
+            (Some(lane), Some(Some((base, bytes)))) => {
+                Ok((lane, Some(HandlePlace { base, bytes })))
+            }
+            (None, _) | (_, Some(None)) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
+                asked: Some(self.lane_bytes.max(self.handle_bytes)),
+                left: 0,
+            })),
+        }
+    }
+
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) {
         let rows = self.entities;
@@ -915,7 +1013,7 @@ impl ArenaPlan {
             EntryBytes::INTEREST,
         );
         // The keys of those rows and of every other keyed row of the session, in one area that a
-        // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
+        // key takes a block of as long as it is held (`TableLender::keys`), not a row of
         // each.
         let keys = self.sized(KeySpace::span_bytes(self.key_bytes));
         self.put("key arena", "KEY_ARENA_BYTES", 1, keys);
@@ -1599,6 +1697,15 @@ impl EntityPlaces {
     }
 }
 
+/// The one buffer of `cells`, a table of one buffer, claimed and never given back:
+/// its place and length, `None` for a table lent no buffer.
+fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
+    let buffer = cells.claim()?;
+    let (base, len) = buffer.raw();
+    core::mem::forget(buffer);
+    Some((NonNull::new(base)?, len))
+}
+
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let
 /// go.
 pub(crate) struct SessionArena {
@@ -1646,154 +1753,11 @@ impl SessionArena {
         self.arena.bytes()
     }
 
-    /// Lend the tables of the links' buffers `plan` lays out, its first rows: the pool of receive
-    /// buffers the links share, each held by a link only while it holds something of its own in
-    /// it, the pool of outbound slots they share, each held by a link from its grant to its send
-    /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
-    /// session's links claim as they open and give back as they go. Refused only by an arena
-    /// reserved by another plan.
-    pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
-        let rx = self.cells(plan.link_bytes, plan.rx_buffers)?;
-        let tx = self.cells(plan.link_bytes, plan.tx_slots)?;
-        #[cfg(feature = "listen")]
-        {
-            let places = self.cells(0, plan.links)?;
-            Ok(LinkTables::pooled(rx, tx, places))
-        }
-        #[cfg(not(feature = "listen"))]
-        Ok(LinkTables::new(rx, tx, plan.link_bytes))
-    }
-
-    /// Lend the delivery lane's area `plan` lays out, next after the links' buffers: one buffer of
-    /// `DELIVERY_LANE_BYTES`, held by the session's lane for the session's life. Refused only by
-    /// an arena reserved by another plan.
-    pub(crate) fn lend_lane(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<(NonNull<u8>, usize), ArenaRefused> {
-        self.one_buffer(plan.lane_bytes)
-    }
-
-    /// Lend the session's reassembly buffers `plan` lays out, next after the lane: a table the
-    /// session holds for its life, from which a link claims a buffer when a chain's first fragment
-    /// arrives and gives it back when the chain ends. Refused only by an arena reserved by another
-    /// plan.
-    pub(crate) fn lend_reassembly(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<LentByteCells, ArenaRefused> {
-        self.cells(plan.reassembly_bytes, plan.reassembly_chains)
-    }
-
-    /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
-    /// on, none written: the session writes each once as it opens. Refused only by an arena
-    /// reserved by another plan.
-    pub(crate) fn lend_endpoints(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<EndpointTexts, ArenaRefused> {
-        let (dials, listens) = plan.endpoint_rows;
-        Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
-    }
-
-    /// Lend the cells `plan` lays out for its links' drivers, their gates and their actions
-    /// ([`ArenaPlan::holding_cells`]), each `None` for a plan with no such table. Refused only by
-    /// an arena reserved by another plan.
-    pub(crate) fn lend_cells(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<LinkCells<Option<LentByteCells>>, ArenaRefused> {
-        let mut lent = [None, None, None];
-        for (bytes, cells) in plan.cell_bytes.into_array().into_iter().zip(&mut lent) {
-            if bytes != 0 {
-                *cells = Some(self.cells(bytes, plan.links)?);
-            }
-        }
-        Ok(LinkCells::from_array(lent))
-    }
-
-    /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
-    /// in, for the session's life, each key at most `longest` bytes, the session's
-    /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_keys(
-        &mut self,
-        plan: &ArenaPlan,
-        longest: MaxKeyexprBytesHeld,
-    ) -> Result<KeySpace, ArenaRefused> {
-        self.arena
-            .lend_keys(plan.key_bytes, longest)
-            .map_err(ArenaRefused::Lend)
-    }
-
-    /// Lend the place for the ABI's handle `plan` holds, its last row: held by the handle for the
-    /// session's life and never given back to the arena, as the lane's area is not. `None` for a
-    /// plan with no place. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_handle(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<Option<HandlePlace>, ArenaRefused> {
-        if plan.handle_bytes == 0 {
-            return Ok(None);
-        }
-        let (base, bytes) = self.one_buffer(plan.handle_bytes)?;
-        Ok(Some(HandlePlace { base, bytes }))
-    }
-
-    /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
-    /// of each kind it holds places of. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_entity_places(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<EntityPlaces, ArenaRefused> {
-        let mut places = EntityPlaces::NONE;
-        for ((kind, bytes), cells) in EntityKind::ALL
-            .into_iter()
-            .zip(plan.entity_bytes)
-            .zip(places.cells.iter_mut())
-        {
-            if bytes == 0 {
-                continue;
-            }
-            *cells = Some(self.cells(bytes, plan.entities.of_kind(kind))?);
-        }
-        Ok(places)
-    }
-
-    /// A table of `count` cells of `bytes` each, lent from the arena: the one body every table of
-    /// cells the session's arena lends goes through. Refused only by an arena reserved by another
-    /// plan.
-    #[inline(never)]
-    fn cells(&mut self, bytes: usize, count: usize) -> Result<LentByteCells, ArenaRefused> {
-        self.arena
-            .lend_byte_cells(bytes, count)
-            .map_err(ArenaRefused::Lend)
-    }
-
-    /// The one buffer of a table of one cell of `bytes`, claimed for the session's life: its place
-    /// and its length. The claim is never given back: what holds the buffer holds it until the
-    /// session is let go, and a buffer dropped then would write its cell's flag into an arena given
-    /// back before it.
-    #[inline(never)]
-    fn one_buffer(&mut self, bytes: usize) -> Result<(NonNull<u8>, usize), ArenaRefused> {
-        let cells = self.cells(bytes, 1)?;
-        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
-            asked: Some(bytes),
-            left: 0,
-        });
-        let buffer = cells.claim().ok_or(refused)?;
-        let (base, len) = buffer.raw();
-        core::mem::forget(buffer);
-        Ok((NonNull::new(base).ok_or(refused)?, len))
-    }
-
-    /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
-    /// taking nothing, past `N` or past what is left, which an arena reserved by the plan that
-    /// counts the table never is.
-    pub(crate) fn lend<T, const N: usize>(
-        &mut self,
-        rows: usize,
-    ) -> Result<BoundedVec<T, N, Lent>, ArenaRefused> {
-        self.arena.lend(rows).map_err(ArenaRefused::Lend)
+    /// One lender of the arena's tables ([`TableLender`]): the tables of the plan are lent through
+    /// it whole, a table refused leaving the ones after it rowless, and the first refusal is asked
+    /// once, after them all.
+    pub(crate) fn lender(&mut self) -> TableLender<'_> {
+        TableLender::new(&mut self.arena)
     }
 
     /// The arena, to lend from.

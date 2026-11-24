@@ -686,12 +686,14 @@ struct SessionLent {
     arena: SessionArena,
 }
 
-/// Reserve the arena `plan` lays out in `memory` and lend from it, in the order the plan laid
-/// them out, every table of the session opened with `config` under `policy`: the links'
-/// buffers and cells, the round of deliveries, the reassembly, the endpoints' rows, the tables of
-/// the session's own declarations and the application's, and the ABI's places. The first table
-/// refused refuses the open, and what was lent before it goes back with the arena. Out of line
-/// and generic over nothing: one body for every stack and source the open is made over.
+/// Reserve the arena `plan` lays out in `memory` and lend from it every table of the session
+/// opened with `config` under `policy`: the links' buffers and cells, the round of deliveries,
+/// the reassembly, the endpoints' rows, the tables of the session's own declarations and the
+/// application's, and the ABI's places. The plain tables are lent by one lender, which gives the
+/// tables after a refusal no rows and is asked once, after them all; the round's tables and the
+/// application's, which their makers lend, ask their own. What was lent before a refusal goes
+/// back with the arena. Out of line and generic over nothing: one body for every stack and
+/// source the open is made over.
 #[inline(never)]
 fn lend_session(
     plan: &ArenaPlan,
@@ -700,25 +702,33 @@ fn lend_session(
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut arena = SessionArena::reserve(plan, memory)?;
-    let link_tables = arena.lend_links(plan)?;
-    let cells = arena.lend_cells(plan)?;
-    let (lane_area, lane_bytes) = arena.lend_lane(plan)?;
+    let mut lend = arena.lender();
+    let link_tables = plan.links_from(&mut lend);
+    let cells = plan.cells_from(&mut lend);
+    let lane = plan.lane_from(&mut lend);
+    let reassembly = plan.reassembly_from(&mut lend);
+    let endpoints = plan.endpoints_from(&mut lend);
+    // The tables of the session's own declarations, as the plan counts them; a count past the
+    // address space is a table the lender refuses.
+    let entities = plan.entities();
+    let filters = lend.table(entities.filters().unwrap_or(usize::MAX));
+    let interests = lend.table(entities.interests().unwrap_or(usize::MAX));
+    let matches = lend.table(entities.matching_listeners);
+    let keys = lend.keys(plan.key_bytes(), config.limits.max_keyexpr_bytes_held());
+    // The ends of the session's legs wait in rows the plan counts for them.
+    #[cfg(feature = "query")]
+    let legs = lend.table(plan.gets().legs().unwrap_or(usize::MAX));
+    let handle = plan.handle_from(&mut lend);
+    let places = plan.places_from(&mut lend);
+    let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    let ((lane_area, lane_bytes), handle_place) = plan.claim_lane_and_handle(lane, handle)?;
+    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
-    let reassembly = arena.lend_reassembly(plan)?;
-    let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
-    let endpoints = arena.lend_endpoints(plan)?;
     // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
     // and given back only when the session is let go, after its last delivery; the round's
     // tables are let go of before it (`Round::let_go`, in the engine's drop).
     let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
-    // The tables of the session's own declarations, lent from the arena as the plan counts
-    // them. Declared after the arena, so a refusal drops them first.
-    let entities = plan.entities();
-    let filters = arena.lend(entities.filters().ok_or(ArenaRefused::TooLarge)?)?;
-    let interests = arena.lend(entities.interests().ok_or(ArenaRefused::TooLarge)?)?;
-    let matches = arena.lend(entities.matching_listeners)?;
-    let keys = arena.lend_keys(plan, config.limits.max_keyexpr_bytes_held())?;
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in a table the plan counts.
     #[cfg(feature = "queryable")]
@@ -742,13 +752,6 @@ fn lend_session(
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
-    // The ends of the session's legs wait in rows the plan counts for them.
-    #[cfg(feature = "query")]
-    let ended = EndedLegs::over(arena.lend(plan.gets().legs().ok_or(ArenaRefused::TooLarge)?)?);
-    // The ABI's handle's place, the plan's last row, and the places of the ABI's objects of the
-    // session's entities, the rows after it.
-    let handle_place = arena.lend_handle(plan)?;
-    let places = arena.lend_entity_places(plan)?;
     Ok(SessionLent {
         link_tables,
         cells,
@@ -763,7 +766,7 @@ fn lend_session(
         plane,
         registry,
         #[cfg(feature = "query")]
-        ended,
+        ended: EndedLegs::over(legs),
         handle_place,
         places,
         arena,
