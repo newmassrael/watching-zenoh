@@ -491,9 +491,29 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
         (table.capacity(), table.size()),
         (caps::UDP_PORT_SLOTS, batch)
     );
+    // The ports' book: a peer row for each link the session may hold, and a queue row for each
+    // slot a waiting datagram holds.
+    let links = row(&listening, "link places").count;
+    assert_eq!(
+        Some(row(&listening, "udp port peers").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(
+            links
+        )
+    );
+    assert_eq!(
+        Some(row(&listening, "udp port queue").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::QueuedDatagram>(
+            caps::UDP_PORT_SLOTS
+        )
+    );
 
     let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
     assert_eq!(row(&dialling, "link port datagram slots").count, 0);
+    assert_eq!(
+        Some(row(&dialling, "udp port peers").entry_bytes),
+        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
+        "a session that listens on nothing keeps no peer row"
+    );
 }
 
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest

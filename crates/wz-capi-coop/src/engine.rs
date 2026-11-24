@@ -687,6 +687,9 @@ struct SessionLent {
     /// The places of the publishes the session keeps for its other faces, the engine's.
     #[cfg(any(feature = "listen", feature = "group"))]
     handed: HandedTable,
+    /// The rows the stack's udp ports keep their peers and their datagrams in, the stack's.
+    #[cfg(feature = "listen")]
+    port_rows: wz_runtime_coop::udp_link::PortRows,
     arena: SessionArena,
 }
 
@@ -744,6 +747,8 @@ fn lend_session(
         endpoints,
         #[cfg(any(feature = "listen", feature = "group"))]
         handed,
+        #[cfg(feature = "listen")]
+        port_rows,
     } = plan.transport().lent_from(&mut lend);
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
@@ -817,6 +822,8 @@ fn lend_session(
         places,
         #[cfg(any(feature = "listen", feature = "group"))]
         handed,
+        #[cfg(feature = "listen")]
+        port_rows,
         arena,
     })
 }
@@ -4188,6 +4195,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             key_forms,
         } = decided;
         links.lend_buffers(lent.link_tables);
+        #[cfg(feature = "listen")]
+        links.lend_port_rows(lent.port_rows);
         if let Some(driver_cells) = lent.cells.driver {
             links.lend_cells(driver_cells);
         }
