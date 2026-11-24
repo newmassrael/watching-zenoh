@@ -579,11 +579,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         } else {
             &(*options).publisher_options
         });
-        // The same outbound canon gate every declare in this crate hoists, so a
-        // key no peer could take is refused with the code a plain publisher
-        // gives it before anything is declared.
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
+        // The same outbound gate every declare in this crate hoists, so a key
+        // no peer could take is refused with the code a plain publisher gives
+        // it before anything is declared.
+        if let Err(code) = crate::keyexpr::outbound_key(&ke) {
+            return code;
         }
         let session = PicoSession::of(handle);
         // The publisher's source identity is the session's own zid, the one its
