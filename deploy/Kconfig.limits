@@ -577,6 +577,16 @@ config WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS
 	  detection token, which are counted in their own tables. Declaring one more
 	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
 
+config WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS
+	int "MAX_SAMPLE_MISS_LISTENERS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The sample-miss listeners one advanced subscriber of the zenoh-pico
+	  interface holds at once, owned or background, each in a room of the
+	  subscriber's place. Declaring one more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every room is taken.
+
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
 	default 64
