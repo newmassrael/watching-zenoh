@@ -219,6 +219,16 @@ fn place_of(holders: &[FaceId], id: FaceId) -> Option<usize> {
         .filter(|_| id != NO_FACE)
 }
 
+/// A face as the dispatch of its link or group names it: the place of its set and its id, read
+/// once as the dispatch is made ([`Registry::held`]). The set is the face's while its row of the
+/// index of held sets names the id, so the key of a face that went finds nothing, whichever face
+/// holds the set since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HeldFace {
+    at: usize,
+    id: FaceId,
+}
+
 /// Where a liveliness subscriber's history stands ([`Registry::next_history_token`]): the face
 /// whose peer's tokens it reads now, by id, and the last token handed from them.
 #[cfg(feature = "liveliness")]
@@ -661,6 +671,20 @@ impl Registry {
         self.held_at(id).and_then(|at| self.set(at))
     }
 
+    /// The key face `id` is found by while the session holds it ([`HeldFace`]): one that finds
+    /// no set for a face it does not hold.
+    pub(super) fn held(&self, id: FaceId) -> HeldFace {
+        HeldFace {
+            at: self.held_at(id).unwrap_or(usize::MAX),
+            id,
+        }
+    }
+
+    /// Where the set `face` names lies, while its face holds it: read at its place, with no walk.
+    fn place(&self, face: HeldFace) -> Option<usize> {
+        (self.holders.get(face.at) == Some(&face.id)).then_some(face.at)
+    }
+
     /// The tables of face `id`, while the session holds it, to write.
     fn held_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
         let at = self.held_at(id)?;
@@ -737,7 +761,7 @@ impl Registry {
     }
 
     /// The tables of face `id`, while the session holds it.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(feature = "query")]
     pub(super) fn face_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
         self.writing();
         self.held_mut(id)
@@ -773,8 +797,9 @@ impl Registry {
 
     /// The application's part, the tables of face `id` and those of the others, apart so each can
     /// be used as its call needs: what every dispatch and drain takes.
-    fn split(&mut self, id: FaceId) -> Option<Split<'_>> {
+    fn split(&mut self, at: Option<usize>) -> Option<Split<'_>> {
         self.writing();
+        let at = at?;
         let Self {
             app,
             delivery,
@@ -783,7 +808,6 @@ impl Registry {
             ..
         } = self;
         let holders: &[FaceId] = &holders[..];
-        let at = place_of(holders, id)?;
         #[cfg(any(feature = "listen", feature = "group", test))]
         let (face, others) = {
             let (before, rest) = sets.split_at_mut_checked(at)?;
@@ -809,24 +833,24 @@ impl Registry {
 
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
-    pub(super) fn dispatch_event(&mut self, id: FaceId, event: IterationEvent<'_, '_>) {
+    pub(super) fn dispatch_event(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         #[cfg(all(test, feature = "std"))]
         if super::lent_push(&event) {
             self.pushes.2 += 1;
         }
         #[cfg(feature = "declarations-synced-event")]
-        let was_final = self.declarations_final(id);
+        let was_final = self.declarations_final(face);
         if let Some(Split {
             app,
             delivery,
-            face,
+            face: set,
             others,
-        }) = self.split(id)
+        }) = self.split(self.place(face))
         {
-            app.dispatch_event_among(delivery, &mut face.peer, &mut face.gets, event, &others);
+            app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others);
         }
         #[cfg(feature = "declarations-synced-event")]
-        if !was_final && self.declarations_final(id) {
+        if !was_final && self.declarations_final(face) {
             // SAFETY: a face's frame is dispatched under the session's lock.
             unsafe { self.decl_watches.heard_synced() };
         }
@@ -878,8 +902,9 @@ impl Registry {
 
     /// Whether the peer of face `id` has ended its initial declarations since its link came up.
     #[cfg(feature = "declarations-synced-event")]
-    fn declarations_final(&self, id: FaceId) -> bool {
-        self.tables_of(id)
+    fn declarations_final(&self, face: HeldFace) -> bool {
+        self.place(face)
+            .and_then(|at| self.set(at))
             .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
     }
 
@@ -905,10 +930,10 @@ impl Registry {
     /// leaves each peer to read the table's epoch, and nothing else reads it. Only a build that
     /// answers its peers' Interests keeps any to reconcile.
     #[cfg(feature = "interest-answer")]
-    fn reconcile_subscribers(&mut self, id: FaceId) {
+    fn reconcile_subscribers(&mut self, face: HeldFace) {
         // Handed out to be written, as `Self::split` hands a face's tables out.
         self.writing();
-        if let Some(set) = self.held_at(id).and_then(|at| self.sets.get_mut(at)) {
+        if let Some(set) = self.place(face).and_then(|at| self.sets.get_mut(at)) {
             reconcile_face(&self.app, set);
         }
     }
@@ -918,13 +943,13 @@ impl Registry {
     /// prunes leave through `actions`. The `Final`s are taken with
     /// [`Self::take_pending_final_rids`].
     #[cfg(feature = "queryable")]
-    pub(super) fn flush_pending_replies<S>(&mut self, id: FaceId, actions: &S)
+    pub(super) fn flush_pending_replies<S>(&mut self, face: HeldFace, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         #[cfg(feature = "interest-answer")]
-        self.reconcile_subscribers(id);
-        if let Some(Split { app, face, .. }) = self.split(id) {
+        self.reconcile_subscribers(face);
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
         }
     }
@@ -932,9 +957,11 @@ impl Registry {
     /// The `Final`s the queries of face `id` owe its peer, each with the QoS of its query, taken
     /// so the caller sends them once the last callback that may still answer has.
     #[cfg(feature = "queryable")]
-    pub(super) fn take_pending_final_rids(&mut self, id: FaceId) -> FinalStage<Static> {
-        self.face_mut(id)
-            .map(|face| face.peer.finals.take_owed())
+    pub(super) fn take_pending_final_rids(&mut self, face: HeldFace) -> FinalStage<Static> {
+        self.writing();
+        self.place(face)
+            .and_then(|at| self.sets.get_mut(at))
+            .map(|set| set.peer.finals.take_owed())
             .unwrap_or_default()
     }
 
@@ -949,7 +976,7 @@ impl Registry {
     #[cfg(feature = "queryable")]
     pub(super) fn dispatch_push<S>(
         &mut self,
-        id: FaceId,
+        face: HeldFace,
         event: IterationEvent<'_, '_>,
         actions: &S,
     ) -> FinalStage<Static>
@@ -958,7 +985,7 @@ impl Registry {
     {
         #[cfg(all(test, feature = "std"))]
         let written = self.faces_written;
-        let owed = match self.split(id) {
+        let owed = match self.split(self.place(face)) {
             Some(Split {
                 app,
                 delivery,
@@ -983,14 +1010,14 @@ impl Registry {
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
     /// to wait for does with each event.
     #[cfg(not(feature = "queryable"))]
-    pub(super) fn dispatch<S>(&mut self, id: FaceId, event: IterationEvent<'_, '_>, actions: &S)
+    pub(super) fn dispatch<S>(&mut self, face: HeldFace, event: IterationEvent<'_, '_>, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        self.dispatch_event(id, event);
+        self.dispatch_event(face, event);
         #[cfg(feature = "interest-answer")]
-        self.reconcile_subscribers(id);
-        if let Some(Split { app, face, .. }) = self.split(id) {
+        self.reconcile_subscribers(face);
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
     }
@@ -1001,7 +1028,7 @@ impl Registry {
     #[cfg(not(feature = "queryable"))]
     pub(super) fn dispatch_push<S>(
         &mut self,
-        id: FaceId,
+        face: HeldFace,
         event: IterationEvent<'_, '_>,
         actions: &S,
     ) where
@@ -1014,7 +1041,7 @@ impl Registry {
             delivery,
             face,
             ..
-        }) = self.split(id)
+        }) = self.split(self.place(face))
         {
             face.peer
                 .subscribers
@@ -1031,7 +1058,7 @@ impl Registry {
     /// and the matching listeners are told what that makes of them, the other faces' peers
     /// counting as they do.
     pub(super) fn flush_declarations_on_link_loss(&mut self, id: FaceId) -> usize {
-        self.split(id).map_or(
+        self.split(self.held_at(id)).map_or(
             0,
             |Split {
                  app, face, others, ..
@@ -1571,9 +1598,10 @@ mod tests {
             .peer
             .finals
             .owe(4, QosLevel::DEFAULT);
+        let dial = held.registry.held(DIAL_FACE);
         let owed: Vec<_> = held
             .registry
-            .take_pending_final_rids(DIAL_FACE)
+            .take_pending_final_rids(dial)
             .into_iter()
             .map(|(rid, _)| rid)
             .collect();
@@ -1938,9 +1966,10 @@ mod tests {
             .expect("the open lent a set for the face");
         assert_eq!(&held.registry.holders[..], &[DIAL_FACE, 5, NO_FACE]);
         assert_eq!(held.registry.held_at(NO_FACE), None);
-        assert!(
-            held.registry.split(NO_FACE).is_none(),
-            "no set to split off"
+        assert_eq!(
+            held.registry.place(held.registry.held(NO_FACE)),
+            None,
+            "no key of it finds a set"
         );
         held.registry.remove_face(NO_FACE);
         assert_eq!(
@@ -1953,6 +1982,35 @@ mod tests {
             Some(1),
             "CONTROL: a face is found"
         );
+    }
+
+    /// A face's key finds its set by its place while the face holds it, and nothing once the face
+    /// went, though another face took the set since; the key of a face the session does not hold
+    /// finds nothing. Turned red by a key read off the place alone, without the id.
+    #[test]
+    fn a_faces_key_finds_its_set_until_the_face_goes() {
+        let mut held = held(3);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        let key = held.registry.held(5);
+        assert_eq!(held.registry.place(key), Some(1));
+        assert_eq!(
+            held.registry.place(held.registry.held(DIAL_FACE)),
+            Some(0),
+            "CONTROL: the dial role's face"
+        );
+        held.registry.remove_face(5);
+        held.registry
+            .add_face(6)
+            .expect("the set the face left is free");
+        assert_eq!(
+            held.registry.held_at(6),
+            Some(1),
+            "CONTROL: the next face took the set"
+        );
+        assert_eq!(held.registry.place(key), None, "the face that went");
+        assert_eq!(held.registry.place(held.registry.held(9)), None);
     }
 
     /// The walk over the faces takes exactly the sets faces hold, in set order, as faces come, go
@@ -2016,7 +2074,10 @@ mod tests {
         let others = lying_at(&held.registry, &[0, 2]);
         let Split {
             face, others: seen, ..
-        } = held.registry.split(7).expect("the registry holds the face");
+        } = held
+            .registry
+            .split(held.registry.held_at(7))
+            .expect("the registry holds the face");
         assert!(ptr::eq(&*face, own));
         let seen: Vec<*const FaceTables> =
             seen.faces().map(|face| face as *const FaceTables).collect();

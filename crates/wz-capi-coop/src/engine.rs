@@ -191,7 +191,7 @@ use deliveries::Deliveries;
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
-use registry::{FaceId, Registry, DIAL_FACE};
+use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
@@ -2364,7 +2364,8 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
 /// out at once. Without it everything the dispatch staged goes out at once.
 pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: Rc<RefCell<Registry>>,
-    face: FaceId,
+    /// The face the link serves, its set found by its place for every frame and not looked for.
+    face: HeldFace,
     actions: SessionHandle<C>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -2674,7 +2675,8 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         let generation = self.session.plane.next_generation();
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
-            face,
+            // The registry holds the face before its link is made (`Registry::add_face`).
+            face: self.session.registry.borrow().held(face),
             actions: actions.clone(),
             #[cfg(feature = "queryable")]
             plane: self.session.plane.clone(),
