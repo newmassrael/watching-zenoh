@@ -68,6 +68,14 @@ pub trait DeclView {
     fn id(&self) -> u64;
     /// Resolved keyexpr literal the entity was declared on.
     fn keyexpr(&self) -> &str;
+
+    /// The key of the session's key arena [`Self::keyexpr`] is the whole text of, when the
+    /// declaration's row keeps it there: what a holder that reads the key past the call holds a
+    /// count of, as [`SampleView::keyexpr_held`](crate::sink::SampleView::keyexpr_held). `None`,
+    /// the provided answer, for a key kept nowhere else.
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        None
+    }
 }
 
 /// A [`DeclView`] over loose borrowed fields — the canonical impl the
@@ -79,6 +87,9 @@ pub struct BorrowedDecl<'a> {
     pub id: u64,
     /// Resolved keyexpr literal.
     pub keyexpr: &'a str,
+    /// The key of the session's key arena the declaration's row keeps `keyexpr` in, when it is
+    /// one ([`DeclView::keyexpr_held`]).
+    pub held: Option<&'a crate::key_arena::KeyRef>,
 }
 
 impl DeclView for BorrowedDecl<'_> {
@@ -87,6 +98,9 @@ impl DeclView for BorrowedDecl<'_> {
     }
     fn keyexpr(&self) -> &str {
         self.keyexpr
+    }
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        self.held
     }
 }
 
@@ -479,6 +493,7 @@ mod tests {
         sink.on_declared(&BorrowedDecl {
             id: 7,
             keyexpr: "home/temp",
+            held: None,
         });
         assert_eq!(sink.decls, 1);
         assert_eq!(sink.last_id, 7);
@@ -529,6 +544,7 @@ mod tests {
         let fired = pair.fire_declared(&BorrowedDecl {
             id: 9,
             keyexpr: "k",
+            held: None,
         });
         assert_eq!(fired, 2, "both declaration observers fire");
         assert_eq!(dcount.load(Ordering::SeqCst), 2);
@@ -578,6 +594,7 @@ mod tests {
         let view = BorrowedDecl {
             id: 3,
             keyexpr: "k",
+            held: None,
         };
         assert_eq!(pair.fire_declared(&view), 1, "survivor still fires");
         assert_eq!(first.load(Ordering::SeqCst), 0, "removed observer silent");
@@ -611,10 +628,12 @@ mod tests {
         sink.on_declared(&BorrowedDecl {
             id: 1,
             keyexpr: "a/b",
+            held: None,
         });
         sink.on_declared(&BorrowedDecl {
             id: 2,
             keyexpr: "c/d",
+            held: None,
         });
 
         let got = seen.lock().unwrap();
