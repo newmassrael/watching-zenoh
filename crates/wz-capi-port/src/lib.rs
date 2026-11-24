@@ -84,8 +84,6 @@ mod engine;
 pub mod entity_place;
 pub mod group;
 pub mod held_key;
-// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
