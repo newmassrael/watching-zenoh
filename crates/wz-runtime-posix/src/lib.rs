@@ -122,6 +122,9 @@ pub struct PosixClock;
 
 #[cfg(unix)]
 impl ClockSource for PosixClock {
+    // Out of line: the session's readers call this one body, and a stream's wait for room, which
+    // reads the clock on both sides of its poll, would otherwise carry two copies of it.
+    #[inline(never)]
     fn now_us(&self) -> u64 {
         let mut ts = libc::timespec {
             tv_sec: 0,

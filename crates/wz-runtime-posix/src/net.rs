@@ -282,6 +282,9 @@ pub(crate) fn errno() -> c_int {
 /// Wait up to `timeout_us` microseconds for the stream socket `fd` to take more bytes: `true` on
 /// `POLLOUT`, or on an error or hang-up the write that follows reports; `false` when the time is
 /// up first, or when the wait itself failed otherwise.
+// Out of line: a stream's wait for room, its connect's look and the waits' room each ask, and a
+// copy inlined in each was larger than the call.
+#[inline(never)]
 pub(crate) fn poll_writable(fd: c_int, timeout_us: u64) -> bool {
     let timeout_ms = c_int::try_from(timeout_us.div_ceil(1_000)).unwrap_or(c_int::MAX);
     let mut pfd = libc::pollfd {
