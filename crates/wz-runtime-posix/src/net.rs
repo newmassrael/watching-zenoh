@@ -916,6 +916,10 @@ impl DatagramSocket for PosixUdpSocket {
         *error == PosixNetError::Socket(libc::EAFNOSUPPORT)
     }
 
+    fn address_in_use(error: &PosixNetError) -> bool {
+        *error == PosixNetError::Bind(libc::EADDRINUSE)
+    }
+
     wz_runtime_coop::with_heap_link_seams! {
         type Waits = PosixWaits;
 
@@ -1028,6 +1032,33 @@ mod tests {
         assert!(!PosixUdpSocket::refuses_address(&PosixNetError::Bind(
             libc::EAFNOSUPPORT
         )));
+    }
+
+    /// A bind of a port another socket holds is refused as that, kept apart from a stack with no
+    /// socket to give and from a family the kernel lacks. CONTROL: a descriptor the process has no
+    /// more of is `Exhausted`. Turned red by a refusal that names every failed bind one way.
+    #[test]
+    fn a_port_another_socket_holds_is_refused_as_in_use() {
+        use wz_runtime_coop::session_drive::LinkOpenError;
+        use wz_runtime_coop::udp_link::bind_refused;
+
+        let first = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+        let taken = PosixUdpSocket::bind(first.local())
+            .err()
+            .expect("the port is held");
+        assert_eq!(
+            bind_refused::<PosixUdpSocket>(taken),
+            LinkOpenError::AddressInUse
+        );
+        assert_eq!(
+            bind_refused::<PosixUdpSocket>(PosixNetError::Socket(libc::EMFILE)),
+            LinkOpenError::Exhausted,
+            "CONTROL: no descriptor left"
+        );
+        assert_eq!(
+            bind_refused::<PosixUdpSocket>(PosixNetError::Socket(libc::EAFNOSUPPORT)),
+            LinkOpenError::Unsupported
+        );
     }
 
     #[test]

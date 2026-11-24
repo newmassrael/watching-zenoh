@@ -368,6 +368,10 @@ impl DatagramSocket for WindowsUdpSocket {
         *error == WindowsNetError::Socket(ws::WSAEAFNOSUPPORT)
     }
 
+    fn address_in_use(error: &WindowsNetError) -> bool {
+        *error == WindowsNetError::Bind(ws::WSAEADDRINUSE)
+    }
+
     wz_runtime_coop::with_heap_link_seams! {
         type Waits = super::WindowsWaits;
 
@@ -632,6 +636,33 @@ mod tests {
         assert!(!WindowsUdpSocket::refuses_address(&WindowsNetError::Bind(
             ws::WSAEAFNOSUPPORT
         )));
+    }
+
+    /// A bind of a port another socket holds is refused as that, kept apart from a system with no
+    /// socket to give and from a family it lacks. CONTROL: no socket left is `Exhausted`. Turned
+    /// red by a refusal that names every failed bind one way.
+    #[test]
+    fn a_port_another_socket_holds_is_refused_as_in_use() {
+        use wz_runtime_coop::session_drive::LinkOpenError;
+        use wz_runtime_coop::udp_link::bind_refused;
+
+        let first = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
+        let taken = WindowsUdpSocket::bind(first.local())
+            .err()
+            .expect("the port is held");
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(taken),
+            LinkOpenError::AddressInUse
+        );
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(WindowsNetError::Socket(ws::WSAEMFILE)),
+            LinkOpenError::Exhausted,
+            "CONTROL: no socket left"
+        );
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(WindowsNetError::Socket(ws::WSAEAFNOSUPPORT)),
+            LinkOpenError::Unsupported
+        );
     }
 
     #[test]

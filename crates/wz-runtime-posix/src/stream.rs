@@ -53,12 +53,14 @@ fn stream_socket(at: &SocketAddr) -> Result<c_int, PosixNetError> {
 }
 
 /// A failed open of a stream socket as the stack's refusal of the link: a family the kernel has
-/// no socket of is permanent for the locator, no descriptor left is worth a later try, and
-/// anything else is the other end's or the port's answer, as a retry would meet it.
+/// no socket of is permanent for the locator, no descriptor left is worth a later try, a port
+/// another socket holds is that, and anything else is the other end's or the port's answer, as a
+/// retry would meet it.
 fn open_refused(error: PosixNetError) -> LinkOpenError {
     match error {
         PosixNetError::Socket(libc::EAFNOSUPPORT) => LinkOpenError::Unsupported,
         PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+        PosixNetError::Bind(libc::EADDRINUSE) => LinkOpenError::AddressInUse,
         _ => LinkOpenError::Refused,
     }
 }

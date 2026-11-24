@@ -44,12 +44,13 @@ pub struct WindowsTcpSocket {
 
 /// A failed open of a stream socket as the stack's refusal of the link: a family the system has
 /// no socket of is permanent for the locator, no socket to give (or no Winsock yet) is worth a
-/// later try, and anything else is the other end's or the port's answer, as a retry would meet
-/// it.
+/// later try, a port another socket holds is that, and anything else is the other end's or the
+/// port's answer, as a retry would meet it.
 fn open_refused(error: WindowsNetError) -> LinkOpenError {
     match error {
         WindowsNetError::Socket(ws::WSAEAFNOSUPPORT) => LinkOpenError::Unsupported,
         WindowsNetError::Socket(_) | WindowsNetError::Startup(_) => LinkOpenError::Exhausted,
+        WindowsNetError::Bind(ws::WSAEADDRINUSE) => LinkOpenError::AddressInUse,
         _ => LinkOpenError::Refused,
     }
 }
