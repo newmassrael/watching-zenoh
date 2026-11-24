@@ -29,7 +29,6 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-use wz_session_core::session_tables::LivelinessSubscriberHandle;
 #[cfg(feature = "group")]
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
@@ -197,22 +196,24 @@ impl RowCallback for LivelinessRow {
     fn retire(&self) -> bool {
         self.latch.retire()
     }
+
+    fn drained(&self) -> bool {
+        self.latch.drained()
+    }
 }
 
 /// A call of a liveliness subscriber's callback the session began under its lock and a delivery
-/// makes after it, as a subscriber's ([`super::SubscriberCall`]): the call, and the handle its row
-/// is let go of by when it ends the last call of an undeclared subscriber. Each is ended once
-/// ([`Self::end`]), or its row would keep its slot for good.
+/// makes after it, as a subscriber's ([`super::SubscriberCall`]): where its row lies, and nothing
+/// else. Each is ended once ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct LivelinessCall {
     call: LivelinessRowCall,
-    handle: LivelinessSubscriberHandle,
 }
 
 impl LivelinessCall {
-    /// `call`, begun on the row `handle` names.
-    pub(crate) fn new(call: LivelinessRowCall, handle: LivelinessSubscriberHandle) -> Self {
-        Self { call, handle }
+    /// `call`, begun on a liveliness subscriber's row.
+    pub(crate) fn new(call: LivelinessRowCall) -> Self {
+        Self { call }
     }
 
     /// Whether `other` is a call of the same row.
@@ -227,13 +228,13 @@ impl LivelinessCall {
         unsafe { self.call.0.as_ref() }.hand(sample);
     }
 
-    /// End the call: the handle of its row when it was the last call of an undeclared subscriber,
-    /// which the caller lets go of (`SessionTables::release_liveliness_subscriber`).
-    pub(crate) fn end(self) -> Option<LivelinessSubscriberHandle> {
+    /// End the call: `true` when it was the last call of an undeclared subscriber, whose row the
+    /// session's walk of its tables then lets go of
+    /// (`SessionTables::release_drained_liveliness_subscriber`).
+    pub(crate) fn end(self) -> bool {
         // SAFETY: the row lies where the call began (the tables never move a row) and keeps its
         // slot until its last call ended, which this one is not yet; a call ends with no lock held
         // (`CallLatch::ENDS_HELD` is asserted false where the rows are chosen).
-        let last = unsafe { <LivelinessRow as RowCallback>::end(self.call) };
-        last.then_some(self.handle)
+        unsafe { <LivelinessRow as RowCallback>::end(self.call) }
     }
 }

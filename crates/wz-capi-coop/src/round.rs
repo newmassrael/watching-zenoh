@@ -72,18 +72,15 @@ use crate::engine::LivelinessCall;
 use crate::engine::SubscriberCall;
 #[allow(unused_imports)]
 use crate::prelude::*;
-use wz_capi_port::sync::Lock;
 #[cfg(feature = "query")]
 use wz_capi_port::ReplyCallback;
+#[cfg(feature = "local-subscriber")]
 use wz_session_core::bounded::Static;
-#[cfg(feature = "liveliness")]
-use wz_session_core::session_tables::LivelinessSubscriberHandle;
-use wz_session_core::session_tables::SubscriberHandle;
 #[cfg(feature = "queryable")]
 use {
     crate::engine::QueryableCall, alloc::sync::Weak, core::cell::OnceCell,
-    wz_session_core::query_sink::QueryView, wz_session_core::sample::EncodingHint,
-    wz_session_core::session_tables::QueryableHandle,
+    wz_capi_port::sync::Lock, wz_session_core::query_sink::QueryView,
+    wz_session_core::sample::EncodingHint,
 };
 
 /// The most subscribers one record of a session reaches: a sample's, of the `subscribers` it
@@ -798,22 +795,24 @@ impl Table {
 
 /// The calls of the subscribers a put of the session's own reaches, in the order the session's
 /// table reached them, each begun on its row ([`Round::captured`]).
+///
+/// A fixed array the put takes out of the round whole and holds in its own frame while it hands
+/// the calls out with no lock held, so it takes no heap after the open; its cost is stack. One is
+/// `MAX_SUBSCRIPTIONS` calls of a row's address each (8 bytes on a 64-bit target, 4 on a 32-bit
+/// one) and a length: at the build's default of 100 subscribers, 808 bytes on a 64-bit target and
+/// 404 on a 32-bit one. A subscriber's callback that puts on
+/// its own session from inside the call holds a second one in a frame above the first, and so
+/// on, as zenoh-pico's put re-enters its subscribers at any depth: the session bounds no such
+/// nesting, so its depth, and the stack it takes, are the program's, each level these bytes
+/// beside the callback's own frame. Shared rows of the arena would hand a nested put's calls to
+/// the round when they overflow, which reorders the calls zenoh-pico makes inline, so the frame
+/// keeps its own.
 #[cfg(feature = "local-subscriber")]
 pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
 
-/// A row of the session's tables to let go of, whose last call ended after its entity was
-/// undeclared ([`Round::take_released`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LetGo {
-    /// A subscriber's row.
-    Subscriber(SubscriberHandle),
-    /// A liveliness subscriber's row.
-    #[cfg(feature = "liveliness")]
-    LivelinessSubscriber(LivelinessSubscriberHandle),
-    /// A queryable's row.
-    #[cfg(feature = "queryable")]
-    Queryable(QueryableHandle),
-}
+// A call is a row's address alone; the stack cost stated on `Captured` holds while it stays so.
+#[cfg(feature = "local-subscriber")]
+const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= core::mem::size_of::<usize>());
 
 /// What answers a query the round hands a queryable: the engine, which builds the responder the
 /// query's replies go out through on the link it came in on, and lets go of its Final's hold once
@@ -842,30 +841,21 @@ pub(crate) trait LegHolders: Send + Sync {
     fn release(&self, leg: LegId) -> Option<ReplyCallback>;
 }
 
-/// The rows waiting to be let go of: as many as the tables of the kinds whose calls the round
-/// ends hold.
-const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS
-    + if cfg!(feature = "liveliness") {
-        caps::MAX_LIVELINESS_SUBSCRIPTIONS
-    } else {
-        0
-    }
-    + if cfg!(feature = "queryable") {
-        caps::MAX_QUERYABLES
-    } else {
-        0
-    };
-
-/// The rows whose last call ended after their entity was undeclared, by handle, for the session
-/// to let go of under its lock and drop after it ([`Round::take_released`]). Written by whoever
-/// ends a call: a delivery emptying the round with no lock of the session held, the session's own
-/// put after its calls, the session refusing a record under its lock.
+/// What the round's ends of calls leave the session to let go of: whether a row may wait, and the
+/// drops under way of the rows the session took ([`Round::take_marked`], [`Round::releasing`]).
+/// The rows that wait are found by a walk of the session's tables, each row's latch its own mark
+/// (`SessionTables::release_drained_subscriber` and its kin), so the round keeps no list of them
+/// and none can overflow. Written by whoever ends a call: a delivery emptying the round with no
+/// lock of the session held, the session's own put after its calls, the session refusing a record
+/// under its lock.
 struct Released {
-    handles: Lock<BoundedVec<LetGo, RELEASED_ROWS, Static>>,
-    /// The rows not dropped yet: those `handles` holds and those taken from it whose drop has not
-    /// ended ([`Releasing`]). A delivery that reads none takes no lock for them, and an
+    /// Set by a call that was the last of a row undeclared while it ran, after its latch said so;
+    /// cleared by the session as it starts a walk. The session walks only while it is set, so the
+    /// ends of the calls of live rows cost it no walk.
+    marked: AtomicBool,
+    /// The rows taken out of their tables whose drop has not ended ([`Releasing`]): an
     /// undeclaration that waits for its row reads that no drop is under way.
-    owed: AtomicUsize,
+    dropping: AtomicUsize,
     /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
     /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
     #[cfg(feature = "query")]
@@ -875,51 +865,40 @@ struct Released {
 impl Released {
     fn new() -> Self {
         Self {
-            handles: Lock::new(BoundedVec::new_static()),
-            owed: AtomicUsize::new(0),
+            marked: AtomicBool::new(false),
+            dropping: AtomicUsize::new(0),
             #[cfg(feature = "query")]
             legs: None,
         }
     }
 
-    /// End `call`, its row kept for the session to let go of when it was the row's last call.
+    /// End `call`, marked for the session to let its row go when it was the row's last call.
     fn end(&self, call: SubscriberCall) {
-        if let Some(handle) = call.end() {
-            self.keep(LetGo::Subscriber(handle));
+        if call.end() {
+            self.mark();
         }
     }
 
     /// [`Self::end`] for a call of a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
     fn end_liveliness(&self, call: LivelinessCall) {
-        if let Some(handle) = call.end() {
-            self.keep(LetGo::LivelinessSubscriber(handle));
+        if call.end() {
+            self.mark();
         }
     }
 
     /// [`Self::end`] for a call of a queryable's callback.
     #[cfg(feature = "queryable")]
     fn end_query(&self, call: QueryableCall) {
-        if let Some(handle) = call.end() {
-            self.keep(LetGo::Queryable(handle));
+        if call.end().is_some() {
+            self.mark();
         }
     }
 
-    /// Keep `row`, whose last call ended, for the session to let go of.
-    fn keep(&self, row: LetGo) {
-        let kept = self.handles.with(|handles| {
-            let kept = handles.push(row).is_ok();
-            if kept {
-                self.owed.fetch_add(1, Ordering::AcqRel);
-            }
-            kept
-        });
-        // An undeclared row keeps its slot until it is let go of, so the rows waiting here are
-        // never more than the tables of them hold; one that found no room would keep its slot.
-        debug_assert!(
-            kept,
-            "the rows waiting to be let go of fit the tables of them"
-        );
+    /// Say that a row waits: set after the row's latch said its last call ended, so a session that
+    /// reads it set finds the row drained when it walks.
+    fn mark(&self) {
+        self.marked.store(true, Ordering::Release);
     }
 
     /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
@@ -940,42 +919,17 @@ impl Released {
             Owed::Query(call) => self.end_query(call),
         }
     }
-
-    /// The next row to let go of, counted as owed until what it hands back is dropped.
-    fn take(&self) -> Option<Releasing<'_>> {
-        if self.owed.load(Ordering::Acquire) == 0 {
-            return None;
-        }
-        let handle = self.handles.with(|handles| handles.pop())?;
-        Some(Releasing {
-            released: self,
-            handle,
-        })
-    }
-
-    /// Whether no row is owed: none waits to be let go of and no drop of one is under way.
-    fn settled(&self) -> bool {
-        self.owed.load(Ordering::Acquire) == 0
-    }
 }
 
-/// A row taken to be let go of ([`Round::take_released`]): owed until this is dropped, which its
-/// taker does once the row was dropped.
+/// The drop of a row the session took out of its tables, under way until this is dropped, which
+/// its taker does once the row was dropped ([`Round::releasing`]).
 pub(crate) struct Releasing<'r> {
     released: &'r Released,
-    handle: LetGo,
-}
-
-impl Releasing<'_> {
-    /// The row's handle.
-    pub(crate) fn handle(&self) -> LetGo {
-        self.handle
-    }
 }
 
 impl Drop for Releasing<'_> {
     fn drop(&mut self) {
-        self.released.owed.fetch_sub(1, Ordering::AcqRel);
+        self.released.dropping.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1017,7 +971,7 @@ pub(crate) struct Round {
     /// Written under the session's lock.
     #[cfg(feature = "local-subscriber")]
     capturing: UnsafeCell<Option<Captured>>,
-    /// The rows whose last call ended after their subscriber was undeclared ([`Released`]).
+    /// What the ends of the calls leave the session to let go of ([`Released`]).
     released: Released,
     /// What answers the queries the round hands their queryables, once the engine that sends the
     /// answers is made ([`Self::answer_queries_with`]): the queries' replies go out on their links
@@ -1046,8 +1000,8 @@ pub(crate) struct Round {
 // filling, and by the one delivery that took it while it is delivering; `lending`, `rejoining`,
 // `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
 // kept buffers, whose claims belong to the session's task, are let go of on that task alone;
-// `released` and `answering` behind their own locks, `answering` naming the engine, whose
-// answering is made for any thread, as is the holder of the legs' rows `released` names; every
+// `answering` behind its own lock, naming the engine, whose answering is made for any thread, as
+// is the holder of the legs' rows `released` names, whose other fields are atomics; every
 // other field is an atomic or never written after the round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
@@ -1912,7 +1866,7 @@ impl Round {
     /// Let go of the round's tables, their records and the callbacks those owe, each call ended,
     /// before the arena that lent them: what the session's end does. The tables left are lent
     /// nothing, so the round's own drop, which may come after the arena's, reads none of the arena.
-    /// A row whose last call this ends waits in [`Self::take_released`].
+    /// A row whose last call this ends is marked ([`Self::take_marked`]) and goes with the tables.
     ///
     /// # Safety
     /// No delivery runs and none starts: the session's last handle is being let go of.
@@ -1965,31 +1919,43 @@ impl Round {
         }
     }
 
-    /// End `call`, which the session's own put made ([`Self::captured`]): its row waits in
-    /// [`Self::take_released`] when it was the row's last call.
+    /// End `call`, which the session's own put made ([`Self::captured`]): its row is marked to be
+    /// let go of ([`Self::take_marked`]) when it was the row's last call.
     #[cfg(feature = "local-subscriber")]
     pub(crate) fn end_call(&self, call: SubscriberCall) {
         self.released.end(call);
     }
 
     /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
-    /// row waits in [`Self::take_released`] when it was the row's last call.
+    /// row is marked to be let go of ([`Self::take_marked`]) when it was the row's last call.
     #[cfg(feature = "liveliness")]
     pub(crate) fn end_liveliness_call(&self, call: LivelinessCall) {
         self.released.end_liveliness(call);
     }
 
-    /// The next row whose last call ended after its entity was undeclared, for the session to let
-    /// go of (`SessionTables::release_subscriber` and its kin) under its lock and drop after it,
-    /// and then drop what this hands back.
-    pub(crate) fn take_released(&self) -> Option<Releasing<'_>> {
-        self.released.take()
+    /// Whether a row may wait to be let go of since this was last asked: a call that was the last
+    /// of a row undeclared while it ran has ended. Asking clears it, so the session walks its
+    /// tables for such rows (`SessionTables::release_drained_subscriber` and its kin) once each
+    /// time one may wait, and not at all while none does. A walk begun after the asking finds every
+    /// row marked before it, its latch drained before the mark was set; a row whose last call ends
+    /// after the asking sets it again, for the next walk.
+    pub(crate) fn take_marked(&self) -> bool {
+        self.released.marked.swap(false, Ordering::AcqRel)
     }
 
-    /// Whether no row waits to be let go of and no drop of one is under way: what an undeclaration
-    /// that waits for its row reads once the row left its table.
+    /// Count the drop of a row the session took out of its tables, under its lock, as under way
+    /// until what this hands back is dropped, after the row was.
+    pub(crate) fn releasing(&self) -> Releasing<'_> {
+        self.released.dropping.fetch_add(1, Ordering::AcqRel);
+        Releasing {
+            released: &self.released,
+        }
+    }
+
+    /// Whether no drop of a row the session took out of its tables is under way: what an
+    /// undeclaration that waits for its row reads once the row left its table.
     pub(crate) fn released_settled(&self) -> bool {
-        self.released.settled()
+        self.released.dropping.load(Ordering::Acquire) == 0
     }
 
     /// Empty a sealed round no delivery has taken, handing nothing out, its calls ended: what the

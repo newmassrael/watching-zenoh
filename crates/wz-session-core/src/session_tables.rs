@@ -1100,6 +1100,8 @@ trait Entity {
     fn key_prefix(&self) -> Option<KeyexprHandle>;
     /// Retire what the row calls ([`RowCallback::retire`]): `true` when no call of it runs.
     fn retire(&self) -> bool;
+    /// Whether the row, retired, has no call left running ([`RowCallback::drained`]).
+    fn drained(&self) -> bool;
 }
 
 impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
@@ -1111,6 +1113,9 @@ impl<Key, Cb: RowCallback> Entity for SubscriberRow<Key, Cb> {
     }
     fn retire(&self) -> bool {
         self.callback.retire()
+    }
+    fn drained(&self) -> bool {
+        self.callback.drained()
     }
 }
 
@@ -1124,6 +1129,9 @@ impl<Key, Cb: RowCallback> Entity for QueryableRow<Key, Cb> {
     fn retire(&self) -> bool {
         self.callback.retire()
     }
+    fn drained(&self) -> bool {
+        self.callback.drained()
+    }
 }
 
 impl<Key> Entity for TokenRow<Key> {
@@ -1134,6 +1142,9 @@ impl<Key> Entity for TokenRow<Key> {
         self.key.prefix
     }
     fn retire(&self) -> bool {
+        true
+    }
+    fn drained(&self) -> bool {
         true
     }
 }
@@ -1147,6 +1158,9 @@ impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     }
     fn retire(&self) -> bool {
         self.callback.retire()
+    }
+    fn drained(&self) -> bool {
+        self.callback.drained()
     }
 }
 
@@ -1187,6 +1201,23 @@ fn undeclare_entity<K, R: Entity, P: Storage, const N: usize>(
         row: removal.taken(),
         keyexpr,
     })
+}
+
+/// Take out of `table` the next row at or after `cursor` that was removed while a call of it ran
+/// and whose last call has ended since: its row, for the caller to drop where no lock is held. The
+/// row's latch is the one mark that it waits ([`Entity::drained`]), so the rows that wait are
+/// found by this walk and no list of them is kept beside the table.
+fn release_drained<K, R: Entity, P: Storage, const N: usize>(
+    table: &mut SlotMap<K, R, N, P>,
+    cursor: &mut usize,
+) -> Option<R> {
+    let handle = loop {
+        let (handle, row) = table.next_retired_from(cursor)?;
+        if row.drained() {
+            break handle;
+        }
+    };
+    table.release(handle)
 }
 
 /// What a declaration reads and moves besides its own table.
@@ -2378,6 +2409,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.subscribers.release(handle)
     }
 
+    /// The next subscriber at or after `cursor` in its table that was undeclared while a call of it
+    /// ran and whose last call has ended since, taken out of the table: its row, to drop where no
+    /// lock is held. A walk from cursor `0` to `None` finds every such row, each once, so a caller
+    /// whose calls end with no lock held keeps no list of the rows that wait: the call that ended
+    /// last leaves its mark in the row's latch alone ([`RowCallback::drained`]).
+    pub fn release_drained_subscriber(&mut self, cursor: &mut usize) -> Option<Subscriber<F, P>> {
+        release_drained(&mut self.subscribers, cursor)
+    }
+
     /// Begin a call of the queryable `handle` names, with the tables held: what the call is made
     /// with once they are let go, `None` when no live row is named. See [`Self::begin_subscriber`].
     pub fn begin_queryable(
@@ -2394,6 +2434,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// ended last: its row, to drop where no lock is held.
     pub fn release_queryable(&mut self, handle: QueryableHandle) -> Option<Queryable<F, P>> {
         self.kept_queryables_mut()?.release(handle)
+    }
+
+    /// [`Self::release_drained_subscriber`] for the queryables.
+    pub fn release_drained_queryable(&mut self, cursor: &mut usize) -> Option<Queryable<F, P>> {
+        release_drained(self.kept_queryables_mut()?, cursor)
     }
 
     /// Begin a call of the liveliness subscriber `handle` names, with the tables held: what the call is made
@@ -2418,6 +2463,14 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: LivelinessSubscriberHandle,
     ) -> Option<LivelinessSubscriber<F, P>> {
         self.kept_liveliness_subscribers_mut()?.release(handle)
+    }
+
+    /// [`Self::release_drained_subscriber`] for the liveliness subscribers.
+    pub fn release_drained_liveliness_subscriber(
+        &mut self,
+        cursor: &mut usize,
+    ) -> Option<LivelinessSubscriber<F, P>> {
+        release_drained(self.kept_liveliness_subscribers_mut()?, cursor)
     }
 
     /// Begin a call of the matching listener `handle` names, with the tables held: what the call is made
