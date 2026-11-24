@@ -415,7 +415,9 @@ enum Engine {
 /// The router node and the counter of the entity ids it hands out.
 #[cfg(feature = "engine-tokio")]
 struct RouterEngine {
-    node: wz_capi_core::drive::RouterState,
+    /// Counted, so that a query a queryable of the node keeps is answered through the node as the
+    /// port's engine, which it holds weakly.
+    node: Arc<wz_capi_core::drive::RouterState>,
     ids: AtomicU64,
     /// The key expressions declared on the session, by the id each was given and the number of
     /// holders. A node names every key whole on the wire, so a declaration costs it nothing and
@@ -781,7 +783,7 @@ impl Engine {
                 .run_node(role)
                 .map_err(|error| tokio_engine::open_error(error, scope))?;
             let engine = Engine::Router(Box::new(RouterEngine {
-                node,
+                node: Arc::new(node),
                 ids: AtomicU64::new(0),
                 keys: std::sync::Mutex::new(RouterKeys::default()),
             }));
@@ -1363,6 +1365,7 @@ impl Engine {
                     })
                 });
                 let sink = tokio_engine::queryable_sink(
+                    Arc::downgrade(&router.node.as_engine()),
                     callback,
                     notifier,
                     zid,
@@ -1431,6 +1434,7 @@ impl Engine {
                         links,
                         None,
                         tokio_engine::queryable_sink(
+                            Arc::downgrade(&state.shared.as_engine()),
                             callback,
                             notifier,
                             zid,
@@ -1728,7 +1732,7 @@ impl Engine {
             // the cancellation token and the notifier of the request are kept the same way.
             Engine::Router(router) => {
                 RouterEngine::refuse_links(request.links)?;
-                let node: &dyn wz_capi_port::SessionEngine = &router.node;
+                let node: &dyn wz_capi_port::SessionEngine = &*router.node;
                 tokio_engine::ask_liveliness(
                     request,
                     Box::new(move |key, wire, timeout_ms, fan, leg| {
@@ -1994,7 +1998,8 @@ mod tokio_engine {
     };
     use wz_capi_port::cancellation::CancellableFan;
     use wz_capi_port::{
-        HeldQuery, MatchingSink, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
+        HeldQueryId, MatchingSink, QueryHolder, QueryableSink, Refusal, ReplyCallback,
+        SessionEngine,
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::{
@@ -3031,6 +3036,7 @@ mod tokio_engine {
     /// be answered after the callback has returned, from any thread; the query is over, and its
     /// final goes out, when the last copy of it is dropped.
     pub(super) fn queryable_sink(
+        engine: std::sync::Weak<dyn SessionEngine>,
         callback: Callback<Query>,
         notifier: Option<SyncGroupNotifier>,
         zid: ZenohId,
@@ -3041,6 +3047,7 @@ mod tokio_engine {
         >,
     ) -> QueryableSink {
         struct Delivery {
+            engine: std::sync::Weak<dyn SessionEngine>,
             ordered: Arc<Ordered<Query>>,
             zid: ZenohId,
             eid: Id,
@@ -3050,6 +3057,7 @@ mod tokio_engine {
             promotion: Option<ReplyPromotion>,
         }
         let delivery = Arc::new(Delivery {
+            engine,
             ordered: Ordered::new(callback, notifier),
             zid,
             eid,
@@ -3060,10 +3068,21 @@ mod tokio_engine {
         });
         QueryableSink::shared(
             move |view: &dyn QueryView, _out: &mut dyn ReplyOut, holder: &dyn QueryHolder| {
-                let held = holder.hold_query(view);
+                // A closed session keeps nothing, and a reply on it would send nothing.
+                let kept = match holder.keep_query(view) {
+                    Ok(kept) => kept.map(|id| KeptQuery {
+                        engine: delivery.engine.clone(),
+                        id,
+                    }),
+                    Err(Refusal::Closed) => None,
+                    Err(refusal) => {
+                        tracing::error!("a query could not be kept to be answered: {refusal}");
+                        None
+                    }
+                };
                 match query_of(
                     view,
-                    held,
+                    kept,
                     delivery.zid,
                     delivery.eid,
                     #[cfg(feature = "unstable")]
@@ -3078,11 +3097,38 @@ mod tokio_engine {
         )
     }
 
-    /// The query the engine's view of a request is, answered through `held`, its large replies
-    /// copied into shared memory as `promotion` says.
+    /// One keep of a query, by the id its engine answered: replies go out through the engine, and
+    /// the keep is released when the last copy of the query is dropped, which is when its final
+    /// goes out. The engine is held weakly, since it holds the queryable whose sink made this.
+    struct KeptQuery {
+        engine: std::sync::Weak<dyn SessionEngine>,
+        id: HeldQueryId,
+    }
+
+    impl KeptQuery {
+        /// Answer the query with what `answer` writes; one of an engine that has gone is answered
+        /// with nothing.
+        fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+            if let Some(engine) = self.engine.upgrade() {
+                engine.reply_held(self.id, answer);
+            }
+        }
+    }
+
+    impl Drop for KeptQuery {
+        fn drop(&mut self) {
+            if let Some(engine) = self.engine.upgrade() {
+                engine.release_held(self.id);
+            }
+        }
+    }
+
+    /// The query the engine's view of a request is, answered through `kept` (none for a query no
+    /// session keeps, which answers nothing), its large replies copied into shared memory as
+    /// `promotion` says.
     fn query_of(
         view: &dyn QueryView,
-        held: Box<dyn HeldQuery>,
+        kept: Option<KeptQuery>,
         zid: ZenohId,
         eid: Id,
         #[cfg(feature = "unstable")] timestamps: &Arc<TimestampSource>,
@@ -3121,9 +3167,10 @@ mod tokio_engine {
             .and_then(|stack| crate::api::timestamp_stack::TimestampStack::try_from(stack).ok());
         #[cfg(feature = "unstable")]
         let reply_timestamps = Arc::clone(timestamps);
-        let held = std::sync::Mutex::new(held);
         let replier: Replier = Box::new(move |answer| {
-            let held = held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(kept) = &kept else {
+                return Ok(());
+            };
             // A reply starts from the stack of its query and records its send, and its routing
             // when it goes out over a link, at the time it is made.
             #[cfg(feature = "unstable")]
@@ -3136,7 +3183,7 @@ mod tokio_engine {
                 engine_stack_of(&stack)
             });
             let mut outcome = Ok(());
-            held.reply(&mut |out: &mut dyn ReplyOut| {
+            kept.reply(&mut |out: &mut dyn ReplyOut| {
                 outcome = write_answer(
                     out,
                     &answer,
@@ -10888,6 +10935,56 @@ mod tests {
                 .undeclare()
                 .wait()
                 .expect("no error on a closed session");
+        }
+
+        /// A query its callback keeps is answered from this thread after the callback has
+        /// returned, and the get ends only once the last copy of the query is dropped: the copies
+        /// share one keep of the session's, released with the last.
+        #[test]
+        fn a_kept_query_is_answered_later_and_its_get_ends_with_its_last_copy() {
+            let session = open(peer("a1b2c7d1")).wait().expect("opens");
+            let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let keeper = Arc::clone(&kept);
+            let _queryable = session
+                .declare_queryable("demo/kept")
+                .callback(move |query| keeper.lock().unwrap().push(query))
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/kept")
+                .timeout(Duration::from_secs(30))
+                .wait()
+                .expect("asks");
+            let deadline = std::time::Instant::now() + WAIT;
+            let query = loop {
+                if let Some(query) = kept.lock().unwrap().pop() {
+                    break query;
+                }
+                assert!(std::time::Instant::now() < deadline, "the query arrives");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            query
+                .reply("demo/kept", "later")
+                .wait()
+                .expect("replies after the callback returned");
+            let copy = query.clone();
+            drop(query);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                !replies.is_disconnected(),
+                "the get ended while a copy of its query was kept"
+            );
+            drop(copy);
+            let told: Vec<String> = replies
+                .into_iter()
+                .filter_map(|reply| {
+                    reply
+                        .into_result()
+                        .ok()
+                        .map(|sample| sample.payload().try_to_string().unwrap().into_owned())
+                })
+                .collect();
+            assert_eq!(told, ["later"]);
         }
 
         #[test]
