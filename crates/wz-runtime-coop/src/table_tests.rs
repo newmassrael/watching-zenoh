@@ -72,7 +72,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// `f`'s answer and the allocations this thread made running it.
-fn allocations<R>(f: impl FnOnce() -> R) -> (R, usize) {
+pub(crate) fn allocations<R>(f: impl FnOnce() -> R) -> (R, usize) {
     COUNTED.with(|counted| counted.set(Some(0)));
     let answer = f();
     let made = COUNTED.with(|counted| counted.replace(None)).unwrap_or(0);
