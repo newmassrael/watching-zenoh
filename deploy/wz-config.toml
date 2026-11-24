@@ -2950,10 +2950,6 @@ free. At least 32.
 zenoh = "none"
 reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. Sixty-four bytes hold a 16-byte head and 48 bytes: the default payloads of zenoh-pico's latency and throughput examples (`vendor/zenoh-pico/examples/unix/c11/z_ping.c` @ `#define DEFAULT_PKT_SIZE 8`), and the key texts and parameters of the queries its examples keep, each a few tens of bytes."
 
-[limit.pico_preset]
-value = 64
-reason = "zenoh-pico sizes its payloads by no constant; the payloads its examples and API tests hold are the eight bytes of its latency and throughput examples (`vendor/zenoh-pico/examples/unix/c11/z_ping.c` @ `#define DEFAULT_PKT_SIZE 8`) and texts of a few tens of bytes, each of which a block of 64 holds with its head."
-
 [[limit]]
 id = "PAYLOAD_MEDIUM_BLOCK_BYTES"
 kconfig = "WZ_LIMIT_PAYLOAD_MEDIUM_BLOCK_BYTES"
@@ -2979,10 +2975,6 @@ payload a session hands a program always has a block that holds it. At least
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration sizes the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap at its own length. 1,040 bytes hold a 16-byte head and a payload of 1,024 bytes, MAX_REPLY_PAYLOAD_BYTES's default, so a reply's payload a program keeps takes one of these blocks and no block of the largest."
-
-[limit.pico_preset]
-value = 1040
-reason = "zenoh-pico sizes its payloads by no constant. A block of 1,040 bytes holds a payload of 1,024 and its head: an encoding's schema of MAX_ENCODING_SCHEMA_BYTES and the strings and slices its API tests build take one, so no payload under a kilobyte spends a block of the largest pool."
 
 [[limit]]
 id = "HELD_SMALL_PAYLOAD_BLOCKS"
