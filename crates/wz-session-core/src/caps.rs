@@ -288,11 +288,27 @@ pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
 /// hellos, each holding [`SCOUT_HELLO_LOCATORS`] locators, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 
-/// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
-/// once, and the keys and parameters of the queries it keeps past their callbacks: the payloads'
-/// area of the process's pools, blocks of power-of-two sizes each the smallest that holds its
-/// bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
-pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
+/// The bytes of each block of the smallest pool of payload blocks of the C ABI, its head
+/// included: the owned payloads, strings and slices a program holds and the keys and parameters of
+/// the queries it keeps take a block of the smallest pool that holds them and has one free.
+pub const PAYLOAD_SMALL_BLOCK_BYTES: usize = generated::PAYLOAD_SMALL_BLOCK_BYTES;
+
+/// The bytes of each block of the middle pool of payload blocks of the C ABI, its head included.
+/// The largest pool's blocks are no limit: each holds the largest message a session delivers.
+pub const PAYLOAD_MEDIUM_BLOCK_BYTES: usize = generated::PAYLOAD_MEDIUM_BLOCK_BYTES;
+
+/// The blocks of [`PAYLOAD_SMALL_BLOCK_BYTES`] a program holds payload bytes in at once, reserved
+/// as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_SMALL_PAYLOAD_BLOCKS: usize = generated::HELD_SMALL_PAYLOAD_BLOCKS;
+
+/// The blocks of [`PAYLOAD_MEDIUM_BLOCK_BYTES`] a program holds payload bytes in at once, reserved
+/// as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_MEDIUM_PAYLOAD_BLOCKS: usize = generated::HELD_MEDIUM_PAYLOAD_BLOCKS;
+
+/// The blocks of the largest pool of payload blocks a program holds payload bytes in at once, each
+/// holding the largest message a session delivers and its head, reserved as [`HELD_SESSIONS`]'s
+/// pool is.
+pub const HELD_LARGE_PAYLOAD_BLOCKS: usize = generated::HELD_LARGE_PAYLOAD_BLOCKS;
 
 /// The encodings a program holds through the C ABI at once: the slots of the process's pool of
 /// encodings, each with room for a schema of [`MAX_ENCODING_SCHEMA_BYTES`], reserved as
@@ -360,11 +376,6 @@ const _: () = assert!(
 const _: () = assert!(
     CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
     "a config holds at least one key, at most one row for each key but one, and some text"
-);
-
-const _: () = assert!(
-    HELD_PAYLOAD_BYTES <= 1 << 30,
-    "the payloads' area names its blocks by 32-bit offsets and its largest block is 1 GiB"
 );
 
 /// Maximum number of concurrently-outstanding pending liveliness GET
