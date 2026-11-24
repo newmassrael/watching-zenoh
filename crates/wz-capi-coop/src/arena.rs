@@ -584,8 +584,8 @@ impl HeldPlaces {
     }
 
     /// The first kind at or after the place `from` in [`EntityKind::ALL`] these places name a
-    /// layout for: its place there and the layout. A walk by it ends on the places named, as
-    /// [`PlaceRows`]'s walk of the kinds it holds does.
+    /// layout for: its place there and the layout. A walk by it ends on the places named, as a
+    /// walk of a row of sizes by [`next_sized`] does.
     fn next_entity(&self, from: usize) -> Option<(usize, Layout)> {
         self.entities
             .iter()
@@ -987,9 +987,12 @@ impl TransportRows {
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
     /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
     fn cells_from(&self, lend: &mut TableLender<'_>) -> LinkCells<Option<LentByteCells>> {
+        let sizes = self.cell_bytes.into_array();
         let mut cells = [None, None, None, None];
-        for (bytes, lent) in self.cell_bytes.into_array().into_iter().zip(&mut cells) {
-            if bytes != 0 {
+        let mut from = 0;
+        while let Some((at, bytes)) = next_sized(&sizes, from) {
+            from = at + 1;
+            if let Some(lent) = cells.get_mut(at) {
                 *lent = Some(lend.byte_cells(bytes, self.links));
             }
         }
@@ -1141,7 +1144,7 @@ impl PlaceRows {
         let handle = (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1));
         let mut entities = EntityPlaces::NONE;
         let mut from = 0;
-        while let Some((at, bytes)) = self.next_held(from) {
+        while let Some((at, bytes)) = next_sized(&self.entity_bytes, from) {
             from = at + 1;
             if let Some(cells) = entities.cells.get_mut(at) {
                 let count = rows.kinds.get(at).copied().unwrap_or(0);
@@ -1150,19 +1153,19 @@ impl PlaceRows {
         }
         PlaceTables { handle, entities }
     }
+}
 
-    /// The first kind at or after the place `from` in [`EntityKind::ALL`] the plan holds places
-    /// of: its place there and the bytes of each of its places. A walk by it ends on the bytes:
-    /// one over every kind has a constant trip count, which the compiler unrolls into a copy of
-    /// the walk's body for each kind.
-    fn next_held(&self, from: usize) -> Option<(usize, usize)> {
-        self.entity_bytes
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(from)
-            .find(|&(_, bytes)| bytes != 0)
-    }
+/// The first of `sizes` at or after the place `from` that is not `0`: its place and the size. A
+/// walk of a row of tables by it ends on the sizes, and lends only the tables a plan holds: one
+/// over every place has a constant trip count, which the compiler unrolls into a copy of the
+/// walk's body for each place.
+fn next_sized(sizes: &[usize], from: usize) -> Option<(usize, usize)> {
+    sizes
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(from)
+        .find(|&(_, size)| size != 0)
 }
 
 /// What a session's arena holds, row by row, and the rows each layer lends its tables from
@@ -2795,6 +2798,30 @@ mod tests {
         assert_eq!(plan.rows().nth(3).map(|row| row.count), Some(3));
         assert_eq!(plan.rows().nth(5).map(|row| row.entry_bytes), Some(56));
         assert_eq!(plan.rows().nth(5).map(|row| row.count), Some(3));
+    }
+
+    /// The tables of cells are lent for each kind of cell the plan holds and for no other, past a
+    /// kind with none and up to the last, a cell of its size for each link. Turned red by a walk
+    /// of the kinds that stops at the first with none, or never reaches the halves'.
+    #[test]
+    fn the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none() {
+        let mut plan = empty_plan();
+        plan.transport.links = 3;
+        let asked = LinkCells {
+            driver: 0,
+            gate: 48,
+            actions: 0,
+            halves: 64,
+        };
+        plan.holding_cells(asked).expect("the cells fit");
+        let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("an arena");
+        let mut lend = arena.lender();
+        let lent = plan.transport().cells_from(&mut lend).into_array();
+        let held: alloc::vec::Vec<_> = lent
+            .iter()
+            .map(|cells| cells.as_ref().map(|cells| (cells.size(), cells.capacity())))
+            .collect();
+        assert_eq!(held, [None, Some((48, 3)), None, Some((64, 3))]);
     }
 
     /// A plan reads the rows it laid out and none past them, in order, and two plans that laid
