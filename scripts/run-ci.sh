@@ -13265,7 +13265,7 @@ layer_c1p32_pico_i686() {
         cargo test -p wz-capi-pico --target "$target" --no-default-features \
         --features "engine-coop,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
     _runci_leg linked-crates -- _runci_guarded_test "C1p32 the crates the library links" + \
-        cargo test --target "$target" --lib --no-fail-fast -p wz-abi-stamp -p wz-app-frame -p wz-capi-core \
+        cargo test --target "$target" --lib --no-fail-fast -p wz-abi-stamp -p wz-app-frame -p wz-app-schema -p wz-capi-core \
         -p wz-capi-coop -p wz-capi-port -p wz-codecs -p wz-ext-pubsub -p wz-host-net \
         -p wz-node-time -p wz-routing-graph -p wz-runtime-coop -p wz-runtime-core \
         -p wz-runtime-posix -p wz-runtime-tokio -p wz-session-core -p wz-session-mcu \

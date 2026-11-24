@@ -78,9 +78,7 @@ use core::fmt;
 
 use wz_session_core::json5::Json5Value;
 
-use crate::e2e_profile::{
-    array, at, check_keys, child, describe, object, optional, read_json, required, DocError,
-};
+use crate::e2e_profile::{describe, optional, read_json, DocError, Pointer};
 use crate::e2e_receiver::{ReceiveError, Receiver, Status, Verdict};
 use crate::e2e_stream_sender::{Protected, SendError, StreamSender, Written};
 use crate::proto_decode::{AtPath, Item, SchemaMessage, SchemaSet, MAX_DECODE_DEPTH};
@@ -308,30 +306,34 @@ impl Keyer {
     ) -> Result<Self, NewError> {
         let schema = SchemaSet::read(files).map_err(NewError::Schema)?;
         let doc = read_json(description).map_err(NewError::Description)?;
-        let entries = object(&doc, "").map_err(NewError::Description)?;
-        check_keys(entries, &["message", "fields", "report_interval_ms"], "")
+        let root = Pointer::text("");
+        let entries = root.object(&doc).map_err(NewError::Description)?;
+        root.check_keys(entries, &["message", "fields", "report_interval_ms"])
             .map_err(NewError::Description)?;
+        let message_path = root.key("message");
         let name = text(
-            required(entries, "message", "").map_err(NewError::Description)?,
-            "/message",
+            root.required(entries, "message")
+                .map_err(NewError::Description)?,
+            &message_path,
         )?;
         let message = schema
             .message(name)
-            .map_err(|why| NewError::Description(DocError::invalid("/message", why)))?;
+            .map_err(|why| NewError::Description(message_path.refuse(why)))?;
         let report_interval_ms = match optional(entries, "report_interval_ms") {
             None => DEFAULT_REPORT_INTERVAL_MS,
-            Some(value) => interval(value, "/report_interval_ms")?,
+            Some(value) => interval(value, &root.key("report_interval_ms"))?,
         };
-        let listed = array(
-            required(entries, "fields", "").map_err(NewError::Description)?,
-            "/fields",
-        )
-        .map_err(NewError::Description)?;
+        let fields_path = root.key("fields");
+        let listed = fields_path
+            .array(
+                root.required(entries, "fields")
+                    .map_err(NewError::Description)?,
+            )
+            .map_err(NewError::Description)?;
         if listed.is_empty() {
-            return Err(NewError::Description(DocError::invalid(
-                "/fields",
-                "a keyer names at least one key field",
-            )));
+            return Err(NewError::Description(
+                fields_path.refuse("a keyer names at least one key field"),
+            ));
         }
         if listed.len() > limits.fields {
             return Err(NewError::TooManyFields {
@@ -342,7 +344,7 @@ impl Keyer {
         let mut fields = Vec::with_capacity(listed.len());
         let mut instances: usize = 1;
         for (i, entry) in listed.iter().enumerate() {
-            let field = key_field(&schema, message, entry, &at("/fields", i), limits)?;
+            let field = key_field(&schema, message, entry, &fields_path.index(i), limits)?;
             instances = instances
                 .checked_mul(field.values.len())
                 .filter(|&n| n <= limits.instances)
@@ -517,14 +519,8 @@ pub(crate) const REPORT_NOW: u8 = 1;
 pub(crate) const REPORT_REBASE: u8 = 2;
 
 /// The text of a string member, or the refusal at `path`.
-fn text<'v>(value: &'v Json5Value, path: &str) -> Result<&'v str, NewError> {
-    match value {
-        Json5Value::String(s) => Ok(s),
-        other => Err(NewError::Description(DocError::invalid(
-            path,
-            format!("expected a string, found {}", describe(other)),
-        ))),
-    }
+fn text<'v>(value: &'v Json5Value, path: &Pointer<'_>) -> Result<&'v str, NewError> {
+    path.read_string(value).map_err(NewError::Description)
 }
 
 /// An integer written as JSON number text: decimal or `0x` hex, with a sign.
@@ -548,8 +544,8 @@ fn integer_of(text: &str) -> Option<i128> {
 }
 
 /// The integer a member holds, or the refusal at `path`.
-fn integer(value: &Json5Value, path: &str) -> Result<i128, NewError> {
-    let refused = |reason: String| NewError::Description(DocError::invalid(path, reason));
+fn integer(value: &Json5Value, path: &Pointer<'_>) -> Result<i128, NewError> {
+    let refused = |reason: String| NewError::Description(path.refuse(reason));
     match value {
         Json5Value::Number(text) => integer_of(text)
             .ok_or_else(|| refused(format!("`{text}` is not an integer of at most 64 bits"))),
@@ -560,13 +556,10 @@ fn integer(value: &Json5Value, path: &str) -> Result<i128, NewError> {
     }
 }
 
-fn interval(value: &Json5Value, path: &str) -> Result<u64, NewError> {
+fn interval(value: &Json5Value, path: &Pointer<'_>) -> Result<u64, NewError> {
     let n = integer(value, path)?;
     u64::try_from(n).map_err(|_| {
-        NewError::Description(DocError::invalid(
-            path,
-            format!("{n} is not a number of milliseconds"),
-        ))
+        NewError::Description(path.refuse(format!("{n} is not a number of milliseconds")))
     })
 }
 
@@ -590,38 +583,39 @@ fn key_field(
     schema: &SchemaSet,
     message: SchemaMessage,
     entry: &Json5Value,
-    path: &str,
+    path: &Pointer<'_>,
     limits: Limits,
 ) -> Result<KeyField, NewError> {
-    let entries = object(entry, path).map_err(NewError::Description)?;
-    check_keys(entries, &["path", "values"], path).map_err(NewError::Description)?;
-    let at_path = child(path, "path");
+    let entries = path.object(entry).map_err(NewError::Description)?;
+    path.check_keys(entries, &["path", "values"])
+        .map_err(NewError::Description)?;
+    let at_path = path.key("path");
     let field_path = text(
-        required(entries, "path", path).map_err(NewError::Description)?,
+        path.required(entries, "path")
+            .map_err(NewError::Description)?,
         &at_path,
     )?;
     let (numbers, kind, presence) = resolve(schema, message, field_path, &at_path)?;
-    let values_path = child(path, "values");
-    let listed = array(
-        required(entries, "values", path).map_err(NewError::Description)?,
-        &values_path,
-    )
-    .map_err(NewError::Description)?;
+    let values_path = path.key("values");
+    let listed = values_path
+        .array(
+            path.required(entries, "values")
+                .map_err(NewError::Description)?,
+        )
+        .map_err(NewError::Description)?;
     if listed.is_empty() {
-        return Err(NewError::Description(DocError::invalid(
-            values_path,
-            "a key field lists at least one value",
-        )));
+        return Err(NewError::Description(
+            values_path.refuse("a key field lists at least one value"),
+        ));
     }
     let mut values: Vec<KeyValue> = Vec::new();
     for (i, item) in listed.iter().enumerate() {
-        let item_path = at(&values_path, i);
+        let item_path = values_path.index(i);
         for value in values_of_item(item, &item_path, kind, limits)? {
             if values.contains(&value) {
-                return Err(NewError::Description(DocError::invalid(
-                    item_path,
-                    format!("the value {value} is listed twice"),
-                )));
+                return Err(NewError::Description(
+                    item_path.refuse(format!("the value {value} is listed twice")),
+                ));
             }
             if values.len() == limits.instances {
                 return Err(NewError::TooManyInstances {
@@ -643,11 +637,11 @@ fn key_field(
 /// range.
 fn values_of_item(
     item: &Json5Value,
-    path: &str,
+    path: &Pointer<'_>,
     kind: Kind,
     limits: Limits,
 ) -> Result<Vec<KeyValue>, NewError> {
-    let refused = |reason: String| NewError::Description(DocError::invalid(path, reason));
+    let refused = |reason: String| NewError::Description(path.refuse(reason));
     match (kind, item) {
         (Kind::Text, Json5Value::String(s)) => Ok(alloc::vec![KeyValue::Text(s.clone())]),
         (Kind::Text, other) => Err(refused(format!(
@@ -660,28 +654,29 @@ fn values_of_item(
             Ok(alloc::vec![KeyValue::Integer(v)])
         }
         (Kind::Integer { min, max }, Json5Value::Object(entries)) => {
-            check_keys(entries, &["range"], path).map_err(NewError::Description)?;
-            let range_path = child(path, "range");
-            let ends = array(
-                required(entries, "range", path).map_err(NewError::Description)?,
-                &range_path,
-            )
-            .map_err(NewError::Description)?;
+            path.check_keys(entries, &["range"])
+                .map_err(NewError::Description)?;
+            let range_path = path.key("range");
+            let ends = range_path
+                .array(
+                    path.required(entries, "range")
+                        .map_err(NewError::Description)?,
+                )
+                .map_err(NewError::Description)?;
             let [low, high] = ends else {
-                return Err(NewError::Description(DocError::invalid(
-                    range_path,
+                return Err(NewError::Description(range_path.refuse(
                     "a range is two integers, the lowest and the highest value",
                 )));
             };
-            let low = integer(low, &at(&range_path, 0))?;
-            let high = integer(high, &at(&range_path, 1))?;
-            in_bounds(low, min, max, &at(&range_path, 0))?;
-            in_bounds(high, min, max, &at(&range_path, 1))?;
+            let (low_path, high_path) = (range_path.index(0), range_path.index(1));
+            let low = integer(low, &low_path)?;
+            let high = integer(high, &high_path)?;
+            in_bounds(low, min, max, &low_path)?;
+            in_bounds(high, min, max, &high_path)?;
             if low > high {
-                return Err(NewError::Description(DocError::invalid(
-                    range_path,
-                    format!("the range starts at {low}, above where it ends, {high}"),
-                )));
+                return Err(NewError::Description(range_path.refuse(format!(
+                    "the range starts at {low}, above where it ends, {high}"
+                ))));
             }
             // Refused before it is written out, so a wide range costs nothing.
             if high - low >= limits.instances as i128 {
@@ -698,12 +693,11 @@ fn values_of_item(
     }
 }
 
-fn in_bounds(v: i128, min: i128, max: i128, path: &str) -> Result<(), NewError> {
+fn in_bounds(v: i128, min: i128, max: i128, path: &Pointer<'_>) -> Result<(), NewError> {
     if !(min..=max).contains(&v) {
-        return Err(NewError::Description(DocError::invalid(
-            path,
-            format!("{v} does not fit the field, whose values are {min} to {max}"),
-        )));
+        return Err(NewError::Description(path.refuse(format!(
+            "{v} does not fit the field, whose values are {min} to {max}"
+        ))));
     }
     Ok(())
 }
@@ -714,9 +708,9 @@ fn resolve(
     schema: &SchemaSet,
     message: SchemaMessage,
     path: &str,
-    at_path: &str,
+    at_path: &Pointer<'_>,
 ) -> Result<(Vec<u64>, Kind, bool), NewError> {
-    let refused = |reason: String| NewError::Description(DocError::invalid(at_path, reason));
+    let refused = |reason: String| NewError::Description(at_path.refuse(reason));
     let names: Vec<&str> = path.split('.').collect();
     if names.iter().any(|n| n.is_empty()) {
         return Err(refused(format!(

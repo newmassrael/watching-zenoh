@@ -41,10 +41,10 @@
 //! | `segment_sender` | the writer of those pieces: one message cut under a segment profile | `alloc` |
 //! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
 //! | `message_catalog` | the reader and judge of a message catalog, and the senders, receivers and supervision rows made from it | `alloc` |
-//! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked | `proto` |
+//! | `proto_schema` | the `.proto` schema reader: files read, imports resolved, names linked, the field tree walked (`wz-app-schema`'s) | `proto` |
 //! | `proto_decode` | a protobuf payload read by the types its schema gives it | `proto` |
 //! | `message_payload` | one message set and read field by field at paths, its protobuf bytes encoded and decoded | `message-payload` |
-//! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader | `proto` |
+//! | `proto_lex`, `proto_parse` | the tokenizer and the parser behind the schema reader (`wz-app-schema`'s) | `proto` |
 //! | `proto_nanopb` | the nanopb options a schema states, merged as nanopb's generator merges them, and the largest size a message encodes to | `proto` |
 //! | `proto_range` | the integers a field may hold: by its type, or narrowed by the nanopb `int_size` in force | `proto` |
 //! | `proto_write` | the one writer of protobuf wire bytes: tags, scalars, presence, packing, map entries, and the range a writer holds an integer to | `proto` |
@@ -97,16 +97,18 @@ pub mod message_payload;
 mod message_payload_tests;
 #[cfg(feature = "proto")]
 pub mod proto_decode;
+// The schema's readers run once, when a schema is handed over, and are built for size in a crate of
+// their own; they stay at the paths they had here.
 #[cfg(feature = "proto")]
-pub mod proto_lex;
+pub use wz_app_schema::proto_lex;
 #[cfg(feature = "proto")]
 pub mod proto_nanopb;
 #[cfg(feature = "proto")]
-pub mod proto_parse;
+pub use wz_app_schema::proto_parse;
 #[cfg(feature = "proto")]
 pub mod proto_range;
 #[cfg(feature = "proto")]
-pub mod proto_schema;
+pub use wz_app_schema::proto_schema;
 #[cfg(feature = "proto")]
 pub mod proto_write;
 // The model tests of the writer, its bytes laid by hand, on synthetic schemas.

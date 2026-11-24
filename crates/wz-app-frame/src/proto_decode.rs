@@ -753,13 +753,16 @@ impl<'s> Reader<'s> {
 
     /// Walk one message of `owner`'s type, in `bytes`, which sit at `base` in the bytes the
     /// reader was handed, telling `visit` what it meets.
-    fn walk<'b, V: Visit<'b>>(
+    ///
+    /// The visitor is dispatched, not a type parameter: the walk is the bulk of the reader and
+    /// each visitor a few lines, so one body serves every reading of the bytes.
+    fn walk<'b>(
         &self,
         owner: Owner<'s>,
         bytes: &'b [u8],
         base: usize,
         depth: usize,
-        visit: &mut V,
+        visit: &mut dyn Visit<'b>,
     ) -> Result<(), WireError> {
         let mut at = 0usize;
         while at < bytes.len() {
@@ -793,7 +796,7 @@ impl<'s> Reader<'s> {
     /// of a packed run, or an unknown field when the wire type is not one the
     /// field's type is written with.
     #[allow(clippy::too_many_arguments)]
-    fn field<'b, V: Visit<'b>>(
+    fn field<'b>(
         &self,
         spec: &Spec<'s>,
         number: u64,
@@ -802,7 +805,7 @@ impl<'s> Reader<'s> {
         base: usize,
         span: (usize, usize),
         depth: usize,
-        visit: &mut V,
+        visit: &mut dyn Visit<'b>,
     ) -> Result<(), WireError> {
         let blame = |mut e: WireError| {
             e.field.get_or_insert_with(|| spec.full_name());
@@ -895,13 +898,13 @@ impl<'s> Reader<'s> {
     }
 
     /// One level down, or the refusal that the bytes nest too deep.
-    fn nested<'b, V: Visit<'b>>(
+    fn nested<'b>(
         &self,
         owner: Owner<'s>,
         bytes: &'b [u8],
         base: usize,
         depth: usize,
-        visit: &mut V,
+        visit: &mut dyn Visit<'b>,
     ) -> Result<(), WireError> {
         if depth + 1 >= MAX_DECODE_DEPTH {
             return Err(wire_error(
@@ -1103,14 +1106,14 @@ pub(crate) trait FieldEvents<'b> {
 /// The walk as [`FieldEvents`] see it: a map's entries are kept whole, and nothing inside one is
 /// told.
 #[cfg(feature = "message-payload")]
-struct Events<'e, F> {
-    events: &'e mut F,
+struct Events<'e, 'b> {
+    events: &'e mut dyn FieldEvents<'b>,
     /// How many map entries the walk is inside.
     in_map: usize,
 }
 
 #[cfg(feature = "message-payload")]
-impl<'b, F: FieldEvents<'b>> Visit<'b> for Events<'_, F> {
+impl<'b> Visit<'b> for Events<'_, 'b> {
     fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
         if self.in_map == 0 {
             self.events.value(number, item);
@@ -1153,11 +1156,11 @@ impl SchemaSet {
     ///
     /// The [`WireError`] [`Self::decode`] gives for the same bytes. What `events` was told before
     /// it is all it is told.
-    pub(crate) fn walk_fields<'b, F: FieldEvents<'b>>(
+    pub(crate) fn walk_fields<'b>(
         &self,
         message: SchemaMessage,
         bytes: &'b [u8],
-        events: &mut F,
+        events: &mut dyn FieldEvents<'b>,
     ) -> Result<(), WireError> {
         let mut walk = Events { events, in_map: 0 };
         Reader {

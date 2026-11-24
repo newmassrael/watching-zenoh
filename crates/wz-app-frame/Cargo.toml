@@ -42,8 +42,10 @@ alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 # options and integer ranges a writer may narrow by (`proto_nanopb`, `proto_range`): what a node that
 # reads or writes a payload by its fields needs, and what the capture crate's schema documents,
 # payload formats and value writer read, re-exported there at the paths they had. Off, a node that
-# only frames its payloads links none of it.
-proto = ["alloc"]
+# only frames its payloads links none of it. The tokenizer, the parser and the linker run once, when a
+# schema is handed over, and are `wz-app-schema`'s, re-exported here at the paths they had; the
+# readers and the writer of every sample are this crate's.
+proto = ["alloc", "dep:wz-app-schema"]
 
 # `instance_key`: which instance of a message a sample is, read from fields of its payload through
 # the schema reader, and the receiver's and the sender's streams and the last values kept per
@@ -74,6 +76,7 @@ replay = ["alloc"]
 sce-generated-codec = ["alloc"]
 
 [dependencies]
+wz-app-schema = { path = "../wz-app-schema", optional = true }
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 
 [lints]

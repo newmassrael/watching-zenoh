@@ -443,9 +443,15 @@ pub struct Profile {
 impl Profile {
     /// Read and validate a profile from JSON text.
     pub fn parse(text: &str) -> Result<Self, DocError> {
-        let root = read_json(text)?;
+        Self::from_tree(&read_json(text)?)
+    }
+
+    /// Read and validate a profile from a document already read, as [`Self::parse`] reads the
+    /// document of its text: a profile that stands inside a larger document is read where it
+    /// stands, with no text written and read again.
+    pub fn from_tree(root: &Json5Value) -> Result<Self, DocError> {
         let doc = Pointer::text("");
-        let entries = doc.object(&root)?;
+        let entries = doc.object(root)?;
         doc.check_keys(
             entries,
             &[

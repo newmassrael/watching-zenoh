@@ -570,7 +570,8 @@ pub struct Document {
 }
 
 impl Document {
-    /// The document as JSON text, numbers spelled as written: what the profile readers take.
+    /// The document as JSON5 text, numbers spelled as written: the text a profile reader reads
+    /// as it reads [`Self::tree`].
     pub fn text(&self) -> String {
         self.tree.to_json5_text()
     }
@@ -734,11 +735,15 @@ fn keying(message: &Message) -> Keying {
 }
 
 /// The documents of a profile map, each judged by `judge`.
+///
+/// A profile is judged on its tree: the catalog is read under [`MAX_CATALOG_JSON_DEPTH`], two
+/// levels above a profile's own bound, so the tree is one the profile's text reader would read
+/// whole, and its numbers keep the spelling they were written with.
 fn documents(
     value: Option<&Json5Value>,
     path: &str,
     invalid: RefusalKind,
-    judge: fn(&str) -> Result<(), DocError>,
+    judge: fn(&Json5Value) -> Result<(), DocError>,
 ) -> Result<Vec<Document>, Refusal> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -757,7 +762,7 @@ fn documents(
         let here = child(path, key);
         check_name(key, &here)?;
         object(tree, &here)?;
-        judge(&tree.to_json5_text()).map_err(|e| refuse(invalid, &here, e.to_string()))?;
+        judge(tree).map_err(|e| refuse(invalid, &here, e.to_string()))?;
         out.push(Document {
             name: key.clone(),
             tree: tree.clone(),
@@ -766,12 +771,12 @@ fn documents(
     Ok(out)
 }
 
-fn judge_e2e(text: &str) -> Result<(), DocError> {
-    Profile::parse(text).map(|_| ())
+fn judge_e2e(tree: &Json5Value) -> Result<(), DocError> {
+    Profile::from_tree(tree).map(|_| ())
 }
 
-fn judge_segment(text: &str) -> Result<(), DocError> {
-    SegmentProfile::parse(text).map(|_| ())
+fn judge_segment(tree: &Json5Value) -> Result<(), DocError> {
+    SegmentProfile::from_tree(tree).map(|_| ())
 }
 
 /// The nodes a message's list names, each once.
@@ -1267,7 +1272,7 @@ impl Catalog {
     /// The e2e profile at `index`, read.
     pub fn e2e_profile(&self, index: usize) -> Result<Profile, DocError> {
         match self.e2e_profiles.get(index) {
-            Some(document) => Profile::parse(&document.text()),
+            Some(document) => Profile::from_tree(&document.tree),
             None => Err(DocError::invalid("", "the catalog has no such e2e profile")),
         }
     }
@@ -1275,7 +1280,7 @@ impl Catalog {
     /// The segment profile at `index`, read.
     pub fn segment_profile(&self, index: usize) -> Result<SegmentProfile, DocError> {
         match self.segment_profiles.get(index) {
-            Some(document) => SegmentProfile::parse(&document.text()),
+            Some(document) => SegmentProfile::from_tree(&document.tree),
             None => Err(DocError::invalid(
                 "",
                 "the catalog has no such segment profile",

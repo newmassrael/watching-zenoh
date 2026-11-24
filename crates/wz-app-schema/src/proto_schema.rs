@@ -8,7 +8,7 @@
 //!
 //! protobuf's wire format carries field numbers and no names and four wire
 //! types and no types. A reader that holds the schema knows both, and a program
-//! that reads a payload by its fields (the typed reader [`crate::proto_decode`],
+//! that reads a payload by its fields (the typed reader `wz_app_frame::proto_decode`,
 //! the instance keys of a message) must not parse `.proto` itself: a second
 //! reader of a language is a second opinion about which field is which, and the
 //! two disagree exactly at the unusual constructs. This module is the one
@@ -476,7 +476,7 @@ impl<'f, 'a> Linker<'f, 'a> {
     /// The type tables a link produced and each file's own options, given up by
     /// the linker that borrows the files: what the typed reader needs to read a
     /// message after the files are gone, and what a writer that narrows by the
-    /// nanopb options reads them from ([`crate::proto_decode::SchemaSet`]).
+    /// nanopb options reads them from (`wz_app_frame::proto_decode::SchemaSet`).
     pub fn into_types(self) -> (Vec<Msg>, Vec<EnumInfo>, Vec<Vec<FieldOption>>) {
         (self.msgs, self.enums, self.file_options)
     }
@@ -514,7 +514,7 @@ impl<'f, 'a> Linker<'f, 'a> {
 
 /// The `option` statements of each file of a linked schema, by the file's index
 /// ([`Msg::file`]): the outermost level the nanopb options are merged from
-/// ([`crate::proto_nanopb`]). The linker a schema is read with and the schema set
+/// (`wz_app_frame::proto_nanopb`). The linker a schema is read with and the schema set
 /// a payload keeps both answer it, so an option reads the same over either.
 pub trait FileOptions {
     /// The options file `file` states, in the order written; none for an index
