@@ -137,7 +137,9 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{CoopTables, FACE_SET_BYTES, HELD_SET_BYTES};
+use crate::engine::{
+    CoopTables, FACE_SET_BYTES, HELD_SET_BYTES, REGISTRY_LEND_BYTES, ROUTER_LEND_BYTES,
+};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::open_source::EndpointList;
@@ -222,6 +224,8 @@ pub enum ArenaPart {
     DeliveryCallbacks,
     DeliveryKeys,
     DeliveryRound,
+    RegistryLend,
+    RouterLend,
     ReassemblyFlags,
     ReassemblyBuffers,
     HandedLegFlags,
@@ -321,6 +325,8 @@ impl ArenaPart {
             Self::DeliveryCallbacks => ("delivery callbacks", "DELIVERY_LANE_CALLBACKS"),
             Self::DeliveryKeys => ("delivery keys", "MAX_KEYEXPR_BYTES"),
             Self::DeliveryRound => ("delivery round", ""),
+            Self::RegistryLend => ("registry lend", ""),
+            Self::RouterLend => ("router lend", ""),
             Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
             Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
@@ -433,6 +439,8 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 /// The round's records, the callbacks they owe, its keys and the round itself: the round keeps no
 /// area, since every record is read where it lies.
 const LANE_ROWS: usize = 4;
+/// The places the session lends its registry and its reassembly Router in for a step.
+const STEP_LEND_ROWS: usize = 2;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -491,6 +499,7 @@ const ENTITY_PLACE_ROWS: usize = 2
 pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LINK_ROWS
     + LANE_ROWS
+    + STEP_LEND_ROWS
     + REASSEMBLY_ROWS
     + GROUP_RX_ROWS
     + PORT_RX_ROWS
@@ -1673,6 +1682,10 @@ impl ArenaPlan {
             1,
             core::mem::size_of::<crate::round::Round>(),
         );
+        // The places the session lends its registry and its Router in for a step, a place each
+        // (`crate::engine::StepPlaces`).
+        self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
+        self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
             [ArenaPart::ReassemblyFlags, ArenaPart::ReassemblyBuffers],

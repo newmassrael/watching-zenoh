@@ -53,7 +53,9 @@ use crate::arena::{
     SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
-use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
+use wz_session_core::bounded::{
+    Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, TableLender,
+};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
@@ -153,6 +155,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleView};
+use wz_session_core::step_lend::{LendCell, StepLend};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -656,6 +659,8 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
+    /// The places the session lends its registry and its Router in for a step, in the arena.
+    steps: StepPlaces,
     /// The session's round of deliveries, which lies in the arena: after the registry, which
     /// holds a handle of it, and before the arena.
     samples: Placed<Round>,
@@ -798,6 +803,7 @@ fn lend_session(
     round.reads_keys_in(keys);
     #[cfg(feature = "query")]
     round.calls_legs_of(gets.clone());
+    let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
@@ -832,6 +838,7 @@ fn lend_session(
     .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
         transport,
+        steps,
         samples,
         router,
         keys,
@@ -1613,7 +1620,35 @@ fn tables_mut(registry: &mut Registry) -> &mut CoopTables {
 /// The session's registry as the tasks of its links and groups reach it: lent to them for the
 /// length of each pass of the session's tasks ([`Core::run_tasks`], and a group's wait for room in
 /// a publish), and the session state's own value between, read and written by `&` and `&mut`.
-type RegistryLend = wz_session_core::step_lend::StepLend<Registry>;
+type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
+
+/// The handle on the place the session lends its reassembly Router in to its links' receives for
+/// the length of each pass of its tasks: a cell in the session's arena (`StepPlaces`).
+type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
+
+/// The bytes of the place the session lends its registry in ([`RegistryLend`]).
+pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
+
+/// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
+pub(crate) const ROUTER_LEND_BYTES: usize = core::mem::size_of::<LendCell<SessionReassembly>>();
+
+/// The places the session lends its registry and its reassembly Router in for a pass of its
+/// tasks, each in the session's arena and reached through handles that count nothing: owned by
+/// [`Core`], after every holder of a handle of them.
+struct StepPlaces {
+    registry: Placed<LendCell<Registry>>,
+    router: Placed<LendCell<SessionReassembly>>,
+}
+
+impl StepPlaces {
+    /// Both places, nothing lent in either, placed in `arena`. Refused past what it has left.
+    fn placed_in(arena: &mut Arena) -> Result<Self, LendRefused> {
+        Ok(Self {
+            registry: arena.place(core::cell::Cell::new(None))?,
+            router: arena.place(core::cell::Cell::new(None))?,
+        })
+    }
+}
 
 /// The session's state, held: what [`CoopEngine::live`] hands a caller that may act on it. As it
 /// lets go, the round of deliveries it wrote is sealed (`Round::seal`), so what the session wrote
@@ -1733,6 +1768,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The places the ABI keeps its objects of the session's entities in, lent from the arena at
     /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`PlaceLender::claim_place`]).
     places: EntityPlaces,
+    /// The places the session lends its registry and its Router in for a pass of its tasks: after
+    /// every holder of a handle of them (the transport, the tasks, `registry_lend`).
+    steps: StepPlaces,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -2642,8 +2680,8 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
         CellRc<dyn SessionDatagramLink>,
-        RouterLend<SessionReassembly>,
-        RouterLend<SessionReassembly>,
+        RouterLend<SessionReassembly, RouterPlace>,
+        RouterLend<SessionReassembly, RouterPlace>,
         FaceDispatch<C>,
     >()
 }
@@ -4051,7 +4089,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(feature = "shared-key-ids")]
                 key_forms,
                 router: lent.router,
-                lend: RouterLend::new(),
+                // SAFETY: the handle is held by the transport and the links' tasks, all dropped
+                // before the place's owner, `Core::steps`, which hands out no `&mut` of it.
+                lend: RouterLend::over(unsafe { lent.steps.router.share() }),
             },
             session: SessionState {
                 registry: lent.registry,
@@ -4085,7 +4125,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 gets: (),
                 lane: lent.samples,
             },
-            registry_lend: RegistryLend::new(),
+            // SAFETY: the handle is held by `registry_lend` and the dispatch of the links and
+            // groups, in the transport and the tasks, all dropped before the place's owner,
+            // `Core::steps`, which hands out no `&mut` of it.
+            registry_lend: RegistryLend::over(unsafe { lent.steps.registry.share() }),
             #[cfg(feature = "time-base")]
             clock_wake,
             entropy,
@@ -4097,6 +4140,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             session_time,
             places: lent.places,
+            steps: lent.steps,
             arena: lent.arena,
         };
         let apart = LentApart {

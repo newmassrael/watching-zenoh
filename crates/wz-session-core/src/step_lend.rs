@@ -12,16 +12,31 @@
 
 use alloc::rc::Rc;
 use core::cell::Cell;
+use core::marker::PhantomData;
+use core::ops::Deref;
 use core::ptr::NonNull;
 
+/// The cell a value of type `D` is lent in: where the value lies while it is lent, nothing
+/// otherwise.
+pub type LendCell<D> = Cell<Option<NonNull<D>>>;
+
 /// The place a value of type `D` is lent in for the length of a step; each task that looks in it
-/// holds a handle on the same place.
-pub struct StepLend<D>(Rc<Cell<Option<NonNull<D>>>>);
+/// holds a handle on the same place. The handle is `H`: a counted one by default, or one that
+/// counts nothing on a cell the session's arena holds
+/// ([`PlacedRef`](crate::placed::PlacedRef)), whose maker answers for its owner outliving it.
+pub struct StepLend<D, H = Rc<LendCell<D>>>(H, PhantomData<fn() -> D>);
 
 impl<D> StepLend<D> {
-    /// A place nothing is lent in yet.
+    /// A place nothing is lent in yet, on a counted cell of its own.
     pub fn new() -> Self {
-        Self(Rc::new(Cell::new(None)))
+        Self::over(Rc::new(Cell::new(None)))
+    }
+}
+
+impl<D, H: Deref<Target = LendCell<D>>> StepLend<D, H> {
+    /// The place `place` names, whatever it holds now.
+    pub fn over(place: H) -> Self {
+        Self(place, PhantomData)
     }
 
     /// Lend `value` to every holder of this place for the length of `f`, and take it back when
@@ -83,9 +98,9 @@ impl<D> Default for StepLend<D> {
     }
 }
 
-impl<D> Clone for StepLend<D> {
+impl<D, H: Clone> Clone for StepLend<D, H> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self(self.0.clone(), PhantomData)
     }
 }
 
@@ -113,6 +128,47 @@ mod tests {
         assert_eq!(seen, Some(2));
         assert!(!holder.is_lent(), "taken back when the step ends");
         assert_eq!(holder.with(|value| *value), None);
+        assert_eq!(owned, 2, "the owner reads what the call wrote");
+    }
+
+    /// One block of an arena's memory, aligned as an arena's spans start.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct Block {
+        _bytes: [u8; crate::bounded::ARENA_ALIGN],
+    }
+
+    /// A lend over a cell placed in an arena, reached by handles that count nothing, is reached
+    /// by every handle of the place, by one call at a time, as one over a counted cell is. Turned
+    /// red by a handle that looks in another place than the one its owner lends in.
+    #[test]
+    fn a_lend_over_a_placed_cell_is_reached_through_every_handle() {
+        use crate::bounded::{Arena, ARENA_ALIGN};
+
+        let mut memory = [Block {
+            _bytes: [0; ARENA_ALIGN],
+        }; 2];
+        let bytes = core::mem::size_of_val(&memory);
+        // SAFETY: the blocks are aligned to `ARENA_ALIGN`, hold `bytes` bytes and outlive the
+        // arena and the cell placed in it, which nothing else uses.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), bytes) };
+        let cell = arena
+            .place::<LendCell<u32>>(Cell::new(None))
+            .expect("the arena has the cell");
+        // SAFETY: the handles are used only while `cell`, made first, lives, and nothing changes
+        // the cell through its owner.
+        let (place, holder) =
+            unsafe { (StepLend::over(cell.share()), StepLend::over(cell.share())) };
+        let mut owned = 1;
+        let seen = place.lend_for(&mut owned, || {
+            holder.with(|value| {
+                *value += 1;
+                assert_eq!(place.with(|_| ()), None, "taken out by the running call");
+                *value
+            })
+        });
+        assert_eq!(seen, Some(2));
+        assert!(!holder.is_lent(), "taken back when the step ends");
         assert_eq!(owned, 2, "the owner reads what the call wrote");
     }
 }

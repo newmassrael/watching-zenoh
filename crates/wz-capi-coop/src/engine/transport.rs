@@ -21,6 +21,7 @@ impl<C: ClockSource + 'static, L: SessionLinks + 'static> TransportFaces for Fac
     type Face = Self;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
+    type RouterPlace = super::RouterPlace;
 }
 
 /// What the session tells the groups it joined of its entities (`group`): this engine's, since

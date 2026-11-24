@@ -17,6 +17,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 #[cfg(any(feature = "group", feature = "connectivity"))]
 use alloc::vec::Vec;
+use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
 #[cfg(feature = "group")]
@@ -34,6 +35,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::session_zid::SessionZid;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::LinkKeyForms;
+use wz_session_core::step_lend::LendCell;
 use wz_session_core::unicast_rx::RouterLend;
 
 #[cfg(feature = "group")]
@@ -88,6 +90,9 @@ pub trait TransportFaces {
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;
+    /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
+    /// counted cell, or one the session's arena holds.
+    type RouterPlace: Deref<Target = LendCell<SessionReassembly>> + Clone + 'static;
 }
 
 /// A dial under way over the network of `T`.
@@ -149,7 +154,7 @@ pub struct TransportState<T: TransportFaces> {
     pub router: SessionReassembly,
     /// Where the session lends its Router to its links' receives, each link's task holding the
     /// place: lent for the length of a pass of the tasks and at no other time.
-    pub lend: RouterLend<SessionReassembly>,
+    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
 /// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
