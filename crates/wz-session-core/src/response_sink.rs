@@ -14,9 +14,13 @@
 //! second sink (the multicast reply loop, which drains only queryable
 //! replies) joined the single unicast `SessionLinkActions` implementor:
 //!
-//! - [`ResponseSink`] — the queryable reply chain (`send_response` /
+//! - [`ResponseSink`] — the queryable reply chain (`send_reply_parts` /
 //!   `send_response_final`). Honest to its name: only `Response` /
-//!   `ResponseFinal` network-message emits.
+//!   `ResponseFinal` network-message emits. A reply is handed over as the
+//!   parts its stage lends; a sink that is handed an owned `Response` already
+//!   built is an `OwnedResponseSink` as well, a trait of its own, so that a
+//!   holder of a `ResponseSink` (the cooperative engine's answer route, a
+//!   trait object) links no encoder of the owned record.
 //! - [`DeclareReplySink`] — the declarer-side liveliness interest-response
 //!   (`send_declare_token_reply` / `send_declare_final_reply`,
 //!   R283 / R311hn). A `Declare(DeclToken|DeclFinal)` reply to a peer's
@@ -46,38 +50,19 @@
 use crate::wire::ResponseOwned;
 
 /// Outbound sink for the queryable reply chain. The application-layer
-/// observer drains its staged `QueryReply` records (and the matching
-/// terminal `ResponseFinal` rids) through this trait so it is decoupled
-/// from any concrete runtime actions type (`SessionLinkActions` in the
-/// tokio profile). Empty in a build with neither response codec.
+/// observer drains its staged replies (and the matching terminal
+/// `ResponseFinal` rids) through this trait so it is decoupled from any
+/// concrete runtime actions type (`SessionLinkActions` in the tokio profile).
+/// Empty in a build with neither response codec.
 pub trait ResponseSink {
-    /// Encode + enqueue one outbound `Response(Reply|Err)` frame.
-    /// Mirrors `SessionLinkActions::send_response`. Heap profile only: the
-    /// argument is the owned record; a node with no allocator sends a staged reply
-    /// through [`Self::send_reply_parts`].
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn send_response(&self, response: ResponseOwned);
-
     /// Encode + enqueue one staged reply, described by borrowed parts
     /// ([`crate::reply_stage::ReplyParts`]): the form a stage hands out without
-    /// building an owned record. A sink that can write the `Response` from the parts
-    /// ([`crate::lent_response::ResponseWriter`]) does so and builds nothing; with a
-    /// heap the default builds the owned `QueryReply` and sends it through
-    /// [`Self::send_response`], so a sink that only knows that form is served too. A
-    /// reply the wire cannot carry is skipped, as the drain skips one whose bounded
-    /// field overflows.
-    #[cfg(feature = "codec-response")]
-    #[cfg(feature = "alloc")]
-    fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
-        if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
-            self.send_response(response);
-        }
-    }
-
-    /// See the heap form. With no allocator there is no owned record to fall back
-    /// on, so the sink writes the `Response` itself.
+    /// building an owned record. A sink writes the `Response` from the parts
+    /// ([`crate::lent_response::ResponseWriter`]), or, where something on its way
+    /// out reads the owned record, builds that record itself. A reply the wire
+    /// cannot carry is skipped, as the drain skips one whose bounded field
+    /// overflows.
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
-    #[cfg(not(feature = "alloc"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>);
 
     /// Encode + enqueue one outbound `ResponseFinal` frame terminating
@@ -113,6 +98,17 @@ pub trait ResponseSink {
     fn end_burst(&self, opened: bool) {
         let _ = opened;
     }
+}
+
+/// A sink handed a `Response` already built as the owned record: a reply a
+/// handler made on the heap profile's own path, which a runtime sends as it
+/// is. Apart from [`ResponseSink`], and implemented only by the sinks such a
+/// sender holds, so that a holder of a `ResponseSink` alone links no encoder
+/// of the owned record.
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
+pub trait OwnedResponseSink {
+    /// Encode + enqueue one outbound `Response(Reply|Err)` frame.
+    fn send_response(&self, response: ResponseOwned);
 }
 
 /// Declarer-side liveliness interest-response emit. Separate from
@@ -266,10 +262,6 @@ pub trait LivelinessGetPrune {
 // satisfy the other two.
 
 impl<S: ResponseSink + ?Sized> ResponseSink for &S {
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn send_response(&self, response: ResponseOwned) {
-        (**self).send_response(response)
-    }
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
         (**self).send_reply_parts(parts)
@@ -338,10 +330,6 @@ impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for &S {
 
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
-    #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: ResponseOwned) {
-        (**self).send_response(response)
-    }
     #[cfg(feature = "codec-response")]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
         (**self).send_reply_parts(parts)

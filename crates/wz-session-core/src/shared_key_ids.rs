@@ -1262,17 +1262,8 @@ impl LinkKeys {
     }
 }
 
-/// The bytes a VLE of `value` takes on the wire: seven bits of it per byte.
-const fn vle_len(value: u64) -> usize {
-    // At most ten bytes for a 64-bit value.
-    let mut len = 1usize;
-    let mut rest = value >> 7;
-    while rest != 0 {
-        len = len.saturating_add(1);
-        rest >>= 7;
-    }
-    len
-}
+// The bytes a VLE takes on the wire: the codec crate's one count.
+use wz_codecs::vle::zint_len as vle_len;
 
 /// The bytes of a wireexpr that names `key` as the literal: id 0, the length, the text.
 fn literal_cost(key: &str) -> usize {

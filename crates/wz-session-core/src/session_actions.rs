@@ -4237,15 +4237,16 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 }
 
 // R311dz-pre — bridge the observer's generic reply drain to the action
-// bundle. The inherent `send_response` / `send_response_final`
-// methods (below, in the `impl<R: SessionRuntime, T: TimeSource>` block) carry
-// the real encode + enqueue; these trait methods delegate to them so
-// The observer's reply drain (`flush_query_replies<S: ResponseSink>` and
-// the composing `flush_pending`) can drive any runtime's actions handle.
-// The delegating `self.send_response(..)` calls resolve to the inherent
-// methods (inherent shadows trait in method-call resolution), so there is
-// no recursion. The method set is empty in a build with neither response
-// codec, matching the trait's gated surface.
+// bundle. The inherent `send_response_final` method (below, in the
+// `impl<R: SessionRuntime, T: TimeSource>` block) carries the real encode +
+// enqueue; the trait method delegates to it so the observer's reply drain
+// (`flush_query_replies<S: ResponseSink>` and the composing `flush_pending`)
+// can drive any runtime's actions handle. The delegating call resolves to the
+// inherent method (inherent shadows trait in method-call resolution), so there
+// is no recursion. The owned `send_response` is inherent only: a holder of the
+// bundle as a `ResponseSink` links no encoder of the owned record. The method
+// set is empty in a build with neither response codec, matching the trait's
+// gated surface.
 //
 // R311lq — `SessionLinkActions` is the full-session bundle, so it
 // implements ALL THREE observer drain-sink concerns. They are separate
@@ -4295,10 +4296,6 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
 }
 
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn send_response(&self, response: ResponseOwned) {
-        self.send_response(response);
-    }
     // A staged reply is written as the codec's borrowed `Response` from the stage's own
     // row and encoded into the lent slot: no `QueryReply`, no `ResponseOwned`. Routed as
     // `dispatch_response` routes a response: on the band and with the express bit of the
