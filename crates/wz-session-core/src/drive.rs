@@ -2002,27 +2002,41 @@ fn dispatch_kept<R: SessionRuntime, T: TimeSource>(
     let mut at = resume.map_or(0, |resume| resume.unit);
     let mut next_record = resume.and_then(|resume| resume.record);
     let mut path = None;
-    while at < datagram.len() {
-        if path.is_some() && !on_event.takes_another() {
-            actions.set_datagram_resume(DatagramResume {
-                unit: at,
-                record: None,
-            });
-            break;
+    // Where the dispatch stopped, noted once after the walk: the host asked for no more before a
+    // unit, or a `Frame` stopped before a record.
+    let mut stop = None;
+    // The host is asked before each unit after the first, so the question closes the loop and
+    // the walk has one call of `unit_at`.
+    if at < datagram.len() {
+        loop {
+            let (read_by, used, stopped) =
+                unit_at(&datagram[at..], next_record.take(), &mut *on_event);
+            path.get_or_insert(read_by);
+            if stopped {
+                stop = Some(DatagramResume {
+                    unit: at,
+                    record: Some(used),
+                });
+                break;
+            }
+            if used == 0 {
+                break;
+            }
+            at += used;
+            if at >= datagram.len() {
+                break;
+            }
+            if !on_event.takes_another() {
+                stop = Some(DatagramResume {
+                    unit: at,
+                    record: None,
+                });
+                break;
+            }
         }
-        let (read_by, used, stopped) = unit_at(&datagram[at..], next_record.take(), &mut *on_event);
-        path.get_or_insert(read_by);
-        if stopped {
-            actions.set_datagram_resume(DatagramResume {
-                unit: at,
-                record: Some(used),
-            });
-            break;
-        }
-        if used == 0 {
-            break;
-        }
-        at += used;
+    }
+    if let Some(stop) = stop {
+        actions.set_datagram_resume(stop);
     }
     path.unwrap_or(DatagramPath::InPlace)
 }
