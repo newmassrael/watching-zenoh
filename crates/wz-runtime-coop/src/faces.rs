@@ -513,7 +513,6 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     }
 
     /// Begin a dial of `to`, which the network answers later.
-    /// Out of line: the stack's dial of each protocol is put together here, not in its caller.
     #[inline(never)]
     pub fn begin_dial(&self, to: Locator) -> Result<L::Dial, LinkOpenError> {
         self.links.begin_initiator(to)

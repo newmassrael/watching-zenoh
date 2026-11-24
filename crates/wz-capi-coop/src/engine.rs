@@ -2488,7 +2488,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Begin a dial of `endpoint`, which the network answers later
     /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
-    /// Out of line: the dial role and a face added by the program each begin a dial.
     #[inline(never)]
     fn begin_dial(&self, endpoint: &str) -> Result<L::Dial, OpenError> {
         let to = parse_locator(endpoint).map_err(|refused| {
