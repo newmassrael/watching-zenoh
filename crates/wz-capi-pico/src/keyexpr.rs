@@ -271,12 +271,14 @@ pub(crate) struct KeyText {
 }
 
 impl KeyText {
-    /// `text` as a copy of its own.
-    pub(crate) fn owned(text: &str) -> Self {
-        Self {
-            key: ManuallyDrop::new(HeldKey::own(text)),
+    /// `text` as a copy of its own; refused as zenoh-pico refuses what its heap cannot hold
+    /// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`) when the heap refuses the copy.
+    pub(crate) fn owned(text: &str) -> Result<Self, ZResult> {
+        let key = HeldKey::own(text).ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        Ok(Self {
+            key: ManuallyDrop::new(key),
             engine: ManuallyDrop::new(None),
-        }
+        })
     }
 
     /// `text` kept for an object of `shared`'s session: in its key arena when it keeps one, and
@@ -299,7 +301,7 @@ impl KeyText {
         };
         match refused {
             Some(code) => Err(code),
-            None => Ok(Self::owned(text)),
+            None => Self::owned(text),
         }
     }
 
@@ -313,23 +315,23 @@ impl KeyText {
     pub(crate) fn beside(&self, text: &str) -> Result<Self, ZResult> {
         match &*self.engine {
             Some(engine) => Self::of_session(engine, text),
-            None => Ok(Self::owned(text)),
+            None => Self::owned(text),
         }
     }
 
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
-    /// copy for one of its own.
+    /// copy for one of its own, refused as [`Self::owned`] refuses it.
     #[inline(never)]
-    pub(crate) fn share(&self) -> Self {
+    pub(crate) fn share(&self) -> Result<Self, ZResult> {
         if let Some(engine) = &*self.engine {
             // An engine that keeps no key arena made no key of one; a copy reads the same.
             if let Some(Ok(Some(key))) =
                 key_arena(engine).map(|keys| SessionKeys::key(keys, KeyAsk::Share(&self.key)))
             {
-                return Self {
+                return Ok(Self {
                     key: ManuallyDrop::new(key),
                     engine: ManuallyDrop::new(Some(engine.clone())),
-                };
+                });
             }
         }
         Self::owned(self.as_str())
@@ -408,11 +410,11 @@ pub(crate) struct DeclaredKeyexpr {
 
 impl DeclaredKeyexpr {
     /// A key with no declaration.
-    pub(crate) fn literal_only(literal: &str) -> Self {
-        Self {
-            literal: KeyText::owned(literal),
+    pub(crate) fn literal_only(literal: &str) -> Result<Self, ZResult> {
+        Ok(Self {
+            literal: KeyText::owned(literal)?,
             declaration: None,
-        }
+        })
     }
 
     /// A key with no declaration, its text kept for an object of `shared`'s session
@@ -454,12 +456,12 @@ impl DeclaredKeyexpr {
     }
 
     /// Another key sharing this one's literal and declaration — pico
-    /// `_z_declared_keyexpr_copy`, which clones the refcount.
-    pub(crate) fn share(&self) -> Self {
-        Self {
-            literal: self.literal.share(),
+    /// `_z_declared_keyexpr_copy`, which clones the refcount. Refused as the literal's share is.
+    pub(crate) fn share(&self) -> Result<Self, ZResult> {
+        Ok(Self {
+            literal: self.literal.share()?,
             declaration: self.declaration.clone(),
-        }
+        })
     }
 
     /// A new literal that keeps this key's declaration — pico's
@@ -613,7 +615,7 @@ impl DeclaredKeyexpr {
                 .declared_on(Arc::as_ref(shared))
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
-                return Ok(existing.share());
+                return existing.share();
             }
         }
         // The key is kept before anything is declared, so one the session's key arena has no room
@@ -1079,8 +1081,16 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// `_mapping` stays 0 because nothing reads it any more — a key's wire form is
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
-unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
-    owned_keyexpr_at(dst, Box::into_raw(Box::new(key)));
+/// `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` as it was and `key` let go of, when the heap
+/// refuses the key's box.
+unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) -> ZResult {
+    match crate::bytes::try_box(key) {
+        Ok(key) => {
+            owned_keyexpr_at(dst, Box::into_raw(key));
+            Z_OK
+        }
+        Err(no_room) => no_room.code(),
+    }
 }
 
 /// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot
@@ -1146,8 +1156,10 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         if let Err(code) = canon_key(text) {
             return code;
         }
-        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
-        Z_OK
+        match DeclaredKeyexpr::literal_only(text) {
+            Ok(key) => store_owned_keyexpr(keyexpr, key),
+            Err(code) => code,
+        }
     })
 }
 
@@ -1269,8 +1281,10 @@ pub unsafe extern "C" fn z_keyexpr_clone(
             Some(declared) => declared.share(),
             None => DeclaredKeyexpr::literal_only(text),
         };
-        store_owned_keyexpr(dst, key);
-        Z_OK
+        match key {
+            Ok(key) => store_owned_keyexpr(dst, key),
+            Err(code) => code,
+        }
     })
 }
 
@@ -1367,7 +1381,7 @@ unsafe fn extended_from(
 ) -> Result<DeclaredKeyexpr, ZResult> {
     match declared_of(left) {
         Some(declared) => declared.extended(literal),
-        None => Ok(DeclaredKeyexpr::literal_only(literal)),
+        None => DeclaredKeyexpr::literal_only(literal),
     }
 }
 
@@ -1418,8 +1432,10 @@ unsafe fn store_canonized(
     let Some(canon) = crate::abi::text_of(form) else {
         return Err(Z_ERR_INVALID);
     };
-    store_owned_keyexpr(key, extended_from(left, canon)?);
-    Ok(form.len())
+    match store_owned_keyexpr(key, extended_from(left, canon)?) {
+        Z_OK => Ok(form.len()),
+        code => Err(code),
+    }
 }
 
 /// How a door that makes a key of the text `parts` make takes a text not in canon form.
@@ -2562,9 +2578,9 @@ mod key_text_tests {
     /// A key made with no session is a copy of its own, read and shared as one.
     #[test]
     fn a_key_with_no_session_is_a_copy_of_its_own() {
-        let key = DeclaredKeyexpr::literal_only("demo/own/key");
+        let key = DeclaredKeyexpr::literal_only("demo/own/key").expect("the test's heap");
         assert!(!key.literal.is_session());
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         assert!(!shared.literal.is_session());
         assert_ne!(
             shared.literal().as_ptr(),
@@ -2701,7 +2717,7 @@ mod arena_key_tests {
         assert!(key.literal.is_session());
         assert_eq!(key.literal(), "demo/pk/a1");
         assert!(room_for(&engine, 10), "one block is left");
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         drop(key);
         assert_eq!(shared.literal(), "demo/pk/a1", "the share reads the key");
         let second = DeclaredKeyexpr::declare(&engine, "demo/pk/b2", None).expect("the last block");
@@ -2729,7 +2745,7 @@ mod arena_key_tests {
             !room_for(&engine, text.len()),
             "the declaration takes the last block"
         );
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         let wire = key.wire_holding_declaration(Arc::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
@@ -2871,7 +2887,7 @@ mod arena_key_tests {
             key.declaration_hold(Arc::as_ref(&engine)).is_none(),
             "nothing is declared"
         );
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         assert!(shared.literal.is_session(), "a share holds the block");
         assert_eq!(shared.literal(), "demo/adv/base");
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
@@ -2931,7 +2947,7 @@ mod arena_key_tests {
         assert_eq!(closed, Z_OK);
         let copy = KeyText::of_session(&engine, "demo/b").expect("a copy of its own");
         assert!(!copy.is_session());
-        assert_eq!(held.share().as_str(), "demo/a");
+        assert_eq!(held.share().expect("a share").as_str(), "demo/a");
         close(session);
     }
 }

@@ -2428,7 +2428,7 @@ mod tests {
 
         // The default is MATCHING_QUERY, so the gate is ON by default.
         let gate = |ke: &str, accept| ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned(ke),
+            query_keyexpr: crate::keyexpr::KeyText::owned(ke).expect("the test's heap"),
             anyke: parameters_has_anyke(&sent(b"", accept)),
         };
 
@@ -2467,7 +2467,7 @@ mod tests {
         // (`primitives.c:575-582`), so `_anyke` in the caller's own parameters
         // opens the gate even under MATCHING_QUERY.
         let g = ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned("a/**"),
+            query_keyexpr: crate::keyexpr::KeyText::owned("a/**").expect("the test's heap"),
             anyke: parameters_has_anyke(&sent(b"_anyke", matching)),
         };
         assert!(g.anyke, "a hand-written _anyke selector must open the gate");
@@ -2598,7 +2598,7 @@ mod tests {
         }
         let closure = || CReplyClosure::uncounted(core::ptr::null_mut(), None, Some(counted_drop));
         let gate = || ReplyGate {
-            query_keyexpr: crate::keyexpr::KeyText::owned("demo/get"),
+            query_keyexpr: crate::keyexpr::KeyText::owned("demo/get").expect("the test's heap"),
             anyke: false,
         };
 

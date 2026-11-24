@@ -88,6 +88,59 @@ impl NoRoom {
     }
 }
 
+/// `value` in a box of its own, or [`NoRoom`] with `value` let go of when the heap refuses the
+/// box: what every door that boxes an object it hands the program asks, so a full heap is answered
+/// as zenoh-pico answers its failed `malloc` and never ends the program. Laid out as
+/// `Box::new(value)` lays it out, so the box is dropped and freed as any other is.
+pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, NoRoom> {
+    let layout = core::alloc::Layout::new::<T>();
+    let at = if layout.size() == 0 {
+        NonNull::<T>::dangling()
+    } else {
+        // SAFETY: the layout has bytes.
+        NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()).ok_or(NoRoom)?
+    };
+    // SAFETY: `at` is a block of `T`'s layout from the global allocator (or the aligned place of
+    // a value of no bytes), this call's alone; it is written whole before the box owns it.
+    unsafe {
+        at.as_ptr().write(value);
+        Ok(Box::from_raw(at.as_ptr()))
+    }
+}
+
+/// A copy of `bytes` of its own, or [`NoRoom`] when the heap refuses it: laid out as
+/// `Box::<[u8]>::from(bytes)` lays it out, so it is dropped and freed as that is.
+pub(crate) fn try_boxed_bytes(bytes: &[u8]) -> Result<Box<[u8]>, NoRoom> {
+    let len = bytes.len();
+    let at = if len == 0 {
+        NonNull::<u8>::dangling()
+    } else {
+        let layout = core::alloc::Layout::array::<u8>(len).map_err(|_| NoRoom)?;
+        // SAFETY: the layout has bytes, `len` of them.
+        let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).ok_or(NoRoom)?;
+        // SAFETY: a new block of `len` bytes, this call's alone, apart from `bytes`.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at.as_ptr(), len) };
+        at
+    };
+    // SAFETY: `len` bytes written whole, laid out as a boxed slice of them (none for no bytes).
+    Ok(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(at.as_ptr(), len)) })
+}
+
+/// `value` put after the last of `items`, or [`NoRoom`] with `items` as they were and `value`
+/// let go of when the heap refuses the room: a push with no path that ends the program.
+pub(crate) fn try_push<T>(items: &mut Vec<T>, value: T) -> Result<(), NoRoom> {
+    items.try_reserve(1).map_err(|_| NoRoom)?;
+    let len = items.len();
+    items
+        .spare_capacity_mut()
+        .first_mut()
+        .ok_or(NoRoom)?
+        .write(value);
+    // SAFETY: the place after the last item was written above, within the room reserved.
+    unsafe { items.set_len(len.saturating_add(1)) };
+    Ok(())
+}
+
 /// The head of a block of payload storage, which its contents follow.
 ///
 /// wz's payload model was an owning `Vec<u8>` with a deep-copying `Clone`, and
@@ -586,11 +639,16 @@ impl ByteBuf {
         if other.len != 0 {
             self.reserve(other.len)?;
         }
+        // The room of every end this append writes, taken before anything is written: one for
+        // each of the other's segments and one to close this payload's own.
+        self.bounds
+            .try_reserve(other.bounds.len().saturating_add(2))
+            .map_err(|_| NoRoom)?;
         if self.bounds.is_empty() && self.len != 0 {
-            self.bounds.push(self.len);
+            try_push(&mut self.bounds, self.len)?;
         }
         for segment in (0..).map_while(|idx| other.segment(idx)) {
-            self.put_segment(segment);
+            self.put_segment(segment)?;
         }
         Ok(())
     }
@@ -599,9 +657,9 @@ impl ByteBuf {
     /// that reads the other payload's segments is unrolled into a first one read apart, and each
     /// copy of the loop held the write and the end of its own.
     #[inline(never)]
-    fn put_segment(&mut self, segment: &[u8]) {
+    fn put_segment(&mut self, segment: &[u8]) -> Result<(), NoRoom> {
         self.put_after(segment);
-        self.bounds.push(self.len);
+        try_push(&mut self.bounds, self.len)
     }
 
     /// Append raw bytes to the CURRENT segment (pico
@@ -715,14 +773,14 @@ impl SliceState {
             Some(start) if !start.is_null() => start,
             _ => NonNull::<u8>::dangling().as_ptr().cast_const(),
         };
-        Ok(Box::new(SliceState {
+        try_box(SliceState {
             backing,
             filled: len,
             self_view: z_loaned_slice_t {
                 _start: start,
                 _len: len,
             },
-        }))
+        })
     }
 
     /// Put in `bytes` this slice as a payload that SHARES its block.
@@ -747,14 +805,14 @@ impl StringState {
     /// the library's and holds no block.
     fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
         if bytes.is_empty() {
-            return Ok(Box::new(StringState {
+            return try_box(StringState {
                 backing: None,
                 filled: 0,
                 self_view: z_loaned_string_t {
                     _start: &EMPTY_C_STRING,
                     _len: 0,
                 },
-            }));
+            });
         }
         let filled = bytes.len().checked_add(1).ok_or(NoRoom)?;
         let mut block = Block::with_room(filled).ok_or(NoRoom)?;
@@ -764,14 +822,14 @@ impl StringState {
             block.write(bytes.len(), &[0]);
         }
         let start = block.span().0;
-        Ok(Box::new(StringState {
+        try_box(StringState {
             backing: Some(block),
             filled,
             self_view: z_loaned_string_t {
                 _start: start,
                 _len: bytes.len(),
             },
-        }))
+        })
     }
 
     /// A string that DESCRIBES the caller's `len` bytes at `start` (pico
@@ -789,14 +847,14 @@ impl StringState {
             NoRoom
         })?;
         let view_start = block.span().0;
-        Ok(Box::new(StringState {
+        try_box(StringState {
             backing: Some(block),
             filled: len,
             self_view: z_loaned_string_t {
                 _start: view_start,
                 _len: len,
             },
-        }))
+        })
     }
 
     /// Put in `bytes` this string as a payload that SHARES its block, minus the terminator.
@@ -850,12 +908,15 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     None
 }
 
-/// Box `buf`, in a kept allocation when this thread has one; `None` never.
+/// Box `buf`, in a kept allocation when this thread has one; `None` when the heap refuses a box.
 #[cfg(not(wz_process_pools))]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
     // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
     // is the same allocation, and the optimiser writes nothing into it.
-    let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
+    let mut slot = match kept_box() {
+        Some(slot) => slot,
+        None => try_box(core::mem::MaybeUninit::uninit()).ok()?,
+    };
     slot.write(buf);
     Some(Box::into_raw(slot).cast::<ByteBuf>())
 }

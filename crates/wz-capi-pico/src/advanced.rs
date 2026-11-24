@@ -1450,7 +1450,7 @@ unsafe fn declare_subscriber_state(
     // A key the caller did not declare is kept in the session's key arena, as any object of the
     // session keeps its key, so the subscriber's entities share its block and copy no text.
     let base = match declared_of(keyexpr) {
-        Some(declared) => declared.share(),
+        Some(declared) => declared.share()?,
         None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);

@@ -633,6 +633,8 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+#[cfg(test)]
+mod heap_refusal_tests;
 mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
@@ -645,6 +647,8 @@ pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
 pub mod scout;
+#[cfg(test)]
+mod test_heap;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]

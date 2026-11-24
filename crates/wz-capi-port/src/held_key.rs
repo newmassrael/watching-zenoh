@@ -71,15 +71,26 @@ impl HeldKey {
     }
 
     /// A copy of `text` of its own, on the heap: for a key no session's arena keeps, made with no
-    /// session, for an engine that keeps no key arena or for a closed session.
-    pub fn own(text: &str) -> Self {
-        let own: Box<str> = text.into();
-        let len = own.len();
-        Self {
-            text: NonNull::from(Box::leak(own).as_bytes()).cast::<u8>(),
+    /// session, for an engine that keeps no key arena or for a closed session. `None` when the
+    /// heap refuses the copy, which the caller answers as a full heap and not by ending the
+    /// program. Laid out as a `Box<str>` of the text is, which [`Self::free_own`] frees.
+    pub fn own(text: &str) -> Option<Self> {
+        let len = text.len();
+        let at = if len == 0 {
+            NonNull::<u8>::dangling()
+        } else {
+            let layout = core::alloc::Layout::array::<u8>(len).ok()?;
+            // SAFETY: the layout has bytes, `len` of them.
+            let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
+            // SAFETY: a new block of `len` bytes, this call's alone, apart from `text`.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), at.as_ptr(), len) };
+            at
+        };
+        Some(Self {
+            text: at,
             len,
             at: OWN,
-        }
+        })
     }
 
     /// Whether this is a copy of its own ([`Self::own`]).
@@ -104,7 +115,8 @@ impl HeldKey {
     /// # Safety
     /// `self` is a copy of its own ([`Self::is_own`]), freed once.
     pub unsafe fn free_own(self) {
-        // SAFETY: the caller's contract: `text` and `len` are the `Box<str>` `own` leaked.
+        // SAFETY: the caller's contract: `text` and `len` are the copy `own` made, laid out as a
+        // `Box<str>` of `len` bytes is (none taken for no bytes).
         drop(unsafe {
             Box::from_raw(
                 core::ptr::slice_from_raw_parts_mut(self.text.as_ptr(), self.len) as *mut str,
@@ -249,10 +261,10 @@ mod tests {
     /// A copy of its own reads back its text and is freed by its owner; it is no key of an arena.
     #[test]
     fn a_copy_of_its_own_reads_back_and_is_freed() {
-        let own = HeldKey::own("demo/own/key");
+        let own = HeldKey::own("demo/own/key").expect("the test's heap");
         assert!(own.is_own());
         assert_eq!(own.as_str(), "demo/own/key");
-        let empty = HeldKey::own("");
+        let empty = HeldKey::own("").expect("no bytes to take");
         assert_eq!(empty.as_str(), "");
         // SAFETY: each is a copy of its own, freed once.
         unsafe {

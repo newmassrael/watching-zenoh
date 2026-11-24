@@ -276,7 +276,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // The cached sample holds a reference to the key it was published on, as
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go.
-        Some(Retained::new(Arc::new(publisher.key().share())))
+        Some(Retained::new(Arc::new(publisher.key().share().ok()?)))
     }
 }
 
