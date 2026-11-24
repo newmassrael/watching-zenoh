@@ -181,8 +181,8 @@ where
 
     /// Dial `target`'s peer over UDP: bind a socket on a port the stack picks (out of the pool
     /// the image declared, so a full pool is [`DialRefused::Link`]), then open the session over
-    /// it. The socket is bound before any table is claimed and is given back when one refuses;
-    /// the `InitSyn` leaves only once the session's task first runs.
+    /// it. The socket is bound only once the session table has a slot free, and is given back
+    /// when a later table refuses; the `InitSyn` leaves only once the session's task first runs.
     pub fn dial<F>(
         &self,
         links: &LwipLinks<L>,

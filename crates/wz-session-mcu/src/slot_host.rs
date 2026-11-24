@@ -189,8 +189,8 @@ where
     /// [`Self::open`] for a driver `make` writes in the place it is handed, the claimed slot's
     /// (`SessionSlots::claim_with`), and lends back: the driver is made where it is kept and is
     /// never a value in this frame or the caller's, which for a driver that carries its link's
-    /// outbound slot is a datagram's width of stack. A table with no slot free makes the driver
-    /// and drops it, as `open` drops the one it is handed.
+    /// outbound slot is a datagram's width of stack. A table with no slot free does not make the
+    /// driver: `make` is dropped unrun, as `open` drops the driver it is handed.
     pub fn open_in<F>(
         &self,
         make: impl FnOnce(&mut core::mem::MaybeUninit<T::Driver>) -> &mut T::Driver,
@@ -272,9 +272,10 @@ where
 
     /// Dial: `bind` opens the socket of the link (a cell of the pool the image declared, a port
     /// the stack picks) and writes its driver into the place it is handed, the claimed slot's
-    /// (`Bind::bind_in`), then the session is opened over it. The socket is bound before any
-    /// table is claimed and is given back when one refuses; the `InitSyn` leaves only once the
-    /// session's task first runs. A pool with no socket is [`DialRefused::Link`].
+    /// (`Bind::bind_in`), then the session is opened over it. The socket is bound only once the
+    /// session table has a slot free, and is given back when a later table refuses; the `InitSyn`
+    /// leaves only once the session's task first runs. A pool with no socket is
+    /// [`DialRefused::Link`].
     ///
     /// `expected_zid` is the node the dial is made for, or `None` for a dial made to the locator
     /// alone (decision D4 of `docs/session-lifecycle-intent.md`). The session closes at an

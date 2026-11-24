@@ -354,8 +354,8 @@ fn a_dial_with_no_socket_left_is_refused_typed_and_counted_and_sends_nothing() {
     dial_then_refuse(rig, N, Why::Socket);
 }
 
-/// The session table is the full one, with a socket to spare: the refused dial's
-/// socket goes back to its pool.
+/// The session table is the full one, with a socket to spare: the refused dial
+/// binds no socket, so the pool holds what it held.
 #[test]
 fn a_dial_with_no_session_slot_left_is_refused_typed_and_counted_and_gives_its_socket_back() {
     static RUNTIME: RuntimeCell<Frozen, { N + 2 }, 256, 4> = RuntimeCell::new();
