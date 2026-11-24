@@ -71,20 +71,20 @@ pub fn encode_zint(out: &mut [u8], v: u64) -> usize {
 /// [`encode_zint`]'s asymmetry.
 pub fn decode_zint(input: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
-    let mut shift = 0u32;
-    for (i, byte) in input.iter().take(VLE_LEN).enumerate() {
-        let is_last = i + 1 == VLE_LEN;
-        if is_last {
-            value |= u64::from(*byte) << shift;
-            return Some((value, i + 1));
+    let mut used = 0usize;
+    loop {
+        let byte = *input.get(used)?;
+        // One exit for the flag and the ninth rung, as in `encode_zint`: a separate count bound
+        // is a constant trip count, unrolled over every rung.
+        let last = used == VLE_LEN - 1;
+        let more = (byte & 0x80 != 0) & !last;
+        let bits = if last { byte } else { byte & 0x7f };
+        value |= u64::from(bits) << (7 * used);
+        used += 1;
+        if !more {
+            return Some((value, used));
         }
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some((value, i + 1));
-        }
-        shift += 7;
     }
-    None
 }
 
 #[cfg(test)]
@@ -159,6 +159,21 @@ mod tests {
                 "a byte past the encoding of {v:#x} was written"
             );
         }
+    }
+
+    /// The ninth byte ends a decoding whatever its high bit and gives all eight bits, and a
+    /// decoding stops at the byte without the flag, leaving what follows unread. Turned red by a
+    /// decoder that honours the flag on the ninth byte (it would read a tenth).
+    #[test]
+    fn a_decoding_ends_at_its_last_byte_and_reads_none_after_it() {
+        assert_eq!(decode_zint(&[0xff; VLE_LEN + 1]), Some((u64::MAX, VLE_LEN)));
+        let mut top = [0x80u8; VLE_LEN + 1];
+        top[VLE_LEN] = 0x01;
+        assert_eq!(decode_zint(&top), Some((1 << 63, VLE_LEN)));
+        assert_eq!(decode_zint(&[0x00, 0xaa]), Some((0, 1)));
+        assert_eq!(decode_zint(&[0x7f, 0xaa]), Some((0x7f, 1)));
+        assert_eq!(decode_zint(&[0x80, 0x01, 0xaa]), Some((0x80, 2)));
+        assert_eq!(decode_zint(&[0x80]), None);
     }
 
     /// A truncated encoding is `None`, not a silently wrong value — the shape a
