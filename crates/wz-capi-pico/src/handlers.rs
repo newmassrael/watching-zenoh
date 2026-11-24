@@ -57,12 +57,12 @@
 //! the read task pushes, the application thread `recv`s), and narrowing the
 //! assertion to "these are opaque bits we move" keeps that visible.
 
-use alloc::collections::VecDeque;
 use core::ffi::c_void;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use wz_capi_port::os::{Condvar, Mutex};
 
+use crate::bytes::NoRoom;
 use crate::prelude::*;
 
 use crate::ffi::{guard_val, guarded};
@@ -291,8 +291,83 @@ const FIFO_FULL: FullPolicy = FullPolicy::DropNewest;
 struct ChannelState {
     /// Element pointers as raw bits. Opaque to this module; see the module doc
     /// for why they are not typed pointers.
-    items: VecDeque<usize>,
+    items: Ring,
     closed: bool,
+}
+
+/// The element pointers a channel holds, as raw bits, oldest first, in places of the channel's
+/// capacity taken when it is made, as pico's ring takes its places at `_z_ring_init`: a push past
+/// them meets the channel's [`FullPolicy`] and never grows the places, so no push allocates.
+struct Ring {
+    places: Box<[usize]>,
+    /// The place of the oldest element.
+    head: usize,
+    /// How many elements are held.
+    len: usize,
+}
+
+impl Ring {
+    /// `capacity` places, or [`NoRoom`] when the heap refuses them.
+    fn with_capacity(capacity: usize) -> Result<Self, NoRoom> {
+        let places = if capacity == 0 {
+            Box::default()
+        } else {
+            let layout = core::alloc::Layout::array::<usize>(capacity).map_err(|_| NoRoom)?;
+            // SAFETY: the layout has bytes.
+            let at = core::ptr::NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
+                .ok_or(NoRoom)?
+                .cast::<usize>();
+            // SAFETY: a block of `capacity` words from the global allocator, zeroed (every word
+            // is a value), this call's alone, laid out as a boxed slice of them.
+            unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(at.as_ptr(), capacity)) }
+        };
+        Ok(Self {
+            places,
+            head: 0,
+            len: 0,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.len >= self.places.len()
+    }
+
+    /// The place `steps` after the oldest element's, round the ring.
+    fn place_after_head(&self, steps: usize) -> usize {
+        self.head
+            .wrapping_add(steps)
+            .checked_rem(self.places.len())
+            .unwrap_or(0)
+    }
+
+    /// The oldest element, taken out; `None` when none is held.
+    fn pop_front(&mut self) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let bits = *self.places.get(self.head)?;
+        self.head = self.place_after_head(1);
+        self.len = self.len.saturating_sub(1);
+        Some(bits)
+    }
+
+    /// `bits` after the newest element, or handed back when every place is held.
+    fn push_back(&mut self, bits: usize) -> Result<(), usize> {
+        if self.is_full() {
+            return Err(bits);
+        }
+        let at = self.place_after_head(self.len);
+        let Some(place) = self.places.get_mut(at) else {
+            return Err(bits);
+        };
+        *place = bits;
+        self.len = self.len.saturating_add(1);
+        Ok(())
+    }
 }
 
 /// The Rust-side channel a `_z_fifo_mt_t` / `_z_ring_mt_t` handle points at.
@@ -304,23 +379,22 @@ struct ChannelState {
 /// truth that the channel macro's fixed function/collection pairing can never
 /// exercise.
 struct Channel {
-    capacity: usize,
     state: Mutex<ChannelState>,
     not_empty: Condvar,
     not_full: Condvar,
 }
 
 impl Channel {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
+    /// A channel of `capacity` places, or [`NoRoom`] when the heap refuses them.
+    fn new(capacity: usize) -> Result<Self, NoRoom> {
+        Ok(Self {
             state: Mutex::new(ChannelState {
-                items: VecDeque::new(),
+                items: Ring::with_capacity(capacity)?,
                 closed: false,
             }),
             not_empty: Condvar::new(),
             not_full: Condvar::new(),
-        }
+        })
     }
 }
 
@@ -414,7 +488,7 @@ unsafe fn install(slot: *mut c_void, capacity: usize, size: usize) -> ZResult {
     // uninitialised stack bytes would make that copy read indeterminate values.
     core::ptr::write_bytes(slot.cast::<u8>(), 0, size);
     // A full heap leaves the slot zeroed, a collection with no channel, as a refused one is.
-    let channel = match crate::bytes::try_box(Channel::new(capacity)) {
+    let channel = match Channel::new(capacity).and_then(crate::bytes::try_box) {
         Ok(channel) => channel,
         Err(no_room) => return no_room.code(),
     };
@@ -462,12 +536,12 @@ unsafe fn push(
     // `z_owned_sample_t`'s drop runs this crate's own `z_sample_drop`), and
     // running it under the channel mutex is how a self-deadlock gets built.
     let mut evicted: Option<*mut c_void> = None;
-    if !state.closed && state.items.len() >= channel.capacity {
+    if !state.closed && state.items.is_full() {
         match policy {
             // A blocking push waits until there is room or the channel closes.
             #[cfg(feature = "multi-thread")]
             FullPolicy::Block => {
-                while !state.closed && state.items.len() >= channel.capacity {
+                while !state.closed && state.items.is_full() {
                     state = channel.not_full.wait(state);
                 }
             }
@@ -494,11 +568,20 @@ unsafe fn push(
         drop(state);
         return Z_RES_CHANNEL_CLOSED;
     }
-    state.items.push_back(elem as usize);
+    // A ring of no places holds nothing even once its oldest is evicted: the new element is
+    // released, as a fifo's that drops it is, and not kept past the ring's capacity.
+    let refused = state.items.push_back(elem as usize).err();
     drop(state);
-    channel.not_empty.notify_one();
-    if let (Some(mut raw), Some(free)) = (evicted, free_f) {
-        free(&mut raw);
+    if refused.is_none() {
+        channel.not_empty.notify_one();
+    }
+    if let Some(free) = free_f {
+        for mut raw in [evicted, refused.map(|bits| bits as *mut c_void)]
+            .into_iter()
+            .flatten()
+        {
+            free(&mut raw);
+        }
     }
     Z_OK
 }
@@ -606,10 +689,17 @@ unsafe fn clear(slot: *mut c_void, free_f: z_element_free_f) {
     // The only reference there is: no lock to take. A mutex a panic left poisoned on a host still
     // holds the elements, which are ours to release. The queue is taken whole, not copied, and
     // the channel goes before the program's free runs.
-    let drained = core::mem::take(&mut channel.state.get_mut().items);
+    let mut drained = core::mem::replace(
+        &mut channel.state.get_mut().items,
+        Ring {
+            places: Box::default(),
+            head: 0,
+            len: 0,
+        },
+    );
     drop(channel);
     if let Some(free) = free_f {
-        for bits in drained {
+        while let Some(bits) = drained.pop_front() {
             let mut raw = bits as *mut c_void;
             free(&mut raw);
         }
@@ -1139,6 +1229,78 @@ mod tests {
             }
             _z_fifo_mt_clear(&mut fifo, Some(counting_free));
             assert_eq!(FREED.load(Ordering::Relaxed), 5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    /// How many elements [`count_free`] released.
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+
+    /// A free function that counts and releases nothing: the elements are the test's own.
+    unsafe extern "C" fn count_free(_slot: *mut *mut c_void) {
+        RELEASED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The places of a ring are taken once: a push past them is handed back, a pull frees one,
+    /// and the next push takes it round the ring, oldest first throughout. Turned red by a ring
+    /// that grows past its capacity or that wraps to the wrong place.
+    #[test]
+    fn a_ring_holds_its_capacity_and_wraps_oldest_first() {
+        let mut ring = Ring::with_capacity(3).expect("the test's heap");
+        for bits in 1..=3 {
+            assert_eq!(ring.push_back(bits), Ok(()));
+        }
+        assert!(ring.is_full());
+        assert_eq!(ring.push_back(4), Err(4), "no place past the capacity");
+        assert_eq!(ring.pop_front(), Some(1));
+        assert_eq!(ring.push_back(4), Ok(()), "the freed place, round the ring");
+        let pulled: Vec<usize> = core::iter::from_fn(|| ring.pop_front()).collect();
+        assert_eq!(pulled, [2, 3, 4]);
+        assert!(ring.is_empty());
+    }
+
+    /// A ring of no places holds nothing and takes no memory, and a ring whose places the heap
+    /// refuses is refused. Turned red by places taken as a push needs them.
+    #[test]
+    fn a_ring_of_no_places_holds_nothing_and_a_refused_one_is_refused() {
+        let mut none = crate::test_heap::refused(|| Ring::with_capacity(0)).expect("no memory");
+        assert!(none.is_full() && none.is_empty());
+        assert_eq!(none.push_back(7), Err(7));
+        assert_eq!(none.pop_front(), None);
+        assert!(crate::test_heap::refused(|| Ring::with_capacity(4)).is_err());
+    }
+
+    /// A ring collection of no places releases what is pushed into it once, at the push, and
+    /// keeps nothing. Turned red by an element kept past the ring's capacity, or leaked.
+    #[test]
+    fn a_ring_collection_of_no_places_releases_each_push() {
+        // SAFETY: the collection's bytes are the test's own, and the element is a pointer the
+        // free function never reads.
+        unsafe {
+            let mut ring = core::mem::MaybeUninit::<_z_ring_mt_t>::zeroed();
+            assert_eq!(_z_ring_mt_init(ring.as_mut_ptr(), 0), Z_OK);
+            let before = RELEASED.load(Ordering::SeqCst);
+            let elem = core::ptr::NonNull::<u8>::dangling()
+                .as_ptr()
+                .cast::<c_void>();
+            let pushed =
+                _z_ring_mt_push(elem, ring.as_mut_ptr().cast::<c_void>(), Some(count_free));
+            assert_eq!(pushed, Z_OK);
+            assert_eq!(
+                RELEASED.load(Ordering::SeqCst),
+                before + 1,
+                "released at the push"
+            );
+            _z_ring_mt_clear(ring.as_mut_ptr(), Some(count_free));
+            assert_eq!(
+                RELEASED.load(Ordering::SeqCst),
+                before + 1,
+                "nothing was kept"
+            );
         }
     }
 }
