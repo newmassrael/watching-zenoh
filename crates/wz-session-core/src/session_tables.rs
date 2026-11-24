@@ -19,9 +19,10 @@
 //! A row keeps its key as the policy keeps one (the session's key arena on the lent policy). An
 //! entity that names a key expression declaration of the session's holds that declaration's row
 //! ([`KeyForm::prefix`]) instead of a copy of its id and suffix: its wire form is read off both
-//! ([`SessionTables::wire_of`]), and the declaration is retracted when its last holder goes. A
-//! write filter keeps no key: it reads the key of the Interest it holds, which every filter of one
-//! kind on one key shares, and a matching listener, declared on a filter, reads its filter's.
+//! ([`SessionTables::wire_of`]), and the declaration is retracted when its last holder goes. Each
+//! write filter that asks the peers, and each matching listener declared on a key, opens an
+//! Interest of its own, as zenoh-pico's `_z_write_filter_create` adds one for every filter; a
+//! matching listener declared on a filter asks nothing and reads its filter's.
 //!
 //! # Refusals
 //!
@@ -712,14 +713,13 @@ impl<Key, Cb> LivelinessSubscriberRow<Key, Cb> {
     }
 }
 
-/// An Interest the session holds open, how it names its key, and how many filters and listeners
-/// hold it.
+/// An Interest the session holds open and how it names its key: the one write filter or matching
+/// listener that opened it holds it alone.
 #[derive(Debug)]
 pub struct InterestRow<Key> {
     id: EntityId,
     kind: InterestKind,
     key: Key,
-    holds: u16,
     mapping_id: ExprId,
     aggregate: bool,
     /// Where in `key` the rest of the key the Interest names lies, as a start and a length, so
@@ -741,11 +741,6 @@ impl<Key: KeyBacking> InterestRow<Key> {
     /// The key it asks about.
     pub fn key(&self) -> &str {
         self.key.as_str()
-    }
-
-    /// How many filters and listeners hold it.
-    pub fn holds(&self) -> u16 {
-        self.holds
     }
 
     /// The key expression declaration it names its key by, `0` for none.
@@ -1172,7 +1167,7 @@ pub struct Undeclared<T> {
 pub struct Watching<K> {
     /// Its row.
     pub handle: Handle<K>,
-    /// The new Interest it opened, to send; `None` when it shares one already open.
+    /// The Interest it opened, to send; `None` for a write filter that asks the peers nothing.
     pub interest: Option<OpenedInterest>,
 }
 
@@ -2023,25 +2018,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- Interests, write filters and matching listeners ------------------------------------
 
-    /// Hold an Interest of `kind` on `key`: the one open already, or a new one, handed back
-    /// to be sent.
-    fn hold_interest(
+    /// Open an Interest of `kind` on `key`, handed back to be sent: one for each holder, as
+    /// zenoh-pico adds one for each write filter, whatever is open on the same key already.
+    fn open_interest(
         &mut self,
         kind: InterestKind,
         key: &str,
         name: InterestName<'_>,
-    ) -> Result<(InterestHandle, Option<OpenedInterest>), RegisterError> {
+    ) -> Result<OpenedInterest, RegisterError> {
         // Tables that keep no write filter hold no Interest of one.
         let interests =
             <F::FilterPresence as Presence>::get_mut::<Interests<P>>(&mut self.interests)
                 .ok_or(RegisterError::TableFull)?;
-        if let Some((handle, row)) = interests
-            .iter_mut()
-            .find(|(_, row)| row.kind == kind && text(&row.key) == key)
-        {
-            row.holds = row.holds.checked_add(1).ok_or(RegisterError::TableFull)?;
-            return Ok((handle, None));
-        }
         if interests.is_full() {
             return Err(RegisterError::TableFull);
         }
@@ -2058,25 +2046,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 id,
                 kind,
                 key: kept,
-                holds: 1,
                 mapping_id,
                 aggregate,
                 suffix,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        Ok((handle, Some(OpenedInterest { handle, id })))
+        Ok(OpenedInterest { handle, id })
     }
 
-    /// Let go of one hold of the Interest `handle` names: its id when that was the last, for its
-    /// Final to go on the wire.
-    fn release_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
+    /// Close the Interest `handle` names, its holder gone: its id, for its Final to go on the
+    /// wire.
+    fn close_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
         let interests = self.kept_interests_mut()?;
-        let row = interests.get_mut(handle)?;
-        row.holds = row.holds.saturating_sub(1);
-        if row.holds > 0 {
-            return None;
-        }
-        let id = row.id;
+        let id = interests.get(handle)?.id;
         let _ = interests.remove(handle);
         Some(id)
     }
@@ -2124,13 +2106,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             _ => return Err(RegisterError::TableFull),
         }
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
-        let (interest, asked) = match ask {
-            Some(name) => {
-                let (handle, asked) = self.hold_interest(plane.interest_kind(), key, name)?;
-                (Some(handle), asked)
-            }
-            None => (None, None),
+        let asked = match ask {
+            Some(name) => Some(self.open_interest(plane.interest_kind(), key, name)?),
+            None => None,
         };
+        let interest = asked.map(|opened| opened.handle);
         let row = WriteFilterRow {
             plane,
             interest,
@@ -2150,7 +2130,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             }),
             None => {
                 if let Some(interest) = interest {
-                    let _ = self.release_interest(interest);
+                    let _ = self.close_interest(interest);
                 }
                 Err(RegisterError::TableFull)
             }
@@ -2180,7 +2160,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             }
         }
         let removal = self.kept_write_filters_mut()?.remove(handle)?;
-        let interest_final = interest.and_then(|interest| self.release_interest(interest));
+        let interest_final = interest.and_then(|interest| self.close_interest(interest));
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
@@ -2188,9 +2168,12 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// Declare a matching listener on the write filter `filter`, whose kind, key and Interest it
-    /// reads and with which it goes. It starts as not matching: the first
-    /// [`Self::next_matching_change`] tells it otherwise where it matches. Refused with
-    /// [`RegisterError::OwnerGone`] when `filter` names no filter, the callback handed back.
+    /// reads and with which it goes: it asks the peers nothing of its own, as zenoh-pico's
+    /// listener is a callback of its entity's filter
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`). It starts
+    /// as not matching: the first [`Self::next_matching_change`] tells it otherwise where it
+    /// matches. Refused with [`RegisterError::OwnerGone`] when `filter` names no filter, the
+    /// callback handed back.
     pub fn declare_matching_listener(
         &mut self,
         filter: WriteFilterHandle,
@@ -2217,9 +2200,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.insert_matching_listener(row)
     }
 
-    /// Declare a matching listener of what `plane` counts on `key`, with no write filter: it holds
-    /// an Interest of its own on `key` whole ([`InterestName::whole`]), shared with any open on
-    /// the same key and kind, and starts as not matching, as one on a filter does. Refused, the
+    /// Declare a matching listener of what `plane` counts on `key`, with no write filter: it opens
+    /// an Interest of its own on `key` whole ([`InterestName::whole`]), whatever is open on the
+    /// same key and kind, and starts as not matching, as one on a filter does. Refused, the
     /// callback handed back and nothing held, when its table or the Interests' has no room, or the
     /// key arena none for its key.
     pub fn declare_matching_listener_on(
@@ -2239,15 +2222,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 callback,
             });
         }
-        let (interest, asked) =
-            match self.hold_interest(plane.interest_kind(), key, InterestName::whole(key)) {
-                Ok(held) => held,
-                Err(why) => return Err(Refused { why, callback }),
-            };
+        let opened = match self.open_interest(plane.interest_kind(), key, InterestName::whole(key))
+        {
+            Ok(opened) => opened,
+            Err(why) => return Err(Refused { why, callback }),
+        };
         let row = MatchingRow {
             filter: None,
             plane,
-            interest: Some(interest),
+            interest: Some(opened.handle),
             count_local,
             last: Cell::new(false),
             told: Cell::new(false),
@@ -2256,39 +2239,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         match self.insert_matching_listener(row) {
             Ok(handle) => Ok(Watching {
                 handle,
-                interest: asked,
+                interest: Some(opened),
             }),
             Err(refused) => {
-                let _ = self.release_interest(interest);
+                let _ = self.close_interest(opened.handle);
                 Err(refused)
             }
         }
-    }
-
-    /// Declare a matching listener of what the write filter `filter` counts, on its key and with
-    /// its count of the session's own, as one declared on that key is
-    /// ([`Self::declare_matching_listener_on`]): it holds an Interest of its own, shared with the
-    /// filter's when the filter holds one, and does not go with the filter. The filter's facts are
-    /// read off its row, so whoever holds the filter keeps no copy of them. Refused with
-    /// [`RegisterError::OwnerGone`] when `filter` names no filter, the callback handed back.
-    pub fn declare_matching_listener_of(
-        &mut self,
-        filter: WriteFilterHandle,
-        callback: F::Matching,
-    ) -> Result<Watching<kind::MatchingListener>, Refused<F::Matching>> {
-        // The key is another holder of the row's, as the declaration below takes the tables the
-        // row lies in.
-        let owner = self
-            .kept_write_filters()
-            .and_then(|filters| filters.get(filter))
-            .map(|row| (row.plane, row.key.clone(), row.count_local));
-        let Some((plane, key, count_local)) = owner else {
-            return Err(Refused {
-                why: RegisterError::OwnerGone,
-                callback,
-            });
-        };
-        self.declare_matching_listener_on(plane, text(&key), count_local, callback)
     }
 
     /// Put `row` in the matching listeners' table.
@@ -2313,8 +2270,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// Undeclare the matching listener `handle` names, its filter staying: its row when no call of
     /// it runs, else none, when the call that ends last lets it go
-    /// ([`Self::release_matching_listener`]); and the id of the Interest of its own it held last,
-    /// whose Final goes on the wire.
+    /// ([`Self::release_matching_listener`]); and the id of the Interest of its own it held, one
+    /// declared on a key, whose Final goes on the wire.
     pub fn undeclare_matching_listener(
         &mut self,
         handle: MatchingListenerHandle,
@@ -2325,7 +2282,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         };
         let removal = self.retire_matching_listener(handle)?;
         let interest_final = match (filter, interest) {
-            (None, Some(interest)) => self.release_interest(interest),
+            (None, Some(interest)) => self.close_interest(interest),
             _ => None,
         };
         Some(Unwatched {
