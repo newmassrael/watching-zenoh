@@ -33,6 +33,7 @@ use super::super::options::{
     AdvancedSubscriberOptions, DeclarationForms, EntityForm, HistoryConfig, RecoveryConfig,
     SubscriberDetection,
 };
+use super::super::state::Delivery;
 use super::{EngineSubscriber, HostError};
 
 /// The zid the scripted session has, as the port hands it: padded to 16 bytes.
