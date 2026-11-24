@@ -3662,6 +3662,20 @@ enum Dispatched {
     Chain,
 }
 
+/// How a publication is sent ([`SessionLinkActions::send_plain_put_qos`] and its twins): on
+/// the reliable or the best-effort channel of `priority`'s conduit, and flushed at once when
+/// `express`, past the batching window.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendAs {
+    /// The reliable channel, or the best-effort one.
+    pub reliable: bool,
+    /// Sent at once, past the batching window.
+    pub express: bool,
+    /// The conduit's priority.
+    pub priority: Priority,
+}
+
 /// What a send that does not wait for a slot did
 /// ([`SessionLinkActions::try_send_plain_put_qos`]).
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
@@ -14483,17 +14497,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
     /// every session that has none.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     fn send_plain_put_at(
         &self,
         stage: DispatchStage,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Dispatched, SendWireError>> {
+        let SendAs {
+            reliable,
+            express,
+            priority,
+        } = send;
         if self.rewrites_originated_keys() {
             return None;
         }
@@ -14561,9 +14577,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             key,
             value,
             qos,
-            reliable,
-            express,
-            priority,
+            SendAs {
+                reliable,
+                express,
+                priority,
+            },
         )
         .map(|sent| sent.map(|_| ()))
     }
@@ -14583,27 +14601,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         express: bool,
         priority: Priority,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_plain_put_at(
-            DispatchStage::Probe,
-            key,
-            value,
-            qos,
+        let send = SendAs {
             reliable,
             express,
             priority,
-        );
+        };
+        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send);
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
         let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
-                DispatchStage::Fresh,
-                key,
-                value,
-                qos,
-                reliable,
-                express,
-                priority,
-            ),
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
+                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+            }
             other => other,
         };
         probed.map(|sent| sent.map(Probed::of))
@@ -14624,7 +14633,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn send_publication_at(
         &self,
         stage: DispatchStage,
@@ -14632,17 +14640,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
-            let _ = (stage, key, kind, value, meta, reliable, express, priority);
+            let _ = (stage, key, kind, value, meta, send);
             None
         }
         #[cfg(not(feature = "transport-stats"))]
         {
+            let SendAs {
+                reliable,
+                express,
+                priority,
+            } = send;
             if self.rewrites_originated_keys() {
                 return None;
             }
@@ -14708,9 +14719,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             kind,
             value,
             meta,
-            reliable,
-            express,
-            priority,
+            SendAs {
+                reliable,
+                express,
+                priority,
+            },
         )
         .map(|sent| sent.map(|_| ()))
     }
@@ -14733,28 +14746,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         express: bool,
         priority: Priority,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_publication_at(
-            DispatchStage::Probe,
-            key,
-            kind,
-            value,
-            meta,
+        let send = SendAs {
             reliable,
             express,
             priority,
-        );
+        };
+        let probed = self.send_publication_at(DispatchStage::Probe, key, kind, value, meta, send);
         // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
         let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
-                DispatchStage::Fresh,
-                key,
-                kind,
-                value,
-                meta,
-                reliable,
-                express,
-                priority,
-            ),
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
+                self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
+            }
             other => other,
         };
         probed.map(|sent| sent.map(Probed::of))
