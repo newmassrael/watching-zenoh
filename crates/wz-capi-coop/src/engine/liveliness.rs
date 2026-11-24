@@ -80,14 +80,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
             mapping_id: form.mapping,
             suffix: String::from(form.suffix),
         });
-        self.announce_to_groups(super::group::GroupEntity {
-            what: wz_session_core::declare_form::GroupDeclaration::Token,
-            entity: row.id(),
-            keyexpr: row.key().as_str(),
-            wire: &wire,
-            retraction: retraction.as_ref(),
-            allowed_origin: wz_session_core::locality::Locality::Any,
-        });
+        self.transport
+            .announce_to_groups(super::group::GroupEntity {
+                what: wz_session_core::declare_form::GroupDeclaration::Token,
+                entity: row.id(),
+                keyexpr: row.key().as_str(),
+                wire: &wire,
+                retraction: retraction.as_ref(),
+                allowed_origin: wz_session_core::locality::Locality::Any,
+            });
     }
 }
 
