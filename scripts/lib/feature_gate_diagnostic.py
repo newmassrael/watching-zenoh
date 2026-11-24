@@ -748,6 +748,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # names no feature for a compound one: the word that is true is this
                 # one.
                 "declare-queryable",
+                # `declare-subscriber` joins: its public sites (the subscriber interest's replies in
+                # `pubsub`, the owned declare in `session_actions`, the observer's declare replies)
+                # are each behind an `all(..)` or `any(..)` with `interest-answer`, `alloc` or
+                # `liveliness-token`; what it gates under its bare name is struct fields alone.
+                "declare-subscriber",
                 # `declare-token` MOVED HERE from the method-only list below, as
                 # `declare-queryable` did, for the same reason: the slot node's token
                 # needed `send_declare_token` to write from the caller's text with no

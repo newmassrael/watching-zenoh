@@ -229,7 +229,7 @@ ALLOWED = [
         # Open-debt item 924, step 4b — and a third time: a list now keeps its
         # rows either whole or as index entries, so the door takes the oldest row
         # from whichever store holds it, and the one line became the two below.
-        "Store::Held(log) => log.pop_front()?,",
+        "Store::Held(log) => Ok(log.pop_front()?),",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
         "PANICS unless the caller took the frame, so the obligation is moved "
@@ -252,7 +252,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.held.remove(&first_produced)",
+        "self.held.remove(&first_produced).map(Ok)",
         "Open-debt item 924, step 4b — the STORAGE under the door: the oldest "
         "row, kept whole, is the value returned to `discard_oldest`, which "
         "hands it back inside the receipt",
@@ -428,7 +428,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.frames.drain(..(k - self.next).min(self.frames.len()));",
+        "self.frames.drain(..skip.min(self.frames.len()));",
         "Open-debt item 924, step 4b — records of a unit READ AGAIN for one "
         "reader, that it passed over: a copy this read made, never the list's "
         "rows, which stay as they are",
