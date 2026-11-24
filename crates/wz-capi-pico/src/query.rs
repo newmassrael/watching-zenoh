@@ -1184,7 +1184,8 @@ struct DeclaredQueryable {
 /// (`_z_sync_group_wait`). Let go of in that order, by the row's release.
 pub(crate) struct QueryableKept {
     closure: CQueryClosure,
-    session: Option<crate::ffi::HeldIn>,
+    // Held for its drop, which lets the session's count go after the closure; never read.
+    _session: Option<crate::ffi::HeldIn>,
 }
 
 /// A queryable's place: its state, which its owner lets go of, and what its row keeps past it; the
@@ -1300,7 +1301,7 @@ unsafe fn declare_queryable_in(
             },
             QueryableKept {
                 closure,
-                session: background.then(|| crate::session::session_count(zs).hold()),
+                _session: background.then(|| crate::session::session_count(zs).hold()),
             },
         ))
         .cast::<QueryableState>();
@@ -2736,7 +2737,7 @@ mod tests {
             0_u8,
             QueryableKept {
                 closure,
-                session: None,
+                _session: None,
             },
         );
         // SAFETY: `place` holds an `Answering<u8, QueryableKept>` that outlives the sink, whose
@@ -2803,7 +2804,7 @@ mod tests {
                         None,
                         Some(counted_drop),
                     ),
-                    session: None,
+                    _session: None,
                 },
             ))
             .cast::<QueryableState>();
