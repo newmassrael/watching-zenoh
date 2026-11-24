@@ -1550,14 +1550,7 @@ pub(crate) fn is_transport_mid(mid: u8) -> bool {
 /// stops it after that record, and is the walk's answer. What a receive path
 /// needs when handing a record over can itself fail (the owned extension chain
 /// of the `Frame` it came in, made only when an owned record needs it).
-#[cfg(all(
-    feature = "codec-frame",
-    any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    )
-))]
+#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
 pub(crate) fn try_for_each_record<'f>(
     payload: &'f [u8],
     record: &mut RecordBuf,

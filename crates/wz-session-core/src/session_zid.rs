@@ -85,8 +85,9 @@ impl SessionZid {
     }
 
     /// The zid of an array whose length is checked when the build is made: an
-    /// array of no bytes or of more than [`ZID_MAX`] does not compile. Panics
-    /// when the bytes are all zero, which a caller writing the array chose.
+    /// array of no bytes or of more than [`ZID_MAX`] does not compile, and nor
+    /// does a constant of bytes all zero, which the assertion below stops when
+    /// the build evaluates it.
     ///
     /// A `const fn` for the constants that name a zid; a zid read at run time is
     /// made by [`Self::new`], whose copy is one `memcpy` and not this loop.
@@ -102,9 +103,7 @@ impl SessionZid {
             }
             rest = tail;
         }
-        if !nonzero {
-            panic!("a zid is not zero");
-        }
+        assert!(nonzero, "a zid is not zero");
         // The array is rebuilt by value, the bytes pushed in from the last, so the
         // zid's first byte ends up first and the bytes past it stay zero: no index
         // and no mutable borrow, which a const fn of Rust 1.81 cannot take.
