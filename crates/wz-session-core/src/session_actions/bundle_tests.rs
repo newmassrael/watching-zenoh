@@ -696,4 +696,114 @@ mod facts_lock {
             "the nonce survives to be drawn over at the next InitAck"
         );
     }
+
+    /// Every fact the closed transport's handshake took is cleared in the reopen's one hold,
+    /// the peer's capabilities with the kept send limits they were computed into.
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopen_clears_every_handshake_fact_and_moves_the_kept_limits_tag() {
+        let (actions, _link) = bundle();
+        actions.fact_awaiting_open_ack(|slot| *slot = true);
+        actions.fact_remote_peer_zid(|slot| *slot = Some([0x0B; 4].into()));
+        actions.fact_peer_whatami(|slot| *slot = Some(1));
+        actions.set_peer_init_caps(Some(crate::peer_init_caps::PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 1024,
+        }));
+        let tag = actions.tx_limits_cache.current_tag();
+        actions.reset_for_reopen();
+        let (awaiting, zid, whatami, caps) = actions.with_facts(|facts| {
+            (
+                facts.handshake.awaiting_open_ack,
+                facts.handshake.remote_peer_zid,
+                facts.handshake.peer_whatami,
+                facts.handshake.inbound_peer_init_caps,
+            )
+        });
+        assert!(!awaiting, "no OpenAck is awaited before the next OpenSyn");
+        assert_eq!(zid, None, "the routing zid is the closed transport's");
+        assert_eq!(whatami, None, "the role is the closed transport's");
+        assert_eq!(caps, None, "the capabilities are the closed transport's");
+        assert_ne!(
+            actions.tx_limits_cache.current_tag(),
+            tag,
+            "limits kept from the cleared capabilities are no longer served"
+        );
+    }
+
+    /// An admitted OpenAck ends the wait and takes the peer's lease in one hold.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_admitted_open_ack_ends_the_wait_and_takes_the_lease() {
+        let (actions, _link) = bundle();
+        actions.fact_awaiting_open_ack(|slot| *slot = true);
+        actions.admit_open_ack(5, 10);
+        let (awaiting, lease) = actions.with_facts(|facts| {
+            (
+                facts.handshake.awaiting_open_ack,
+                facts.handshake.peer_open_lease_ms,
+            )
+        });
+        assert!(!awaiting, "the one awaited OpenAck has been taken");
+        assert_eq!(lease, Some(5), "the lease the OpenAck advertised");
+    }
+
+    /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease in one
+    /// hold.
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+    #[test]
+    fn an_admitted_open_syn_spends_the_nonce_and_takes_the_lease() {
+        let (actions, _link) = bundle();
+        actions.fact_cookie_nonce(|slot| *slot = Some(7));
+        actions.admit_open_syn(5, 10);
+        let (nonce, lease) =
+            actions.with_facts(|facts| (facts.cookie_nonce, facts.handshake.peer_open_lease_ms));
+        assert_eq!(nonce, None, "a spent nonce admits no replay");
+        assert_eq!(lease, Some(5), "the lease the OpenSyn advertised");
+    }
+
+    /// An Init whose region does not read is refused before its patch is taken; one whose region
+    /// reads writes the region and caps the patch at the peer's level.
+    #[cfg(all(
+        feature = "codec-init-body",
+        any(
+            feature = "alloc",
+            all(feature = "codec-frame", feature = "session-slot")
+        )
+    ))]
+    #[test]
+    fn an_init_whose_region_does_not_read_takes_no_patch() {
+        let (actions, _link) = bundle();
+        let earlier = crate::extregion::RegionName::new("south").expect("a valid region name");
+        actions.fact_peer_region(|slot| *slot = Some(earlier));
+        assert!(
+            !actions.admit_init_region_and_patch(Err(crate::extregion::RegionNameError::Empty), 0),
+            "a region that does not read refuses the Init"
+        );
+        assert_eq!(
+            actions.fact_negotiated_patch(|slot| *slot),
+            None,
+            "a refused Init merges no patch"
+        );
+        assert!(
+            actions.fact_peer_region(|slot| slot.is_some()),
+            "a refused Init writes no region"
+        );
+        assert!(
+            actions.admit_init_region_and_patch(Ok(None), 0),
+            "a peer that announces no region is admitted"
+        );
+        let (region_none, patch) = actions.with_facts(|facts| {
+            (
+                facts.handshake.peer_region.is_none(),
+                facts.handshake.negotiated_patch,
+            )
+        });
+        assert!(
+            region_none,
+            "the region is what the admitted Init announced"
+        );
+        assert_eq!(patch, Some(0), "the patch is capped at the peer's level");
+    }
 }

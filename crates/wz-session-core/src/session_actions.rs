@@ -7134,6 +7134,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// runs there: the acceptor's RX SN seed waits for the restore.
     pub fn negotiated_sn_mask(&self) -> u64 {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
+        self.sn_mask_for(peer)
+    }
+
+    /// The SN ring mask [`Self::negotiated_sn_mask`] answers, for the peer's capabilities
+    /// `peer` as read by the caller.
+    fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
             self.params.seq_num_res,
             peer,
@@ -7265,11 +7271,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// to write the slot: a write that bypassed it would leave a send using limits the slot no
     /// longer says.
     pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
-        self.fact_inbound_peer_init_caps(|slot| {
-            *slot = caps;
-            self.tx_limits_cache.peer_caps_changed();
-            self.best_effort_tx_limits_cache.peer_caps_changed();
-        });
+        self.fact_inbound_peer_init_caps(|slot| self.write_peer_init_caps(slot, caps));
+    }
+
+    /// [`Self::set_peer_init_caps`] for a step that holds the facts' lock already, writing
+    /// the capabilities beside other facts of the same handshake message: the kept limits
+    /// are told in the same hold, as the setter tells them.
+    fn write_peer_init_caps(&self, slot: &mut Option<PeerInitCaps>, caps: Option<PeerInitCaps>) {
+        *slot = caps;
+        self.tx_limits_cache.peer_caps_changed();
+        self.best_effort_tx_limits_cache.peer_caps_changed();
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -8013,30 +8024,43 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     ))]
     fn install_negotiated(&self, n: crate::accept_state::NegotiatedExtensions) {
-        #[cfg(feature = "transport-qos")]
-        self.fact_is_qos(|s| *s = n.qos.negotiated());
+        let region = n.region.name();
+        // The members kept as facts, under one hold.
+        self.with_facts(|f| {
+            #[cfg(feature = "transport-qos")]
+            {
+                f.is_qos = n.qos.negotiated();
+            }
+            #[cfg(feature = "transport-shm")]
+            {
+                f.is_shm = n.shm.0;
+            }
+            #[cfg(feature = "transport-lowlatency")]
+            {
+                f.is_lowlatency = n.lowlatency.0;
+            }
+            #[cfg(feature = "transport-compression")]
+            {
+                f.is_compression = n.compression.0;
+            }
+            // UNGATED, and it is the one with content: `negotiated_patch` is an
+            // ungated field carrying `Option<u8>`, so it is the only member of the
+            // five that a default build can observe at all.
+            f.handshake.negotiated_patch = n.patch.0;
+            // R2780 — UNGATED too, and a second member a default build observes:
+            // `peer_region` is an ungated slot. It is not one of the five above,
+            // which are outcomes of a negotiation; it is what the peer announced.
+            f.handshake.peer_region = region;
+        });
         // R2777 — the band, from the same QoS state: one member, two slots.
         // R2941 — and the link's egress band with it, so a band restored from
-        // a cookie routes as the band the merge settled does.
+        // a cookie routes as the band the merge settled does. After the hold
+        // above: the link's band is written under the link's own lock.
         #[cfg(feature = "session-extqos")]
         self.settle_qos_link(crate::extqos::QosLinkState::from_qos_accept_state(n.qos));
-        #[cfg(feature = "transport-shm")]
-        self.fact_is_shm(|s| *s = n.shm.0);
         // R2779 — the auth challenges, into the methods that issued them.
         #[cfg(feature = "session-extauth")]
         R::with_mutex_mut(&self.auth, |d| d.restore_accept_state(n.auth));
-        #[cfg(feature = "transport-lowlatency")]
-        self.fact_is_lowlatency(|s| *s = n.lowlatency.0);
-        #[cfg(feature = "transport-compression")]
-        self.fact_is_compression(|s| *s = n.compression.0);
-        // UNGATED, and it is the one with content: `negotiated_patch` is an
-        // ungated field carrying `Option<u8>`, so it is the only member of the
-        // five that a default build can observe at all.
-        self.fact_negotiated_patch(|s| *s = n.patch.0);
-        // R2780 — UNGATED too, and a second member a default build observes:
-        // `peer_region` is an ungated slot. It is not one of the five above,
-        // which are outcomes of a negotiation; it is what the peer announced.
-        self.fact_peer_region(|s| *s = n.region.name());
     }
 
     /// R2774 — return EVERY negotiated slot to this node's offer: the state a
@@ -8124,12 +8148,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn install_accept_head(&self, head: Option<&crate::accept_cookie::AcceptCookieState>) {
         let zid = head.map(|h| h.peer_zid);
-        self.fact_inbound_peer_zid(|s| *s = zid);
-        self.fact_remote_peer_zid(|s| *s = zid);
-        self.fact_peer_whatami(|s| *s = head.map(|h| h.peer_whatami));
-        self.set_peer_init_caps(
-            head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size))),
-        );
+        let whatami = head.map(|h| h.peer_whatami);
+        let caps = head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size)));
+        self.with_facts(|f| {
+            f.handshake.inbound_peer_zid = zid;
+            f.handshake.remote_peer_zid = zid;
+            f.handshake.peer_whatami = whatami;
+            self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, caps);
+        });
     }
 
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
@@ -8837,14 +8863,43 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// non-increasing, so a second Init cannot raise a level a first one
     /// lowered.
     pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
-        self.fact_negotiated_patch(|s| {
-            // The first Init starts from wz's OWN announcement (R121f1 puts
-            // `_Z_CURRENT_PATCH` on every Init wz sends), matching
-            // zenoh-pico's `iam._patch` starting at its current level; a
-            // later Init can only lower it further.
-            let local = s.unwrap_or(crate::extpatch::CURRENT_PATCH);
-            *s = Some(crate::extpatch::negotiate_patch(local, peer_patch));
+        self.fact_negotiated_patch(|s| Self::lower_patch_to(s, peer_patch));
+    }
+
+    /// The cap [`Self::negotiate_patch_against_peer`] applies, on the slot as the caller holds it.
+    fn lower_patch_to(slot: &mut Option<u8>, peer_patch: u8) {
+        // The first Init starts from wz's OWN announcement (R121f1 puts
+        // `_Z_CURRENT_PATCH` on every Init wz sends), matching
+        // zenoh-pico's `iam._patch` starting at its current level; a
+        // later Init can only lower it further.
+        let local = slot.unwrap_or(crate::extpatch::CURRENT_PATCH);
+        *slot = Some(crate::extpatch::negotiate_patch(local, peer_patch));
+    }
+
+    /// What an admitted Init takes of the peer's region identity and patch level, under one hold
+    /// of the facts: [`Self::admit_read_peer_region`] and then
+    /// [`Self::negotiate_patch_against_peer`]. A region that does not read refuses the Init
+    /// (`false`) before the patch is taken, so a refused Init merges neither.
+    #[cfg(all(
+        feature = "codec-init-body",
+        any(
+            feature = "alloc",
+            all(feature = "codec-frame", feature = "session-slot")
+        )
+    ))]
+    pub(crate) fn admit_init_region_and_patch(
+        &self,
+        region: Result<Option<crate::extregion::RegionName>, crate::extregion::RegionNameError>,
+        peer_patch: u8,
+    ) -> bool {
+        let Ok(region) = region else {
+            return false;
+        };
+        self.with_facts(|f| {
+            f.handshake.peer_region = region;
+            Self::lower_patch_to(&mut f.handshake.negotiated_patch, peer_patch);
         });
+        true
     }
 
     /// R2539 — give this session a region identity, or clear it.
@@ -10357,16 +10412,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R311ke — seed the RX SN gate baselines from the peer's announced
     /// `initial_sn` (peer.c:212-214: both channels one before, so the first
-    /// frame at `initial_sn` passes), on the ring the negotiated caps give.
-    /// Sequential mutex scopes (`negotiated_sn_mask` takes
-    /// `inbound_peer_init_caps`), never nested.
+    /// frame at `initial_sn` passes), on the ring the negotiated caps in `facts` give.
     ///
     /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
-    /// [`Self::admit_open_ack`], and by nothing at parse time.
+    /// [`Self::admit_open_ack`], inside the hold in which they write the rest of what
+    /// an admitted Open takes, and by nothing at parse time.
     #[cfg(feature = "codec-open-body")]
-    pub(crate) fn seed_rx_sn(&self, initial_sn: u64) {
-        let mask = self.negotiated_sn_mask();
-        self.fact_rx_sn(|s| s.seed(mask, initial_sn));
+    fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
+        let mask = self.sn_mask_for(facts.handshake.inbound_peer_init_caps);
+        facts.rx_sn.seed(mask, initial_sn);
     }
 
     /// R2782 — everything an ADMITTED OpenSyn does to the acceptor, in one
@@ -10392,15 +10446,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !self.fixed_cookie() {
             self.restore_accept_state_from_cookie();
         }
-        self.fact_cookie_nonce(|slot| *slot = None);
-        // R311ke — the peer's announced initial_sn seeds the RX gate on the
-        // ring the restored caps give (peer.c:212-214).
-        self.seed_rx_sn(initial_sn);
-        // R311kv — the peer's advertised lease (ms, R311ku boundary
-        // projection) for the deadline comparator's min(); pico adopts it at
-        // OpenSyn arrival (unicast/transport.c:269), which on its accept path
-        // is after the cookie is judged.
-        self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
+        self.with_facts(|f| {
+            f.cookie_nonce = None;
+            // R311ke — the peer's announced initial_sn seeds the RX gate on the
+            // ring the restored caps give (peer.c:212-214).
+            self.seed_rx_sn_in(f, initial_sn);
+            // R311kv — the peer's advertised lease (ms, R311ku boundary
+            // projection) for the deadline comparator's min(); pico adopts it at
+            // OpenSyn arrival (unicast/transport.c:269), which on its accept path
+            // is after the cookie is judged.
+            f.handshake.peer_open_lease_ms = Some(lease);
+        });
     }
 
     /// R2782 — the initiator's admission predicate for an OpenAck: one is
@@ -10521,13 +10577,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// nothing to wait for but admission.
     #[cfg(feature = "codec-open-body")]
     pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
-        self.fact_awaiting_open_ack(|s| *s = false);
-        // R311ke — pico captures `_initial_sn_rx` from either Open body
-        // (transport.c:196/270).
-        self.seed_rx_sn(initial_sn);
-        // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
-        // unicast/transport.c:193).
-        self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
+        self.with_facts(|f| {
+            f.handshake.awaiting_open_ack = false;
+            // R311ke — pico captures `_initial_sn_rx` from either Open body
+            // (transport.c:196/270).
+            self.seed_rx_sn_in(f, initial_sn);
+            // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
+            // unicast/transport.c:193).
+            f.handshake.peer_open_lease_ms = Some(lease);
+        });
     }
 
     /// R311y632 (§17) — the same, told how many bytes the message occupied.
@@ -10643,21 +10701,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // The parser refused an INIT whose zid is no zid (`parse_init`), so the
                 // conversion holds for every frame it produced; a frame built by hand
                 // that names none records none.
-                self.fact_remote_peer_zid(|slot| {
-                    *slot = SessionZid::new(init.zid).ok();
-                });
-                // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
-                // alongside its zid. Both Init arms capture it (a face may be
-                // opened from either side); the routing boundary maps wire -> the
-                // graph's API-form role. The gossip-policy prerequisite ("F1").
-                self.fact_peer_whatami(|slot| {
-                    *slot = Some(init.whatami);
-                });
-                if let Some(cookie) = init.cookie {
-                    self.fact_inbound_cookie(|slot| {
-                        crate::session_init_params::store_session_bytes(slot, cookie);
-                    });
-                }
+                let zid = SessionZid::new(init.zid).ok();
                 // R311kb — capture the InitAck's sizing caps too: the
                 // initiator adopts the acceptor's (already-capped) final
                 // values, mirroring zenoh-pico's client arm
@@ -10666,10 +10710,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // [`Self::negotiated_sn_mask`] so both roles resolve the
                 // same SN ring; the packed `sn_res` byte is wire-identical
                 // on InitSyn and InitAck, so the decoder is shared.
-                self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
+                let caps = PeerInitCaps::from_init_body(
                     init.s.map(|s| s.sn_res),
                     init.s.map(|s| s.batch_size),
-                )));
+                );
+                self.with_facts(|f| {
+                    f.handshake.remote_peer_zid = zid;
+                    // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
+                    // alongside its zid. Both Init arms capture it (a face may be
+                    // opened from either side); the routing boundary maps wire -> the
+                    // graph's API-form role. The gossip-policy prerequisite ("F1").
+                    f.handshake.peer_whatami = Some(init.whatami);
+                    if let Some(cookie) = init.cookie {
+                        crate::session_init_params::store_session_bytes(
+                            &mut f.handshake.inbound_cookie,
+                            cookie,
+                        );
+                    }
+                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                });
             }
             // A peer's InitSyn and OpenSyn are recorded only by a build with the accepting
             // role. Without it neither is an event (`inbound::control_event`) and what
@@ -10685,31 +10744,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 // As the InitAck arm's: `parse_init` refused a zid that is none.
                 let zid = SessionZid::new(init.zid).ok();
-                self.fact_inbound_peer_zid(|slot| {
-                    *slot = zid;
-                });
-                // R311qh — also capture it into the role-agnostic routing
-                // identity slot (the Initiating side captures the same from the
-                // InitAck above), so a held face exposes its remote peer's zid
-                // regardless of which side opened it.
-                self.fact_remote_peer_zid(|slot| {
-                    *slot = zid;
-                });
-                // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
-                // alongside its zid; see the InitAck arm above for why both
-                // directions capture it (the gossip-policy "F1" prerequisite).
-                self.fact_peer_whatami(|slot| {
-                    *slot = Some(init.whatami);
-                });
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
                 // `InitAck.size <= InitSyn.size` rule on the
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
-                self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
+                let caps = PeerInitCaps::from_init_body(
                     init.s.map(|s| s.sn_res),
                     init.s.map(|s| s.batch_size),
-                )));
+                );
+                self.with_facts(|f| {
+                    f.handshake.inbound_peer_zid = zid;
+                    // R311qh — also capture it into the role-agnostic routing
+                    // identity slot (the Initiating side captures the same from the
+                    // InitAck above), so a held face exposes its remote peer's zid
+                    // regardless of which side opened it.
+                    f.handshake.remote_peer_zid = zid;
+                    // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
+                    // alongside its zid; see the InitAck arm above for why both
+                    // directions capture it (the gossip-policy "F1" prerequisite).
+                    f.handshake.peer_whatami = Some(init.whatami);
+                    self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, Some(caps));
+                });
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
@@ -18082,12 +18138,50 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The next peer has been asked for nothing: the answers owed by the last are not
             // owed to it, and the replay asks again, noting each interest as it does.
             R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());
-            self.fact_inbound_cookie(|slot| *slot = None);
-            self.fact_inbound_opensyn_cookie(|slot| *slot = None);
-            // R2782 — a reopen awaits no OpenAck until its own OpenSyn is out;
-            // one left standing would admit a stray OpenAck into the new
-            // handshake.
-            self.fact_awaiting_open_ack(|slot| *slot = false);
+            // What the closed transport's handshake learned of its peer, cleared under one
+            // hold of the facts.
+            self.with_facts(|f| {
+                f.handshake.inbound_cookie = None;
+                f.handshake.inbound_opensyn_cookie = None;
+                // R2782 — a reopen awaits no OpenAck until its own OpenSyn is out;
+                // one left standing would admit a stray OpenAck into the new
+                // handshake.
+                f.handshake.awaiting_open_ack = false;
+                f.handshake.inbound_peer_zid = None;
+                f.handshake.remote_peer_zid = None;
+                f.handshake.peer_whatami = None;
+                // R2774 — the peer's region is the PEER's, as `peer_whatami` is:
+                // upstream builds its region state `None` on every link. R2780 —
+                // that clear is `return_to_offer` below: the region joined the
+                // cookie's group, whose one writer puts back the offer, and the offer
+                // holds no peer's region. A second write here would be a second writer.
+                self.write_peer_init_caps(&mut f.handshake.inbound_peer_init_caps, None);
+                // R2566 — the authenticated principal is HANDSHAKE-scoped and must
+                // not survive into the re-dial window. The `auth` dispatch itself
+                // persists here (its methods keep their configured credentials), so
+                // an identity cached beside the method would outlive the handshake
+                // that earned it; this slot is cleared with the rest of the
+                // per-handshake state, which is the reason it lives out here.
+                #[cfg(feature = "session-extauth")]
+                {
+                    f.peer_auth_id = None;
+                }
+                // R311ke — the RX SN gate is handshake-scoped: the reopen
+                // handshake's OpenSyn/OpenAck re-seeds both channels.
+                f.rx_sn = crate::sn::RxConduits::default();
+                // §5.21 routing-namespace — the per-session INGRESS correlation is
+                // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
+                // declaration tables + a RESTARTED id space, so a stale blocked-id
+                // from before the reopen would swallow a re-declared entity's id-only
+                // Undeclare* after it (the unicast twin of the multicast re-JOIN gap
+                // the R311y107b session review found). Reset the correlation in place;
+                // the namespace PREFIX is preserved (it is this node's config, not
+                // peer state). No-op when no namespace is installed.
+                #[cfg(feature = "routing-namespace")]
+                if let Some(ing) = f.namespace_ingress.as_mut() {
+                    ing.reset();
+                }
+            });
             #[cfg(all(
                 any(feature = "codec-init-body", feature = "codec-open-body"),
                 any(feature = "session-unicast-open", feature = "session-unicast-accept")
@@ -18119,34 +18213,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
             R::with_mutex_mut(&self.link.last_outbound_at, |slot| *slot = None);
-            self.fact_inbound_peer_zid(|slot| *slot = None);
-            self.fact_remote_peer_zid(|slot| *slot = None);
-            self.fact_peer_whatami(|slot| *slot = None);
-            // R2774 — the peer's region is the PEER's, as `peer_whatami` is:
-            // upstream builds its region state `None` on every link. Without
-            // a clear the reconnect window reported the previous peer's region
-            // until the next Init replaced it. R2780 — that clear is now
-            // `return_to_offer` below: the region joined the cookie's group,
-            // whose one writer puts back the offer, and the offer holds no
-            // peer's region. A second write here would be a second writer.
-            // R2566 — the authenticated principal is HANDSHAKE-scoped and must
-            // not survive into the re-dial window. The `auth` dispatch itself
-            // persists here (its methods keep their configured credentials), so
-            // an identity cached beside the method would outlive the handshake
-            // that earned it; this slot is cleared with the rest of the
-            // per-handshake state, which is the reason it lives out here.
-            #[cfg(feature = "session-extauth")]
-            self.fact_peer_auth_id(|slot| *slot = None);
-            self.set_peer_init_caps(None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
             // one way, so the last link's outcome became the next link's
             // offer and each reconnect could only lose capability. The next
             // handshake starts from what this node OFFERS.
             self.return_to_offer();
-            // R311ke — the RX SN gate is handshake-scoped: the reopen
-            // handshake's OpenSyn/OpenAck re-seeds both channels.
-            self.fact_rx_sn(|s| *s = crate::sn::RxConduits::default());
             // The next peer has sent none of its initial declarations yet.
             self.peer_declarations_final
                 .store(false, core::sync::atomic::Ordering::Release);
@@ -18156,20 +18228,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "alloc")]
             self.peer_sync_bits
                 .store(0, core::sync::atomic::Ordering::Release);
-            // §5.21 routing-namespace — the per-session INGRESS correlation is
-            // handshake-scoped too: on reopen the remote re-handshakes with EMPTY
-            // declaration tables + a RESTARTED id space, so a stale blocked-id
-            // from before the reopen would swallow a re-declared entity's id-only
-            // Undeclare* after it (the unicast twin of the multicast re-JOIN gap
-            // the R311y107b session review found). Reset the correlation in place;
-            // the namespace PREFIX is preserved (it is this node's config, not
-            // peer state). No-op when no namespace is installed.
-            #[cfg(feature = "routing-namespace")]
-            self.fact_namespace_ingress(|slot| {
-                if let Some(ing) = slot.as_mut() {
-                    ing.reset();
-                }
-            });
             // ARCHITECTURE section 9.1 -- a frame open in a lent slot is given
             // back to its lender before the reset forgets it.
             #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
