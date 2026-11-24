@@ -121,6 +121,8 @@ pub(crate) struct Counts {
     pub(crate) advanced_publishers: usize,
     /// Advanced subscribers of each session, owned and background.
     pub(crate) advanced_subscribers: usize,
+    /// Link events listeners of each session.
+    pub(crate) link_events_listeners: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -197,6 +199,7 @@ pub(crate) struct Bounds {
     transport_events_listeners: Option<usize>,
     advanced_publishers: Option<usize>,
     advanced_subscribers: Option<usize>,
+    link_events_listeners: Option<usize>,
 }
 
 impl Bounds {
@@ -217,6 +220,7 @@ impl Bounds {
             transport_events_listeners: limits.max_transport_events_listeners().most(),
             advanced_publishers: limits.max_advanced_publishers().most(),
             advanced_subscribers: limits.max_advanced_subscribers().most(),
+            link_events_listeners: limits.max_link_events_listeners().most(),
         }
     }
 }
@@ -362,12 +366,18 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.advanced_subscribers,
             bounds.advanced_subscribers,
         )),
+        link_events_listeners: planned!(bounded(
+            cfg!(feature = "connectivity"),
+            sessions,
+            stated.link_events_listeners,
+            bounds.link_events_listeners,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 22;
+const KINDS: usize = 23;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -481,6 +491,13 @@ impl Plan {
             plan = plan.with::<crate::advanced::AdvSubPlace>(
                 Kind::AdvancedSubscriber,
                 objects.advanced_subscribers,
+            );
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        {
+            plan = plan.with::<crate::connectivity::LinkPlace>(
+                Kind::LinkEventsListener,
+                objects.link_events_listeners,
             );
         }
         let mut kind = 0;
@@ -1012,6 +1029,9 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         advanced_subscribers: each::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
             limits.max_advanced_subscribers(),
         ),
+        link_events_listeners: each::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+            limits.max_link_events_listeners(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -1042,6 +1062,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         transport_events_listeners: 0,
         advanced_publishers: 0,
         advanced_subscribers: 0,
+        link_events_listeners: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1290,6 +1311,7 @@ mod tests {
         transport_events_listeners: Some(12),
         advanced_publishers: Some(10),
         advanced_subscribers: Some(11),
+        link_events_listeners: Some(13),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1306,6 +1328,7 @@ mod tests {
         transport_events_listeners: None,
         advanced_publishers: None,
         advanced_subscribers: None,
+        link_events_listeners: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1409,6 +1432,7 @@ mod tests {
             transport_events_listeners: 1,
             advanced_publishers: 1,
             advanced_subscribers: 1,
+            link_events_listeners: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1854,6 +1878,12 @@ mod tests {
             Kind::AdvancedSubscriber,
             core::mem::size_of::<crate::advanced::AdvSubPlace>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        row(
+            "link_events_listener",
+            Kind::LinkEventsListener,
+            core::mem::size_of::<crate::connectivity::LinkPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -2053,6 +2083,8 @@ mod tests {
         check(Kind::AdvancedPublisher);
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         check(Kind::AdvancedSubscriber);
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        check(Kind::LinkEventsListener);
         assert_eq!(pools.held(), 0);
     }
 
@@ -2091,6 +2123,10 @@ mod tests {
         assert_eq!(
             bounds.advanced_subscribers,
             limits.max_advanced_subscribers().most()
+        );
+        assert_eq!(
+            bounds.link_events_listeners,
+            limits.max_link_events_listeners().most()
         );
     }
 

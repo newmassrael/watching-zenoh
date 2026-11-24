@@ -1458,6 +1458,10 @@ typedef struct wz_ext_replay_subscriber_counts_t {
   uint64_t abandoned;
   uint64_t frames_given_up; /* segmented: a piece never came */
   uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
+  uint64_t declarations_lost; /* added in minor version 3: declarations of the
+                                 publishers' queryables the watch lost
+                                 (WZ_EXT_DECL_LOST); not zero, the rounds may
+                                 miss a publisher or wait on one that went */
 } wz_ext_replay_subscriber_counts_t;
 
 typedef struct wz_ext_owned_replay_subscriber_t {
@@ -1989,16 +1993,18 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers, queriers,
- * keyexprs, gets, liveliness_gets, matching_listeners, decl_watches and
- * transport_events_listeners) are per session and are multiplied by sessions;
- * the rest are for all sessions together. A session's subscribers,
- * queryables, liveliness tokens, liveliness subscribers, queriers, declared
- * key expressions, pending gets and liveliness gets, matching listeners,
- * declaration watches and transport events listeners are bounded by the
- * limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
+ * keyexprs, gets, liveliness_gets, matching_listeners, decl_watches,
+ * transport_events_listeners and link_events_listeners) are per session and
+ * are multiplied by sessions; the rest are for all sessions together. A
+ * session's subscribers, queryables, liveliness tokens, liveliness
+ * subscribers, queriers, declared key expressions, pending gets and
+ * liveliness gets, matching listeners, declaration watches and transport and
+ * link events listeners are bounded by the limits it opens under
+ * (MAX_SUBSCRIPTIONS, MAX_QUERYABLES, MAX_LOCAL_TOKENS,
  * MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS, MAX_DECLARED_KEYEXPRS,
  * MAX_PENDING_QUERIES, MAX_PENDING_LIVELINESS_GETS, MAX_MATCHING_LISTENERS,
- * MAX_DECL_WATCHES, MAX_TRANSPORT_EVENTS_LISTENERS): a count of
+ * MAX_DECL_WATCHES, MAX_TRANSPORT_EVENTS_LISTENERS,
+ * MAX_LINK_EVENTS_LISTENERS): a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
@@ -2059,6 +2065,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t matching_listeners;
   size_t decl_watches;
   size_t transport_events_listeners;
+  size_t link_events_listeners;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

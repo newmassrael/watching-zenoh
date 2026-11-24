@@ -88,6 +88,10 @@ pub(crate) enum Kind {
     /// An advanced subscriber, owned or background (`crate::advanced::AdvSubPlace`).
     #[cfg(feature = "advanced")]
     AdvancedSubscriber = 21,
+    /// A link events listener, held while its session's hub can reach it
+    /// (`crate::connectivity::LinkPlace`).
+    #[cfg(feature = "connectivity")]
+    LinkEventsListener = 22,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -338,6 +342,11 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::AdvancedSubscriber,
             InSession::<crate::advanced::AdvSubPlace>::LAYOUT,
         )),
+        #[cfg(feature = "connectivity")]
+        Kind::LinkEventsListener => Some((
+            EntityKind::LinkEventsListener,
+            InSession::<crate::connectivity::LinkPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -378,9 +387,12 @@ const DECL_WATCH: Option<Kind> = Some(Kind::DeclWatch);
 ))]
 const DECL_WATCH: Option<Kind> = None;
 #[cfg(all(not(feature = "engine-tokio"), feature = "connectivity"))]
-const TRANSPORT_EVENTS: Option<Kind> = Some(Kind::TransportEventsListener);
+const CONNECTIVITY: [Option<Kind>; 2] = [
+    Some(Kind::TransportEventsListener),
+    Some(Kind::LinkEventsListener),
+];
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "connectivity")))]
-const TRANSPORT_EVENTS: Option<Kind> = None;
+const CONNECTIVITY: [Option<Kind>; 2] = [None, None];
 #[cfg(all(not(feature = "engine-tokio"), feature = "advanced"))]
 const ADVANCED: [Option<Kind>; 2] = [
     Some(Kind::AdvancedPublisher),
@@ -396,6 +408,7 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
     let [token, liveliness_subscriber] = LIVELINESS;
     let [querier, get] = QUERIER;
     let [advanced_publisher, advanced_subscriber] = ADVANCED;
+    let [transport_events, link_events] = CONNECTIVITY;
     [
         Some(Kind::Publisher),
         Some(Kind::Subscriber),
@@ -407,9 +420,10 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         LIVELINESS_GET,
         Some(Kind::MatchingListener),
         DECL_WATCH,
-        TRANSPORT_EVENTS,
+        transport_events,
         advanced_publisher,
         advanced_subscriber,
+        link_events,
     ]
     .into_iter()
     .flatten()
