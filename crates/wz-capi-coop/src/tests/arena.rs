@@ -458,6 +458,58 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
     }
 }
 
+/// A session that joins groups is lent a receive buffer for each group it may join, of the largest
+/// batch a group it names sends, under the build's multicast batch, with the links' tables: the
+/// stack claims one when a group is joined. Turned red by a buffer for each group asked past the
+/// task cells, or one shorter than the largest group's batch.
+#[cfg(feature = "group")]
+#[test]
+fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    let join = |batch_size: u16| GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    };
+    let groups = vec![join(1_024), join(2_048)];
+    let asked = groups.len().min(caps::MAX_TASKS);
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            groups,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let bytes = 2_048_usize.min(caps::PICO_MULTICAST_BATCH_BYTES);
+    let buffers = row(&plan, "link group receive buffers");
+    assert_eq!(buffers.count, asked);
+    assert_eq!(buffers.entry_bytes, bytes, "the largest group's batch");
+    assert_eq!(row(&plan, "link group receive flags").count, asked);
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = plan.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    let table = tables.group_rx().expect("a table for the groups");
+    assert_eq!((table.capacity(), table.size()), (asked, bytes));
+
+    let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(row(&none, "link group receive buffers").count, 0);
+}
+
 /// The tokens of faces that went before each was retracted are owed apart from the sets those
 /// faces gave back, a table of them lent at the open with a row for each row of the session's token
 /// pool: a face owes apart only while its tokens hold a row of the pool, so the faces owing at

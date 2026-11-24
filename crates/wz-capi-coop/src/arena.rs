@@ -44,6 +44,9 @@
 //!   with the flags that say which buffers are lent (`TransportRows::links_from`). The batch is
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
 //!   the rows lent when the session opens, first;
+//! - with `group`, a receive buffer for each group the session may join, of the largest batch a
+//!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
+//!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
 //!   state's tables (`SessionRows::lane_bytes`);
@@ -181,6 +184,8 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 const LANE_ROWS: usize = 5;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
+/// The receive buffers of the groups the session may join and their flags (`group`).
+const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
@@ -221,6 +226,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LINK_ROWS
     + LANE_ROWS
     + REASSEMBLY_ROWS
+    + GROUP_RX_ROWS
     + HANDED_ROWS
     + OBSERVER_ROWS
     + GET_ROWS
@@ -550,6 +556,9 @@ pub struct TransportRows {
     /// link's batch (`HANDED_LEG_BYTES`).
     #[cfg(any(feature = "listen", feature = "group"))]
     handed_legs: usize,
+    /// The receive buffers of the groups the session may join: how many, and the bytes of each.
+    #[cfg(feature = "group")]
+    group_rx: (usize, usize),
 }
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
@@ -605,12 +614,26 @@ impl TransportRows {
         let rx = lend.byte_cells(self.link_bytes, self.rx_buffers);
         let tx = lend.byte_cells(self.link_bytes, self.tx_slots);
         #[cfg(feature = "listen")]
-        {
-            let places = lend.byte_cells(0, self.links);
-            LinkTables::pooled(rx, tx, places)
-        }
+        let tables = LinkTables::pooled(rx, tx, lend.byte_cells(0, self.links));
         #[cfg(not(feature = "listen"))]
-        LinkTables::new(rx, tx, self.link_bytes)
+        let tables = LinkTables::new(rx, tx, self.link_bytes);
+        self.group_rx_from(tables, lend)
+    }
+
+    /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
+    /// after the links' own: a buffer of the groups' batch for each group the plan counts, which a
+    /// group claims when it is joined, so a joined group's datagram is read where the session's
+    /// memory holds it.
+    #[cfg(feature = "group")]
+    fn group_rx_from(&self, tables: LinkTables, lend: &mut TableLender<'_>) -> LinkTables {
+        let (buffers, bytes) = self.group_rx;
+        tables.with_group_rx(lend.byte_cells(bytes, buffers))
+    }
+
+    /// A build that joins no group lends no group a buffer.
+    #[cfg(not(feature = "group"))]
+    fn group_rx_from(&self, tables: LinkTables, _lend: &mut TableLender<'_>) -> LinkTables {
+        tables
     }
 }
 
@@ -763,6 +786,8 @@ impl ArenaPlan {
                 cell_bytes: LinkCells::default(),
                 #[cfg(any(feature = "listen", feature = "group"))]
                 handed_legs: 0,
+                #[cfg(feature = "group")]
+                group_rx: (0, 0),
             },
             session: SessionRows::default(),
             places: PlaceRows::default(),
@@ -864,6 +889,28 @@ impl ArenaPlan {
             links,
             LentByteCells::FLAG_BYTES,
         );
+        // A receive buffer for each group the session may join, lent with the links' tables
+        // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
+        // batch a group the config names sends, held to the build's multicast batch. A group's
+        // datagram longer than it is dropped and counted by its transport.
+        #[cfg(feature = "group")]
+        {
+            let buffers = config.groups.len().min(caps::MAX_TASKS);
+            let bytes = config
+                .groups
+                .iter()
+                .map(|join| usize::from(join.profile.batch_size))
+                .max()
+                .unwrap_or(0)
+                .min(limits.pico_multicast_batch_bytes());
+            plan.transport.group_rx = (buffers, bytes);
+            plan.put_table(
+                ["link group receive flags", "link group receive buffers"],
+                "PICO_MULTICAST_BATCH_BYTES",
+                buffers,
+                bytes,
+            );
+        }
         // The delivery lane's area (`SessionRows::lane_bytes`): one table of one buffer.
         plan.put_table(
             ["delivery lane flag", "delivery lane"],
