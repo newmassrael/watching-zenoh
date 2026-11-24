@@ -579,6 +579,9 @@ impl Registry {
 
     /// Whether any face's peer declared what `plane` counts on `keyexpr`: a subscriber, or a
     /// queryable (a complete one where the plane requires it).
+    // Out of line: a write filter's answer and the matching listeners' walk both read it, and each
+    // would carry a copy of the walk over the faces.
+    #[inline(never)]
     pub(super) fn peers_declare(&self, plane: Plane, keyexpr: &str) -> bool {
         #[cfg(test)]
         self.peer_looks.set(self.peer_looks.get() + 1);
