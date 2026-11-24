@@ -1042,6 +1042,8 @@ pub(crate) struct Takes {
     /// The reads whose wait was a wait on the input of the session's links and ports, which
     /// the step's read follows.
     pub(crate) polls: core::sync::atomic::AtomicUsize,
+    /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
+    pub(crate) face_marks: core::sync::atomic::AtomicUsize,
     /// The walks of the tables for rows whose last call ended, made only when a call said one
     /// may wait.
     pub(crate) walks: core::sync::atomic::AtomicUsize,
@@ -1453,6 +1455,16 @@ struct Publication<'a> {
     payload: &'a [u8],
     opts: &'a PublishOptions<'a>,
     meta: &'a PushMetadata<'a>,
+}
+
+/// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
+/// the session's tables name it, and how it rides.
+struct LinkLeg<'a> {
+    named: NamedKey<'a>,
+    payload: &'a [u8],
+    kind: SampleKind,
+    meta: &'a PushMetadata<'a>,
+    send: wz_session_core::session_actions::SendAs,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -4971,14 +4983,78 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             opts,
             meta,
         } = *put;
-        let reliable = opts.reliable_bool();
-        let express = meta.is_express();
-        let priority = opts.priority_band();
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
         let Some(named) = tables(&core.session.registry).named_by(keyexpr, wire.mapping_id) else {
             return (Err(FanoutError::ExceedsCapacity), None);
         };
+        let send = wz_session_core::session_actions::SendAs {
+            reliable: opts.reliable_bool(),
+            express: meta.is_express(),
+            priority: opts.priority_band(),
+        };
+        let leg = LinkLeg {
+            named,
+            payload,
+            kind: opts.kind,
+            meta,
+            send,
+        };
+        let (outcome, stuck) = self.send_on_links(core, &leg, skip, pass);
+        if stuck.is_some() {
+            return (outcome, stuck);
+        }
+        // And each group the session joined, which its task frames and sends.
+        #[cfg(feature = "group")]
+        let mut outcome = outcome;
+        #[cfg(feature = "group")]
+        for group in &core.transport.groups {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
+                continue;
+            }
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+            let sent = group.publish(GroupPut {
+                keyexpr,
+                wire,
+                payload,
+                kind: opts.kind,
+                meta,
+                reliable: send.reliable,
+                priority: send.priority,
+            });
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        (outcome, None)
+    }
+
+    /// Send `leg` to the session's links by `pass` (`Self::fan_out_in`), each face marked as the
+    /// session's holder's send on it while it is sent (`SendingOn`), as every put the session
+    /// sends to its links is, a plain one through a write filter (`Self::put_plain_in`) among
+    /// them. A link that does not take the plain form (one that rewrites the keys the session
+    /// originates) is sent the owned message in its place, so each link answers for itself.
+    // Out of line: the publish and the put through a write filter send through this one body.
+    #[inline(never)]
+    fn send_on_links(
+        &self,
+        core: &Core<L, C>,
+        leg: &LinkLeg<'_>,
+        skip: Option<&DroppedOn>,
+        pass: Pass,
+    ) -> (Result<usize, FanoutError>, Option<u64>) {
+        let LinkLeg {
+            named,
+            payload,
+            kind,
+            meta,
+            send,
+        } = *leg;
+        let wz_session_core::session_actions::SendAs {
+            reliable,
+            express,
+            priority,
+        } = send;
         let mut outcome = Ok(0);
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = skip;
@@ -4995,11 +5071,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, place);
+            #[cfg(test)]
+            self.takes.face_marks.fetch_add(1, Ordering::Relaxed);
             // Each link names the key as its own key-wire form says. A publication is written from
             // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
             // own shorter writer, unless the session or the build leaves it to the owned send below.
             let key = key_on_link(actions, named);
-            let plain = opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos();
+            let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
             // A send that may not wait is told apart from one whose link has room: one with none
             // ends the fan-out at this face, and a chain of fragments, which such a send does not
             // begin, is sent as the caller's own send.
@@ -5019,7 +5097,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 } else {
                     actions.try_send_publication_qos(
                         key,
-                        opts.kind,
+                        kind,
                         payload,
                         meta,
                         wz_session_core::session_actions::SendAs {
@@ -5061,7 +5139,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             } else {
                 actions.send_publication_qos(
                     key,
-                    opts.kind,
+                    kind,
                     payload,
                     meta,
                     wz_session_core::session_actions::SendAs {
@@ -5078,7 +5156,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Err(FanoutError::ExceedsCapacity)
             } else {
                 let suffix = key.wire().suffix();
-                let push = match (opts.kind, key.wire().id()) {
+                let push = match (kind, key.wire().id()) {
                     (SampleKind::Put, 0) => {
                         push_build::build_push_literal_with_meta(key.text(), payload, meta)
                     }
@@ -5102,26 +5180,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Err(_) => Err(FanoutError::ExceedsCapacity),
                 }
             };
-            if sent.is_err() {
-                outcome = sent;
-            }
-        }
-        // And each group the session joined, which its task frames and sends.
-        #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
-                continue;
-            }
-            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
-            let sent = group.publish(GroupPut {
-                keyexpr,
-                wire,
-                payload,
-                kind: opts.kind,
-                meta,
-                reliable,
-                priority,
-            });
             if sent.is_err() {
                 outcome = sent;
             }
@@ -5883,9 +5941,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
-    /// every link, once the write filter let it through: `NotPlain`, with nothing sent, when a
-    /// subscriber of the session, a group or a link that rewrites keys wants it the general way.
+    /// every link, once the write filter let it through, as a publish is sent
+    /// ([`Self::send_on_links`]): `NotPlain`, with nothing sent, when a subscriber of the session or
+    /// a group wants it the general way, or the key names nothing a link carries.
     fn put_plain_in(
+        &self,
         core: &Core<L, C>,
         keyexpr: &str,
         mapping_id: ExprId,
@@ -5911,39 +5971,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
-        // Asked of every link before any is sent to, so the put goes plain to all of them or to
-        // none: a link that rewrites what it originates (a routing namespace) takes the general
-        // publish for the whole of it. Its namespace is installed before the session sends
-        // anything, so no link answers otherwise below.
-        if core
-            .transport
-            .ups()
-            .any(|actions| actions.rewrites_originated_keys())
-        {
-            return FilteredPut::NotPlain;
-        }
         // The key as the session's tables name it, and each link as its key-wire form says.
         let Some(named) = tables(&core.session.registry).named_by(keyexpr, mapping_id) else {
             return FilteredPut::NotPlain;
         };
-        let mut outcome = Ok(0);
-        for actions in core.transport.ups() {
-            let sent = leg(actions
-                .send_plain_put_qos(
-                    key_on_link(actions, named),
-                    payload,
-                    params.qos,
-                    wz_session_core::session_actions::SendAs {
-                        reliable: params.reliable,
-                        express: params.express,
-                        priority: params.priority,
-                    },
-                )
-                .unwrap_or(Err(SendWireError::FeatureDisabled)));
-            if sent.is_err() {
-                outcome = sent;
-            }
-        }
+        // A plain put carries its QoS and nothing else of a publication's.
+        let meta = PushMetadata {
+            qos: params.qos,
+            ..PushMetadata::default()
+        };
+        let leg = LinkLeg {
+            named,
+            payload,
+            kind: SampleKind::Put,
+            meta: &meta,
+            send: wz_session_core::session_actions::SendAs {
+                reliable: params.reliable,
+                express: params.express,
+                priority: params.priority,
+            },
+        };
+        // Marked as a publish for as long as it holds the session, as the general publish is.
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        let (outcome, _) = self.send_on_links(core, &leg, None, Pass::EVERY_FACE);
         FilteredPut::Sent(outcome)
     }
 
@@ -8016,7 +8066,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 (mapping_id, params)
             }
         };
-        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
+        self.put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds

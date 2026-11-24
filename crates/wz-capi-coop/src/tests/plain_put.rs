@@ -142,3 +142,50 @@ fn a_write_filters_answer_is_kept_until_a_face_is_written() {
     }
     assert_eq!(looks(&engine) - before, 1, "and that answer is kept");
 }
+
+/// How many sends on a face were marked as the session holder's since the open.
+fn face_marks(engine: &Engine) -> usize {
+    engine.takes.face_marks.load(Ordering::SeqCst)
+}
+
+/// A plain put through a write filter is sent to each face marked as the session holder's send on
+/// it, as a publish is: a droppable publish that finds the session held by it reads which face the
+/// send holds, and not a step it waits behind. CONTROL: the general publish marks its one face
+/// too. Turned red by a filtered put that sends to the links unmarked.
+#[test]
+fn a_plain_put_through_a_write_filter_marks_its_send_on_each_face() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let filter = filter_on(&engine, "demo/x");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) > 0
+    });
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+
+    let before = face_marks(&engine);
+    let published =
+        engine.publish_on_wire_all("demo/x", &WireKey::literal(), b"v", &PublishOptions::put());
+    assert!(published.is_ok(), "the publish is sent");
+    assert_eq!(
+        face_marks(&engine) - before,
+        1,
+        "CONTROL: the publish marks its one face"
+    );
+
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    let before = face_marks(&engine);
+    assert_eq!(
+        engine.put_plain_filtered(filter, "demo/x", 0, b"v", &params),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        face_marks(&engine) - before,
+        1,
+        "the filtered put marks its one face"
+    );
+}
