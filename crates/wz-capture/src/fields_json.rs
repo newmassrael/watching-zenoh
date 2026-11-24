@@ -12499,7 +12499,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 114] = [
+        let live: [(&str, &str, Vec<&'static str>); 115] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (

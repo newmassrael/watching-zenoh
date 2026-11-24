@@ -5148,7 +5148,9 @@ mod format_definition_tests {
     /// An ENCODING RULE is a rule written as any rule is, read back as itself,
     /// and consulted only for a key no other rule covers, in either order; its
     /// token is refused as the name of a definition.
+    /// Its rules are wildcards, which a build without `filter-wildcards` refuses.
     #[test]
+    #[cfg(feature = "filter-wildcards")]
     fn an_encoding_rule_yields_every_key_another_rule_covers() {
         for (text, other_at) in [
             ("**=encoding\ndemo/a=json", 1),

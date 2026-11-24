@@ -715,8 +715,8 @@ mod tests {
     fn a_cdr_rule_installs_over_its_definition_and_is_refused_without_one() {
         let text = "#@std_msgs/msg/String.msg=\"string data\"\n\
                     #@pose.proto=\"syntax = \\\"proto3\\\"; package pkg; message Pose { sint32 x = 1; }\"\n\
-                    demo/**=cdr@std_msgs/msg/String\n\
-                    pose/**=protobuf@pkg.Pose";
+                    demo/a=cdr@std_msgs/msg/String\n\
+                    pose/a=protobuf@pkg.Pose";
         let mut map = FormatMap::new();
         map.declare_all(text).expect("the declarations install");
         let rule = map.matching_rule("demo/a").expect("the cdr rule");
@@ -732,20 +732,20 @@ mod tests {
         assert!(map
             .declarations()
             .iter()
-            .any(|d| d.text == "demo/**=cdr@std_msgs/msg/String"));
+            .any(|d| d.text == "demo/a=cdr@std_msgs/msg/String"));
 
         for (declarations, says) in [
-            ("demo/**=cdr", "cdr@<package>/msg/<Type>"),
+            ("demo/a=cdr", "cdr@<package>/msg/<Type>"),
             (
-                "demo/**=cdr@std_msgs/msg/String",
+                "demo/a=cdr@std_msgs/msg/String",
                 "no declared definition file",
             ),
             (
-                "#@std_msgs/msg/String.msg=\"string data\"\ndemo/**=cdr@std_msgs/msg/Nope",
+                "#@std_msgs/msg/String.msg=\"string data\"\ndemo/a=cdr@std_msgs/msg/Nope",
                 "no declared definition defines std_msgs/msg/Nope",
             ),
             (
-                "#@demo/msg/Bad.msg=\"float64\"\ndemo/**=cdr@demo/msg/Bad",
+                "#@demo/msg/Bad.msg=\"float64\"\ndemo/a=cdr@demo/msg/Bad",
                 "demo/msg/Bad.msg:1:",
             ),
             ("#cdr=a:u8", "already a format name"),
