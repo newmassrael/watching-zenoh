@@ -2066,6 +2066,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(remote)
     }
 
+    /// The callback of the matching listener `handle` names, for a caller that takes what it calls
+    /// out of the row under the tables' lock, calls it with none held and puts it back; `None`
+    /// once the listener is undeclared, so a callback put back after its row went is let go of by
+    /// the caller instead of landing in the row that took the slot since.
+    pub fn matching_listener_callback_mut(
+        &mut self,
+        handle: MatchingListenerHandle,
+    ) -> Option<&mut F::Matching> {
+        self.kept_matching_mut()?
+            .get_mut(handle)
+            .map(|row| &mut row.callback)
+    }
+
     /// The next matching listener at or after `cursor` whose verdict changed, with its new
     /// verdict, now recorded as the one it was told.
     pub fn next_matching_change(
