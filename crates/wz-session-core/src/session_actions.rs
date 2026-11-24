@@ -1429,10 +1429,11 @@ struct BatchStage {
 /// Why a batch frame was opened on the heap and not in a lent slot (the
 /// heap-stage reasons of [`BatchLendCounts`]), or that the message was never a
 /// batch frame at all. Gated, as the two items below are, on the data path that
-/// opens a batch frame.
+/// opens a batch frame on the heap, which a lend-only build has none of.
 #[cfg(all(
     feature = "transport-batching",
     feature = "transport-tx-lend",
+    not(feature = "tx-lend-only"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1458,10 +1459,12 @@ enum HeapStage {
     PastBudget,
 }
 
-/// What opening a batch frame in a lent slot came to.
+/// What opening a batch frame in a lent slot came to, for a path that opens it on the heap
+/// instead.
 #[cfg(all(
     feature = "transport-batching",
     feature = "transport-tx-lend",
+    not(feature = "tx-lend-only"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -5785,9 +5788,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The link the slot comes from is the one [`Self::send_wire`] would route
     /// the frame to (`with_conduit_link` is that routing), so the slot is lent
     /// by the link that will write it. Gated as `with_conduit_link` is, the
-    /// data-path union, because it is the data-path send.
+    /// data-path union, because it is the data-path send, less a lend-only build, whose frame
+    /// is lent by `open_frame_lent`.
     #[cfg(all(
         feature = "transport-tx-lend",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -6080,10 +6085,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and the wire would no longer be the heap stage's byte for byte. A message
     /// that does not fit an empty slot is past the budget itself
     /// ([`HeapStage::PastBudget`]): the slot goes back and the message takes the
-    /// oversize path, with the SN already minted.
+    /// oversize path, with the SN already minted. A lend-only build opens its window in
+    /// `open_frame_lent`.
     #[cfg(all(
         feature = "transport-batching",
         feature = "transport-tx-lend",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -12823,48 +12830,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(emit) = admit.admit() else {
             return Ok(UnicastPush::Congested);
         };
-        // An encoder's refusal in the window's slot takes the oversize path, which measures the
-        // message again and answers the refusal (`emit_fragments_encoded`).
-        #[cfg(feature = "transport-batching")]
-        let opened = if in_window {
-            Some(
-                match self.open_lent_batch(
-                    batch,
-                    priority,
-                    LentFrameHead {
-                        sn: emit.sn,
-                        reliable: emit.reliable,
-                        ext_qos: emit.ext_qos,
-                        mtu: emit.mtu,
-                    },
-                    &encode_body,
-                ) {
-                    LentBatchOpen::Opened => FrameLend::Sent,
-                    LentBatchOpen::Heap(HeapStage::PastBudget) => FrameLend::PastMtu,
-                    LentBatchOpen::Heap(HeapStage::NoSlot | HeapStage::ShortSlot) => {
-                        FrameLend::Heap
-                    }
-                },
-            )
-        } else {
-            None
-        };
         // A build without batching opens no window.
         #[cfg(not(feature = "transport-batching"))]
-        let opened: Option<FrameLend> = {
+        let in_window = {
             let _ = in_window;
-            None
+            false
         };
-        let lent = match opened {
-            Some(lent) => lent,
-            None => {
-                let lent = self.send_frame_lent(&emit, worst_case_payload, &encode_body);
-                if lent == FrameLend::Sent {
-                    batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
-                }
-                lent
-            }
+        // A window asks for the whole budget, in its conduit's band; a frame sent whole asks for
+        // room for the widest prefix and a possible ext_qos, as the heap path reserves for the
+        // same frame, on the conduit its ext_qos names, as the heap path's send does.
+        let (lend_priority, want) = if in_window {
+            (priority, emit.mtu)
+        } else {
+            (
+                emit.ext_qos.unwrap_or(Priority::DEFAULT),
+                worst_case_payload.saturating_add(1 + 10 + 2),
+            )
         };
+        // One lend for the window's opening and for the frame sent whole.
+        let filled = self.lend_frame(
+            #[cfg(feature = "transport-batching")]
+            in_window.then_some(&mut *batch),
+            LentFrameHead {
+                sn: emit.sn,
+                reliable: emit.reliable,
+                ext_qos: emit.ext_qos,
+                mtu: emit.mtu,
+            },
+            lend_priority,
+            want,
+            &encode_body,
+        );
+        let lent = match filled {
+            Some(LentFill::Fits) => FrameLend::Sent,
+            Some(LentFill::PastBudget) => FrameLend::PastMtu,
+            // No slot, or one short of the frame: the heap would decide, and this profile has
+            // none.
+            None | Some(LentFill::ShortSlot) => FrameLend::Heap,
+            // An encoder's refusal in the window's slot takes the oversize path, which measures
+            // the message again and answers the refusal (`emit_fragments_encoded`).
+            Some(LentFill::Refused(_)) if in_window => FrameLend::PastMtu,
+            Some(LentFill::Refused(refused)) => FrameLend::Refused(refused),
+        };
+        // A window counts its own opening (`lend_frame`); a frame sent whole is counted here.
+        if lent == FrameLend::Sent && !in_window {
+            batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
+        }
         match lent {
             FrameLend::Sent => Ok(UnicastPush::Pushed),
             #[cfg(feature = "transport-fragmentation")]
