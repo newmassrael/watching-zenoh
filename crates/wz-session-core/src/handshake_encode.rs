@@ -51,8 +51,7 @@ use crate::session_init_params::SessionInitParams;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "transport-keepalive"
+    feature = "codec-close"
 ))]
 use crate::transport_profile::ExtEntryOwned;
 #[cfg(any(
@@ -79,8 +78,6 @@ use wz_codecs::open_body::{OpenBody, OpenBodySource};
 use wz_codecs::transport_close::{TransportCloseSource, TransportCloseWire};
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::transport_init::{TransportInitSource, TransportInitWire};
-#[cfg(feature = "transport-keepalive")]
-use wz_codecs::transport_keep_alive::{TransportKeepAliveSource, TransportKeepAliveWire};
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::transport_open::{TransportOpenSource, TransportOpenWire};
 
@@ -89,8 +86,7 @@ use sce_forge_runtime::codec::Bounded;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "transport-keepalive"
+    feature = "codec-close"
 ))]
 use sce_forge_runtime::codec::BoundedIter;
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
@@ -98,8 +94,7 @@ use wz_codecs::ext_entry::ExtEntryParts;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "transport-keepalive"
+    feature = "codec-close"
 ))]
 use wz_codecs::ext_entry::ExtEntrySource;
 
@@ -772,12 +767,15 @@ fn open_message<'p, 'e>(
 #[cfg(all(feature = "alloc", feature = "codec-close"))]
 #[inline(never)]
 pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
-    let mut wire = Vec::with_capacity(1 + Close::MAX_ENCODED_BYTES);
-    TransportCloseWire::encode_source(
+    let mut wire = Vec::with_capacity(Close::MAX_ENCODED_BYTES.saturating_add(1));
+    // A growing vector refuses no write: its sink's error has no value.
+    match TransportCloseWire::encode_source(
         &CloseMessage::new(reason, session),
         &mut VecSink::new(&mut wire),
-    )
-    .expect("VecSink is infallible");
+    ) {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     wire
 }
 
@@ -914,29 +912,8 @@ pub fn encode_multicast_close_into_slice(out: &mut [u8]) -> Result<usize, CodecE
 /// document (`sources/codecs/transport_keep_alive.scxml`) writes for it.
 #[cfg(feature = "transport-keepalive")]
 pub fn encode_keep_alive() -> [u8; 1] {
-    let mut frame = [0u8; 1];
-    TransportKeepAliveWire::write_window(&KeepAliveMessage, &mut frame)
-        .expect("a KeepAlive with no chain is its one header byte");
-    frame
-}
-
-/// A KeepAlive as `transport_keep_alive` writes it for this node: the message
-/// id, and no chain, so Z is derived clear.
-#[cfg(feature = "transport-keepalive")]
-struct KeepAliveMessage;
-
-#[cfg(feature = "transport-keepalive")]
-impl TransportKeepAliveSource for KeepAliveMessage {
-    fn header(&self) -> u8 {
-        wire_const::T_MID_KEEP_ALIVE
-    }
-
-    fn extensions(
-        &self,
-    ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
-    {
-        None::<BoundedIter<core::slice::Iter<'static, ExtEntryOwned>, { usize::MAX }, 1>>
-    }
+    // Its message id with no flag and no chain: a test holds the byte to the document's writer.
+    [wire_const::T_MID_KEEP_ALIVE]
 }
 
 /// Pack the `cbyte` field: the 2-bit whatami wire form (via
@@ -949,7 +926,8 @@ fn init_cbyte(whatami: WhatAmI, zid_len: usize) -> u8 {
         (1..=16).contains(&zid_len),
         "zid_len must be 1..=16 (wire constraint, transport.h)"
     );
-    whatami.to_wire() | (((zid_len as u8 - 1) & 0x0F) << 4)
+    // A zid is one to sixteen bytes, so the length less one fits the nibble.
+    whatami.to_wire() | (((zid_len as u8).wrapping_sub(1) & 0x0F) << 4)
 }
 
 /// Pack `sn_res` per transport.c:196-197:
@@ -1208,6 +1186,29 @@ mod tests {
 // the receive arm of `codec-keep-alive`.
 #[cfg(all(test, feature = "transport-keepalive"))]
 mod keep_alive_tests {
+    use crate::transport_profile::ExtEntryOwned;
+    use sce_forge_runtime::codec::BoundedIter;
+    use wz_codecs::ext_entry::ExtEntrySource;
+    use wz_codecs::transport_keep_alive::{TransportKeepAliveSource, TransportKeepAliveWire};
+    use wz_codecs::wire_const;
+
+    /// A KeepAlive as `transport_keep_alive` writes it for this node: the
+    /// message id, and no chain, so Z is derived clear.
+    struct KeepAliveMessage;
+
+    impl TransportKeepAliveSource for KeepAliveMessage {
+        fn header(&self) -> u8 {
+            wire_const::T_MID_KEEP_ALIVE
+        }
+
+        fn extensions(
+            &self,
+        ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
+        {
+            None::<BoundedIter<core::slice::Iter<'static, ExtEntryOwned>, { usize::MAX }, 1>>
+        }
+    }
+
     /// The KeepAlive a node sends is its message id alone: no flag, no chain,
     /// which upstream writes for a KeepAlive
     /// (`commons/zenoh-codec/src/transport/keepalive.rs` @
@@ -1215,5 +1216,13 @@ mod keep_alive_tests {
     #[test]
     fn the_keep_alive_sent_is_its_message_id_alone() {
         assert_eq!(super::encode_keep_alive(), [0x04]);
+        let mut frame = [0u8; 1];
+        TransportKeepAliveWire::write_window(&KeepAliveMessage, &mut frame)
+            .expect("a KeepAlive with no chain is its one header byte");
+        assert_eq!(
+            frame,
+            super::encode_keep_alive(),
+            "the document's writer agrees"
+        );
     }
 }

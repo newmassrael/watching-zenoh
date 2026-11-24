@@ -1228,8 +1228,6 @@ pub mod frame_encode;
         feature = "transport-keepalive"
     )
 ))]
-// Totality debt TD-098 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod handshake_encode;
 
 /// The handshake's transport messages as `handshake_encode` writes them and
