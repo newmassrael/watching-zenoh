@@ -45,7 +45,7 @@ use crate::declare::liveliness::LivelinessRegistry;
 #[cfg(feature = "liveliness-get")]
 use crate::declare::liveliness_get::LivelinessGetRegistry;
 use crate::declare::liveliness_sample::LivelinessSampleSink;
-use crate::declare::liveliness_subscriber::LivelinessDelivery;
+use crate::declare::liveliness_subscriber::LivelinessDelivered;
 #[cfg(feature = "liveliness-subscriber")]
 use crate::declare::liveliness_subscriber::{
     LivelinessSubscriberTable, LocalLivelinessSubscribers,
@@ -66,7 +66,7 @@ use crate::peer_tables::PeerTables;
 pub use crate::pubsub::LocalSubscribers;
 use crate::pubsub::{SubscriberTable, SubscriptionId};
 #[cfg(feature = "query-queryable")]
-use crate::query::{LocalQueryables, QueryDelivery, QueryableRegistry};
+use crate::query::{LocalQueryables, QueryDelivered, QueryableRegistry};
 use crate::query_sink::QuerySink;
 use crate::reply::ReplyRegistry;
 use crate::reply_sink::ReplySink;
@@ -311,15 +311,9 @@ pub trait ObserverSinks {
     /// The context a matched row is delivered through, handed to the dispatch
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
-    /// [`crate::query::ResponderSink`], [`LivelinessSampleSink`]).
-    #[cfg(feature = "query-queryable")]
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>
-        + QueryDelivery<Self::Queryable, Self::QueryableId>
-        + LivelinessDelivery<Self::LivelinessSubscriber, Self::LivelinessSubscriberId>;
-    /// See the form with queryables.
-    #[cfg(not(feature = "query-queryable"))]
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>
-        + LivelinessDelivery<Self::LivelinessSubscriber, Self::LivelinessSubscriberId>;
+    /// [`crate::query::ResponderSink`], [`LivelinessSampleSink`]). How each kind's rows are told
+    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
+    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
     /// policies ([`RegistryTables`]), or the session's one table set, whose rows are the session's
     /// only record of each entity. One type for every kind the bundle holds, so a kind that moves
@@ -330,10 +324,15 @@ pub trait ObserverSinks {
     /// What a local queryable's row keeps of its queryable, asked through [`Self::Delivery`]: a
     /// row that answers itself is asked by `()` with the view and the responder of the wire
     /// dispatch as their own types, so a closed sink is called with no vtable.
+    #[cfg(feature = "query-queryable")]
+    type Queryable: QueryDelivered<Self::Delivery, Self::QueryableId>;
+    /// What a local queryable's row keeps of its queryable; a build that asks none reads nothing
+    /// of it.
+    #[cfg(not(feature = "query-queryable"))]
     type Queryable;
     /// What a local liveliness subscriber's row keeps of its subscriber, told through
     /// [`Self::Delivery`].
-    type LivelinessSubscriber;
+    type LivelinessSubscriber: LivelinessDelivered<Self::Delivery, Self::LivelinessSubscriberId>;
     /// What a peer's declaration is announced to.
     type Declared: DeclSink;
     /// What a peer's undeclaration is announced to.
@@ -1868,13 +1867,13 @@ mod tests {
 
     /// The tables of these tests hold no liveliness subscriber: a row of no value is never told.
     impl
-        crate::declare::liveliness_subscriber::LivelinessDelivery<
-            NoSink,
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            HandleLog,
             crate::session_tables::LivelinessSubscriberHandle,
-        > for HandleLog
+        > for NoSink
     {
-        fn deliver(
-            &mut self,
+        fn tell(
+            _cx: &mut HandleLog,
             _id: crate::session_tables::LivelinessSubscriberHandle,
             row: crate::sink::RowAccess<'_, NoSink>,
             _sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
@@ -1885,9 +1884,9 @@ mod tests {
 
     /// The tables of these tests hold no queryable: a row of no value is never asked.
     #[cfg(feature = "query-queryable")]
-    impl crate::query::QueryDelivery<NoSink, crate::session_tables::QueryableHandle> for HandleLog {
+    impl crate::query::QueryDelivered<HandleLog, crate::session_tables::QueryableHandle> for NoSink {
         fn ask(
-            &mut self,
+            _cx: &mut HandleLog,
             _id: crate::session_tables::QueryableHandle,
             row: crate::sink::RowAccess<'_, NoSink>,
             _query: &crate::query_sink::ProvenQuery<'_>,
@@ -2025,28 +2024,28 @@ mod tests {
     }
 
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-    impl crate::query::QueryDelivery<AskedRow, crate::session_tables::QueryableHandle> for QueryLog {
+    impl crate::query::QueryDelivered<QueryLog, crate::session_tables::QueryableHandle> for AskedRow {
         fn ask(
-            &mut self,
+            cx: &mut QueryLog,
             id: crate::session_tables::QueryableHandle,
             _row: crate::sink::RowAccess<'_, AskedRow>,
             _query: &crate::query_sink::ProvenQuery<'_>,
             _responder: &mut crate::query::QueryResponder<'_>,
         ) {
-            self.0.push(id);
+            cx.0.push(id);
         }
     }
 
     /// The tables of these tests hold no liveliness subscriber: a row of no value is never told.
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
     impl
-        crate::declare::liveliness_subscriber::LivelinessDelivery<
-            NoSink,
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            QueryLog,
             crate::session_tables::LivelinessSubscriberHandle,
-        > for QueryLog
+        > for NoSink
     {
-        fn deliver(
-            &mut self,
+        fn tell(
+            _cx: &mut QueryLog,
             _id: crate::session_tables::LivelinessSubscriberHandle,
             row: crate::sink::RowAccess<'_, NoSink>,
             _sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
@@ -2204,9 +2203,9 @@ mod tests {
         feature = "alloc",
         feature = "query-queryable"
     ))]
-    impl crate::query::QueryDelivery<NoSink, crate::session_tables::QueryableHandle> for TokenLog {
+    impl crate::query::QueryDelivered<TokenLog, crate::session_tables::QueryableHandle> for NoSink {
         fn ask(
-            &mut self,
+            _cx: &mut TokenLog,
             _id: crate::session_tables::QueryableHandle,
             row: crate::sink::RowAccess<'_, NoSink>,
             _query: &crate::query_sink::ProvenQuery<'_>,
@@ -2218,18 +2217,18 @@ mod tests {
 
     #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
     impl
-        crate::declare::liveliness_subscriber::LivelinessDelivery<
-            AskedRow,
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            TokenLog,
             crate::session_tables::LivelinessSubscriberHandle,
-        > for TokenLog
+        > for AskedRow
     {
-        fn deliver(
-            &mut self,
+        fn tell(
+            cx: &mut TokenLog,
             id: crate::session_tables::LivelinessSubscriberHandle,
             _row: crate::sink::RowAccess<'_, AskedRow>,
             sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
         ) {
-            self.0.push((id, sample.kind));
+            cx.0.push((id, sample.kind));
         }
     }
 

@@ -202,29 +202,31 @@ impl PeerDeclarations for NoPeers {
     }
 }
 
-/// What a matching listener's row is told a change of its verdict through: the context the tables
-/// are handed, so a row holds its own facts and no reference to the state its verdicts go to, as
-/// [`crate::sink::SampleDelivery`] is for a subscriber's row.
+/// How a matching listener's row is told a change of its verdict through the context `X` the tables
+/// are handed: implemented by the row's type, so a row holds its own facts and no reference to the
+/// state its verdicts go to, as [`crate::sink::SampleDelivery`] is for a subscriber's row. An
+/// associated function and not a method, so no value gains a method by an impl of it.
 ///
-/// `()` is the context of a row that is its own sink (`Row: MatchingSink`), which the tables hold
-/// alone; a row of no listener's callback (`()`) is told nothing by any context.
-pub trait MatchingDelivery<Row, Id> {
-    /// Tell `row`, the row `id`, its new verdict: `true` when what it watches is now matched.
-    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, matching: bool);
+/// A row that is its own sink (`MatchingSink`) is told through the unit context `()`; a row of no
+/// listener's callback (`()`) is told nothing, through any context.
+pub trait MatchingDelivered<X, Id>: Sized {
+    /// Tell `row`, the row `id`, its new verdict through `cx`: `true` when what it watches is now
+    /// matched.
+    fn tell(cx: &mut X, id: Id, row: RowAccess<'_, Self>, matching: bool);
 }
 
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
-impl<Row: crate::declare::matching::MatchingSink, Id> MatchingDelivery<Row, Id> for () {
-    fn deliver(&mut self, _id: Id, row: RowAccess<'_, Row>, matching: bool) {
+impl<Row: crate::declare::matching::MatchingSink, Id> MatchingDelivered<(), Id> for Row {
+    fn tell(_cx: &mut (), _id: Id, row: RowAccess<'_, Row>, matching: bool) {
         if let Some(row) = row.held() {
             row.on_matching_changed(matching);
         }
     }
 }
 
-/// `()` is no `MatchingSink`, so this and the unit context's own never name the same pair.
-impl<X, Id> MatchingDelivery<(), Id> for X {
-    fn deliver(&mut self, _id: Id, _row: RowAccess<'_, ()>, _matching: bool) {}
+/// `()` is no `MatchingSink`, so this and the sinks' own never name the same pair.
+impl<X, Id> MatchingDelivered<X, Id> for () {
+    fn tell(_cx: &mut X, _id: Id, _row: RowAccess<'_, ()>, _matching: bool) {}
 }
 
 /// How an entity's declaration names its key on the wire.
@@ -1731,11 +1733,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// shared where its calls read it in place and exclusively otherwise: how many were told. A
     /// listener is declared not matching, so one declared while what it watches is matched is told
     /// so by the next call.
-    pub fn tell_matching_changes<X: MatchingDelivery<F::Matching, MatchingListenerHandle>>(
-        &mut self,
-        cx: &mut X,
-        peers: &impl PeerDeclarations,
-    ) -> usize {
+    pub fn tell_matching_changes<X>(&mut self, cx: &mut X, peers: &impl PeerDeclarations) -> usize
+    where
+        F::Matching: MatchingDelivered<X, MatchingListenerHandle>,
+    {
         let mut cursor = 0usize;
         let mut told = 0usize;
         while let Some((handle, matching)) = self.next_matching_change(&mut cursor, peers) {
@@ -1749,7 +1750,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                     .map(|row| RowAccess::Held(&mut row.callback))
             };
             if let Some(row) = row {
-                cx.deliver(handle, row, matching);
+                F::Matching::tell(cx, handle, row, matching);
                 told = told.saturating_add(1);
             }
         }

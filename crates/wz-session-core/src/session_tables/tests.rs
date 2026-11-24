@@ -1890,9 +1890,9 @@ fn a_write_filter_keeps_the_engines_record_and_hands_it_back_refused() {
 #[derive(Default)]
 struct Told(Vec<(MatchingListenerHandle, bool)>);
 
-impl MatchingDelivery<u32, MatchingListenerHandle> for Told {
-    fn deliver(&mut self, id: MatchingListenerHandle, _row: RowAccess<'_, u32>, matching: bool) {
-        self.0.push((id, matching));
+impl MatchingDelivered<Told, MatchingListenerHandle> for u32 {
+    fn tell(cx: &mut Told, id: MatchingListenerHandle, _row: RowAccess<'_, u32>, matching: bool) {
+        cx.0.push((id, matching));
     }
 }
 
