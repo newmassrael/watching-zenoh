@@ -176,7 +176,9 @@ pub(crate) struct SampleMarshal {
     /// which reads the Rust `keyexpr` field below.
     _pico_keyexpr: [u8; PICO_SAMPLE_PAYLOAD_OFFSET],
     /// pico `_z_sample_t.payload` — a BORROWED view of `payload` below, bound by
-    /// [`SampleMarshal::bind`] once the marshal is at its final address.
+    /// [`SampleMarshal::bind`] once the marshal is at its final address. It is also the loaned
+    /// payload `z_sample_payload` hands out, as pico's is `&sample->payload`: one view, which a
+    /// program that copies it, as a field or through the accessor, holds as a borrow.
     pico_payload: z_owned_bytes_t,
     keyexpr: KeyText,
     payload: ByteBuf,
@@ -210,7 +212,6 @@ pub(crate) struct SampleMarshal {
     /// accessor returns a pointer, and a stack temporary would dangle.
     source_info: Option<z_source_info_t>,
     loaned_keyexpr: z_loaned_keyexpr_t,
-    loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
     loaned_encoding: crate::encoding::z_loaned_encoding_t,
 }
@@ -286,10 +287,6 @@ impl SampleMarshal {
             reliability: Reliability::default(),
             source_info: None,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            loaned_payload: z_loaned_bytes_t {
-                handle: core::ptr::null_mut(),
-                _pad: [core::ptr::null_mut(); 3],
-            },
             loaned_attachment: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
@@ -365,7 +362,6 @@ impl SampleMarshal {
     pub(crate) fn bind(&mut self) {
         let keyexpr = self.keyexpr.as_str();
         self.loaned_keyexpr = z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
-        self.loaned_payload.handle = &self.payload as *const ByteBuf as *mut c_void;
         // The pico-layout slot binds here for the same reason the cached views
         // do: it points into THIS marshal, so it can only be written once the
         // value has stopped moving.
@@ -445,10 +441,6 @@ impl SampleMarshal {
             source_info: self.source_info,
             encoding,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            loaned_payload: z_loaned_bytes_t {
-                handle: core::ptr::null_mut(),
-                _pad: [core::ptr::null_mut(); 3],
-            },
             loaned_attachment: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
@@ -3545,7 +3537,8 @@ pub unsafe extern "C" fn z_sample_payload(
         return core::ptr::null();
     }
     let marshal = &*(sample as *const SampleMarshal);
-    &marshal.loaned_payload as *const z_loaned_bytes_t
+    // The loaned bytes are the owned bytes' layout, read by their handle alone (`handle_ref`).
+    core::ptr::from_ref(&marshal.pico_payload).cast::<z_loaned_bytes_t>()
 }
 
 /// How the sample was issued — Put or Delete (pico `z_sample_kind`).
@@ -4114,6 +4107,39 @@ mod tests {
         assert_ne!(clone.as_slice().as_ptr(), view.payload.as_ptr());
     }
 
+    /// A sample's payload view is its pico-layout payload field, as zenoh-pico's `z_sample_payload`
+    /// is `&sample->payload`: it reads the sample's payload, and a copy of it is a borrow, which
+    /// the drop of an owned bytes made of it does not let go. Turned red by an accessor that hands
+    /// out a view of its own.
+    #[test]
+    fn a_samples_payload_view_is_its_pico_payload_field() {
+        let view = HeldView {
+            key: "demo/payload",
+            payload: b"payload",
+            attachment: b"",
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.bind();
+        let sample = marshal.as_loaned();
+        // SAFETY: a sample this crate marshalled and bound.
+        let payload = unsafe { z_sample_payload(sample) };
+        assert_eq!(
+            payload as usize,
+            sample as usize + PICO_SAMPLE_PAYLOAD_OFFSET,
+            "the view is the field a C program reads as sample->payload"
+        );
+        // SAFETY: the loaned payload of the live marshal.
+        let bytes = unsafe { handle_ref::<z_loaned_bytes_t, ByteBuf>(payload) }.expect("bound");
+        assert_eq!(bytes.as_slice(), b"payload");
+        // SAFETY: the loaned bytes have the owned bytes' layout.
+        let as_owned = unsafe { &*payload.cast::<z_owned_bytes_t>() };
+        assert!(
+            crate::abi::HandleOwnership::handle_is_borrowed(as_owned),
+            "a copy of the view is a borrow"
+        );
+    }
+
     /// A sample taken from its callback is a copy of its own, written in its place and bound there:
     /// its key, payload and attachment read as the view's from bytes of its own, and the views it
     /// hands out point into it, not into the marshal it was copied from, which is gone by then.
@@ -4143,7 +4169,7 @@ mod tests {
                 Some(&b"attachment"[..])
             );
             assert_eq!(
-                (*copy).loaned_payload.handle as usize,
+                (*copy).pico_payload.handle as usize,
                 core::ptr::addr_of!((*copy).payload) as usize,
                 "the payload's view is bound to the copy"
             );
