@@ -162,8 +162,9 @@ pub trait MatchingReport {}
 impl<T> MatchingReport for T {}
 
 /// Whether the remote-declaration tables of `M` can hold a matching watch: not where the sink type
-/// makes no value ([`matching::MatchingSink::WATCHES`]), so a holder hands such tables no consult
-/// of its own tables to re-evaluate a watch by.
+/// makes no value ([`matching::MatchingSink::WATCHES`]). A holder's consult of its own tables,
+/// the one such tables would re-evaluate a watch by, tests this first: a constant `false` there
+/// answers no without reading the tables, and the reads leave the build.
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 pub const fn holds_watches<M: MatchingReport>() -> bool {
     <M as matching::MatchingSink>::WATCHES
