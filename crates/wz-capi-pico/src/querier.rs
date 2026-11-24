@@ -590,8 +590,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         };
         let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
-            Arc::as_ref(&state.shared),
-            state.key.literal().to_owned(),
+            &state.shared,
+            state.key.literal(),
             state.key.wire(Arc::as_ref(&state.shared)),
             params_in,
             state.target,
@@ -602,7 +602,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             attachment,
             state.qos,
             value_meta,
-            Arc::new(closure),
+            closure,
             token,
             None,
         )
