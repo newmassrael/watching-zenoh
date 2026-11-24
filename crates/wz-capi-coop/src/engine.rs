@@ -4459,12 +4459,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(any(feature = "listen", feature = "group"))]
         let handed_at_most = core.config.tx_queue.sizes;
         let arena_bytes = core.arena.bytes();
-        Arc::new_cyclic(|this| {
+        // The handle's type is named: the engine's handle coerced for the round would otherwise be
+        // what infers it.
+        Arc::new_cyclic(|this: &Weak<Self>| {
             // The round hands the queries it holds to their queryables through the engine, which
             // sends what they answer.
             #[cfg(feature = "queryable")]
             {
-                let answering: Weak<dyn crate::round::AnswersQueries> = this.clone();
+                let answering: Weak<dyn crate::round::AnswersQueries> = Weak::<Self>::clone(this);
                 samples.answer_queries_with(answering);
             }
             Self {

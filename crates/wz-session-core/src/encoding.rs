@@ -186,24 +186,39 @@ pub fn id_for_mime(mime: &str) -> Option<EncodingId> {
 /// rather than each re-deriving where the encoding ends.
 #[cfg(feature = "alloc")]
 pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
-    let (packed_id, schema, payload) = split_value_body_parts(value)?;
+    let parts = split_value_body_parts(value)?;
     let hint = EncodingHint {
-        packed_id,
-        schema: schema.map(<[u8]>::to_vec),
+        packed_id: parts.packed_id,
+        schema: parts.schema.map(<[u8]>::to_vec),
     };
-    Some((hint, payload))
+    Some((hint, parts.payload))
+}
+
+/// A value's parts read where the value lies: its encoding's packed id, the encoding's schema
+/// when it carries one, and the payload, each a range of the value's bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValueParts<'a> {
+    /// The encoding's packed id (its id shifted left, the low bit set when a schema follows).
+    pub packed_id: u32,
+    /// The encoding's schema.
+    pub schema: Option<&'a [u8]>,
+    /// The payload.
+    pub payload: &'a [u8],
 }
 
 /// [`split_value_body`] read where the value lies: the encoding's packed id and its schema's
 /// bytes, a slice of `value` as the payload is, so a reader that keeps them past the call reads
 /// them there instead of a copy an owned hint makes.
-pub fn split_value_body_parts(value: &[u8]) -> Option<(u32, Option<&[u8]>, &[u8])> {
+pub fn split_value_body_parts(value: &[u8]) -> Option<ValueParts<'_>> {
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(value);
     let encoding = wz_codecs::lent::Encoding::decode(&mut cursor).ok()?;
     // The bytes the encoding consumed are what the cursor no longer holds.
     let consumed = value.len().saturating_sub(cursor.remaining());
-    let schema = encoding.schema.map(|schema| schema.into_inner());
-    Some((encoding.packed_id, schema, value.get(consumed..)?))
+    Some(ValueParts {
+        packed_id: encoding.packed_id,
+        schema: encoding.schema.map(|schema| schema.into_inner()),
+        payload: value.get(consumed..)?,
+    })
 }
 
 /// Parse a MIME string into an [`EncodingHint`] (zenoh `Encoding::from_str`,
