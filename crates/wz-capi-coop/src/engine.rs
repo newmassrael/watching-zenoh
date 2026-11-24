@@ -5366,7 +5366,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             suffix_at,
             holds: 1,
         };
-        core.announce(Kind::Interest, |actions| hold.send(actions));
+        core.announce(Kind::Interest, &|actions| hold.send(actions));
         // The row was found free above, under the lock still held.
         let held = core.interests.push(hold).is_ok();
         debug_assert!(held, "the Interests' table had the row the check found");
@@ -6095,8 +6095,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let place = core.keyexpr_place(declared.handle);
         let taken = core.announce_or_undo_at(
             place,
-            |actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
-            |actions| actions.send_undeclare_kexpr(id),
+            &|actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
+            &|actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
             tables_mut(&core.registry).undeclare_keyexpr(declared.handle);

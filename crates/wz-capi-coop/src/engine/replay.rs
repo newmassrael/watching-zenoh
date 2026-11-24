@@ -349,8 +349,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: usize,
         on_refusal: OnRefusal,
-        send: impl Fn(&McuActions<C>) -> bool,
-        undo: impl Fn(&McuActions<C>),
+        send: &dyn Fn(&McuActions<C>) -> bool,
+        undo: &dyn Fn(&McuActions<C>),
     ) -> bool {
         announce_on(self.links.faces_mut(), place, on_refusal, send, undo)
     }
@@ -358,9 +358,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
     /// that a link refused is counted as told, and the peer learns it when the session declares
     /// over a new link.
-    pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
+    pub(super) fn announce(&mut self, kind: Kind, send: &dyn Fn(&McuActions<C>) -> bool) {
         let place = self.end_of(kind);
-        self.announce_with(place, OnRefusal::Forget, send, |_| {});
+        self.announce_with(place, OnRefusal::Forget, send, &|_| {});
     }
 
     /// The place in the replay's order of the subscriber `handle` names, the one past the last for
@@ -386,7 +386,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let told = tables.subscribers().get(handle).is_some_and(|row| {
                     tables
@@ -395,7 +395,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 told
             },
-            |_| {},
+            &|_| {},
         );
     }
 
@@ -424,7 +424,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let told = tables.queryables().get(handle).is_some_and(|row| {
                     tables
@@ -433,7 +433,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 told
             },
-            |_| {},
+            &|_| {},
         );
     }
 
@@ -442,8 +442,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn announce_or_undo_at(
         &mut self,
         place: usize,
-        send: impl Fn(&McuActions<C>) -> bool,
-        undo: impl Fn(&McuActions<C>),
+        send: &dyn Fn(&McuActions<C>) -> bool,
+        undo: &dyn Fn(&McuActions<C>),
     ) -> bool {
         self.announce_with(place, OnRefusal::Undo, send, undo)
     }
@@ -485,7 +485,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let taken = tables.tokens().get(handle).is_some_and(|row| {
                     tables
@@ -494,7 +494,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 });
                 taken
             },
-            |_| {},
+            &|_| {},
         );
     }
 
@@ -523,7 +523,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            |actions| {
+            &|actions| {
                 let tables = super::tables(registry);
                 let asked = tables
                     .liveliness_subscribers()
@@ -534,7 +534,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     });
                 asked
             },
-            |_| {},
+            &|_| {},
         );
     }
 
@@ -563,52 +563,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 }
 
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
-/// (a row of the session core's tables) in `send` while the faces are written.
+/// (a row of the session core's tables) in `send` while the faces are written. One body for every
+/// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
+///
+/// Each face that is up is offered the declaration where its replay stands, and the replays move
+/// only once the declaration is made: a refusal that undoes it stops at the face that refused,
+/// takes back what the faces before it were sent and leaves every replay as it was, so nothing is
+/// kept to put back.
+#[inline(never)]
 fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
     faces: &mut [Face<C, L>],
     place: usize,
     on_refusal: OnRefusal,
-    send: impl Fn(&McuActions<C>) -> bool,
-    undo: impl Fn(&McuActions<C>),
+    send: &dyn Fn(&McuActions<C>) -> bool,
+    undo: &dyn Fn(&McuActions<C>),
 ) -> bool {
-    // What each face's replay was and what its link made of the declaration, so that a refusal
-    // that undoes the declaration can put every face back.
-    let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
-    for (at, face) in faces.iter_mut().enumerate() {
+    // Whether the replay of `face` is past the declaration, so its link is told it now.
+    let emits_now = |face: &Face<C, L>| {
+        let mut cursor = face.replay.cursor;
+        cursor.inserted(place) == Insertion::EmitNow
+    };
+    let mut refused_at = None;
+    for (at, face) in faces.iter().enumerate() {
         let Link::Up(wire) = &face.link else {
             continue;
         };
-        let before = face.replay.cursor;
-        let outcome = match face.replay.cursor.inserted(place) {
-            Insertion::Owed => Told::Owed,
-            Insertion::EmitNow if send(&wire.actions) => Told::Sent,
-            Insertion::EmitNow => Told::Refused,
-        };
-        told.push((at, before, outcome));
-    }
-    let refused = told.iter().any(|(_, _, outcome)| *outcome == Told::Refused);
-    if !refused || on_refusal == OnRefusal::Forget {
-        return true;
-    }
-    for (at, before, outcome) in told {
-        let face = &mut faces[at];
-        face.replay.cursor = before;
-        if let (Told::Sent, Link::Up(wire)) = (outcome, &face.link) {
-            undo(&wire.actions);
+        if emits_now(face) && !send(&wire.actions) && on_refusal == OnRefusal::Undo {
+            refused_at = Some(at);
+            break;
         }
     }
-    false
-}
-
-/// What a face's link made of a declaration it was offered.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Told {
-    /// The face's replay has not reached the declaration: it is sent in its turn.
-    Owed,
-    /// The link took it now.
-    Sent,
-    /// The link refused it.
-    Refused,
+    if let Some(refused) = refused_at {
+        for face in faces.iter().take(refused) {
+            if let Link::Up(wire) = &face.link {
+                if emits_now(face) {
+                    undo(&wire.actions);
+                }
+            }
+        }
+        return false;
+    }
+    for face in faces.iter_mut() {
+        if matches!(face.link, Link::Up(_)) {
+            // The face was told it above, or its replay tells it in its turn.
+            let _ = face.replay.cursor.inserted(place);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
