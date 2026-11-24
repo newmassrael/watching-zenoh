@@ -226,10 +226,14 @@ const CELL_ROWS: usize = 6;
 const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
-/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), as many as the ABI
-/// asks places of, at most these.
-const ENTITY_PLACE_ROWS: usize =
-    2 * (3 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize);
+/// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
+/// (`query`) and pending liveliness gets (`liveliness-get`), as many as the ABI asks places of,
+/// at most these.
+const ENTITY_PLACE_ROWS: usize = 2
+    * (3 + cfg!(feature = "queryable") as usize
+        + 2 * cfg!(feature = "liveliness") as usize
+        + cfg!(feature = "query") as usize
+        + cfg!(feature = "liveliness-get") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -283,6 +287,16 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "MAX_LIVELINESS_SUBSCRIPTIONS",
         ),
         EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
+        EntityKind::PendingGet => (
+            "pending get place flags",
+            "pending get places",
+            "MAX_PENDING_QUERIES",
+        ),
+        EntityKind::PendingLivelinessGet => (
+            "pending liveliness get place flags",
+            "pending liveliness get places",
+            "MAX_PENDING_LIVELINESS_GETS",
+        ),
     }
 }
 
@@ -400,6 +414,12 @@ pub struct EntityRows {
     pub queriers: usize,
     /// The matching listeners (`MAX_MATCHING_LISTENERS`).
     pub matching_listeners: usize,
+    /// The gets pending at once (`MAX_PENDING_QUERIES`), each a row of every table of pending
+    /// gets; none in a build without `query`.
+    pub pending_gets: usize,
+    /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
+    /// without `liveliness-get`.
+    pub pending_liveliness_gets: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -486,6 +506,8 @@ impl EntityRows {
             EntityKind::Token => self.tokens,
             EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
             EntityKind::Querier => self.queriers,
+            EntityKind::PendingGet => self.pending_gets,
+            EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
         }
     }
 
@@ -1688,6 +1710,24 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             "MAX_MATCHING_LISTENERS",
             limits.max_matching_listeners(),
         )?,
+        // As many as the tables of pending gets hold rows of each (`GetTables`): a get the ABI
+        // holds pending takes one row of every face's table, so no more are pending at once.
+        pending_gets: if cfg!(feature = "query") {
+            lent::<{ caps::MAX_PENDING_QUERIES }>(
+                "MAX_PENDING_QUERIES",
+                limits.max_pending_queries(),
+            )?
+        } else {
+            0
+        },
+        pending_liveliness_gets: if cfg!(feature = "liveliness-get") {
+            lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+                "MAX_PENDING_LIVELINESS_GETS",
+                limits.max_pending_liveliness_gets(),
+            )?
+        } else {
+            0
+        },
     })
 }
 

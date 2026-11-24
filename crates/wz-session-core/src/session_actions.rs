@@ -3747,6 +3747,53 @@ struct FrameEmit {
     deadline: PushDeadline,
 }
 
+/// The room check and SN mint a frame opened under `tx-lend-only` starts with
+/// (`SessionLinkActions::open_frame_lent`), as a trait object so that the staged and the fresh
+/// dispatch, whose admissions are closures of different types, share one body. A trait of its
+/// own and not `dyn Fn`: a closure's `dyn Fn` table also holds its `FnOnce` shim, which
+/// carries a second copy of the closure's body.
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+trait AdmitFrame {
+    /// The frame's emit once its link has room and its SN is minted; `None` when the link
+    /// is congested.
+    fn admit(&self) -> Option<FrameEmit>;
+}
+
+#[cfg(all(
+    feature = "tx-lend-only",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
+    fn admit(&self) -> Option<FrameEmit> {
+        self()
+    }
+}
+
 // R2928 — the outcome and the deadline moved to `crate::tx_deadline`, which
 // the multicast transmission pipeline shares.
 #[cfg(any(
@@ -12016,8 +12063,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// SN is given back. Nothing is staged on the heap, which this profile has no answer in.
     ///
     /// One body for the window's opening and for the frame sent whole: the two differ only in
-    /// the slot they write and what keeps it. `admit` is a trait object so that the staged and
-    /// the fresh dispatch, whose admissions are closures of different types, share this body.
+    /// the slot they write and what keeps it.
     #[cfg(all(
         feature = "tx-lend-only",
         any(
@@ -12039,7 +12085,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         in_window: bool,
         priority: Priority,
-        admit: &dyn Fn() -> Option<FrameEmit>,
+        admit: &dyn AdmitFrame,
         worst_case_payload: usize,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
@@ -12047,7 +12093,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
-        let Some(emit) = admit() else {
+        let Some(emit) = admit.admit() else {
             return Ok(UnicastPush::Congested);
         };
         // An encoder's refusal in the window's slot takes the oversize path, which measures the
