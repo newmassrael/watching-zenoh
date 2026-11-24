@@ -941,6 +941,21 @@ const TX_CONDUITS: usize = Priority::NUM;
 #[cfg(not(feature = "transport-qos"))]
 const TX_CONDUITS: usize = 1;
 
+/// The entry of `rows`, one per conduit, that `priority` rides: its own under `transport-qos`,
+/// where the wire priority is the conduit, and the single one otherwise.
+fn conduit_row<T>(rows: &[T; TX_CONDUITS], priority: Priority) -> &T {
+    #[cfg(feature = "transport-qos")]
+    {
+        priority.of(rows)
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    {
+        let _ = priority;
+        let [only] = rows;
+        only
+    }
+}
+
 /// R3052 -- the lane the four handshake messages (InitSyn, InitAck, OpenSyn,
 /// OpenAck) are handed to the link on.
 ///
@@ -1081,7 +1096,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         feature = "liveliness-token",
     ))]
     fn sender_flag(&self, priority: Priority) -> &core::sync::atomic::AtomicBool {
-        &self.sending[Self::conduit_index(priority)]
+        conduit_row(&self.sending, priority)
     }
 
     /// The conduit `priority` rides. With `transport-qos` this is zenoh's
@@ -1114,7 +1129,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         feature = "transport-batching",
     ))]
     fn conduit(&self, priority: Priority) -> &R::Mutex<BatchTx> {
-        &self.conduits[Self::conduit_index(priority)]
+        conduit_row(&self.conduits, priority)
     }
 
     /// `priority` -> conduit index. The wire priority byte IS the index under
@@ -1536,7 +1551,7 @@ impl FrameTxConduits {
     fn select(&self, _priority: Priority) -> &AtomicTxSn {
         #[cfg(feature = "transport-qos")]
         {
-            &self.conduits[_priority as usize]
+            _priority.of(&self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -2870,7 +2885,10 @@ impl LinkPriorityRange {
     /// `PriorityRange::len` (`end - start + 1`; named `width` here to avoid the
     /// `len_without_is_empty` lint — a band is never empty, `width >= 1`).
     pub fn width(&self) -> usize {
-        (self.end.wire_byte() as usize) - (self.start.wire_byte() as usize) + 1
+        // A band's end is at or past its start.
+        usize::from(self.end.wire_byte())
+            .saturating_sub(usize::from(self.start.wire_byte()))
+            .saturating_add(1)
     }
 
     /// The inclusive lower bound (the numerically SMALLEST wire priority, i.e.
@@ -4883,7 +4901,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         #[cfg(feature = "transport-multilink")]
         {
-            let links = self.links.lock().expect("multilink set mutex");
+            let links = self
+                .links
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !links.is_empty() {
                 return links.iter().map(|l| render(l.link_driver())).collect();
             }
@@ -5257,7 +5278,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let priority = emit.ext_qos.unwrap_or(Priority::DEFAULT);
         // Room for the widest prefix and a possible ext_qos, as the heap path
         // reserves for the same frame.
-        let want = 1 + 10 + 2 + worst_case_payload;
+        let want = worst_case_payload.saturating_add(1 + 10 + 2);
         let lent = self.send_lent(reliability, priority, want, |slot| {
             // Over a slot that holds the whole budget a frame that crosses it is
             // past the budget; over a shorter one the slot may be what is short,
@@ -5402,7 +5423,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 return LentBatchOpen::Heap(HeapStage::PastBudget);
             }
-            if let Some(stale) = link.batch_slots[idx].take() {
+            if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
                 // A record with no open frame naming it: the stage and the
                 // link disagree, which the shared conduit lock rules out. Give
                 // the slot back rather than lose it, and say so.
@@ -5421,7 +5442,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return LentBatchOpen::Opened;
             }
             let open = slot.keep_open();
-            link.batch_slots[idx].hold(open.slot());
+            if let Some(record) = link.batch_slots.get(idx) {
+                record.hold(open.slot());
+            }
             batch.stage.lent = Some(open);
             batch.stage.count = 1;
             batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
@@ -5533,7 +5556,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 encode_body(&mut sink).is_ok()
             } && slot.len() <= mtu;
             if appended {
-                batch.stage.count += 1;
+                batch.stage.count = batch.stage.count.saturating_add(1);
                 batch.stage.lent = Some(slot.keep_open());
                 return true;
             }
@@ -5541,7 +5564,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // leaves, exactly as the heap stage truncates its vector.
             slot.truncate(wpos);
         }
-        link.batch_slots[idx].take();
+        let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
         batch.stage.count = 0;
         self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
         false
@@ -5564,7 +5587,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 lend.lost = lend.lost.wrapping_add(1);
                 return;
             };
-            link.batch_slots[idx].take();
+            let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
             // SAFETY: `link` recorded the slot for this conduit until the line above, and every
             // send or abort of a conduit's lent slot clears the record first, under the
             // conduit's lock, which the caller holds (`batch`).
@@ -5591,7 +5614,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         f: impl FnOnce(Option<&LinkState<R>>) -> O,
     ) -> O {
         let own = self.own_link();
-        if own.batch_slots[idx].holds(slot) {
+        if own
+            .batch_slots
+            .get(idx)
+            .is_some_and(|record| record.holds(slot))
+        {
             return f(Some(own));
         }
         #[cfg(feature = "transport-multilink")]
@@ -5599,9 +5626,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let found = self
                 .links
                 .lock()
-                .expect("multilink set mutex")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .find(|l| l.batch_slots[idx].holds(slot))
+                .find(|l| {
+                    l.batch_slots
+                        .get(idx)
+                        .is_some_and(|record| record.holds(slot))
+                })
                 .cloned();
             if let Some(link) = found {
                 return f(Some(&*link));
@@ -5691,7 +5722,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.with_batch_holder(idx, open.slot(), |found| {
                     // A slot no link records went back with the link that lent it.
                     if let Some(link) = found {
-                        link.batch_slots[idx].take();
+                        let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
                         open.abort(link.link_driver());
                     }
                 });
@@ -5715,14 +5746,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let priority = TxConduits::<R>::conduit_priority(idx);
             R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
                 let open = match batch.stage.lent.take() {
-                    Some(open) if link.batch_slots[idx].holds(open.slot()) => open,
+                    Some(open)
+                        if link
+                            .batch_slots
+                            .get(idx)
+                            .is_some_and(|record| record.holds(open.slot())) =>
+                    {
+                        open
+                    }
                     // No frame is open in a lent slot, or it is in another link's.
                     other => {
                         batch.stage.lent = other;
                         return;
                     }
                 };
-                link.batch_slots[idx].take();
+                let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
                 // SAFETY: `link` recorded the slot for this conduit until the line above, and
                 // every send or abort of a conduit's lent slot clears the record first, under the
                 // conduit's lock, which is held here.
@@ -6526,7 +6564,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })?;
             // The acceptor's InitAck is the answer a replay sends again, as written.
             if holds_answer(role) {
-                self.hold_handshake_answer(&buf.as_slice()[start..]);
+                self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
             }
             Ok(())
         })
@@ -6572,7 +6610,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             open_head_len(&self.params, initial_sn, is_ack, None)
         };
-        let want = head_len + chain_len;
+        let want = head_len.saturating_add(chain_len);
         self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, want, |buf| {
             let start = buf.len();
             if echo_inbound_cookie {
@@ -6594,7 +6632,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })?;
             // The initiator's OpenSyn is the answer a replay sends again, as written.
             if holds_answer(role) {
-                self.hold_handshake_answer(&buf.as_slice()[start..]);
+                self.hold_handshake_answer(buf.as_slice().get(start..).unwrap_or_default());
             }
             Ok(())
         })
@@ -6624,7 +6662,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// or refuses and counts it (the link is going down either way).
     #[cfg(feature = "codec-close")]
     fn write_close_on_this_link(&self, reason: u8) {
-        self.note_action(|t| t.send_close_frame_with_reason += 1);
+        self.note_action(|t| {
+            t.send_close_frame_with_reason = t.send_close_frame_with_reason.saturating_add(1)
+        });
         #[cfg(not(feature = "tx-lend-only"))]
         {
             let bytes = encode_close(reason, self.close_scope_is_session());
@@ -6878,7 +6918,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         #[cfg(not(feature = "transport-compression"))]
         let header = 0;
-        length + header
+        length.saturating_add(header)
     }
 
     /// Write the peer's capabilities ([`SessionCore::inbound_peer_init_caps`]), and tell the
@@ -7134,7 +7174,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if *slot == 0 {
                 return false;
             }
-            *slot -= 1;
+            // Not zero, checked above.
+            *slot = slot.wrapping_sub(1);
             true
         })
     }
@@ -7806,7 +7847,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .filter(|zid| zid.len() <= CREDENTIAL_ZID_BYTES)
                 .map(|zid| {
                     let mut bytes = [0u8; CREDENTIAL_ZID_BYTES];
-                    bytes[..zid.len()].copy_from_slice(zid);
+                    for (to, from) in bytes.iter_mut().zip(zid) {
+                        *to = *from;
+                    }
                     (bytes, zid.len())
                 })
         });
@@ -7816,7 +7859,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The link is read after the claim's lock is released.
         self.link_driver()
             .peer_credential_zid()
-            .is_some_and(|zid| zid_is_bound(&bytes[..len], &zid))
+            .is_some_and(|zid| zid_is_bound(bytes.get(..len).unwrap_or_default(), &zid))
     }
 
     /// R3b — run the auth dispatch's send stage for `role` and install the
@@ -8037,7 +8080,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliability: Reliability,
         priority: Priority,
     ) -> Option<R::Shared<LinkState<R>>> {
-        let links = self.links.lock().expect("multilink set mutex");
+        let links = self
+            .links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if links.is_empty() {
             return None;
         }
@@ -8102,7 +8148,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// with an empty set until then). A no-op if the set already holds links.
     #[cfg(feature = "transport-multilink")]
     pub fn register_first_link(&self, link: R::Shared<LinkState<R>>) {
-        let mut links = self.links.lock().expect("multilink set mutex");
+        let mut links = self
+            .links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if links.is_empty() {
             links.push(link);
         }
@@ -8130,7 +8179,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
             R::with_mutex_mut(&link.stats_slot, |own| *own = slot);
         }
-        let mut links = self.links.lock().expect("multilink set mutex");
+        let mut links = self
+            .links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         links.push(link);
         links.len()
     }
@@ -8171,7 +8223,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // loops that stay park again when they are woken.
         self.out_of_band.wake_parked();
         let target: *const LinkState<R> = &**link;
-        let mut links = self.links.lock().expect("multilink set mutex");
+        let mut links = self
+            .links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         links.retain(|l| {
             let p: *const LinkState<R> = &**l;
             !core::ptr::eq(p, target)
@@ -8184,7 +8239,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// reads this.
     #[cfg(feature = "transport-multilink")]
     pub fn link_count(&self) -> usize {
-        self.links.lock().expect("multilink set mutex").len()
+        self.links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// The number of links currently ALIVE (`transport_available`). The session-
@@ -8195,7 +8253,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn live_link_count(&self) -> usize {
         self.links
             .lock()
-            .expect("multilink set mutex")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|l| l.transport_available.is_open())
             .count()
@@ -8270,9 +8328,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })
         };
         count_in(&self.init_syn_ext)
-            + count_in(&self.init_ack_ext)
-            + count_in(&self.open_syn_ext)
-            + count_in(&self.open_ack_ext)
+            .saturating_add(count_in(&self.init_ack_ext))
+            .saturating_add(count_in(&self.open_syn_ext))
+            .saturating_add(count_in(&self.open_ack_ext))
     }
 
     /// Emit a LINK-ONLY close (`FLAG_T_CLOSE_S` = 0) on THIS binding's link with
@@ -10739,7 +10797,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            self.note_action(|t| t.send_close_frame_with_reason += 1);
+            self.note_action(|t| {
+                t.send_close_frame_with_reason = t.send_close_frame_with_reason.saturating_add(1)
+            });
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
@@ -11798,10 +11858,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let mut stage = Some(stage_and_emit);
             loop {
                 let taken = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
-                    (stage.take().expect("a conduit is staged in once"))(batch)
+                    stage.take().map(|stage_and_emit| stage_and_emit(batch))
                 });
-                if let Some(push) = taken {
-                    break push;
+                match taken {
+                    Some(Some(push)) => break push,
+                    // The stage runs in the one call that takes the lock, which leaves the loop
+                    // with what it sent: a call that finds it gone has nothing to send.
+                    Some(None) => break Ok(UnicastPush::Congested),
+                    None => {}
                 }
                 if self.params.tx_queue.held_drop
                     == crate::session_init_params::HeldDrop::DropAtOnce
@@ -12181,7 +12245,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // fits may still find the lane full and is abandoned and put down for later, which is
         // what a probe does with a frame.
         if deadline.is_probe() {
-            let before_last = (plan.remaining_fragments() - 1).saturating_mul(mtu);
+            let before_last = plan
+                .remaining_fragments()
+                .saturating_sub(1)
+                .saturating_mul(mtu);
             if before_last >= self.tx_lane_bytes(priority) {
                 self.outbound_frame_sn.unmint(priority, reliable);
                 return Ok(UnicastPush::Chain);
@@ -12292,7 +12359,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
                 return Err(refused);
             }
-            emitted += 1;
+            emitted = emitted.saturating_add(1);
             deadline.next_fragment();
         }
         Ok(UnicastPush::Pushed)
@@ -12917,53 +12984,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
     ) -> Result<(), Unsent> {
         #[cfg(feature = "codec-push")]
-        if matches!(msg, crate::network_message::NetworkMessage::Push(_)) {
-            // The handoff transaction is opened before the message is built and given back
-            // when it drops uncommitted, which is what a message that did not leave is owed.
-            #[cfg(all(
-                feature = "session-extshm",
-                any(
-                    feature = "codec-push",
-                    feature = "codec-request",
-                    feature = "codec-response"
-                )
-            ))]
-            let transaction = self.open_shm_tx(&msg, reliable, priority);
-            let crate::network_message::NetworkMessage::Push(push) = msg else {
-                unreachable!("the message was matched as a Push on the line above");
-            };
-            let ended = self.dispatch_push_at(DispatchStage::Probe, priority, &push, reliable);
-            return match ended {
-                Ok(Dispatched::Sent) => {
-                    #[cfg(feature = "transport-batching")]
-                    if express {
-                        self.flush_express(priority);
+        let msg = match msg {
+            crate::network_message::NetworkMessage::Push(push) => {
+                // The handoff transaction is opened before the message is built and given back
+                // when it drops uncommitted, which is what a message that did not leave is owed.
+                #[cfg(feature = "session-extshm")]
+                let transaction = self.open_shm_tx_push(&push, reliable, priority);
+                let ended = self.dispatch_push_at(DispatchStage::Probe, priority, &push, reliable);
+                return match ended {
+                    Ok(Dispatched::Sent) => {
+                        #[cfg(feature = "transport-batching")]
+                        if express {
+                            self.flush_express(priority);
+                        }
+                        #[cfg(not(feature = "transport-batching"))]
+                        let _ = express;
+                        #[cfg(all(
+                            feature = "session-extshm",
+                            any(
+                                feature = "codec-push",
+                                feature = "codec-request",
+                                feature = "codec-response"
+                            )
+                        ))]
+                        if let Some(transaction) = transaction {
+                            transaction.commit();
+                        }
+                        Ok(())
                     }
-                    #[cfg(not(feature = "transport-batching"))]
-                    let _ = express;
-                    #[cfg(all(
-                        feature = "session-extshm",
-                        any(
-                            feature = "codec-push",
-                            feature = "codec-request",
-                            feature = "codec-response"
-                        )
-                    ))]
-                    if let Some(transaction) = transaction {
-                        transaction.commit();
-                    }
-                    Ok(())
-                }
-                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(
-                    crate::network_message::NetworkMessage::Push(push),
-                )),
-                #[cfg(feature = "transport-fragmentation")]
-                Ok(Dispatched::Chain) => Err(Unsent::Chain(
-                    crate::network_message::NetworkMessage::Push(push),
-                )),
-                Err(e) => Err(Unsent::Failed(e)),
-            };
-        }
+                    Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(
+                        crate::network_message::NetworkMessage::Push(push),
+                    )),
+                    #[cfg(feature = "transport-fragmentation")]
+                    Ok(Dispatched::Chain) => Err(Unsent::Chain(
+                        crate::network_message::NetworkMessage::Push(push),
+                    )),
+                    Err(e) => Err(Unsent::Failed(e)),
+                };
+            }
+            other => other,
+        };
         // A link-state message is probed too: the flood a router makes when a face comes up goes
         // out under the tables of the node, and a send that waits there for a full queue holds
         // everything that needs them for as long as it waits.
@@ -13210,11 +13270,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // The handoff transaction is opened before the message is built and given back when it
         // drops uncommitted, which is what a message that did not leave is owed.
-        #[cfg(feature = "session-extshm")]
-        let transaction = self.open_shm_tx(&msg, reliable, priority);
-        let crate::network_message::NetworkMessage::Push(push) = msg else {
-            unreachable!("the message was matched as a Push above");
+        let push = match msg {
+            crate::network_message::NetworkMessage::Push(push) => push,
+            // Only a Push is sent under a reservation (checked above); any other message is sent
+            // the general way.
+            other => {
+                drop(room);
+                return self.send_network_message_qos(other, reliable, express, priority);
+            }
         };
+        #[cfg(feature = "session-extshm")]
+        let transaction = self.open_shm_tx_push(&push, reliable, priority);
         let sent = self
             .dispatch_push_at(stage, priority, &push, reliable)
             .map(|_| ());
@@ -13360,14 +13426,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority,
         ) = match msg {
             #[cfg(feature = "codec-push")]
-            NetworkMessage::Push(push) => match &push.body {
-                crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => (
-                    crate::put_payload::shm_descriptors(put),
-                    crate::held_list::HeldList::entries(&push.extensions).unwrap_or(&[]),
-                    push_priority,
-                ),
-                _ => return None,
-            },
+            NetworkMessage::Push(push) => {
+                return self.open_shm_tx_push(push, reliable, push_priority)
+            }
             #[cfg(feature = "codec-request")]
             NetworkMessage::Request(request) => match &request.body {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
@@ -13387,6 +13448,48 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         #[cfg(not(feature = "codec-push"))]
         let _ = push_priority;
+        self.shm_tx_over(descriptors, extensions, route, reliable)
+    }
+
+    /// [`Self::open_shm_tx`] of a Push, read off the Push itself: what a sender that holds the
+    /// Push and not the message it would be wrapped in asks for.
+    #[cfg(all(feature = "session-extshm", feature = "codec-push", feature = "alloc"))]
+    fn open_shm_tx_push(
+        &self,
+        push: &crate::wire::PushOwned,
+        reliable: bool,
+        priority: Priority,
+    ) -> Option<alloc::boxed::Box<dyn crate::extshm::ShmTxTransaction>> {
+        let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+            return None;
+        };
+        self.shm_tx_over(
+            crate::put_payload::shm_descriptors(put),
+            crate::held_list::HeldList::entries(&push.extensions).unwrap_or(&[]),
+            priority,
+            reliable,
+        )
+    }
+
+    /// The transaction over `descriptors`, the shared-memory buffers of a message whose
+    /// `extensions` give its band, on the link a message of `reliable` routed on `route` leaves
+    /// on; `None` for a message that names no buffer or a session without shared memory.
+    #[cfg(all(
+        feature = "session-extshm",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
+    ))]
+    #[cfg(feature = "alloc")]
+    fn shm_tx_over(
+        &self,
+        descriptors: alloc::vec::Vec<&[u8]>,
+        extensions: &[wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>],
+        route: Priority,
+        reliable: bool,
+    ) -> Option<alloc::boxed::Box<dyn crate::extshm::ShmTxTransaction>> {
         if descriptors.is_empty() || !self.is_shm() {
             return None;
         }
@@ -17249,7 +17352,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// them (`_z_transport_tx_send_t_msg_inner`).
     #[cfg(feature = "transport-keepalive")]
     pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
-        self.note_action(|t| t.send_keep_alive += 1);
+        self.note_action(|t| t.send_keep_alive = t.send_keep_alive.saturating_add(1));
         let bytes = crate::handshake_encode::encode_keep_alive();
         // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must ride the physical
         // link this drive loop monitors (so that link's `last_outbound_at` is stamped and its
@@ -17994,14 +18097,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             R::with_mutex_mut(&self.declaration_cache, |cache| {
                 let range = cache.turn(burst);
-                let mut emitted = 0;
+                let mut emitted = 0usize;
                 for place in range {
-                    let entry = cache.entries()[place].clone();
+                    // The turn names places of the cache's entries.
+                    let Some(entry) = cache.entries().get(place).cloned() else {
+                        break;
+                    };
                     if let Err(error) = self.replay_one(entry) {
                         cache.refused(place);
                         return Err(error);
                     }
-                    emitted += 1;
+                    emitted = emitted.saturating_add(1);
                 }
                 cache.settle();
                 Ok(ReplayTurn {
@@ -18305,7 +18411,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
     fn stage_close_reason(&self, reason: CloseReason) {
-        self.inner.note_action(|t| t.set_close_reason_count += 1);
+        self.inner
+            .note_action(|t| t.set_close_reason_count = t.set_close_reason_count.saturating_add(1));
         R::with_mutex_mut(&self.link().close_reason, |slot| *slot = Some(reason));
     }
 }
@@ -18368,7 +18475,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn link_driver_open(&mut self) {
         let a = &self.inner;
-        a.note_action(|t| t.link_driver_open += 1);
+        a.note_action(|t| t.link_driver_open = t.link_driver_open.saturating_add(1));
         a.link_driver().open_blocking();
     }
 
@@ -18381,7 +18488,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            a.note_action(|t| t.send_init_syn += 1);
+            a.note_action(|t| t.send_init_syn = t.send_init_syn.saturating_add(1));
             // This node dialled the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(false);
@@ -18482,7 +18589,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            a.note_action(|t| t.send_open_syn += 1);
+            a.note_action(|t| t.send_open_syn = t.send_open_syn.saturating_add(1));
             // R3b — initiator usrpwd response (Zbuf {user, hmac}) staged into
             // the OpenSyn chain; HMACs over the nonce captured from InitAck.
             #[cfg(feature = "session-extauth")]
@@ -18550,7 +18657,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            a.note_action(|t| t.send_init_ack_with_cookie += 1);
+            a.note_action(|t| {
+                t.send_init_ack_with_cookie = t.send_init_ack_with_cookie.saturating_add(1)
+            });
             // This node accepted the link.
             #[cfg(feature = "alloc")]
             a.note_link_role(true);
@@ -18774,7 +18883,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            a.note_action(|t| t.send_open_ack += 1);
+            a.note_action(|t| t.send_open_ack = t.send_open_ack.saturating_add(1));
             // R3b — responder usrpwd accept (Unit) staged into the OpenAck
             // chain (reached only after accept_recv_open_syn verified the HMAC).
             #[cfg(feature = "session-extauth")]
@@ -18838,7 +18947,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn release_link(&mut self) {
         let a = &self.inner;
-        a.note_action(|t| t.release_link += 1);
+        a.note_action(|t| t.release_link = t.release_link.saturating_add(1));
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
         // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
@@ -18859,13 +18968,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn enable_rx_tx_regions(&mut self) {
-        self.inner.note_action(|t| t.enable_rx_tx_regions += 1);
+        self.inner
+            .note_action(|t| t.enable_rx_tx_regions = t.enable_rx_tx_regions.saturating_add(1));
     }
 
     #[inline(never)]
     fn record_established_at(&mut self) {
         let a = &self.inner;
-        a.note_action(|t| t.record_established_at += 1);
+        a.note_action(|t| t.record_established_at = t.record_established_at.saturating_add(1));
         // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
         // clock (same epoch as last_inbound_at +
         // drive_session_until_terminal) so the lease comparator's u64
@@ -18902,7 +19012,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn start_lease_monitor(&mut self) {
-        self.inner.note_action(|t| t.start_lease_monitor += 1);
+        self.inner
+            .note_action(|t| t.start_lease_monitor = t.start_lease_monitor.saturating_add(1));
         // The monitor is the drive loop's lease deadline; arming it is what
         // gives this link one (`drive::lease_wake_deadline`).
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
@@ -18910,7 +19021,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
-        self.inner.note_action(|t| t.stop_lease_monitor += 1);
+        self.inner
+            .note_action(|t| t.stop_lease_monitor = t.stop_lease_monitor.saturating_add(1));
         R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
     }
 
@@ -18922,7 +19034,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // (`SESSION_HOST_REALIZATION`).
         #[cfg(feature = "transport-keepalive")]
         {
-            self.inner.note_action(|t| t.start_keepalive_worker += 1);
+            self.inner.note_action(|t| {
+                t.start_keepalive_worker = t.start_keepalive_worker.saturating_add(1)
+            });
             // The worker is the drive loops' keepalive deadline and the AP
             // pacer; both emit only while this is set.
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
@@ -18933,14 +19047,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
-            self.inner.note_action(|t| t.stop_keepalive_worker += 1);
+            self.inner.note_action(|t| {
+                t.stop_keepalive_worker = t.stop_keepalive_worker.saturating_add(1)
+            });
             R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
         }
     }
 
     #[inline(never)]
     fn free_pool_slots(&mut self) {
-        self.inner.note_action(|t| t.free_pool_slots += 1);
+        self.inner
+            .note_action(|t| t.free_pool_slots = t.free_pool_slots.saturating_add(1));
     }
 
     #[inline(never)]
@@ -19038,7 +19155,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// guard actually fired (vs. R57's `bind_bool` placeholder which never
     /// executed any dynamic check).
     pub fn cookie_valid(&self) -> bool {
-        self.note_action(|t| t.cookie_valid_check += 1);
+        self.note_action(|t| t.cookie_valid_check = t.cookie_valid_check.saturating_add(1));
         if self.fixed_cookie() {
             return self.fixed_cookie_echoed();
         }
