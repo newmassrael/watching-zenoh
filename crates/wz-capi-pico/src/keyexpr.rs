@@ -705,7 +705,11 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
 /// the checked [`z_view_keyexpr_from_str`] (which pico implements as this
 /// function): a view this crate stores must be readable as `&str` at every
 /// later publish, and a text that is not canon is refused with `Z_EINVAL`.
+///
+/// Out of line: the `_from_str` door and both autocanonizing view doors end in this one, and
+/// each held the reading and the judgement of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_view_keyexpr_from_substr(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
@@ -1518,17 +1522,6 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
     })
 }
 
-/// Canonize `start[..*len]` IN PLACE, writing the new length back (pico
-/// `z_keyexpr_canonize`).
-///
-/// In place is safe because canonization never grows a keyexpr — every rule
-/// (`$*` -> `*`, `$*$*` -> `$*`, dropping a `*` after `**`) removes bytes or
-/// keeps the count. The buffer is NOT NUL-terminated here; that is
-/// [`z_keyexpr_canonize_null_terminated`]'s job, and the split is upstream's.
-///
-/// # Safety
-/// `start` must be null or point at `*len` readable AND writable bytes; `len`
-/// must be null or valid and writable.
 /// wz's typed canon error as pico's `zp_keyexpr_canon_status_t`
 /// (`api/constants.h:90-100`).
 ///
@@ -1559,7 +1552,22 @@ fn pico_canon_status(err: &wz_session_core::keyexpr_canon::KeyexprCanonError) ->
     }
 }
 
+/// Canonize `start[..*len]` IN PLACE, writing the new length back (pico
+/// `z_keyexpr_canonize`).
+///
+/// In place is safe because canonization never grows a keyexpr — every rule
+/// (`$*` -> `*`, `$*$*` -> `$*`, dropping a `*` after `**`) removes bytes or
+/// keeps the count. The buffer is NOT NUL-terminated here; that is
+/// [`z_keyexpr_canonize_null_terminated`]'s job, and the split is upstream's.
+///
+/// Out of line: the NUL-terminated form and the substring autocanonizing view door canonize
+/// through this one, and each held the reading and the status mapping of its own.
+///
+/// # Safety
+/// `start` must be null or point at `*len` readable AND writable bytes; `len`
+/// must be null or valid and writable.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize) -> ZResult {
     guarded(|| {
         if start.is_null() || len.is_null() {

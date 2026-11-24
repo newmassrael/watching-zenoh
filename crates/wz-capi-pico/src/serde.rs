@@ -208,21 +208,40 @@ pub unsafe extern "C" fn z_bytes_writer_write_all(
     len: usize,
 ) -> ZResult {
     guarded(|| {
-        let buf = match writer_mut(writer as *mut c_void) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
-        };
-        if len == 0 {
-            return Z_OK;
-        }
-        if src.is_null() {
+        let Some(bytes) = c_run(src, len) else {
             return Z_ERR_NULL;
-        }
-        match buf.write_all(core::slice::from_raw_parts(src, len)) {
-            Ok(()) => Z_OK,
-            Err(no_room) => no_room.code(),
-        }
+        };
+        write_into(writer as *mut c_void, bytes)
     })
+}
+
+/// The `len` bytes at `src`: empty for no bytes, whatever `src` is, and `None` for a null
+/// `src` of some.
+///
+/// # Safety
+/// `src` must be null or point at `len` readable bytes.
+unsafe fn c_run<'a>(src: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    crate::abi::view_bytes(src, len)
+}
+
+/// `bytes` written after what a loaned writer or serializer holds: `Z_ERR_NULL` for a null or
+/// empty handle, whatever the bytes, and the code of the room it has none of. The one body every
+/// door that writes into a writer calls, out of line, so the write and its error code are one copy.
+///
+/// # Safety
+/// `writer` must be null or a live loaned writer/serializer handle.
+#[inline(never)]
+unsafe fn write_into(writer: *mut c_void, bytes: &[u8]) -> ZResult {
+    let Some(buf) = writer_mut(writer) else {
+        return Z_ERR_NULL;
+    };
+    match buf.write_all(bytes) {
+        Ok(()) => Z_OK,
+        Err(no_room) => no_room.code(),
+    }
 }
 
 /// Append a moved payload's bytes (pico `z_bytes_writer_append`), consuming it.
@@ -339,19 +358,12 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
     len: usize,
 ) -> ZResult {
     guarded(|| {
-        let buf = match writer_mut(serializer as *mut c_void) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
-        };
         let mut vle = [0u8; VLE_LEN];
         let n = encode_zint_into(&mut vle, len as u64);
         let Some(encoded) = vle.get(..n) else {
             return Z_ERR_GENERIC;
         };
-        match buf.write_all(encoded) {
-            Ok(()) => Z_OK,
-            Err(no_room) => no_room.code(),
-        }
+        write_into(serializer as *mut c_void, encoded)
     })
 }
 
@@ -363,24 +375,14 @@ pub unsafe extern "C" fn ze_serializer_serialize_buf(
     len: usize,
 ) -> ZResult {
     guarded(|| {
-        if len != 0 && val.is_null() {
+        let Some(bytes) = c_run(val, len) else {
             return Z_ERR_NULL;
-        }
+        };
         let rc = ze_serializer_serialize_sequence_length(serializer, len);
         if rc != Z_OK {
             return rc;
         }
-        let buf = match writer_mut(serializer as *mut c_void) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
-        };
-        if len == 0 {
-            return Z_OK;
-        }
-        match buf.write_all(core::slice::from_raw_parts(val, len)) {
-            Ok(()) => Z_OK,
-            Err(no_room) => no_room.code(),
-        }
+        write_into(serializer as *mut c_void, bytes)
     })
 }
 
@@ -1194,6 +1196,54 @@ mod tests {
             );
             let buf = bytes_ref(crate::bytes::z_bytes_loan(&bytes)).expect("payload");
             assert_eq!(buf.as_slice(), &[1, 2, 3]);
+        }
+    }
+
+    /// A write of no bytes needs no source and writes nothing, one of some refuses a null source,
+    /// and a null writer refuses either; a length-prefixed run of no bytes is its length alone.
+    /// Turned red by a null source read for an empty write, or by a null writer taken for one.
+    #[test]
+    fn a_write_of_no_bytes_needs_no_source_but_a_writer() {
+        unsafe {
+            let mut serializer = ze_owned_serializer_t::null_value();
+            assert_eq!(ze_serializer_empty(&mut serializer), Z_OK);
+            let as_writer = &mut serializer as *mut _ as *mut z_loaned_bytes_writer_t;
+            let loaned = &mut serializer as *mut _ as *mut ze_loaned_serializer_t;
+            assert_eq!(
+                z_bytes_writer_write_all(as_writer, core::ptr::null(), 0),
+                Z_OK
+            );
+            assert_eq!(
+                z_bytes_writer_write_all(as_writer, core::ptr::null(), 3),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                z_bytes_writer_write_all(core::ptr::null_mut(), [1u8].as_ptr(), 0),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                ze_serializer_serialize_buf(loaned, core::ptr::null(), 0),
+                Z_OK
+            );
+            assert_eq!(
+                ze_serializer_serialize_buf(loaned, core::ptr::null(), 2),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                ze_serializer_serialize_buf(core::ptr::null_mut(), [1u8].as_ptr(), 1),
+                Z_ERR_NULL
+            );
+            let mut bytes = core::mem::zeroed();
+            ze_serializer_finish(
+                &mut serializer as *mut _ as *mut ze_moved_serializer_t,
+                &mut bytes,
+            );
+            let buf = bytes_ref(crate::bytes::z_bytes_loan(&bytes)).expect("payload");
+            assert_eq!(
+                buf.as_slice(),
+                &[0u8],
+                "the empty run's length and nothing else"
+            );
         }
     }
 

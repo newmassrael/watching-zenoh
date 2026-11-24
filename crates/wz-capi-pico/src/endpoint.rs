@@ -197,12 +197,21 @@ fn kept_text<'a>(
         return Err(crate::result::Z_ERR_CONFIG_INVALID_VALUE);
     }
     let mut fits = true;
-    read.write_text("#", |piece| fits = fits && kept.push_str(piece).is_ok());
+    read.write_text("#", |piece| fits = fits && keep_piece(kept, piece));
     if fits {
         Ok(kept.as_str())
     } else {
         Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
     }
+}
+
+/// `piece` appended to `kept` with one copy; `false`, and `kept` as it was, when it has no room
+/// for it. Out of line: the text is written a piece at a time, and each piece of each pair would
+/// carry the copy of its own.
+#[cfg(not(feature = "engine-tokio"))]
+#[inline(never)]
+fn keep_piece(kept: &mut wz_session_core::locator_directory::LocatorText, piece: &str) -> bool {
+    wz_session_core::bounded::push_text(kept, piece).is_ok()
 }
 
 #[cfg(all(test, not(feature = "engine-tokio")))]
@@ -291,6 +300,20 @@ mod tests {
             dialled(&format!("tcp/{host}h:9000")),
             Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
+    }
+
+    /// A piece is kept whole or not at all: one that fills the text to its room is taken, and one
+    /// past it leaves the text as it was. Turned red by a piece written in part.
+    #[test]
+    fn a_piece_past_the_room_leaves_the_kept_text_as_it_was() {
+        let mut kept = wz_session_core::locator_directory::LocatorText::new();
+        let head = "h".repeat(MAX_LOCATOR_LEN - 1);
+        assert!(keep_piece(&mut kept, &head));
+        assert!(!keep_piece(&mut kept, "ab"));
+        assert_eq!(kept.as_str(), head);
+        assert!(keep_piece(&mut kept, "a"));
+        assert_eq!(kept.as_str().len(), MAX_LOCATOR_LEN);
+        assert!(!keep_piece(&mut kept, "b"));
     }
 
     /// An endpoint's text is cut at the first of each separator: the metadata goes, an empty pair

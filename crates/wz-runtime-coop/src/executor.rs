@@ -190,10 +190,10 @@ impl TaskCell {
         }
     }
 
-    /// A free cell over `cap` bytes at `buf` (none for a bare one), whose store is named once the
-    /// store is made (`TaskStore::new`).
+    /// A free cell over `cap` bytes at `buf` (none for a bare one) of the store `owner` (null for
+    /// a cell no store holds).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn owned(buf: *mut u8, cap: usize) -> Self {
+    fn owned(buf: *mut u8, cap: usize, owner: *const TaskStore) -> Self {
         let mut meta = Meta::new();
         meta.buf = buf;
         meta.cap = cap;
@@ -201,7 +201,7 @@ impl TaskCell {
             wake: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             meta: UnsafeCell::new(meta),
-            owner: ptr::null(),
+            owner,
         }
     }
 
@@ -386,22 +386,15 @@ impl TaskStore {
         } else {
             block.cast()
         };
-        for at in 0..count {
-            let (buf, cap) = match reserved {
-                // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn takes the
-                // cell, and each offset lies inside the block.
-                Some((_, offset, stride, bytes)) => (
-                    block
-                        .wrapping_add(offset)
-                        .wrapping_add(at.saturating_mul(stride)),
-                    bytes,
-                ),
-                None => (ptr::null_mut(), 0),
-            };
-            // SAFETY: `at` is below `count`, so the place is one of the block's cells, aligned for
-            // one, written once here and read by nothing before.
-            unsafe { first.add(at).write(TaskCell::owned(buf, cap)) };
-        }
+        // Where the first cell's bytes start, how far apart each cell's are and how many each has:
+        // a bare cell's are at null, a step of none apart, so every cell is written by one body.
+        // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn takes the cell.
+        let (base, stride, cap) = match reserved {
+            Some((_, offset, stride, bytes)) => (block.wrapping_add(offset), stride, bytes),
+            None => (ptr::null_mut(), 0, 0),
+        };
+        // The store is made before its cells are written, so each cell is written once, naming
+        // it: the store is not shared and reads no cell until this returns it.
         let store = Arc::new(Self {
             cells: ptr::slice_from_raw_parts(first.cast_const(), count),
             block,
@@ -411,9 +404,12 @@ impl TaskStore {
         });
         let owner = Arc::as_ptr(&store);
         for at in 0..count {
-            // SAFETY: the cells were written above and nothing else points at them yet; each write
-            // is through the raw pointer, in bounds, and makes no reference.
-            unsafe { (*first.add(at)).owner = owner };
+            // The strides of `count` cells were laid out without overflow, so no product wraps,
+            // and each lies inside the block.
+            let buf = base.wrapping_add(at.wrapping_mul(stride));
+            // SAFETY: `at` is below `count`, so the place is one of the block's cells, aligned for
+            // one, written once here and read by nothing before.
+            unsafe { first.add(at).write(TaskCell::owned(buf, cap, owner)) };
         }
         store
     }
@@ -1661,7 +1657,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_cell_asked_for_more_than_an_allocation_can_have_is_refused() {
-        let cell = TaskCell::owned(ptr::null_mut(), 0);
+        let cell = TaskCell::owned(ptr::null_mut(), 0, ptr::null());
         assert_eq!(fit_cell(&cell, usize::MAX, CELL_ALIGN), None);
         assert!(cell.with_meta(|meta| meta.buf.is_null() && meta.cap == 0));
     }
@@ -1691,7 +1687,8 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_done_cell_without_its_operations_reads_cancelled_and_is_freed() {
-        let cell: &'static TaskCell = Box::leak(Box::new(TaskCell::owned(ptr::null_mut(), 0)));
+        let cell: &'static TaskCell =
+            Box::leak(Box::new(TaskCell::owned(ptr::null_mut(), 0, ptr::null())));
         cell.with_meta(|meta| {
             meta.state = State::Done;
             meta.handle = true;
@@ -1741,6 +1738,27 @@ mod tests {
             "a reserved table takes no memory after it is made"
         );
         assert_eq!(state.capacity(), 3);
+    }
+
+    /// Every cell of a store names the store, whether its cells have bytes of the block or none: a
+    /// waker's count is taken on the store its cell lies in. Turned red by a cell left naming no
+    /// store, or by a bare cell given bytes.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn every_cell_of_a_store_names_the_store() {
+        for bytes in [Some(100), None] {
+            let store = TaskStore::new(3, bytes, None);
+            let owner = Arc::as_ptr(&store);
+            assert_eq!(store.cells().len(), 3);
+            for cell in store.cells() {
+                assert!(ptr::eq(cell.owner, owner), "the cell names its store");
+                assert_eq!(
+                    cell.with_meta(|meta| meta.buf.is_null()),
+                    bytes.is_none(),
+                    "a cell has bytes exactly when its store reserved some"
+                );
+            }
+        }
     }
 
     /// A reserved table of no cells refuses a task its cells would fit for want of a cell, and one

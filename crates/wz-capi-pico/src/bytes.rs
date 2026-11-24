@@ -581,10 +581,18 @@ impl ByteBuf {
             self.bounds.push(self.len);
         }
         for segment in (0..).map_while(|idx| other.segment(idx)) {
-            self.put_after(segment);
-            self.bounds.push(self.len);
+            self.put_segment(segment);
         }
         Ok(())
+    }
+
+    /// Write `segment` after the payload's bytes and end a segment there. Out of line: the loop
+    /// that reads the other payload's segments is unrolled into a first one read apart, and each
+    /// copy of the loop held the write and the end of its own.
+    #[inline(never)]
+    fn put_segment(&mut self, segment: &[u8]) {
+        self.put_after(segment);
+        self.bounds.push(self.len);
     }
 
     /// Append raw bytes to the CURRENT segment (pico
@@ -2310,6 +2318,19 @@ mod block_tests {
         assert_eq!(writer.segment(2), Some(&b"tail"[..]));
         assert_eq!(writer.segment(3), None);
         assert_eq!(tail.as_slice(), b"tail");
+    }
+
+    /// A payload appended to an empty writer is its first segment, with no empty one before it.
+    /// Turned red by an append that closes a segment the writer never had.
+    #[test]
+    fn an_append_to_an_empty_writer_starts_at_its_first_segment() {
+        let mut writer = ByteBuf::new();
+        writer
+            .append_segments(&ByteBuf::copy_of(b"ab").expect("room"))
+            .expect("room");
+        assert_eq!(writer.as_slice(), b"ab");
+        assert_eq!(writer.segment(0), Some(&b"ab"[..]));
+        assert_eq!(writer.segment(1), None);
     }
 
     /// A payload of several segments appended to a writer brings each of them, in order, and no

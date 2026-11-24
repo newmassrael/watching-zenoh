@@ -36,21 +36,24 @@ config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OS_DEFAULT
 	default y
 	help
 	  Whether `os-default` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_ON
 	bool "multicast-loopback allows on" if !WZ_POLICY_MULTICAST_LOOPBACK_ON
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTICAST_LOOPBACK_ALLOWS_OFF
 	bool "multicast-loopback allows off" if !WZ_POLICY_MULTICAST_LOOPBACK_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
 	bool "tx-no-progress-deadline"
@@ -70,14 +73,16 @@ config WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TX_NO_PROGRESS_DEADLINE_ALLOWS_ON
 	bool "tx-no-progress-deadline allows on" if !WZ_POLICY_TX_NO_PROGRESS_DEADLINE
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	bool "tx-expiry-keeps-session"
@@ -98,14 +103,16 @@ config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION_ALLOWS_ON
 	bool "tx-expiry-keeps-session allows on" if !WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_DECLARATION_SYNC_PACING
 	bool "declaration-sync-pacing"
@@ -127,14 +134,16 @@ config WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON
 	bool "declaration-sync-pacing allows on" if !WZ_POLICY_DECLARATION_SYNC_PACING
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_DATAGRAM_FRAGMENT_PACING
 	bool "datagram-fragment-pacing"
@@ -159,14 +168,16 @@ config WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_DATAGRAM_FRAGMENT_PACING_ALLOWS_ON
 	bool "datagram-fragment-pacing allows on" if !WZ_POLICY_DATAGRAM_FRAGMENT_PACING
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
 	bool "multicast-link-requires-iface"
@@ -188,14 +199,16 @@ config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE_ALLOWS_ON
 	bool "multicast-link-requires-iface allows on" if !WZ_POLICY_MULTICAST_LINK_REQUIRES_IFACE
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_RELIABLE_GAP_RECONNECT
 	prompt "reliable-gap-reconnect"
@@ -243,28 +256,32 @@ config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED
 	bool "reliable-gap-reconnect allows until-declarations-synced" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED
 	default y
 	help
 	  Whether `until-declarations-synced` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_ALWAYS
 	bool "reliable-gap-reconnect allows always" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_ALWAYS
 	default y
 	help
 	  Whether `always` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_RELIABLE_GAP_RECONNECT_ALLOWS_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN
 	bool "reliable-gap-reconnect allows until-declarations-synced-when-begun" if !WZ_POLICY_RELIABLE_GAP_RECONNECT_UNTIL_DECLARATIONS_SYNCED_WHEN_BEGUN
 	default y
 	help
 	  Whether `until-declarations-synced-when-begun` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ENTITY_LINK_RESTRICTION
 	bool "entity-link-restriction"
@@ -289,14 +306,16 @@ config WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ENTITY_LINK_RESTRICTION_ALLOWS_ON
 	bool "entity-link-restriction allows on" if !WZ_POLICY_ENTITY_LINK_RESTRICTION
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TARGETED_QUERY
 	bool "targeted-query"
@@ -318,14 +337,16 @@ config WZ_POLICY_TARGETED_QUERY_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_TARGETED_QUERY_ALLOWS_ON
 	bool "targeted-query allows on" if !WZ_POLICY_TARGETED_QUERY
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_PUBLISHER_ADMISSION_RETRY
 	bool "publisher-admission-retry"
@@ -356,14 +377,16 @@ config WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_PUBLISHER_ADMISSION_RETRY_ALLOWS_ON
 	bool "publisher-admission-retry allows on" if !WZ_POLICY_PUBLISHER_ADMISSION_RETRY
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	bool "multi-route-atomic-tx"
@@ -397,14 +420,16 @@ config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX_ALLOWS_ON
 	bool "multi-route-atomic-tx allows on" if !WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
@@ -427,14 +452,16 @@ config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN_ALLOWS_ON
 	bool "entity-timestamp-opt-in allows on" if !WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLY_AUTO_TIMESTAMP
 	bool "reply-auto-timestamp"
@@ -456,14 +483,16 @@ config WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLY_AUTO_TIMESTAMP_ALLOWS_ON
 	bool "reply-auto-timestamp allows on" if !WZ_POLICY_REPLY_AUTO_TIMESTAMP
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_SUBSCRIBER_OVERLOAD
 	prompt "subscriber-overload"
@@ -502,21 +531,24 @@ config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_BLOCK
 	default y
 	help
 	  Whether `block` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_REJECT
 	bool "subscriber-overload allows reject" if !WZ_POLICY_SUBSCRIBER_OVERLOAD_REJECT
 	default y
 	help
 	  Whether `reject` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SUBSCRIBER_OVERLOAD_ALLOWS_KEEP_LATEST
 	bool "subscriber-overload allows keep-latest" if !WZ_POLICY_SUBSCRIBER_OVERLOAD_KEEP_LATEST
 	default y
 	help
 	  Whether `keep-latest` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_KEY_SET
 	prompt "key-set"
@@ -547,14 +579,16 @@ config WZ_POLICY_KEY_SET_ALLOWS_OPEN
 	default y
 	help
 	  Whether `open` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_KEY_SET_ALLOWS_CLOSED
 	bool "key-set allows closed" if !WZ_POLICY_KEY_SET_CLOSED
 	default y
 	help
 	  Whether `closed` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_SN_RESOLUTION
 	prompt "sn-resolution"
@@ -597,28 +631,32 @@ config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_32
 	default y
 	help
 	  Whether `bits-32` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_8
 	bool "sn-resolution allows bits-8" if !WZ_POLICY_SN_RESOLUTION_BITS_8
 	default y
 	help
 	  Whether `bits-8` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_16
 	bool "sn-resolution allows bits-16" if !WZ_POLICY_SN_RESOLUTION_BITS_16
 	default y
 	help
 	  Whether `bits-16` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SN_RESOLUTION_ALLOWS_BITS_64
 	bool "sn-resolution allows bits-64" if !WZ_POLICY_SN_RESOLUTION_BITS_64
 	default y
 	help
 	  Whether `bits-64` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_SUPERVISION_AFTER_EXPIRY
 	prompt "supervision-after-expiry"
@@ -647,14 +685,16 @@ config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_LATCH
 	default y
 	help
 	  Whether `latch` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_ALLOWS_REARM
 	bool "supervision-after-expiry allows rearm" if !WZ_POLICY_SUPERVISION_AFTER_EXPIRY_REARM
 	default y
 	help
 	  Whether `rearm` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_E2E_SUPERVISION_NOTIFY
 	prompt "e2e-supervision-notify"
@@ -683,14 +723,16 @@ config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_STATUS_ONLY
 	default y
 	help
 	  Whether `status-only` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_E2E_SUPERVISION_NOTIFY_ALLOWS_LAST_VALUE
 	bool "e2e-supervision-notify allows last-value" if !WZ_POLICY_E2E_SUPERVISION_NOTIFY_LAST_VALUE
 	default y
 	help
 	  Whether `last-value` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_REPLAY_REPLY_SHAPE
 	prompt "replay-reply-shape"
@@ -722,14 +764,16 @@ config WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_FRAME_PER_SAMPLE
 	default y
 	help
 	  Whether `frame-per-sample` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLAY_REPLY_SHAPE_ALLOWS_SEGMENTED
 	bool "replay-reply-shape allows segmented" if !WZ_POLICY_REPLAY_REPLY_SHAPE_SEGMENTED
 	default y
 	help
 	  Whether `segmented` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS
 	bool "replay-serve-holds-sends"
@@ -750,14 +794,16 @@ config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_OFF
 	default y
 	help
 	  Whether `off` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS_ALLOWS_ON
 	bool "replay-serve-holds-sends allows on" if !WZ_POLICY_REPLAY_SERVE_HOLDS_SENDS
 	default y
 	help
 	  Whether `on` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER
 	prompt "replay-live-before-answer"
@@ -787,14 +833,16 @@ config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_DELIVER
 	default y
 	help
 	  Whether `deliver` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_ALLOWS_HOLD_BACK
 	bool "replay-live-before-answer allows hold-back" if !WZ_POLICY_REPLAY_LIVE_BEFORE_ANSWER_HOLD_BACK
 	default y
 	help
 	  Whether `hold-back` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
@@ -822,14 +870,16 @@ config WZ_POLICY_EVENT_RING_FULL_ALLOWS_OVERWRITE_OLDEST
 	default y
 	help
 	  Whether `overwrite-oldest` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_EVENT_RING_FULL_ALLOWS_DROP_NEWEST
 	bool "event-ring-full allows drop-newest" if !WZ_POLICY_EVENT_RING_FULL_DROP_NEWEST
 	default y
 	help
 	  Whether `drop-newest` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_CLOCK_QUALITY_STAMPING
 	prompt "clock-quality-stamping"
@@ -860,14 +910,16 @@ config WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_ALWAYS
 	default y
 	help
 	  Whether `always` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_CLOCK_QUALITY_STAMPING_ALLOWS_TRUSTED_ONLY
 	bool "clock-quality-stamping allows trusted-only" if !WZ_POLICY_CLOCK_QUALITY_STAMPING_TRUSTED_ONLY
 	default y
 	help
 	  Whether `trusted-only` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_ROUTING_FACE_DRIVE
 	prompt "routing-face-drive"
@@ -900,14 +952,16 @@ config WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_TASK_PER_FACE
 	default y
 	help
 	  Whether `task-per-face` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ROUTING_FACE_DRIVE_ALLOWS_ONE_TASK
 	bool "routing-face-drive allows one-task" if !WZ_POLICY_ROUTING_FACE_DRIVE_ONE_TASK
 	default y
 	help
 	  Whether `one-task` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_ROUTING_TABLE_SHARING
 	prompt "routing-table-sharing"
@@ -942,14 +996,16 @@ config WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_RWLOCK
 	default y
 	help
 	  Whether `rwlock` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ROUTING_TABLE_SHARING_ALLOWS_SNAPSHOT
 	bool "routing-table-sharing allows snapshot" if !WZ_POLICY_ROUTING_TABLE_SHARING_SNAPSHOT
 	default y
 	help
 	  Whether `snapshot` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_REASSEMBLY_POOL_OVERFLOW
 	prompt "reassembly-pool-overflow"
@@ -989,21 +1045,24 @@ config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_REJECT
 	default y
 	help
 	  Whether `reject` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_DIAGNOSTIC_EVENT
 	bool "reassembly-pool-overflow allows diagnostic-event" if !WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_DIAGNOSTIC_EVENT
 	default y
 	help
 	  Whether `diagnostic-event` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_ALLOWS_OLDEST_WINS
 	bool "reassembly-pool-overflow allows oldest-wins" if !WZ_POLICY_REASSEMBLY_POOL_OVERFLOW_OLDEST_WINS
 	default y
 	help
 	  Whether `oldest-wins` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_LINK_TIE_ORDER
 	prompt "link-tie-order"
@@ -1035,14 +1094,16 @@ config WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_NUMBER
 	default y
 	help
 	  Whether `zid-number` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_LINK_TIE_ORDER_ALLOWS_ZID_BYTES
 	bool "link-tie-order allows zid-bytes" if !WZ_POLICY_LINK_TIE_ORDER_ZID_BYTES
 	default y
 	help
 	  Whether `zid-bytes` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_QUERY_UNANSWERABLE_FINAL
 	prompt "query-unanswerable-final"
@@ -1074,14 +1135,16 @@ config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_NONE
 	default y
 	help
 	  Whether `none` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_QUERY_UNANSWERABLE_FINAL_ALLOWS_EMPTY_FINAL
 	bool "query-unanswerable-final allows empty-final" if !WZ_POLICY_QUERY_UNANSWERABLE_FINAL_EMPTY_FINAL
 	default y
 	help
 	  Whether `empty-final` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_ZID_DERIVATION
 	prompt "zid-derivation"
@@ -1113,14 +1176,16 @@ config WZ_POLICY_ZID_DERIVATION_ALLOWS_RANDOM
 	default y
 	help
 	  Whether `random` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_ZID_DERIVATION_ALLOWS_ADDRESS_PORTS
 	bool "zid-derivation allows address-ports" if !WZ_POLICY_ZID_DERIVATION_ADDRESS_PORTS
 	default y
 	help
 	  Whether `address-ports` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_HANDSHAKE_STRAY_MESSAGE
 	prompt "handshake-stray-message"
@@ -1162,21 +1227,24 @@ config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_FAIL
 	default y
 	help
 	  Whether `fail` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE
 	bool "handshake-stray-message allows ignore" if !WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE
 	default y
 	help
 	  Whether `ignore` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE_AND_REPLAY
 	bool "handshake-stray-message allows ignore-and-replay" if !WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_IGNORE_AND_REPLAY
 	default y
 	help
 	  Whether `ignore-and-replay` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_HANDSHAKE_COOKIE
 	prompt "handshake-cookie"
@@ -1212,14 +1280,16 @@ config WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_STATELESS
 	default y
 	help
 	  Whether `stateless` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_HANDSHAKE_COOKIE_ALLOWS_FIXED
 	bool "handshake-cookie allows fixed" if !WZ_POLICY_HANDSHAKE_COOKIE_FIXED
 	default y
 	help
 	  Whether `fixed` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_KEY_WIRE_FORM
 	prompt "key-wire-form"
@@ -1266,21 +1336,24 @@ config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_DECLARED
 	default y
 	help
 	  Whether `declared` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_SHARED
 	bool "key-wire-form allows shared" if !WZ_POLICY_KEY_WIRE_FORM_SHARED
 	default y
 	help
 	  Whether `shared` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_KEY_WIRE_FORM_ALLOWS_LITERAL
 	bool "key-wire-form allows literal" if !WZ_POLICY_KEY_WIRE_FORM_LITERAL
 	default y
 	help
 	  Whether `literal` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 choice WZ_POLICY_HELD_PUBLISH_DROP
 	prompt "held-publish-drop"
@@ -1315,13 +1388,15 @@ config WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_HELD_FACES
 	default y
 	help
 	  Whether `held-faces` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 config WZ_POLICY_HELD_PUBLISH_DROP_ALLOWS_EVERY_FACE
 	bool "held-publish-drop allows every-face" if !WZ_POLICY_HELD_PUBLISH_DROP_EVERY_FACE
 	default y
 	help
 	  Whether `every-face` stays selectable after the build; the chosen default always does.
-	  A target with no operating system keeps only the default unless this is set here.
+	  A target with no operating system, or a build where nothing selects a policy after it,
+	  keeps only the default unless this is set here.
 
 endmenu

@@ -56,6 +56,7 @@ default = [
     "log",
     "south-subregions",
     "interest-answer",
+    "policy-selection",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -66,6 +67,16 @@ default = [
 # its log calls out unless a level is chosen when it is built. On by default, for the runtimes that
 # install a logger; a build that takes the crate without its defaults and wants the records names it.
 log = []
+
+# `policy-selection`: a stage after the build selects the value of a policy (a document, a config
+# door, an open's statements, a test). Without it no value but the build's default is ever reached,
+# so a policy whose allowance the build does not state keeps its default alone
+# (`policy::policy_defaults_only`), as on a target with no operating system, and the code of its
+# other values is not linked. It only widens a domain, so unified across a graph it never narrows
+# the build of a crate that has a door. On by default; a crate that takes this one without its
+# defaults and has a door names it (`wz-capi-pico`'s `config-policy`), and its tests name it on a
+# dev-dependency.
+policy-selection = []
 
 # `south-subregions`: a node whose south is a list of subregions a remote is placed in by rule (the
 # pin's `gateway/south` given as a list): `region_partition::SouthPartition::Custom`, its filters,
@@ -1406,8 +1417,9 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # the encoders (a fixed `SliceTxBuf` slot, `dyn TxBuf`), which exists only
 # with `transport-tx-lend`, and read the action counters, which exist only
 # with `action-trace`. A dev-dependency on itself turns the features on for
-# the test build alone; the library an image links is unchanged.
-wz-session-core = { path = ".", default-features = false, features = ["transport-tx-lend", "action-trace"] }
+# the test build alone; the library an image links is unchanged. The tests
+# select every value of a policy, which `policy-selection` keeps in its domain.
+wz-session-core = { path = ".", default-features = false, features = ["transport-tx-lend", "action-trace", "policy-selection"] }
 # R311ds — the four declare/* registries' wider behavioural tests
 # (callback fan-out value capture, mixed-message dispatch) migrated
 # here from the wz-runtime-tokio shells, joining the existing R311dm
