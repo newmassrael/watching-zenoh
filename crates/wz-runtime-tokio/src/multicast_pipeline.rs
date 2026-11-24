@@ -1039,8 +1039,10 @@ impl MulticastTxPlane {
                 }
                 // A push dropped behind a held stage is a congestion drop as well, which the
                 // pico profile tells its sender of.
+                // A message its body refused left nothing on the wire: a drop as well.
                 wz_session_core::tx_deadline::PushOutcome::Congested
-                | wz_session_core::tx_deadline::PushOutcome::Held => {
+                | wz_session_core::tx_deadline::PushOutcome::Held
+                | wz_session_core::tx_deadline::PushOutcome::Refused(_) => {
                     stats.network_message_dropped(&tally)
                 }
             }

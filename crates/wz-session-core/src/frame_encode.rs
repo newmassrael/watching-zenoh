@@ -305,7 +305,32 @@ pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliab
 /// R311jq lifts the prefix write into [`begin_frame`] so the batching
 /// open-frame writer shares the same bytes-producing code.
 #[cfg(feature = "alloc")]
+///
+/// # Errors
+///
+/// The refusal of `payload_encode`: a body composed as it is written can refuse its message
+/// (a key or a payload past its protocol bound), and the vector does not change that. Nothing is
+/// framed then.
 pub(crate) fn encode_frame_envelope<P>(
+    sn: u64,
+    parent_flags: u8,
+    worst_case_payload: usize,
+    ext_qos: Option<Priority>,
+    payload_encode: P,
+) -> Result<Vec<u8>, CodecError>
+where
+    P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
+{
+    // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
+    let mut wire = Vec::with_capacity(worst_case_payload.saturating_add(13));
+    encode_frame_envelope_into(&mut wire, sn, parent_flags, ext_qos, payload_encode)?;
+    Ok(wire)
+}
+
+/// [`encode_frame_envelope`] of an owned message, whose writer is a value it cannot refuse: what
+/// is left is the vector's write, which the buffer seam still types as one that can refuse.
+#[cfg(feature = "alloc")]
+fn owned_frame_envelope<P>(
     sn: u64,
     parent_flags: u8,
     worst_case_payload: usize,
@@ -315,11 +340,14 @@ pub(crate) fn encode_frame_envelope<P>(
 where
     P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
 {
-    // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
-    let mut wire = Vec::with_capacity(worst_case_payload.saturating_add(13));
-    encode_frame_envelope_into(&mut wire, sn, parent_flags, ext_qos, payload_encode)
-        .expect("a Vec grows, so its sink is infallible");
-    wire
+    encode_frame_envelope(
+        sn,
+        parent_flags,
+        worst_case_payload,
+        ext_qos,
+        payload_encode,
+    )
+    .expect("an owned message is written whole into a vector")
 }
 
 /// The same envelope, written into a destination the caller chose: a heap
@@ -551,7 +579,7 @@ pub fn encode_frame_with_response_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::response::ResponseWire::measure(&response).len(),
@@ -591,7 +619,7 @@ pub fn encode_frame_with_response_final_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len(),
@@ -613,7 +641,7 @@ pub fn encode_frame_with_response_final_qos(
 /// that pass `reliable=false` accept that risk explicitly.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::request::RequestWire::measure(&request).len(),
@@ -639,7 +667,7 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
 /// the unknown id — useful only for fuzz / negative tests.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::declare::DeclareWire::measure(&declare).len(),
@@ -667,7 +695,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
 /// fuzz / negative tests.
 #[cfg(feature = "alloc")]
 pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::interest::InterestWire::measure(&interest).len(),
@@ -730,7 +758,7 @@ pub fn encode_frame_with_push_qos(
     reliable: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
-    encode_frame_envelope(
+    owned_frame_envelope(
         sn,
         frame_flags(reliable),
         wz_codecs::push::PushWire::measure(&push).len(),
@@ -2863,7 +2891,8 @@ mod qos_wire_tests {
         let wire =
             encode_frame_envelope(7, frame_flags(true), 0, Some(Priority::RealTime), |_sink| {
                 Ok(())
-            });
+            })
+            .expect("an empty body is framed");
         assert_ne!(
             wire[0] & wire_const::FLAG_T_Z,
             0,
@@ -2892,11 +2921,22 @@ mod qos_wire_tests {
         assert!(has_ext);
     }
 
+    /// A body that refuses its message is framed into nothing: the envelope answers the body's
+    /// own refusal, though the vector it writes into refuses no write.
+    #[test]
+    fn a_body_that_refuses_its_message_frames_nothing() {
+        let framed = encode_frame_envelope(7, frame_flags(true), 0, None, |_sink| {
+            Err(CodecError::LengthOutOfRange)
+        });
+        assert_eq!(framed, Err(CodecError::LengthOutOfRange));
+    }
+
     /// A DEFAULT-priority frame (`ext_qos = None`) is byte-identical to the
     /// pre-QoS wire — no Z flag, no ext bytes — and decodes back to DEFAULT.
     #[test]
     fn default_priority_frame_is_byte_identical_and_decodes_default() {
-        let wire = encode_frame_envelope(7, frame_flags(true), 0, None, |_sink| Ok(()));
+        let wire = encode_frame_envelope(7, frame_flags(true), 0, None, |_sink| Ok(()))
+            .expect("an empty body is framed");
         assert_eq!(
             wire,
             alloc::vec![wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME, 0x07],

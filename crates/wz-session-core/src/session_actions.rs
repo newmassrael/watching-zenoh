@@ -11778,13 +11778,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         return Err(SendWireError::Codec(refused));
                     }
                 }
-                let wire = crate::frame_encode::encode_frame_envelope(
+                let wire = match crate::frame_encode::encode_frame_envelope(
                     sn,
                     crate::frame_encode::frame_flags(reliable),
                     worst_case_payload,
                     ext_qos,
                     encode_body,
-                );
+                ) {
+                    Ok(wire) => wire,
+                    // The body refused its message: refused before a byte left, as the lent
+                    // frame's refusal above is, with the SN minted above given back.
+                    Err(refused) => {
+                        self.outbound_frame_sn.unmint(priority, reliable);
+                        return Err(SendWireError::Codec(refused));
+                    }
+                };
                 self.emit_frame_or_fragments(batch, &wire, frame_emit)
             }
             #[cfg(feature = "tx-lend-only")]
