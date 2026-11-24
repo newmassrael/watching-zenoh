@@ -803,19 +803,6 @@ struct Slot<
 /// A slot's machine.
 type SlotEngine = Engine<ReassemblySlotPolicy<SlotBinding>>;
 
-/// Raise a `fragment.chunk` carrying the wire `more` bit on a slot's machine and drain the duties
-/// its transition ran.
-///
-/// Not generic over the Router and out of line, as [`start_slot_engine`] is: a chain's first
-/// fragment and its continuations both drive a chunk, and each inlined the raise, the step and the
-/// drain.
-#[inline(never)]
-fn drive_slot_chunk(engine: &mut SlotEngine, more: u8) -> u8 {
-    engine.raise_fragment_chunk(chunk_event(more));
-    engine.step();
-    engine.policy().actions().take()
-}
-
 /// Build a slot machine in `cell` and enter its initial `Empty` leaf (W3C SCXML 3.3).
 ///
 /// Not generic over the Router and out of line, so every Router type and every place a slot is
@@ -882,7 +869,9 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
     /// Send a `fragment.chunk` carrying the wire `more` bit, which the
     /// machine's guards split on, and drain the duties its transition ran.
     fn drive_chunk(&mut self, more: u8) -> u8 {
-        drive_slot_chunk(&mut self.engine, more)
+        self.engine.raise_fragment_chunk(chunk_event(more));
+        self.engine.step();
+        self.engine.policy().actions().take()
     }
 
     /// Raise `slot.release` and perform `reset_slot` if the machine ran it:
