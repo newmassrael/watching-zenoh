@@ -88,7 +88,7 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceRole, Next};
+use wz_runtime_coop::face_life::{FaceEffect, Next};
 use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
@@ -2941,16 +2941,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
         }
         // What became of the link is the face's value's to say (`FaceLife`), from what the
-        // transport reads of the link here; carrying it out is the session's. The dial role's face
-        // is the one whose link is dialled again.
-        let role = if id == DIAL_FACE {
-            FaceRole::Dial
-        } else {
-            FaceRole::Taken
-        };
+        // transport reads of the link here, the face's role among it; carrying it out is the
+        // session's.
         let step = self
             .transport
-            .face_step(at, id, role, redial_ms.is_some(), now_us);
+            .face_step(at, id, redial_ms.is_some(), now_us);
         self.carry_out(at, step, redial_ms, now_us)
     }
 

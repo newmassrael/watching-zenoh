@@ -35,6 +35,7 @@ use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::transport::GroupRecord;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
+use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
@@ -152,15 +153,15 @@ fn member_key(member: &MulticastMember) -> ToldKey {
 /// the listeners it is owed to were told it went, or until a member the group admits finds no
 /// other row: a member that stands comes before a departure owed.
 struct MemberRows {
-    rows: [Option<MemberRow>; GROUP_MEMBERS],
-    len: usize,
+    /// The rows held, in the order their members came, and only those: a member's row is written
+    /// when it comes, so a group joined writes no row.
+    rows: BoundedVec<MemberRow, GROUP_MEMBERS, Static>,
 }
 
 impl MemberRows {
     const fn new() -> Self {
         Self {
-            rows: [None; GROUP_MEMBERS],
-            len: 0,
+            rows: BoundedVec::new_static(),
         }
     }
 
@@ -168,32 +169,21 @@ impl MemberRows {
     fn push(&mut self, member: MulticastMember) -> bool {
         // The oldest tomb is given up: its listeners are not told that member left.
         #[cfg(feature = "connectivity")]
-        if self.len >= GROUP_MEMBERS {
+        if self.rows.len() >= GROUP_MEMBERS {
             if let Some(at) = self.position(|row| row.gone) {
                 self.drop_row(at);
             }
         }
-        let Some(row) = self.rows.get_mut(self.len) else {
-            return false;
-        };
-        *row = Some(MemberRow::of(member));
-        // The row just filled lies below the rows' count, so the count after it is at most that.
-        self.len = self.len.saturating_add(1);
-        true
+        self.rows.push(MemberRow::of(member)).is_ok()
     }
 
     /// The member `peer` went: hand it back, its row let go of, the ones after it moving up a
     /// row, or kept as its tomb while a replaying listener told it stands is owed its departure.
     fn remove(&mut self, peer: &MulticastPeerId) -> Option<MulticastMember> {
         let at = self.position(|row| row.stands() && row.member.peer == *peer)?;
-        let member = self.rows.get(at)?.as_ref()?.member;
+        let member = self.rows.get(at)?.member;
         #[cfg(feature = "connectivity")]
-        if let Some(row) = self
-            .rows
-            .get_mut(at)
-            .and_then(Option::as_mut)
-            .filter(|row| !row.told.is_empty())
-        {
+        if let Some(row) = self.rows.get_mut(at).filter(|row| !row.told.is_empty()) {
             row.gone = true;
             return Some(member);
         }
@@ -202,32 +192,21 @@ impl MemberRows {
     }
 
     /// The place of the first row that `found` says is the one.
-    fn position(&self, mut found: impl FnMut(&MemberRow) -> bool) -> Option<usize> {
-        self.rows
-            .iter()
-            .take(self.len)
-            .position(|row| row.as_ref().is_some_and(&mut found))
+    fn position(&self, found: impl FnMut(&MemberRow) -> bool) -> Option<usize> {
+        self.rows.iter().position(found)
     }
 
-    /// Let go of the row at `at`, below the rows' count, the ones after it moving up a row.
+    /// Let go of the row at `at`, the ones after it moving up a row; nothing past the rows.
     fn drop_row(&mut self, at: usize) {
-        if let Some(row) = self.rows.get_mut(at) {
-            *row = None;
+        if at < self.rows.len() {
+            self.rows.remove(at);
         }
-        if let Some(after) = self.rows.get_mut(at..self.len) {
-            if !after.is_empty() {
-                after.rotate_left(1);
-            }
-        }
-        self.len = self.len.saturating_sub(1);
     }
 
     /// The members that stand, in the order they came.
     fn iter(&self) -> impl Iterator<Item = &MulticastMember> {
         self.rows
             .iter()
-            .take(self.len)
-            .flatten()
             .filter(|row| row.stands())
             .map(|row| &row.member)
     }
@@ -243,8 +222,6 @@ impl MemberRows {
     fn came(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
         self.rows
             .iter_mut()
-            .take(self.len)
-            .flatten()
             .find(|row| {
                 row.stands() && row.member.whatami.is_some() && member_key(&row.member) == *key
             })
@@ -277,8 +254,6 @@ impl MemberRows {
     fn first_gone(&self, plane: ToldPlane, listener: usize) -> Option<MulticastMember> {
         self.rows
             .iter()
-            .take(self.len)
-            .flatten()
             .find(|row| row.gone && row.told.has(plane, listener))
             .map(|row| row.member)
     }
@@ -287,7 +262,7 @@ impl MemberRows {
     #[cfg(feature = "connectivity")]
     fn forget(&mut self, plane: ToldPlane, listener: usize) {
         // From the last row, so a row let go of moves none still to be looked at.
-        let mut at = self.len;
+        let mut at = self.rows.len();
         while let Some(before) = at.checked_sub(1) {
             at = before;
             self.forget_at(at, plane, listener);
@@ -297,14 +272,10 @@ impl MemberRows {
     /// Take `listener` of `plane` off the row at `at`, let go of when it is a tomb owed to no one.
     #[cfg(feature = "connectivity")]
     fn forget_at(&mut self, at: usize, plane: ToldPlane, listener: usize) {
-        let spent = self
-            .rows
-            .get_mut(at)
-            .and_then(Option::as_mut)
-            .is_some_and(|row| {
-                row.told.clear(plane, listener);
-                row.gone && row.told.is_empty()
-            });
+        let spent = self.rows.get_mut(at).is_some_and(|row| {
+            row.told.clear(plane, listener);
+            row.gone && row.told.is_empty()
+        });
         if spent {
             self.drop_row(at);
         }
@@ -314,15 +285,13 @@ impl MemberRows {
     /// a join that ended, its members gone with it, which this table takes over.
     #[cfg(feature = "connectivity")]
     fn keep_tombs_of(&mut self, ended: &Self) {
-        for row in ended.rows.iter().take(ended.len).flatten() {
+        for row in ended.rows.iter() {
             if row.told.is_empty() {
                 continue;
             }
-            let Some(into) = self.rows.get_mut(self.len) else {
+            if self.rows.push(MemberRow { gone: true, ..*row }).is_err() {
                 return;
-            };
-            *into = Some(MemberRow { gone: true, ..*row });
-            self.len = self.len.saturating_add(1);
+            }
         }
     }
 }
@@ -1591,6 +1560,23 @@ mod told_tests {
 
     const PLANE: ToldPlane = ToldPlane::Transports;
 
+    /// A group joined holds no member; a member that goes, told to no listener, leaves its row and
+    /// the members after it keep the order they came in; a member that never came is not handed
+    /// back. Turned red by a row let go of out of order (the last row moved into its place).
+    #[test]
+    fn a_member_that_goes_keeps_the_order_of_the_others() {
+        let mut rows = MemberRows::new();
+        assert_eq!(rows.iter().count(), 0, "a group joined holds no member");
+        for first in 1..=3 {
+            assert!(rows.push(member(first)));
+        }
+        assert_eq!(rows.remove(&member(2).peer), Some(member(2)));
+        assert_eq!(rows.remove(&member(9).peer), None, "no such member");
+        let left: Vec<MulticastMember> = rows.iter().copied().collect();
+        assert_eq!(left, [member(1), member(3)]);
+        assert_eq!(rows.rows.len(), 2);
+    }
+
     /// A member a replaying listener was told stays in its row, gone, until the listener was told
     /// it went; one no listener was told leaves its row at once.
     ///
@@ -1608,9 +1594,13 @@ mod told_tests {
         assert!(!rows.came(PLANE, 0, &key), "told once");
 
         assert_eq!(rows.remove(&member(2).peer), Some(member(2)));
-        assert_eq!(rows.len, 1, "a member no listener was told leaves its row");
+        assert_eq!(
+            rows.rows.len(),
+            1,
+            "a member no listener was told leaves its row"
+        );
         assert_eq!(rows.remove(&member(1).peer), Some(member(1)));
-        assert_eq!(rows.len, 1, "a member told stays as its tomb");
+        assert_eq!(rows.rows.len(), 1, "a member told stays as its tomb");
         assert_eq!(rows.iter().count(), 0, "a tomb is no member that stands");
         assert!(rows.owes(PLANE, 0, &key));
         assert!(!rows.owes(PLANE, 1, &key), "only to the listener told it");
@@ -1621,7 +1611,7 @@ mod told_tests {
         assert_eq!(rows.first_gone(PLANE, 0), Some(member(1)));
         assert!(rows.went(PLANE, 0, &key));
         assert!(!rows.went(PLANE, 0, &key), "told once");
-        assert_eq!(rows.len, 0, "the tomb owed to no one is let go of");
+        assert_eq!(rows.rows.len(), 0, "the tomb owed to no one is let go of");
     }
 
     /// A member the group admits when every row is held takes the oldest tomb's row: a member that
@@ -1660,7 +1650,7 @@ mod told_tests {
         assert!(ended.came(ToldPlane::Links, 2, &key));
         let mut joined = MemberRows::new();
         joined.keep_tombs_of(&ended);
-        assert_eq!(joined.len, 1, "only the member a listener was told");
+        assert_eq!(joined.rows.len(), 1, "only the member a listener was told");
         assert!(joined.owes(ToldPlane::Links, 2, &key));
         assert_eq!(joined.iter().count(), 0, "kept as a tomb");
         joined.forget(ToldPlane::Transports, 2);
@@ -1669,6 +1659,6 @@ mod told_tests {
             "another plane forgets nothing here"
         );
         joined.forget(ToldPlane::Links, 2);
-        assert_eq!(joined.len, 0);
+        assert_eq!(joined.rows.len(), 0);
     }
 }
