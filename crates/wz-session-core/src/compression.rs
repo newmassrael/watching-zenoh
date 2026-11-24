@@ -52,8 +52,10 @@ pub const BATCH_HEADER_BYTES: usize = 1;
 /// bound. Otherwise the original payload ships uncompressed, the COMPRESSION bit
 /// clear, which is what zenoh 1.10.2 does: it compresses into a support buffer and
 /// keeps the original batch with the bit cleared when the result is not smaller
-/// (`io/zenoh-transport/src/common/batch.rs:339` writes nothing on a failed
-/// compression, `:346-354` compares and falls back). The returned
+/// (`io/zenoh-transport/src/common/batch.rs` @
+/// `lz4_flex::block::compress_into(payload, b).unwrap_or(0)` writes nothing on a failed
+/// compression, and `io/zenoh-transport/src/common/batch.rs` @
+/// `if support.len() < self.buffer.len() {` compares and falls back). The returned
 /// `[BatchHeader][payload]` is what the link layer then length-frames.
 ///
 /// The header and the payload are written by the batch's document

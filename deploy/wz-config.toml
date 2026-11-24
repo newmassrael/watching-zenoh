@@ -3845,15 +3845,22 @@ kconfig = "WZ_LIMIT_HANDSHAKE_COOKIE_BYTES"
 kind = "bound"
 driven = "remote"
 # The widest cookie a zenoh 1.10.2 node of any build hands out in its InitAck: the plaintext of
-# `Cookie` (io/zenoh-transport/src/unicast/establishment/cookie.rs:57-81) at most 176 bytes, a
-# multiple of the cipher's 16-byte block (commons/zenoh-crypto/src/cipher.rs:37-42), so 176.
+# `Cookie`, whose fields end at its region name (`io/zenoh-transport/src/unicast/establishment/cookie.rs` @
+# `self.write(&mut *writer, &x.ext_region_name)?;`), at most 176 bytes, a multiple of the
+# cipher's 16-byte block (`commons/zenoh-crypto/src/cipher.rs` @
+# `let missing = Self::BLOCK_SIZE - modulo;`), so 176.
 # zid 17 (len + 16), whatami 1, resolution 1, batch size 3, nonce 9 (VLE of a u64,
-# commons/zenoh-codec/src/core/zint.rs:21), QoS 9; multilink 79 (flag 1, challenge 9, the
-# initiator's 512-bit RSA key as n 1+64 and e 1+3: ext/multilink.rs:32,230-244,
-# ext/auth/pubkey.rs:189-192); shared memory 0 (ext/shm/auth.rs:483); auth 21 (count 1, pubkey
-# id 1 + challenge 9, usrpwd id 1 + nonce 9: ext/auth/mod.rs:184-219, ext/auth/pubkey.rs,
-# ext/auth/usrpwd.rs); lowlatency 1, compression 1, patch 1; region name 33 (len + 32:
-# commons/zenoh-protocol/src/core/region.rs:211).
+# `commons/zenoh-codec/src/core/zint.rs` @ `const VLE_LEN_MAX: usize = vle_len(u64::MAX);`), QoS 9;
+# multilink 79 (flag 1, challenge 9, the initiator's 512-bit RSA key as n 1+64 and e 1+3:
+# `io/zenoh-transport/src/unicast/establishment/ext/multilink.rs` @ `const KEY_SIZE: usize = 512;`,
+# `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
+# `self.write(&mut *writer, x.n().to_bytes_le().as_slice())?;`); shared memory 0
+# (`io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @
+# `fn write(self, _writer: &mut W, _x: &StateAccept) -> Self::Output {`); auth 21 (count 1,
+# pubkey id 1 + challenge 9, usrpwd id 1 + nonce 9: `io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @
+# `self.write(&mut wbuf, id::USRPWD)?;`, `io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @
+# `self.write(&mut *writer, x.nonce)`); lowlatency 1, compression 1, patch 1; region name 33
+# (len + 32: `commons/zenoh-protocol/src/core/region.rs` @ `pub const MAX_LEN: usize = 32;`).
 default = 176
 storage = "capacity"
 scope = "session"
