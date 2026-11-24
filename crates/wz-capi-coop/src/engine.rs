@@ -647,15 +647,11 @@ impl OpenKeyIds {
     }
 }
 
-/// What a session's open decided before its state is built ([`CoopEngine::core_of`]): the
-/// stack its links are opened on, the clock and the entropy it runs on, its config and policies,
-/// the zid it announces and, with `shared-key-ids`, the key ids it holds and the key-wire form of
-/// each link.
-struct OpenDecided<L, C> {
-    links: L,
-    clock: C,
-    entropy: SessionEntropy,
-    config: CoopConfig<Counted>,
+/// What a session's open decided before its state is built ([`CoopEngine::core_of`]): its
+/// policies, the zid it announces and, with `shared-key-ids`, the key ids it holds and the
+/// key-wire form of each link. Small values, apart from the config and the stack's values the
+/// stage is handed as they are.
+struct OpenDecided {
     policy: SessionPolicy,
     zid: SessionZid,
     #[cfg(feature = "shared-key-ids")]
@@ -3850,10 +3846,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut entropy = SessionEntropy::new(entropy);
         let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
         let decided = OpenDecided {
-            links,
-            clock,
-            entropy,
-            config,
             policy,
             zid: wire,
             #[cfg(feature = "shared-key-ids")]
@@ -3861,25 +3853,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "shared-key-ids")]
             key_forms,
         };
-        let (core, handle_place) = Self::core_of(decided, &plan, lent);
+        let (core, handle_place) =
+            Self::core_of(links, clock, entropy, config, decided, &plan, lent);
         Ok(Self::engine_of(core, handle_place))
     }
 
-    /// The session's state out of what its open decided (`decided`) and lent (`lent`, as `plan`
-    /// laid it out): the links lent their buffers and cells, the task and timer tables reserved,
-    /// the dial role's face and every table in place. Out of line, so the open's measure shows it
-    /// apart.
+    /// The session's state over `links`, on `clock` and `entropy`, out of `config`, what its open
+    /// decided (`decided`) and lent (`lent`, as `plan` laid it out): the links lent their buffers
+    /// and cells, the task and timer tables reserved, the dial role's face and every table in
+    /// place. Out of line, so the open's measure shows it apart.
     #[inline(never)]
     fn core_of(
-        decided: OpenDecided<L, C>,
+        mut links: L,
+        clock: C,
+        entropy: SessionEntropy,
+        config: CoopConfig<Counted>,
+        decided: OpenDecided,
         plan: &ArenaPlan,
         lent: SessionLent,
     ) -> (Core<L, C>, Option<HandlePlace>) {
         let OpenDecided {
-            mut links,
-            clock,
-            entropy,
-            config,
             policy,
             zid: wire,
             #[cfg(feature = "shared-key-ids")]
