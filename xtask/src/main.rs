@@ -473,8 +473,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         // over two key texts and the chunk steps they share. Each document names those it calls
         // as sibling modules (`super::<name>`), so they are emitted into one directory and
         // included as siblings.
-        "keyexpr_intersects",
-        "keyexpr_includes",
+        "keyexpr_relation",
         "keyexpr_matches",
         "keyexpr_walk",
         "keyexpr_relation_dp",
