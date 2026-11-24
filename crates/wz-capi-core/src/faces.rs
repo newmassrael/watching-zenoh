@@ -8409,7 +8409,7 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
                 log.lock().unwrap().push(now);
                 let probe = probe
                     .upgrade()
@@ -8570,12 +8570,14 @@ mod matching_aggregate_tests {
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
-                // Keep the probe owned BY the closure, exactly as a C sink owns
-                // its context, so the probe's drop is the closure's drop.
-                let _ = &probe;
-                log.lock().unwrap().push(now);
-            }))))
+            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+                move |now| {
+                    // Keep the probe owned BY the closure, exactly as a C sink owns
+                    // its context, so the probe's drop is the closure's drop.
+                    let _ = &probe;
+                    log.lock().unwrap().push(now);
+                },
+            ))))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8622,14 +8624,16 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
-            entered_tx.send(()).expect("the test thread is waiting");
-            release_rx
-                .lock()
-                .unwrap()
-                .recv()
-                .expect("the test thread releases the sink");
-        }))));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+            move |_now| {
+                entered_tx.send(()).expect("the test thread is waiting");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("the test thread releases the sink");
+            },
+        ))));
 
         let deliverer = {
             let state = state.clone();
@@ -8682,7 +8686,7 @@ mod matching_aggregate_tests {
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
                 let state = weak.upgrade().expect("alive during its own call");
                 // The re-entrant undeclare. It must RETURN, and it must decline
                 // to take the sink rather than block on this frame's own lock.
