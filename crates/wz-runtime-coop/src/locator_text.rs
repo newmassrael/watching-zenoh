@@ -8,8 +8,10 @@
 //! [`DialRefused::BadAddress`], since a node of this runtime has no resolver, and another scheme,
 //! or upstream's `?metadata` / `#config` parts, as [`DialRefused::Unsupported`]: no link here
 //! honours them, and opening one anyway would quietly drop what the writer asked for. Both are
-//! permanent for the text. Whether a stack carries the protocol or the family is the stack's to
-//! answer when it opens the link; a stack built without IPv6 reads its endpoints with
+//! permanent for the text. A build with serial links (`serial`) reads `serial/` too, with the
+//! `#config` that is that link's own (`wz_session_core::locator_grammar`); without it the scheme
+//! is one more this build does not carry. Whether a stack carries the protocol or the family is
+//! the stack's to answer when it opens the link; a stack built without IPv6 reads its endpoints with
 //! [`parse_locator_for`], so its image holds the IPv4 reader alone.
 //!
 //! Written once for every engine over this runtime: the session shell's dialler and connection
@@ -18,6 +20,10 @@
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::session_drive::{LinkProto, Locator};
+#[cfg(feature = "serial")]
+use crate::session_drive::{SerialLine, SerialLocator, SerialPath};
+#[cfg(feature = "serial")]
+use wz_session_core::locator_grammar::{read_serial_locator, SerialAddress, SerialTextError};
 
 /// Why a dial could not even be attempted. Permanent for this endpoint text in this build, so it
 /// is not retried.
@@ -77,6 +83,10 @@ fn parse_endpoint<const IPV6: bool>(
     endpoint: &str,
     any_port: bool,
 ) -> Result<Locator, DialRefused> {
+    #[cfg(feature = "serial")]
+    if let Some(serial) = serial_endpoint(endpoint) {
+        return serial;
+    }
     let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
         .into_iter()
         .find_map(|proto| {
@@ -110,6 +120,37 @@ fn parse_endpoint<const IPV6: bool>(
         return Err(DialRefused::BadAddress);
     }
     Ok(Locator::ip(proto, at))
+}
+
+/// A `serial/` endpoint's text read into its locator, or `None` for a text of another scheme. A
+/// line that cannot be read, or a device path longer than a row of the build names
+/// ([`SerialPath`]), is [`DialRefused::BadAddress`]; a `?metadata` span is
+/// [`DialRefused::Unsupported`], as on every other scheme here. A listener reads the same text:
+/// a line has no port for the stack to choose.
+#[cfg(feature = "serial")]
+fn serial_endpoint(endpoint: &str) -> Option<Result<Locator, DialRefused>> {
+    let read = match read_serial_locator(endpoint) {
+        Ok(read) => read,
+        Err(SerialTextError::NotSerialScheme) => return None,
+        Err(SerialTextError::EmptyAddress | SerialTextError::BadNumber(_)) => {
+            return Some(Err(DialRefused::BadAddress))
+        }
+    };
+    if !read.metadata.is_empty() {
+        return Some(Err(DialRefused::Unsupported));
+    }
+    let line = match read.address {
+        SerialAddress::Device(path) => match SerialPath::new(path) {
+            Some(path) => SerialLine::Device(path),
+            None => return Some(Err(DialRefused::BadAddress)),
+        },
+        SerialAddress::Pins { tx, rx } => SerialLine::Pins { tx, rx },
+    };
+    Some(Ok(Locator::Serial(SerialLocator {
+        line,
+        baudrate: read.baudrate,
+        options: read.options,
+    })))
 }
 
 /// `a.b.c.d:port` read as `SocketAddrV4`'s `FromStr` reads it, in one pass over the bytes: four
@@ -683,6 +724,89 @@ mod tests {
             let ip = read.as_ip().expect("an IP locator");
             std::assert_eq!(Locator::ip(ip.proto, ip.at), read);
         }
+    }
+
+    /// A serial locator read from its text writes that text back by either writer, to dial and to
+    /// listen on, and is no IP locator. Turned red by a reader or a writer of the serial grammar
+    /// that drifts from the other, or by a serial text read as another kind.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_locator_is_written_as_it_was_read() {
+        for text in [
+            "serial//dev/ttyUSB0#baudrate=115200",
+            "serial/12.13#baudrate=9600",
+            "serial//dev/ttyS1#baudrate=9600;exclusive=false;tout=1000;release_on_close=false",
+        ] {
+            let read = parse_locator(text).expect("a dialable serial locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            std::assert_eq!(read.as_ip(), None, "{text}");
+            std::assert_eq!(parse_listen_locator(text), Ok(read), "{text}");
+        }
+    }
+
+    /// What a serial locator names is read into its parts: the device, the baud rate (upstream's
+    /// 9600 when none is written, and written back then) and the options. Turned red by a reader
+    /// that loses the default or a key.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_locator_is_read_into_its_line_and_rate() {
+        use wz_session_core::locator_grammar::SerialOptions;
+        let read = parse_locator("serial//dev/ttyACM0").expect("no config");
+        let serial = read.as_serial().expect("a serial locator");
+        std::assert_eq!(
+            serial.line,
+            SerialLine::Device(SerialPath::new("/dev/ttyACM0").expect("short"))
+        );
+        std::assert_eq!(serial.baudrate, 9600);
+        std::assert_eq!(serial.options, SerialOptions::UPSTREAM);
+        std::assert_eq!(
+            read.text().finish(),
+            Ok("serial//dev/ttyACM0#baudrate=9600")
+        );
+        let pins = parse_locator("serial/3.4#baudrate=57600;tout=10")
+            .ok()
+            .and_then(Locator::as_serial);
+        std::assert_eq!(
+            pins.map(|serial| (serial.line, serial.baudrate, serial.options.timeout_us)),
+            Some((SerialLine::Pins { tx: 3, rx: 4 }, 57600, 10))
+        );
+    }
+
+    /// A serial text this engine cannot open a line from is refused for good, with the reason:
+    /// no line, a number that is no positive `u32`, a path longer than a row names, and a
+    /// `?metadata` span no link here honours. Turned red by a reader that takes any of them.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_text_that_names_no_line_is_refused() {
+        use crate::session_drive::SERIAL_PATH_LEN;
+        for (text, why) in [
+            ("serial/#baudrate=9600", DialRefused::BadAddress),
+            ("serial//dev/ttyUSB0#baudrate=0", DialRefused::BadAddress),
+            ("serial//dev/ttyUSB0#baudrate=fast", DialRefused::BadAddress),
+            ("serial/0.1#baudrate=9600", DialRefused::BadAddress),
+            (
+                "serial//dev/ttyUSB0?prio=1#baudrate=9600",
+                DialRefused::Unsupported,
+            ),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+        let longest = std::format!("serial//{}", "a".repeat(SERIAL_PATH_LEN - 1));
+        std::assert!(parse_locator(&longest).is_ok(), "{longest}");
+        let past = std::format!("serial//{}", "a".repeat(SERIAL_PATH_LEN));
+        std::assert_eq!(parse_locator(&past), Err(DialRefused::BadAddress));
+    }
+
+    /// A build without serial links refuses a serial text as a scheme it does not carry. Turned
+    /// red by a reader that takes it into another kind of locator.
+    #[cfg(not(feature = "serial"))]
+    #[test]
+    fn a_build_without_serial_links_refuses_a_serial_text() {
+        std::assert_eq!(
+            parse_locator("serial//dev/ttyUSB0#baudrate=115200"),
+            Err(DialRefused::Unsupported)
+        );
     }
 
     /// The octet reader takes four octets and leaves what follows them, and refuses a `.` after

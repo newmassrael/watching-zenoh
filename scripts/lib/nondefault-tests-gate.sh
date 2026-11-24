@@ -847,6 +847,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         reassembly,\
         rx-in-place,\
         scouting-static,\
+        serial,\
         session-unicast,\
         session-unicast-accept,\
         session-unicast-open,\

@@ -52,9 +52,13 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LostCause;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
+#[cfg(feature = "serial")]
+use wz_session_core::locator_grammar::{
+    write_serial_address_with_config, SerialAddress, SerialOptions, SERIAL_SCHEME,
+};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::text_out::FixedText;
+use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::transport_timers::TransportTimers;
 use wz_session_core::unicast_rx::{RxReassembly, UnicastRx};
 
@@ -607,6 +611,9 @@ impl LinkProto {
 pub enum Locator {
     /// A link over IP: `udp/`, `tcp/` or `tls/` to an address and a port.
     Ip(IpLocator),
+    /// A link over a serial line: `serial/` to a device or a pin pair, at a baud rate.
+    #[cfg(feature = "serial")]
+    Serial(SerialLocator),
 }
 
 /// The locator of a link over IP: a protocol and the end it reaches, an IPv4 or an IPv6 address
@@ -629,9 +636,111 @@ impl IpLocator {
     /// compile time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
     pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
         let mut text = FixedText::new();
-        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at)
-            .write_src(&mut text);
+        self.write(&mut text);
         text
+    }
+
+    /// Write zenoh's text of the locator into `out`.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        wz_session_core::link::LinkEnds::ip(self.proto.kind(), self.at, self.at).write_src(out);
+    }
+}
+
+/// The locator of a link over a serial line, as zenoh's serial link and zenoh-pico's read one:
+/// `serial/<line>[#baudrate=<n>[;exclusive=<b>][;tout=<us>][;release_on_close=<b>]]`, the line
+/// a device path or a `<tx>.<rx>` pin pair
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub const PORT_EXCLUSIVE_RAW: &str = "exclusive";`,
+/// `vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c` @ `_z_serial_endpoint_parse`).
+/// The grammar is the session core's (`wz_session_core::locator_grammar`), read and written there
+/// for this engine and the heap profile's leaf alike.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialLocator {
+    /// The line the link runs over.
+    pub line: SerialLine,
+    /// The baud rate, as written; whether the line can run at it is the device's to answer when
+    /// it opens the line.
+    pub baudrate: u32,
+    /// The three keys of upstream's serial link beyond the baud rate.
+    pub options: SerialOptions,
+}
+
+/// The line a serial link runs over.
+#[cfg(feature = "serial")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialLine {
+    /// A device a host opens by its path.
+    Device(SerialPath),
+    /// A UART an MCU names by its transmit and receive pins.
+    Pins {
+        /// The transmit pin.
+        tx: u32,
+        /// The receive pin.
+        rx: u32,
+    },
+}
+
+/// The path of a serial device, held inline so a [`Locator`] stays `Copy`: at most
+/// [`SERIAL_PATH_LEN`] bytes, the most a `serial/<path>` text of a row of the build
+/// ([`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN)) can name, so a link over any path it holds can
+/// be named in its faces' rows.
+#[cfg(feature = "serial")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SerialPath {
+    bytes: [u8; SERIAL_PATH_LEN],
+    len: usize,
+}
+
+/// The longest device path a [`SerialPath`] holds: what a row of
+/// [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes leaves after `serial/`.
+#[cfg(feature = "serial")]
+pub const SERIAL_PATH_LEN: usize = caps::MAX_LOCATOR_LEN.saturating_sub(SERIAL_SCHEME.len() + 1);
+
+#[cfg(feature = "serial")]
+impl SerialPath {
+    /// The path `path`, or `None` when it is empty or longer than [`SERIAL_PATH_LEN`] bytes.
+    pub fn new(path: &str) -> Option<Self> {
+        let mut bytes = [0u8; SERIAL_PATH_LEN];
+        bytes
+            .get_mut(..path.len())
+            .filter(|_| !path.is_empty())?
+            .copy_from_slice(path.as_bytes());
+        Some(Self {
+            bytes,
+            len: path.len(),
+        })
+    }
+
+    /// The path's text.
+    pub fn as_str(&self) -> &str {
+        // The bytes were a `&str`'s, whole, so they are UTF-8.
+        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "serial")]
+impl core::fmt::Debug for SerialPath {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+#[cfg(feature = "serial")]
+impl SerialLocator {
+    /// The line as the grammar writes it.
+    pub fn address(&self) -> SerialAddress<'_> {
+        match &self.line {
+            SerialLine::Device(path) => SerialAddress::Device(path.as_str()),
+            SerialLine::Pins { tx, rx } => SerialAddress::Pins { tx: *tx, rx: *rx },
+        }
+    }
+
+    /// Write zenoh's text of the locator into `out`: the scheme, the line and the config the
+    /// locator is read back from.
+    fn write<W: TextOut>(&self, out: &mut W) {
+        out.push_str(SERIAL_SCHEME);
+        out.push_str("/");
+        write_serial_address_with_config(out, self.address(), self.baudrate, self.options);
     }
 }
 
@@ -661,15 +770,30 @@ impl Locator {
     pub const fn as_ip(self) -> Option<IpLocator> {
         match self {
             Self::Ip(ip) => Some(ip),
+            #[cfg(feature = "serial")]
+            Self::Serial(_) => None,
+        }
+    }
+
+    /// The locator of a serial link, or `None` for a link of another kind.
+    #[cfg(feature = "serial")]
+    pub const fn as_serial(self) -> Option<SerialLocator> {
+        match self {
+            Self::Serial(serial) => Some(serial),
+            Self::Ip(_) => None,
         }
     }
 
     /// zenoh's text of the locator, the [`Display`](core::fmt::Display) text, written without
-    /// `core::fmt`: [`IpLocator::text`] for an IP link.
-    pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
+    /// `core::fmt` into text that holds the longest locator of every kind the build carries.
+    pub fn text(&self) -> FixedText<LONGEST_LOCATOR_LEN> {
+        let mut text = FixedText::new();
         match self {
-            Self::Ip(ip) => ip.text(),
+            Self::Ip(ip) => ip.write(&mut text),
+            #[cfg(feature = "serial")]
+            Self::Serial(serial) => serial.write(&mut text),
         }
+        text
     }
 }
 
@@ -686,6 +810,33 @@ pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
+/// The longest serial locator text: `serial/`, the longest line, and every config key written
+/// with its widest value.
+#[cfg(feature = "serial")]
+pub const LONGEST_SERIAL_LOCATOR_LEN: usize = SERIAL_SCHEME.len()
+    + 1
+    + longer(SERIAL_PATH_LEN, "4294967295.4294967295".len())
+    + "#baudrate=4294967295;exclusive=false;tout=18446744073709551615;release_on_close=false".len();
+
+/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
+/// writes into.
+#[cfg(not(feature = "serial"))]
+pub const LONGEST_LOCATOR_LEN: usize = LONGEST_IP_LOCATOR_LEN;
+/// The longest locator text of every kind of link the build carries, which [`Locator::text`]
+/// writes into.
+#[cfg(feature = "serial")]
+pub const LONGEST_LOCATOR_LEN: usize = longer(LONGEST_IP_LOCATOR_LEN, LONGEST_SERIAL_LOCATOR_LEN);
+
+/// The larger of two lengths, for the constants above.
+#[cfg(feature = "serial")]
+const fn longer(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 const _: () = assert!(
     caps::MAX_LOCATOR_LEN >= LONGEST_IPV4_LOCATOR_LEN,
     "MAX_LOCATOR_LEN cannot hold an IPv4 locator such as udp/255.255.255.255:65535 (25 bytes)"
@@ -696,6 +847,8 @@ impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Ip(ip) => write!(f, "{}/{}", ip.proto.scheme(), ip.at),
+            #[cfg(feature = "serial")]
+            Self::Serial(_) => f.write_str(self.text().prefix()),
         }
     }
 }

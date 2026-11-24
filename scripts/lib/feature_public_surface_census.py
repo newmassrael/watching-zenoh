@@ -858,6 +858,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # (`link_storage::LinkRx`, `LinkTxStore`, `LinkStorage::claim`) and the faces' owed writes
         # (`Faces::write_owed_now`, `owing_waits`), selected by `wz-capi-coop`'s `listen`; sites
         # inside a `pub mod` or an `impl`, the shape `udp-listen`'s have.
+        # `serial` joins: the locator of a link over a serial line (`Locator::Serial`,
+        # `SerialLocator`, `SerialLine`, `SerialPath`, `SERIAL_PATH_LEN` in `pub mod session_drive`),
+        # selected by the pico ABI's `transport-link-serial`; sites inside a `pub mod` or an `impl`,
+        # the shape `udp-listen`'s have.
         frozenset(
             {
                 "alloc",
@@ -867,6 +871,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "runtime",
                 "rx-in-place",
                 "scouting-static",
+                "serial",
                 "session-slot",
                 "session-unicast",
                 "session-unicast-accept",
@@ -1464,6 +1469,8 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `udp-listen` joins with its OFF_AXIS row: its sites (`UdpPort`, `PortPeer`, `PortPeerError`,
     # `PORT_PEER_BACKLOG`) sit inside `pub mod udp_link` behind `all(udp-listen,
     # not(session-slot))`, compound and nested, which the second clause reads off the sites.
+    # `serial` joins with its OFF_AXIS row: its sites sit inside `pub mod session_drive`, nested,
+    # which the second clause reads off the sites.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
@@ -1473,6 +1480,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "runtime",
             "rx-in-place",
             "scouting-static",
+            "serial",
             "session-slot",
             "session-unicast",
             "session-unicast-accept",

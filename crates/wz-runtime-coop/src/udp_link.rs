@@ -66,7 +66,9 @@ use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
-use crate::session_drive::{LinkProto, Locator, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN};
+use crate::session_drive::{
+    IpLocator, LinkProto, Locator, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN,
+};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
@@ -288,7 +290,7 @@ pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
     caps::MAX_LOCATOR_LEN >= LONGEST_IP_LOCATOR_LEN
         || [local, peer]
             .into_iter()
-            .all(|at| Locator::ip(proto, at).text().demanded() <= caps::MAX_LOCATOR_LEN)
+            .all(|at| IpLocator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
 }
 
 /// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
