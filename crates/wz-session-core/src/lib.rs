@@ -1731,8 +1731,6 @@ pub mod extpatch;
 /// `extqos`, which sends and negotiates: the passive observer folds both Inits
 /// of a handshake in a build that selects no QoS feature, and `extqos` reads
 /// through this module so that the two cannot disagree.
-// Totality debt TD-119 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod extqos_offer;
 
 /// SSOT for the `0x8` REGION-NAME establishment ext — a node's region
