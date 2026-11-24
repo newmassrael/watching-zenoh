@@ -169,8 +169,10 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    `wz-runtime-coop` in non-test code, debt rows for the sites that remain, paid largest first.
    The lints are denied at each crate root; the modules that remain are the register of
    section 7, held by `scripts/lib/totality_debt_gate.py`.
-3. **Transport views (L2).** Landed on size-handshake; the remaining owned paths (OAM with zbuf
-   extensions, JOIN) move to views.
+3. **Transport views (L2).** Landed. Every participant's receive reads a JOIN and a transport OAM
+   (a ZBuf body and ZBuf extensions included) by its view and keeps nothing of it: in place, into
+   the receive's slot (`InboundFrame::Refused`), and on a group's walk. The decode that keeps
+   them whole is the observer's (`parse_inbound`).
 4. **One table set (L3).** The cooperative engine's registry, targets and key table fold into
    the session core's rows; the delivery lane is removed (callback in the row). The largest phase:
    one entity kind at a time (subscribers, then queryables, then tokens, then queries/replies).
@@ -235,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (36) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (33) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -252,7 +254,7 @@ scout. A module the text read found no site in is not in the register.
 
 The classes: **open**, hand-written code not converted yet; **in flight**, a module another branch
 is restructuring now (the cooperative engine of step 4, the session core's entity modules, the pico
-doors of step 5, the group drive's stage in `wz-session-mcu`), converted as it lands;
+doors of step 5), converted as it lands;
 **generated**, SCE output, whose totality is the generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
 orders the payment (largest first) and is not a measurement of what clippy reports. The rows of
 `wz-session-mcu` count clippy's own reports instead, over the crate's default build, its build
@@ -284,19 +286,13 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
-| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing` | 1 | open |
 | TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
-| TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
 
 TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
 fills a list of `N` zids from the text a build states. It reads the text by slice pattern; the row
 it fills is written by index, because a `const fn` of Rust 1.81 takes no `&mut` and every write
 that names no index (`get_mut`, `split_first_mut`, `iter_mut`, a raw pointer) needs one
 (`const_mut_refs` is Rust 1.83). The row is paid with `get_mut` when the workspace's MSRV is 1.83.
-
-TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
-(`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
-once that lands, in the same module.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic
 is how a misspelt build value stops the build that holds it: the refusal of a `WZ_POLICY_*` value
