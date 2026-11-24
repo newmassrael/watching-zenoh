@@ -81,6 +81,12 @@ pub(crate) use core::sync::atomic::AtomicBool;
 #[cfg(not(target_has_atomic = "8"))]
 pub(crate) use portable_atomic::AtomicBool;
 
+// Keyed as `Ordering` is, so its loads and stores take the `Ordering` re-exported below.
+#[cfg(target_has_atomic = "8")]
+pub(crate) use core::sync::atomic::AtomicPtr;
+#[cfg(not(target_has_atomic = "8"))]
+pub(crate) use portable_atomic::AtomicPtr;
+
 // AtomicU64 is currently only referenced by the test ClockSource in
 // runtime_impl.rs; flagging unused imports is a workspace lint
 // (`-D warnings`), so the alias carries an allow attribute. Future
