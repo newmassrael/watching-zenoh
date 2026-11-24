@@ -8,10 +8,10 @@
 //! trigger issues, what ends a get, and what a teardown stops.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use wz_capi_port::cancellation::CancellableFan;
+use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey};
 use wz_capi_port::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
     MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
@@ -51,11 +51,15 @@ struct GetRecord {
     parameters: String,
     destination: Locality,
     legs: Vec<Arc<Mutex<Option<ReplyCallback>>>>,
+    /// The key of the fan that cancels the get, when a token can.
+    fan: Option<FanKey>,
 }
 
 /// An engine that records and hands over.
 #[derive(Default)]
 struct Script {
+    /// The script itself, as the fans it is attached to reach it.
+    this: Weak<Script>,
     next: AtomicU64,
     now: AtomicU64,
     closed: AtomicBool,
@@ -75,10 +79,15 @@ struct Script {
 
 impl Script {
     fn new(legs: usize) -> Arc<Self> {
-        let script = Self::default();
-        *script.legs.lock().unwrap() = legs;
-        script.next.store(100, Ordering::SeqCst);
-        Arc::new(script)
+        Arc::new_cyclic(|this| {
+            let script = Self {
+                this: Weak::clone(this),
+                ..Self::default()
+            };
+            *script.legs.lock().unwrap() = legs;
+            script.next.store(100, Ordering::SeqCst);
+            script
+        })
     }
 
     /// The next id the script hands out, for every kind it records.
@@ -140,6 +149,26 @@ impl wz_capi_port::Tickers for Script {
     }
     fn stop_ticker(&self, _id: TickerId) {
         self.event("stop ticker");
+    }
+}
+
+/// What a cancelled get undoes: the script forgets each leg of the gets the fan tagged, dropping
+/// its callback, after letting go of its own lock.
+impl FanCanceller for Script {
+    fn cancel_fan(&self, key: FanKey) {
+        let forgotten: Vec<ReplyCallback> = self
+            .gets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|get| get.fan == Some(key))
+            .flat_map(|get| {
+                get.legs
+                    .iter()
+                    .filter_map(|slot| slot.lock().unwrap().take())
+            })
+            .collect();
+        drop(forgotten);
     }
 }
 
@@ -306,18 +335,20 @@ impl SessionEngine for Script {
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Refusal> {
+        // The script is what ends the legs a cancelled fan tagged, as an engine is.
+        let tag = match fan {
+            Some(fan) => {
+                let canceller: Weak<dyn FanCanceller> = Weak::<Script>::clone(&self.this);
+                if !fan.attach(&canceller) {
+                    return Ok(0);
+                }
+                Some(fan.key())
+            }
+            None => None,
+        };
         let mut legs = Vec::new();
         for _ in 0..*self.legs.lock().unwrap() {
-            let slot = Arc::new(Mutex::new(Some(leg())));
-            if let Some(fan) = fan {
-                // What a cancelled get undoes: the engine forgets the leg, dropping its callback.
-                let undo = Arc::clone(&slot);
-                fan.record(move || {
-                    let callback = undo.lock().unwrap().take();
-                    drop(callback);
-                });
-            }
-            legs.push(slot);
+            legs.push(Arc::new(Mutex::new(Some(leg()))));
         }
         let count = legs.len();
         self.event(format!("get {keyexpr}"));
@@ -327,6 +358,7 @@ impl SessionEngine for Script {
                 .expect("parameters are text"),
             destination: opts.allowed_destination,
             legs,
+            fan: tag,
         });
         Ok(count)
     }

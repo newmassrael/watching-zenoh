@@ -569,9 +569,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
     /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
     /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
-    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
-    /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
-    /// legs are issued stops the issuing.
+    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
+    /// attached as what ends the legs it tags with the fan's key ([`CancellableFan::attach`]), and
+    /// a fan cancelled while the legs are issued stops the issuing.
     ///
     /// The number of legs issued, `0` for a get that reached nobody (its destination admits
     /// nobody, or no link is up), which is over at once. A refused get issued no leg (`leg` was

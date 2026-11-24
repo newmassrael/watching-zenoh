@@ -5,10 +5,11 @@
 //! callback outside the session's lock, and the leg ends when its Final comes, its deadline
 //! passes, its token is cancelled or its link goes, each time as the drop of its callback.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken};
+use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
@@ -223,6 +224,91 @@ fn a_cancelled_get_ends_without_a_step() {
     assert!(leg.ended, "cancel returns once the leg is over");
     assert!(leg.replies.is_empty(), "{:?}", leg.replies);
     assert_eq!(token.active(), 0);
+}
+
+/// A raw leg's call: the tests of a get's cost read no reply.
+unsafe fn ignore_reply(_context: *mut core::ffi::c_void, _reply: &dyn ReplyView) {}
+
+/// A raw leg's end: one more on the counter its context names.
+unsafe fn count_end(context: *mut core::ffi::c_void) {
+    // SAFETY: the context is the test's counter, which outlives every leg it was minted for.
+    unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A get whose fan is registered on a token lying in its owner's place, as a querier's is, is
+/// asked with no allocation: the fan is the token's registration and the engine tags the leg with
+/// the fan's key, keeping no undo of it. Cancelling the fan ends the leg at once, though nothing
+/// steps the session, and lets go of the token. The CONTROL is the leg open before the cancel.
+#[test]
+fn a_cancellable_get_allocates_nothing_and_its_fan_ends_it() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let token = CancellationToken::default();
+    let fan = CancellableFan::new();
+    // SAFETY: the fan does not move until its drop below, and the token outlives it.
+    assert!(unsafe { fan.register(TokenRef::placed(&token)) });
+    let ended = AtomicUsize::new(0);
+    let context = core::ptr::from_ref(&ended)
+        .cast_mut()
+        .cast::<core::ffi::c_void>();
+    let opts = remote_get();
+    let mut issued = Ok(0);
+    let allocations = super::redial_heap::counted(|| {
+        issued = engine.get_on_wire(
+            "demo/g/a",
+            &WireKey::literal(),
+            &opts,
+            Some(&fan),
+            &mut || {
+                // SAFETY: the counter outlives the leg: the test reads its end below.
+                unsafe { ReplyCallback::raw(ignore_reply, context, Some(count_end)) }
+            },
+        );
+    });
+    assert_eq!(issued, Ok(1));
+    assert_eq!(
+        allocations, 0,
+        "a cancellable get is asked with no allocation"
+    );
+    assert_eq!(
+        ended.load(Ordering::SeqCst),
+        0,
+        "CONTROL: open before the cancel"
+    );
+    fan.cancel();
+    assert_eq!(ended.load(Ordering::SeqCst), 1, "the cancel ended the leg");
+    drop(fan);
+    assert_eq!(token.active(), 0);
+}
+
+/// A get whose fan was cancelled before it is asked issues no leg: no callback is minted and no
+/// query sent. The CONTROL is a get asked after it with no fan, the one query the router sees.
+#[test]
+fn a_get_whose_fan_was_cancelled_asks_nobody() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let cancelled = CancellableFan::new();
+    cancelled.cancel();
+    let minted = AtomicUsize::new(0);
+    let refused = engine.get_on_wire(
+        "demo/g/a",
+        &WireKey::literal(),
+        &remote_get(),
+        Some(&cancelled),
+        &mut || {
+            minted.fetch_add(1, Ordering::SeqCst);
+            ReplyCallback::shared(|_view: &dyn ReplyView| {})
+        },
+    );
+    assert_eq!(refused, Ok(0));
+    assert_eq!(minted.load(Ordering::SeqCst), 0, "no leg was minted");
+    let (issued, _leg) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1), "CONTROL: a get with no fan is asked");
+    until(&engine, "the query to reach the router", || {
+        router.seen(|s| s.queries) == 1
+    });
 }
 
 /// The face's table of pending gets holds `MAX_PENDING_QUERIES` of them: a get past it is
