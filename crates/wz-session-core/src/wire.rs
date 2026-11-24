@@ -43,7 +43,6 @@ pub use crate::network_message::WireStorage;
 ///
 /// A COPY on every profile: a builder's bytes are not part of any frame, so
 /// there is nothing here to share.
-#[allow(dead_code)] // used by the codec-gated builders; unused in no-codec subsets
 pub fn wire_bytes<B: SceByteBuf, const MAX: usize, const MIN: usize>(
     b: &[u8],
 ) -> Result<Bounded<B, MAX, MIN>, CodecError> {
@@ -51,7 +50,6 @@ pub fn wire_bytes<B: SceByteBuf, const MAX: usize, const MIN: usize>(
 }
 
 /// Copy `s` into a text field of a wire-profile message; see [`wire_bytes`].
-#[allow(dead_code)] // used by the codec-gated builders; unused in no-codec subsets
 pub fn wire_string<T: SceStr, const MAX: usize, const MIN: usize>(
     s: &str,
 ) -> Result<Bounded<T, MAX, MIN>, CodecError> {
