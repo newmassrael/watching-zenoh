@@ -1054,7 +1054,7 @@ pub struct AppGroupTransport {
     /// that a datagram asked to be kept is lent again whole: a buffer the session lent, as long
     /// as the group's batch, or one of the transport's own, room for the widest datagram, both
     /// taken when the group is joined.
-    rx: GroupRx,
+    rx: GroupRx<alloc::vec::Vec<u8>>,
     /// How many bytes of `rx` the datagram the last receive lent holds.
     len: usize,
     /// The source of the datagram in `rx`, `None` while it holds none.
@@ -1094,7 +1094,7 @@ impl AppGroupTransport {
                 locator,
                 bound,
             )?),
-            rx: GroupRx::lent_or_own(rx, DATAGRAM_MAX),
+            rx: GroupRx::lent_or_own(rx, || alloc::vec![0; DATAGRAM_MAX]),
             len: 0,
             lent_from: None,
             kept: false,
