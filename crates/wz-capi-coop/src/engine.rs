@@ -137,7 +137,8 @@ use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::KeyWireForm;
-use wz_session_core::policy::{SessionPolicy, SnResolution};
+use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy, SnResolution};
+use wz_session_core::policy_binding::OutsideDomain;
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::push_build;
 use wz_session_core::sample::{QosLevel, SampleKind};
@@ -2291,8 +2292,12 @@ fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
 }
 
 /// Where the Interest `handle` names lies among the Interests the replay tells, in the table's slot
-/// order: read while it stands, for its Final's place once it is let go of.
+/// order: read while it stands, for its Final's place once it is let go of. `None` when it names
+/// none. A build that reaches no pace reads no place (`replay`), so only whether it stands.
 fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<usize> {
+    if !ReplayPacing::REACHABLE {
+        return tables.interests().get(handle?).map(|_| 0);
+    }
     tables.interests().rank_of(handle?)
 }
 
@@ -3171,8 +3176,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`); the driver
         // then finds it lost, so the dial role's face dials again and tells everything over the
         // next link, and any other face goes.
+        // A build that reaches no pace told the peer everything when the link came up.
         let up = match &face.link {
-            Link::Up(wire) if !wire.finished() => Some(wire.actions.clone()),
+            Link::Up(wire) if ReplayPacing::REACHABLE && !wire.finished() => {
+                Some(wire.actions.clone())
+            }
             _ => None,
         };
         if let Some(actions) = up {
@@ -4504,11 +4512,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// the session's policies (a test, or a program whose image is built for another policy); the
     /// snapshots the session opened under state it otherwise (`ReplayPacing::of_snapshot`). `Some`
     /// sends a burst of declarations a step and waits at least the interval before the next burst;
-    /// `None` sends them all in one.
-    pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
+    /// `None` sends them all in one. A pace is refused, and the session keeps what it had, in a
+    /// build whose domain of `declaration-sync-pacing` leaves `on` out
+    /// (`ReplayPacing::REACHABLE`): that build holds no code of the turns, so it answers as a
+    /// snapshot that selects the policy's `on` is answered there.
+    pub fn set_replay_pacing(
+        &self,
+        pacing: Option<ReplayPacing>,
+    ) -> Result<(), OutsideDomain<DeclarationSyncPacing>> {
+        if pacing.is_some() && !ReplayPacing::REACHABLE {
+            return Err(OutsideDomain {
+                value: DeclarationSyncPacing::On,
+            });
+        }
         if let Some(mut core) = self.live() {
             core.0.session.replay_pacing = pacing;
         }
+        Ok(())
     }
 
     /// How the dial role's face replays its declarations now, and the snapshot the session opened
