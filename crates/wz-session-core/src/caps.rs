@@ -618,6 +618,17 @@ pub const MAX_GROUP_MEMBERS: usize = generated::MAX_GROUP_MEMBERS;
 /// transports that stand with those the listener was told.
 pub const MAX_CONNECTIVITY_REPLAY_EVENTS: usize = generated::MAX_CONNECTIVITY_REPLAY_EVENTS;
 
+/// The rows of faces that came or went a session holds for the program's watchers of its faces
+/// between two deliveries, reserved at its open: a session that holds fewer faces reserves fewer.
+/// A row past them is let go of and counted on the last row kept, which tells the watchers of it
+/// once (`face::FaceLinkRow::lost_after`). At least `1`.
+pub const MAX_FACE_WATCH_ROWS: usize = generated::MAX_FACE_WATCH_ROWS;
+
+const _: () = assert!(
+    MAX_FACE_WATCH_ROWS >= 1,
+    "a queue of no row has no row to tell a watcher it lost one"
+);
+
 /// Maximum number of static-scouting peer locators
 /// ([`crate::scout_static::synth_static_locators`] output capacity =
 /// `deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
