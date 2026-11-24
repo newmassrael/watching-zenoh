@@ -3561,7 +3561,7 @@ enum LentDeclaration<'a> {
     },
     #[cfg(feature = "declare-keyexpr")]
     Keyexpr {
-        mapping_id: crate::wire_id::ExprId,
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
         suffix: &'a str,
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
@@ -15553,9 +15553,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R300 — pre-emit gate. Both checks run BEFORE any wire
         // bytes leave or any mapping-table side effect; on Err
         // the session-link state is unchanged.
-        if mapping_id == 0 {
+        let Some(declared) = core::num::NonZero::new(mapping_id) else {
             return Err(SendDeclareError::ReservedMappingIdZero);
-        }
+        };
         // The upper end of the id space is the type: a mapping id is an
         // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
         // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
@@ -15565,10 +15565,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "tx-lend-only")]
         if !self.rewrites_originated_keys() {
             return self
-                .dispatch_declare_lent(&LentDeclaration::Keyexpr { mapping_id, suffix })
+                .dispatch_declare_lent(&LentDeclaration::Keyexpr {
+                    mapping_id: declared,
+                    suffix,
+                })
                 .map_err(SendDeclareError::from);
         }
-        let declare = build_declare_kexpr(mapping_id, suffix)?;
+        let declare = build_declare_kexpr(declared.get(), suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
         // DEFINITION (this is a direct `dispatch_declare`, below the egress
         // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
@@ -17518,11 +17521,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // so does this.
         #[cfg(all(feature = "declare-interest", feature = "tx-lend-only"))]
         {
-            if !current && !future {
-                return Err(SendWireError::from(
-                    sce_forge_runtime::codec::CodecError::PresentIfMismatch,
-                ));
-            }
             let interest = crate::lent_control::interest(
                 interest_id,
                 kinds,

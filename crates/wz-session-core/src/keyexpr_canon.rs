@@ -352,7 +352,14 @@ pub fn canonize_in_place(
         len = match piece? {
             Piece::Text { from, to } => match len.checked_add(to.saturating_sub(from)) {
                 Some(end) if (len..=to).contains(&from) && to <= text.len() => {
-                    text.copy_within(from..to, len);
+                    // SAFETY: `len <= from <= to <= text.len()`, so the span read (`from..to`) and
+                    // the span written (`len..end`, as long and starting no later) lie in `text`;
+                    // `ptr::copy` moves spans that overlap, as `copy_within` does, whose own
+                    // check of the same bounds the guard above already makes.
+                    unsafe {
+                        let base = text.as_mut_ptr();
+                        core::ptr::copy(base.add(from), base.add(len), to - from);
+                    }
                     end
                 }
                 _ => return Err(KeyexprCanonError::ExceedsCapacity),
