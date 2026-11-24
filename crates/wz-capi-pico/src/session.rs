@@ -1855,12 +1855,13 @@ fn write_unicast_endpoints(
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     // What the config names, read where it lies; the texts themselves are written into the
-    // engine's rows by the open (`write_endpoints` below), the config going with them.
-    let Ok(open) = open_config(&request.config) else {
-        // `open_request` read the same config and took its mode.
-        return crate::result::Z_ERR_CONFIG_INVALID_MODE;
-    };
-    let (stated, listen) = (open.connect, open.listen);
+    // engine's rows by the open (`write_unicast_endpoints` below), the config going with them.
+    // The keys `open_config` reads them by: `open_request` read the config so and took its mode,
+    // which is not judged again.
+    let (stated, listen) = (
+        request.config.get(Z_CONFIG_CONNECT_KEY),
+        request.config.get(Z_CONFIG_LISTEN_KEY),
+    );
     // A build without `peer` is a client build: `z_open` refused a listener and the peer role
     // before this.
     #[cfg(not(feature = "peer"))]
