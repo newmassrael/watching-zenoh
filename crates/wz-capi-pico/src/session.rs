@@ -1023,16 +1023,16 @@ unsafe fn open_request(
         key_ids,
     );
     #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-    let scouted: Vec<String> = match (connect, listen) {
+    let scouted: ScoutedLocators = match (connect, listen) {
         (None, None) => crate::scout::locators_by_scout(cfg, &policy, &limits)?,
         _ => Vec::new(),
     };
     #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
-    let scouted: Vec<String> = {
+    let scouted = {
         if connect.is_none() && listen.is_none() {
             return Err(crate::result::Z_ERR_SCOUT_NO_RESULTS);
         }
-        Vec::new()
+        ScoutedLocators::default()
     };
     // The time base the config names, which the session holds from here on.
     #[cfg(feature = "time-base")]
@@ -1359,6 +1359,27 @@ mod open_config_tests {
     }
 }
 
+/// The locators of the node a scout found for a config that names none. A cooperative build
+/// without a scout finds none, so its open carries no list to let go on each of its exits.
+#[cfg(any(feature = "scout", feature = "scout-mcu", feature = "engine-tokio"))]
+type ScoutedLocators = Vec<String>;
+#[cfg(not(any(feature = "scout", feature = "scout-mcu", feature = "engine-tokio")))]
+type ScoutedLocators = [String; 0];
+
+#[cfg(all(
+    test,
+    not(any(feature = "scout", feature = "scout-mcu", feature = "engine-tokio"))
+))]
+mod scouted_locators_tests {
+    /// A cooperative build without a scout opens on no scouted list: none is held in the open's
+    /// request, and none is let go on any of its exits.
+    #[test]
+    fn a_build_without_a_scout_opens_on_no_scouted_list() {
+        assert_eq!(core::mem::size_of::<super::ScoutedLocators>(), 0);
+        assert!(!core::mem::needs_drop::<super::ScoutedLocators>());
+    }
+}
+
 /// What `z_open` read off the C config and its options, for the engine that opens it.
 struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
@@ -1375,7 +1396,7 @@ struct OpenRequest {
     config: crate::object_slot::Placed<ConfigState>,
     /// The locators of the node a scout found, for a config that names none.
     #[cfg(not(feature = "engine-tokio"))]
-    scouted: Vec<String>,
+    scouted: ScoutedLocators,
     dial_whatami: WhatAmI,
     /// The id the config names for the session, as an INIT carries it, `None` for one the
     /// engine mints.
