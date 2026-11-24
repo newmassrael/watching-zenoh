@@ -20,7 +20,7 @@
 
 use core::ptr::NonNull;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
+use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -122,6 +122,12 @@ pub(crate) struct LivelinessRow {
     sink: LivelinessSink,
     /// How many calls of the callback run, and whether the subscriber was undeclared.
     latch: CallLatch,
+}
+
+impl super::RowHolds for LivelinessRow {
+    fn into_holds(self) -> WireHolds {
+        self.wire.into_holds()
+    }
 }
 
 impl LivelinessRow {

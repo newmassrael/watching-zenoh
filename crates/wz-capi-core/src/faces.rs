@@ -892,7 +892,7 @@ impl QueryLeg<'_> {
         // A face's link names the key as its own key-wire form says.
         let linked = match self {
             QueryLeg::Face(session) => on_link(session, keyexpr, wire),
-            _ => std::borrow::Cow::Borrowed(wire),
+            _ => wz_capi_port::LinkKey::Lent(wire),
         };
         let wire: &WireKey = &linked;
         match self {
@@ -1020,10 +1020,10 @@ fn on_link<'w>(
     session: &TokioSession,
     keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
+) -> wz_capi_port::LinkKey<'w> {
     match wz_capi_port::wire_on_link(session.actions().key_wire_on_link(keyexpr)) {
-        Some(linked) => std::borrow::Cow::Owned(linked),
-        None => std::borrow::Cow::Borrowed(wire),
+        Some(linked) => wz_capi_port::LinkKey::Made(linked),
+        None => wz_capi_port::LinkKey::Lent(wire),
     }
 }
 
@@ -1034,8 +1034,8 @@ fn on_link<'w>(
     _session: &TokioSession,
     _keyexpr: &str,
     wire: &'w WireKey,
-) -> std::borrow::Cow<'w, WireKey> {
-    std::borrow::Cow::Borrowed(wire)
+) -> wz_capi_port::LinkKey<'w> {
+    wz_capi_port::LinkKey::Lent(wire)
 }
 
 /// Declare a queryable on one face in `wire`'s form.
@@ -3254,6 +3254,13 @@ impl SharedSession {
         }
     }
 
+    /// Give back to the session what `wire` held of its declarations ([`WireKey::into_holds`]),
+    /// the key let go of: an entry taken out of the registry, or a key the session refused. With
+    /// no lock held, since the last hold of a declaration retracts it, which takes the lock.
+    fn give_back(&self, wire: WireKey) {
+        wire.let_go(self);
+    }
+
     /// The registry lock, poison-tolerant. A C callback that panics is caught
     /// at the FFI boundary (`crate::ffi`), so poisoning should not happen; if
     /// it somehow does, the registry is still structurally sound (a panic
@@ -4028,7 +4035,19 @@ impl SharedSession {
                 .collect();
             (entries, copies)
         };
-        drop(dropped);
+        // What each entry's key held goes back with the entry, outside the lock.
+        let ((subs, qbls, live_subs, matches), copies) = dropped;
+        for entry in subs {
+            self.give_back(entry.wire);
+        }
+        for entry in qbls {
+            self.give_back(entry.wire);
+        }
+        for entry in live_subs {
+            self.give_back(entry.wire);
+        }
+        drop(matches);
+        drop(copies);
     }
 
     /// One inbound iteration event for `id` — dispatched into that face's own
@@ -5185,7 +5204,11 @@ impl SharedSession {
         links: LinkRestriction,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -5261,7 +5284,9 @@ impl SharedSession {
         // The per-face tokens go first, so their retractions reach the wire
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         // And the session's own liveliness subscribers, last: the token is gone from the wire
         // when they hear of it.
         if let Some((legs, keyexpr)) = told {
@@ -5321,7 +5346,11 @@ impl SharedSession {
         sink: LivelinessSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -6232,7 +6261,11 @@ impl SharedSession {
         sink: SubscriberSink,
     ) -> Option<SubId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
             zid_text(&self.zid),
@@ -7063,9 +7096,13 @@ impl SharedSession {
         drop(dropped_groups);
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
         drop(dropped_group_live);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         drop(dropped_live);
-        drop(dropped_live_entry);
+        if let Some(entry) = dropped_live_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
@@ -7220,7 +7257,11 @@ impl SharedSession {
         sink: QueryableSink,
     ) -> Option<QblId> {
         let mut guard = self.lock();
-        let id = guard.take_entity_id()?;
+        let Some(id) = guard.take_entity_id() else {
+            drop(guard);
+            self.give_back(wire);
+            return None;
+        };
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
@@ -7307,7 +7348,9 @@ impl SharedSession {
         drop(dropped);
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
         drop(dropped_groups);
-        drop(dropped_entry);
+        if let Some(entry) = dropped_entry {
+            self.give_back(entry.wire);
+        }
         if let Some(key) = local_key {
             self.refresh_local_matches(
                 FilterPlane::Queryables {
