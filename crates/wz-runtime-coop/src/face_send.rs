@@ -301,14 +301,16 @@ impl PublishRun {
         }
     }
 
-    /// What follows a fan-out that stopped at `stuck` (`None` when it reached every face), the
-    /// clock reading `now_us`. The wait for a slot is the publish's `wait_before_close` from the
-    /// first face that found none, as a blocking send's is.
-    pub fn fanned(&mut self, stuck: Option<FaceId>, now_us: u64) -> Fanned {
+    /// What follows a fan-out that stopped at `stuck` (`None` when it reached every face).
+    /// `now_us` reads the clock, which only a fan-out that stopped asks. The wait for a slot is
+    /// the publish's `wait_before_close` from the first face that found none, as a blocking
+    /// send's is.
+    pub fn fanned(&mut self, stuck: Option<FaceId>, now_us: impl FnOnce() -> u64) -> Fanned {
         self.stuck = stuck;
         let then = match stuck {
             None => Then::Done,
             Some(stuck) => {
+                let now_us = now_us();
                 let wait_us = self.wait_us;
                 let deadline_us = *self
                     .deadline_us
@@ -451,7 +453,7 @@ mod tests {
             }
         );
         assert_eq!(
-            run.fanned(None, 100),
+            run.fanned(None, || 100),
             Fanned {
                 hand_after: true,
                 then: Then::Done
@@ -460,12 +462,22 @@ mod tests {
         let mut bare = PublishRun::new(false, false, 5_000, DIAL);
         assert!(!bare.begin().hand_before);
         assert_eq!(
-            bare.fanned(None, 100),
+            bare.fanned(None, || 100),
             Fanned {
                 hand_after: false,
                 then: Then::Done
             }
         );
+    }
+
+    /// A fan-out that reached every face does not read the clock.
+    #[test]
+    fn a_fan_out_that_reached_every_face_reads_no_clock() {
+        let mut run = PublishRun::new(true, true, 5_000, DIAL);
+        let fanned = run.fanned(None, || {
+            panic!("the clock is read only when a face found no slot")
+        });
+        assert_eq!(fanned.then, Then::Done);
     }
 
     /// A fan-out that stops at a face waits out the publish's whole wait from then, and goes on
@@ -477,7 +489,7 @@ mod tests {
         let mut run = PublishRun::new(true, true, 5_000, DIAL);
         assert_eq!(run.begin().pass, Pass::first(true));
         assert_eq!(
-            run.fanned(Some(7), 1_000).then,
+            run.fanned(Some(7), || 1_000).then,
             Then::WaitForSlots {
                 stuck: 7,
                 left_us: 5_000
@@ -499,7 +511,7 @@ mod tests {
             "no link was waited on"
         );
         assert_eq!(
-            run.fanned(Some(9), 2_000).then,
+            run.fanned(Some(9), || 2_000).then,
             Then::WaitForSlots {
                 stuck: 9,
                 left_us: 4_000
@@ -515,20 +527,20 @@ mod tests {
             "past the deadline every send is the caller's own"
         );
         assert_eq!(
-            run.fanned(Some(9), 6_500).then,
+            run.fanned(Some(9), || 6_500).then,
             Then::WaitForSlots {
                 stuck: 9,
                 left_us: 0
             }
         );
-        assert_eq!(run.fanned(None, 6_500).then, Then::Done);
+        assert_eq!(run.fanned(None, || 6_500).then, Then::Done);
     }
 
     /// A fan-out that stopped at the dial role's face goes on from the first face, which it is.
     #[test]
     fn a_fan_out_stopped_at_the_dial_face_goes_on_from_the_first() {
         let mut run = PublishRun::new(false, true, 1_000, DIAL);
-        let _ = run.fanned(Some(DIAL), 0);
+        let _ = run.fanned(Some(DIAL), || 0);
         assert_eq!(
             run.waited(true, 10),
             Pass {
