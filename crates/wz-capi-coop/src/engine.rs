@@ -5225,8 +5225,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Give back to the session what a key held of its declarations (`RowHolds`), with no lock
     /// of the session held: a release may retract a declaration, which takes the lock.
+    // Out of line: every undeclaration, refused declaration and close gives holds back, and each
+    // would otherwise carry the releases and the drop of what the key kept.
+    #[inline(never)]
     fn give_back(&self, holds: WireHolds) {
         holds.release(self);
+    }
+
+    /// Let go of `wire`, a key no row came to hold, giving back what it held
+    /// ([`Self::give_back`]), with no lock of the session held.
+    // Out of line: each refusal of a declaration lets its key go, and one body serves them.
+    #[inline(never)]
+    fn let_go_of_key(&self, wire: WireKey) {
+        self.give_back(wire.into_holds());
     }
 
     /// Let go of each row whose last call ended after it was undeclared, when a call said one may
@@ -6264,7 +6275,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6275,7 +6286,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(
@@ -6802,7 +6813,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: QueryableSink,
     ) -> Result<QblId, Declined> {
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6813,7 +6824,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(
@@ -7465,7 +7476,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         });
         // The row holds the declaration its key is named by, so the key the ABI named it by is
         // not kept: what it held goes back, declared or refused, with no lock held.
-        wire.let_go(self);
+        self.let_go_of_key(wire);
         declared
     }
 
@@ -7522,7 +7533,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7534,7 +7545,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(wire.mapping_id, Retraction::ById);
