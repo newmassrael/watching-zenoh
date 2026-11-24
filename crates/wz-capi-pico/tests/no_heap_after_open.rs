@@ -272,11 +272,13 @@ enum Round {
     Delete,
     PutEncoded,
     PutTimestamped,
+    AdvancedPut,
+    AdvancedHistory,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 22] = [
+    const ALL: [Round; 24] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -299,6 +301,8 @@ impl Round {
         Round::Delete,
         Round::PutEncoded,
         Round::PutTimestamped,
+        Round::AdvancedPut,
+        Round::AdvancedHistory,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -312,6 +316,7 @@ impl Round {
             Round::QueryableDeclare => cfg!(feature = "queryable"),
             Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
+            Round::AdvancedPut | Round::AdvancedHistory => cfg!(feature = "advanced"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -341,7 +346,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 25] = [
+const FAMILIES: [(&str, Round, Part); 28] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -371,6 +376,17 @@ const FAMILIES: [(&str, Round, Part); 25] = [
     ("delete", Round::Delete, Part::Calling),
     ("put-encoded", Round::PutEncoded, Part::Calling),
     ("put-timestamped", Round::PutTimestamped, Part::Calling),
+    ("advanced-put", Round::AdvancedPut, Part::Calling),
+    (
+        "advanced-subscriber-receive",
+        Round::AdvancedPut,
+        Part::Others,
+    ),
+    (
+        "advanced-subscriber-history",
+        Round::AdvancedHistory,
+        Part::All,
+    ),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -627,6 +643,134 @@ impl Replay {
     }
 }
 
+/// The key the advanced publisher puts on and the advanced subscribers hear. Synthetic.
+#[cfg(feature = "advanced")]
+const ADVANCED_KEY: &CStr = c"noheap/advanced";
+
+/// An advanced publisher of the dialling session with its cache on, and an advanced subscriber of
+/// the listening session with its history on, both on `ADVANCED_KEY`: what a program of the
+/// release profile's advanced plane holds.
+#[cfg(feature = "advanced")]
+struct Advanced {
+    publisher: wz_capi_pico::advanced::ze_owned_advanced_publisher_t,
+    subscriber: wz_capi_pico::advanced::ze_owned_advanced_subscriber_t,
+}
+
+#[cfg(feature = "advanced")]
+impl Advanced {
+    /// The publisher, with one sample in its cache that the subscriber heard, and the subscriber.
+    unsafe fn new(pair: &Pair) -> Self {
+        use wz_capi_pico::advanced::{
+            ze_advanced_publisher_options_default, ze_advanced_publisher_options_t,
+            ze_declare_advanced_publisher,
+        };
+        let ke = view(ADVANCED_KEY);
+        let mut options: ze_advanced_publisher_options_t = std::mem::zeroed();
+        ze_advanced_publisher_options_default(&mut options);
+        options.cache.is_enabled = true;
+        options.cache.max_samples = 4;
+        let mut publisher = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_publisher(
+                z_session_loan(pair.dialler()),
+                &mut publisher,
+                z_view_keyexpr_loan(&ke),
+                &options,
+            ),
+            Z_OK,
+            "the advanced publisher is declared"
+        );
+        let mut advanced = Self {
+            publisher,
+            subscriber: Self::subscriber(pair),
+        };
+        advanced.put_and_hear(&pair.counts);
+        advanced
+    }
+
+    /// An advanced subscriber of the listening session on `ADVANCED_KEY`, its history on, which
+    /// counts what it hears as the pair's subscriber does.
+    unsafe fn subscriber(pair: &Pair) -> wz_capi_pico::advanced::ze_owned_advanced_subscriber_t {
+        use wz_capi_pico::advanced::{
+            ze_advanced_subscriber_options_default, ze_advanced_subscriber_options_t,
+            ze_declare_advanced_subscriber,
+        };
+        let ke = view(ADVANCED_KEY);
+        let mut options: ze_advanced_subscriber_options_t = std::mem::zeroed();
+        ze_advanced_subscriber_options_default(&mut options);
+        options.history.is_enabled = true;
+        let mut closure = pipe_pair::sample_closure(&pair.counts);
+        let mut subscriber = std::mem::zeroed();
+        assert_eq!(
+            ze_declare_advanced_subscriber(
+                z_session_loan(pair.listener()),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                &mut options,
+            ),
+            Z_OK,
+            "the advanced subscriber is declared"
+        );
+        subscriber
+    }
+
+    /// Put one sample through the advanced publisher, which its cache keeps, and wait for the
+    /// advanced subscriber to hear it.
+    unsafe fn put_and_hear(&mut self, counts: &pipe_pair::Counts) {
+        use wz_capi_pico::advanced::{ze_advanced_publisher_loan, ze_advanced_publisher_put};
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            ze_advanced_publisher_put(
+                ze_advanced_publisher_loan(&self.publisher),
+                z_bytes_move(&mut bytes),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "an advanced put is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "an advanced put did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Declare an advanced subscriber whose history asks the publisher's cache, wait for it to
+    /// hear what the cache answers, and undeclare it.
+    unsafe fn history(&self, pair: &Pair) {
+        use wz_capi_pico::advanced::{
+            ze_advanced_subscriber_move, ze_undeclare_advanced_subscriber,
+        };
+        let heard = pair.counts.heard.load(Ordering::SeqCst);
+        let mut subscriber = Self::subscriber(pair);
+        assert!(
+            wait_for(WAIT_BOUND, || pair.counts.heard.load(Ordering::SeqCst)
+                > heard),
+            "a history did not cross within {WAIT_BOUND:?}"
+        );
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut subscriber)),
+            Z_OK
+        );
+    }
+
+    unsafe fn drop_both(mut self) {
+        use wz_capi_pico::advanced::{
+            ze_advanced_publisher_move, ze_advanced_subscriber_move,
+            ze_undeclare_advanced_publisher, ze_undeclare_advanced_subscriber,
+        };
+        assert_eq!(
+            ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut self.subscriber)),
+            Z_OK
+        );
+        assert_eq!(
+            ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&mut self.publisher)),
+            Z_OK
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The rounds.
 
@@ -648,6 +792,8 @@ struct Bench {
     e2e: E2e,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
+    #[cfg(feature = "advanced")]
+    advanced: Advanced,
 }
 
 impl Bench {
@@ -679,6 +825,8 @@ impl Bench {
         let e2e = E2e::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
+        #[cfg(feature = "advanced")]
+        let advanced = Advanced::new(&pair);
         let ke = view(DATA_KEY);
         let mut publisher: z_owned_publisher_t = std::mem::zeroed();
         assert_eq!(
@@ -719,6 +867,8 @@ impl Bench {
             e2e,
             #[cfg(feature = "replay-cache")]
             replay,
+            #[cfg(feature = "advanced")]
+            advanced,
         }
     }
 
@@ -784,6 +934,14 @@ impl Bench {
             Round::Delete => self.delete(),
             Round::PutEncoded => self.put_encoded(),
             Round::PutTimestamped => self.put_timestamped(),
+            Round::AdvancedPut => {
+                #[cfg(feature = "advanced")]
+                self.advanced.put_and_hear(&self.pair.counts);
+            }
+            Round::AdvancedHistory => {
+                #[cfg(feature = "advanced")]
+                self.advanced.history(&self.pair);
+            }
         }
     }
 
@@ -1183,6 +1341,8 @@ impl Bench {
         self.e2e.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
+        #[cfg(feature = "advanced")]
+        self.advanced.drop_both();
         #[cfg(feature = "query")]
         {
             let mut querier = self.querier;
