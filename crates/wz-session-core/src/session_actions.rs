@@ -3599,8 +3599,9 @@ enum UnicastPush {
     /// every try gets as far as the lane is deep and no further. Such a message is the caller's
     /// to send with a wait; a chain the lane can hold whole is probed like a frame.
     ///
-    /// Only a build that fragments has a chain to refuse.
-    #[cfg(feature = "transport-fragmentation")]
+    /// Only a build that fragments has a chain to refuse, and only one with `alloc` has a
+    /// sender that may not wait (`DispatchStage::Probe`).
+    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
     Chain,
 }
 
@@ -9078,6 +9079,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session gave the link when it was established ([`Self::record_established_at`]), asked
     /// of the same parameters.
     #[cfg(all(
+        feature = "alloc",
         feature = "transport-fragmentation",
         any(
             feature = "codec-push",
@@ -12001,11 +12003,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // counted as a message sent and not a congestion drop, the message is the caller's.
             #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
             Ok(UnicastPush::Chain) => Ok(Dispatched::Chain),
-            // Only a probe is answered `Chain`, and a probe exists with `alloc`.
-            #[cfg(all(not(feature = "alloc"), feature = "transport-fragmentation"))]
-            Ok(UnicastPush::Chain) => {
-                unreachable!("a chain is refused only to a sender that may not wait")
-            }
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
             // and the refusal was counted where it was raised (`refuse_tx`).
@@ -12387,7 +12384,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
         // with the SN of this message given back; the sender sends it waiting. The chain that
         // fits may still find the lane full and is abandoned and put down for later, which is
-        // what a probe does with a frame.
+        // what a probe does with a frame. A probe exists with `alloc`.
+        #[cfg(feature = "alloc")]
         if deadline.is_probe() {
             let before_last = plan
                 .remaining_fragments()
