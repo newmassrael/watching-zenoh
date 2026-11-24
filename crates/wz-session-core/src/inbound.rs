@@ -2199,9 +2199,10 @@ pub(crate) struct ControlRead<'a> {
     feature = "session-unicast"
 ))]
 impl<'a> ControlRead<'a> {
-    /// The message's facts ([`ControlFacts`]), borrowing the unit it was read from.
-    pub(crate) fn facts(&self) -> ControlFacts<'a> {
-        self.facts
+    /// The message's facts ([`ControlFacts`]), borrowing the unit it was read from. Lent where
+    /// the read left them: every judgement of them reads them by reference.
+    pub(crate) fn facts(&self) -> &ControlFacts<'a> {
+        &self.facts
     }
 
     /// The extension chain the judgement reads beside [`Self::facts`], as
@@ -3648,7 +3649,7 @@ mod control_read_tests {
                 );
                 assert_eq!(used, decoded_used, "{wire:02x?}");
                 assert_eq!(
-                    format!("{:?}", control_event(message.ext_admission(), &facts)),
+                    format!("{:?}", control_event(message.ext_admission(), facts)),
                     format!("{:?}", inbound_to_fsm_event(&frame)),
                     "{wire:02x?}"
                 );
@@ -3967,7 +3968,7 @@ mod control_read_tests {
         ];
         let (message, _) = read_control(&wire).expect("an InitSyn with a chain");
         let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
-        let read: ControlFacts<'_> = message.facts();
+        let read: ControlFacts<'_> = *message.facts();
         let held: ControlFacts<'_> = frame.control_facts();
         assert_eq!(format!("{read:?}"), format!("{held:?}"));
         assert_eq!(

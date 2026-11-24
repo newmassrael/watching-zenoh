@@ -951,6 +951,35 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
     }
 }
 
+/// What judging one fragment leaves to do: its outcome, and the chain it ends when it ends one.
+///
+/// Each judgement that ends a chain names the ending here rather than ending it, so the one
+/// ingest walk ends every such chain at one site
+/// ([`ReassemblyDispatcher::ingest_delivering`]).
+#[derive(Clone, Copy, Debug)]
+enum Judged {
+    /// The fragment's outcome; no chain is ended by it.
+    Outcome(IngestOutcome),
+    /// The chain in slot `idx` ends as `ending` says, and the fragment's outcome is `outcome`.
+    Ends {
+        idx: usize,
+        ending: SlotEnding,
+        outcome: IngestOutcome,
+    },
+}
+
+impl Judged {
+    /// The chain in slot `idx` ended through the machine's abort arm `event`, reported as
+    /// ended for `reason`, the Router's own word for why it sent `event`.
+    fn abort(idx: usize, event: ReassemblySlotEvent, reason: AbortReason) -> Self {
+        Self::Ends {
+            idx,
+            ending: SlotEnding::Abort(event),
+            outcome: IngestOutcome::Aborted(reason),
+        }
+    }
+}
+
 /// How a slot gives up the chain it holds ([`Slot::end`]).
 #[derive(Clone, Copy, Debug)]
 enum SlotEnding {
@@ -1269,18 +1298,43 @@ where
         deliver: F,
     ) -> IngestOutcome {
         self.displaced = None;
+        match self.judge(frag, ring, now_ms, hand, deliver) {
+            Judged::Outcome(outcome) => outcome,
+            Judged::Ends {
+                idx,
+                ending,
+                outcome,
+            } => {
+                self.end_slot(idx, ending);
+                outcome
+            }
+        }
+    }
+
+    /// Judge `frag` by the marker rules, its admission and its slot's machine, delivering the
+    /// chain it completes. A chain the judgement ends is named in the answer, not ended here.
+    fn judge<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        frag: Fragment<'_>,
+        ring: SnRing,
+        now_ms: u64,
+        hand: Hand,
+        deliver: F,
+    ) -> Judged {
         if self.config.fragmentation_markers {
-            if let Some(outcome) = self.apply_chain_boundary_markers(&frag) {
-                return outcome;
+            if let Some(judged) = self.apply_chain_boundary_markers(&frag) {
+                return judged;
             }
         }
         let admitted = match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
             Some(idx) => self.admit_continuation(idx, &frag, ring, now_ms),
-            None => self.admit_chain_start(&frag, now_ms),
+            None => self
+                .admit_chain_start(&frag, now_ms)
+                .map_err(Judged::Outcome),
         };
         match admitted {
             Ok((idx, starts)) => self.drive_open_chain(idx, frag, starts, hand, deliver),
-            Err(outcome) => outcome,
+            Err(judged) => judged,
         }
     }
 
@@ -1362,7 +1416,7 @@ where
     /// ahead of the SN machinery on a session whose negotiated patch level
     /// carries them ([`ReassemblyConfig::fragmentation_markers`]).
     ///
-    /// `Some(outcome)` means the fragment is CONSUMED here and must not
+    /// `Some(judged)` means the fragment is CONSUMED here and must not
     /// reach the staging path; `None` means carry on to the normal
     /// start / continuation split, whose own `find_active` re-resolves the
     /// slot this may have just released.
@@ -1380,7 +1434,7 @@ where
     /// missing-start-marker rule rather than reported as an abort — there
     /// is nothing to abort, and the sender is announcing the end of a
     /// chain this receiver never saw the start of.
-    fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<IngestOutcome> {
+    fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<Judged> {
         let active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
         if frag.markers.first {
             // A restart supersedes whatever is staged on this key: the open
@@ -1394,10 +1448,12 @@ where
         let Some(idx) = active else {
             // No marker and no chain in progress: this is not a chain
             // start, whatever its SN says.
-            return Some(IngestOutcome::Refused(RefuseReason::MissingStartMarker));
+            return Some(Judged::Outcome(IngestOutcome::Refused(
+                RefuseReason::MissingStartMarker,
+            )));
         };
         if frag.markers.dropped {
-            return Some(self.abort_peer_drop(idx));
+            return Some(Self::abort_peer_drop(idx));
         }
         None
     }
@@ -1412,8 +1468,8 @@ where
     /// `Receiving` is not freed at all, and the Router's key can never read
     /// free over an engine still parked there
     /// (`the_drop_arm_leaves_the_slot_fsm_in_a_declared_state`).
-    fn abort_peer_drop(&mut self, idx: usize) -> IngestOutcome {
-        self.abort(
+    fn abort_peer_drop(idx: usize) -> Judged {
+        Judged::abort(
             idx,
             ReassemblySlotEvent::FragmentDrop,
             AbortReason::SenderDropped,
@@ -1677,11 +1733,13 @@ where
         frag: &Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
-    ) -> Result<(usize, bool), IngestOutcome> {
+    ) -> Result<(usize, bool), Judged> {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
         let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
-            return self.admit_chain_start(frag, now_ms);
+            return self
+                .admit_chain_start(frag, now_ms)
+                .map_err(Judged::Outcome);
         };
         let last_sn = open.last_sn;
         // A payload the chain cannot hold is a codec error for the machine,
@@ -1705,11 +1763,11 @@ where
         // than as the judgement it cannot make; the slot FSM's one abort arm for
         // "this continuation cannot be admitted" serves both words.
         if let Err(reason) = ring.admits(last_sn, frag.sn) {
-            return Err(self.abort(idx, ReassemblySlotEvent::FragmentOoo, reason));
+            return Err(Judged::abort(idx, ReassemblySlotEvent::FragmentOoo, reason));
         }
         if !fits {
             self.note_capacity_overflow(staged.saturating_add(frag.payload.len()));
-            return Err(self.abort(
+            return Err(Judged::abort(
                 idx,
                 ReassemblySlotEvent::CodecError,
                 AbortReason::CapacityOverflow,
@@ -1731,7 +1789,7 @@ where
         starts: bool,
         hand: Hand,
         deliver: F,
-    ) -> IngestOutcome {
+    ) -> Judged {
         // `Empty --fragment.more/last--> { Receiving | Complete }` for a first fragment and
         // `Receiving --fragment.more/last--> { Receiving | Complete }` for a continuation, the
         // wire `more` bit naming the event. A well-formed chain's first fragment has M=1 (a
@@ -1762,11 +1820,14 @@ where
             duties & (duty::APPEND | duty::FINALIZE) == 0
         };
         if disagrees {
-            self.end_slot(idx, SlotEnding::Replace);
-            return if starts {
-                IngestOutcome::Refused(RefuseReason::PoolExhausted)
-            } else {
-                IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+            return Judged::Ends {
+                idx,
+                ending: SlotEnding::Replace,
+                outcome: if starts {
+                    IngestOutcome::Refused(RefuseReason::PoolExhausted)
+                } else {
+                    IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+                },
             };
         }
         if starts {
@@ -1790,29 +1851,20 @@ where
             } else {
                 SlotEnding::Abort(ReassemblySlotEvent::CodecError)
             };
-            self.end_slot(idx, ending);
-            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
+            return Judged::Ends {
+                idx,
+                ending,
+                outcome: IngestOutcome::Aborted(AbortReason::CapacityOverflow),
+            };
         }
         if !completes {
-            return if starts {
+            return Judged::Outcome(if starts {
                 IngestOutcome::Begun
             } else {
                 IngestOutcome::Continued
-            };
+            });
         }
-        self.finish(idx, hand, deliver)
-    }
-
-    /// Send the open chain in `idx` an abort `event` and report it ended for
-    /// `reason`, the Router's own word for why it sent `event`.
-    fn abort(
-        &mut self,
-        idx: usize,
-        event: ReassemblySlotEvent,
-        reason: AbortReason,
-    ) -> IngestOutcome {
-        self.end_slot(idx, SlotEnding::Abort(event));
-        IngestOutcome::Aborted(reason)
+        Judged::Outcome(self.finish(idx, hand, deliver))
     }
 
     /// End the chain in `idx` as `ending` says ([`Slot::end`]). An abort arm the machine does
@@ -1840,11 +1892,7 @@ where
     pub fn abort_channel(&mut self, peer_key: &[u8], priority: Priority, reliable: bool) -> bool {
         match self.find_active(peer_key, reliable, priority) {
             Some(idx) => {
-                self.abort(
-                    idx,
-                    ReassemblySlotEvent::FragmentOoo,
-                    AbortReason::OutOfOrder,
-                );
+                self.end_slot(idx, SlotEnding::Abort(ReassemblySlotEvent::FragmentOoo));
                 true
             }
             None => false,
@@ -1865,11 +1913,7 @@ where
                 .and_then(|slot| slot.open.as_ref())
                 .is_some_and(|open| open.key.same_peer(peer_key));
             if of_peer {
-                self.abort(
-                    idx,
-                    ReassemblySlotEvent::FragmentOoo,
-                    AbortReason::OutOfOrder,
-                );
+                self.end_slot(idx, SlotEnding::Abort(ReassemblySlotEvent::FragmentOoo));
                 // At most `SLOTS`.
                 ended = ended.saturating_add(1);
             }

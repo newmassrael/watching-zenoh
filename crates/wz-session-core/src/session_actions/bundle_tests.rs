@@ -572,7 +572,7 @@ mod handshake_records {
             0x03,
         ];
         let (read, _) = read_control(&wire).expect("an InitAck");
-        let facts = read.facts();
+        let facts = *read.facts();
         actions.observe_control(&facts);
         assert_eq!(
             actions.fact_remote_peer_zid(|slot| *slot).as_deref(),
