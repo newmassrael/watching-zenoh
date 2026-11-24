@@ -30,8 +30,6 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 // the crate does not link `alloc` at all, which `lib.rs` keeps so that a use creeping back into the
 // slot profile is a compile error and not a silent allocation.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-use alloc::collections::VecDeque;
-#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec;
@@ -41,9 +39,13 @@ use alloc::vec::Vec;
 #[cfg(feature = "session-slot")]
 use core::marker::PhantomData;
 
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use wz_session_core::bounded::{BoundedVec, Heap, Lent, Storage};
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use wz_session_core::byte_cells::LentByteCells;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
@@ -823,42 +825,320 @@ pub const PORT_PEER_BACKLOG: usize = 64;
 /// A link that is let go of frees its source, whose next `InitSyn` opens a new link.
 ///
 /// Every link of the port is driven by the one thread that drives the session, so the port is
-/// shared by `Rc` and its tables are cells.
+/// shared by `Rc` and its tables are cells. The peers it took and the datagrams it sorted for
+/// them are kept in rows the stack's ports share ([`PortRows`]).
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 pub struct UdpPort<S: DatagramSocket> {
     socket: S,
-    /// The peers that have a link, each with the datagrams taken for it and not yet read.
-    peers: RefCell<Vec<PeerInbox>>,
-    /// The sources whose `InitSyn` opened a link the listener has not handed out yet.
-    fresh: RefCell<VecDeque<SocketAddr>>,
-    /// What one datagram is read into before it is sorted.
-    buf: RefCell<Vec<u8>>,
-    /// Buffers a peer's link gave back once it read the datagram held in them, which the next
-    /// datagram sorted for a peer is held in: a port whose peers keep sending holds each datagram
-    /// in a buffer it already has, and allocates only while its backlog grows past any it held.
-    spare: RefCell<Vec<Vec<u8>>>,
+    /// The number this port's rows carry in the book its stack's ports share.
+    id: u32,
+    book: Rc<RefCell<PortBook>>,
+    /// What each datagram is read into, and what the datagrams sorted for a peer are held in.
+    rx: RefCell<PortRx>,
     strays: Cell<u32>,
     overflows: Cell<u32>,
 }
 
-/// One peer of a [`UdpPort`] and what was taken for it.
+/// One peer a stack's udp ports took, while its link lasts: the port it came in on, its address,
+/// and whether the listener has handed its link out yet. One row for each link a session may hold.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-struct PeerInbox {
+#[derive(Debug, Clone, Copy)]
+pub struct PortPeerRow {
+    port: u32,
     peer: SocketAddr,
-    datagrams: VecDeque<Vec<u8>>,
+    fresh: bool,
+}
+
+/// A datagram one of a stack's udp ports sorted for a peer, held until the peer's link reads it.
+/// One row for each slot of the ports' table: a datagram that waits holds a slot.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub struct QueuedDatagram {
+    port: u32,
+    peer: SocketAddr,
+    held: Held,
+}
+
+/// The rows a stack's udp ports keep their peers and the datagrams sorted for them in, which every
+/// port of the stack shares: a session lends them from the memory it reserved when it opened
+/// ([`SessionLinks::lend_port_rows`](crate::session_drive::SessionLinks::lend_port_rows)), and a
+/// stack lent none keeps its own (`P` the heap). A peer past the peers' rows, or a datagram past
+/// the queue's, is dropped and counted, as a full socket buffer drops one. A peer's datagrams are
+/// read in the order they were sorted, from the one queue of all the ports.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub struct PortRows<P: Storage = Lent> {
+    peers: BoundedVec<PortPeerRow, { usize::MAX }, P>,
+    queue: BoundedVec<QueuedDatagram, { usize::MAX }, P>,
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl PortRows<Lent> {
+    /// The rows a session lent: `peers` for the peers its ports take, `queue` for the datagrams
+    /// they sort.
+    pub fn over(
+        peers: BoundedVec<PortPeerRow, { usize::MAX }, Lent>,
+        queue: BoundedVec<QueuedDatagram, { usize::MAX }, Lent>,
+    ) -> Self {
+        Self { peers, queue }
+    }
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<P: Storage> Default for PortRows<P> {
+    fn default() -> Self {
+        Self {
+            peers: BoundedVec::default(),
+            queue: BoundedVec::default(),
+        }
+    }
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<P: Storage> PortRows<P> {
+    fn knows(&self, port: u32, peer: SocketAddr) -> bool {
+        self.peers
+            .iter()
+            .any(|row| row.port == port && row.peer == peer)
+    }
+
+    fn queued_for(&self, port: u32, peer: SocketAddr) -> usize {
+        self.queue
+            .iter()
+            .filter(|row| row.port == port && row.peer == peer)
+            .count()
+    }
+
+    /// Queue `held` for `peer` of `port`; `false`, the datagram let go of, when the queue is full.
+    fn enqueue(&mut self, port: u32, peer: SocketAddr, held: Held) -> bool {
+        self.queue.push(QueuedDatagram { port, peer, held }).is_ok()
+    }
+
+    /// Take `peer` of `port`, whose `InitSyn` opened a link, with `held` its first datagram;
+    /// `false`, nothing taken, when the peers' or the queue's rows are all held.
+    fn take(&mut self, port: u32, peer: SocketAddr, held: Held) -> bool {
+        if self.peers.free_slots() == 0 || self.queue.free_slots() == 0 {
+            return false;
+        }
+        let row = PortPeerRow {
+            port,
+            peer,
+            fresh: true,
+        };
+        self.peers.push(row).is_ok() && self.enqueue(port, peer, held)
+    }
+
+    fn take_fresh(&mut self, port: u32) -> Option<SocketAddr> {
+        let row = self
+            .peers
+            .iter_mut()
+            .find(|row| row.port == port && row.fresh)?;
+        row.fresh = false;
+        Some(row.peer)
+    }
+
+    fn take_for(&mut self, port: u32, peer: SocketAddr) -> Option<Held> {
+        let at = self
+            .queue
+            .iter()
+            .position(|row| row.port == port && row.peer == peer)?;
+        Some(self.queue.remove(at).held)
+    }
+
+    fn holds_for(&self, port: u32, peer: SocketAddr) -> bool {
+        self.queue
+            .iter()
+            .any(|row| row.port == port && row.peer == peer)
+    }
+
+    fn forget(&mut self, port: u32, peer: SocketAddr) {
+        self.peers
+            .retain(|row| !(row.port == port && row.peer == peer));
+        self.queue
+            .retain(|row| !(row.port == port && row.peer == peer));
+    }
+
+    fn forget_port(&mut self, port: u32) {
+        self.peers.retain(|row| row.port != port);
+        self.queue.retain(|row| row.port != port);
+    }
+}
+
+/// The rows a stack's udp ports share and the number the next port takes: the session's when it
+/// lent some, the stack's own otherwise.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub(crate) struct PortBook {
+    rows: BookRows,
+    next: u32,
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+enum BookRows {
+    Own(PortRows<Heap>),
+    Lent(PortRows<Lent>),
+}
+
+/// `$body` over the rows of `$book`, whichever they are.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+macro_rules! with_rows {
+    ($book:expr, |$rows:ident| $body:expr) => {
+        match &mut $book.rows {
+            BookRows::Own($rows) => $body,
+            BookRows::Lent($rows) => $body,
+        }
+    };
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl PortBook {
+    /// A book over the rows a session lent, or rows of the stack's own.
+    pub(crate) fn of(rows: Option<PortRows<Lent>>) -> Self {
+        Self {
+            rows: rows.map_or_else(|| BookRows::Own(PortRows::default()), BookRows::Lent),
+            next: 0,
+        }
+    }
+
+    /// The number a port opened now carries.
+    fn next_port(&mut self) -> u32 {
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        id
+    }
+}
+
+/// Where a [`UdpPort`] reads its datagrams and holds those it sorted for a peer: memory of its
+/// own, or slots of the table its session lent (`LinkTables::port_rx`).
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+enum PortRx {
+    /// A read buffer of the port's own, and the buffers a peer's link gave back once it read the
+    /// datagram held in them, which the next datagram sorted is held in: a port whose peers keep
+    /// sending holds each datagram in a buffer it already has, and allocates only while its
+    /// backlog grows past any it held.
+    Own { read: Vec<u8>, spare: Vec<Vec<u8>> },
+    /// A slot of `table` read into. A datagram sorted for a peer keeps the slot it was read into,
+    /// and the next read takes another; with none free the datagram is dropped and counted, as a
+    /// full socket buffer drops one, and the slot is read into again.
+    Lent { table: LentByteCells, read: ByteBuf },
+}
+
+/// A datagram sorted for a peer, held until its link reads it.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+enum Held {
+    /// In a buffer of the port's own, exactly as long as the datagram.
+    Own(Vec<u8>),
+    /// The first `len` bytes of a slot the session lent.
+    Lent(ByteBuf, usize),
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl Held {
+    /// The datagram's bytes.
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Held::Own(bytes) => bytes,
+            Held::Lent(slot, len) => slot.as_slice().get(..*len).unwrap_or_default(),
+        }
+    }
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl PortRx {
+    /// What the next datagram is read into.
+    fn read_into(&mut self) -> &mut [u8] {
+        match self {
+            PortRx::Own { read, .. } => read,
+            PortRx::Lent { read, .. } => read.as_mut_slice(),
+        }
+    }
+
+    /// The `len` bytes the last read reported, cut to what was read into.
+    fn read(&self, len: usize) -> &[u8] {
+        match self {
+            PortRx::Own { read, .. } => datagram_of(read, len),
+            PortRx::Lent { read, .. } => datagram_of(read.as_slice(), len),
+        }
+    }
+
+    /// The datagram of `len` bytes just read, held for a peer: in a buffer a link gave back, or a
+    /// new one; or in the slot it was read into, another taken for the next read. `None` when no
+    /// slot is free for that read: the datagram is dropped, and its slot read into again.
+    fn keep(&mut self, len: usize) -> Option<Held> {
+        match self {
+            PortRx::Own { read, spare } => {
+                let mut held = spare.pop().unwrap_or_default();
+                held.clear();
+                held.extend_from_slice(datagram_of(read, len));
+                Some(Held::Own(held))
+            }
+            PortRx::Lent { table, read } => {
+                let next = table.claim()?;
+                let slot = core::mem::replace(read, next);
+                let len = len.min(slot.as_slice().len());
+                Some(Held::Lent(slot, len))
+            }
+        }
+    }
+
+    /// `held`, read by its link: a buffer of the port's own is kept for the next datagram sorted,
+    /// up to as many as one peer's backlog, so a burst that is over leaves no more buffers than a
+    /// backlog holds; a slot goes back to its table as it is dropped.
+    fn give_back(&mut self, held: Held) {
+        if let (PortRx::Own { spare, .. }, Held::Own(buffer)) = (self, held) {
+            if spare.len() < PORT_PEER_BACKLOG {
+                spare.push(buffer);
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 impl<S: DatagramSocket> UdpPort<S> {
-    /// The port of `socket`, which reads each datagram into `rx_capacity` bytes before it sorts
-    /// it: the largest datagram a link of the port receives whole.
+    /// The port of `socket`, which reads each datagram into `rx_capacity` bytes of its own before
+    /// it sorts it: the largest datagram a link of the port receives whole.
     pub fn new(socket: S, rx_capacity: usize) -> Self {
+        Self::in_book(
+            socket,
+            rx_capacity,
+            &Rc::new(RefCell::new(PortBook::of(None))),
+        )
+    }
+
+    /// [`Self::new`], keeping its peers and their datagrams in `book`, which the stack's ports
+    /// share.
+    pub(crate) fn in_book(socket: S, rx_capacity: usize, book: &Rc<RefCell<PortBook>>) -> Self {
+        Self::over(
+            socket,
+            PortRx::Own {
+                read: vec![0u8; rx_capacity],
+                spare: Vec::new(),
+            },
+            book,
+        )
+    }
+
+    /// The port of `socket` over the slots of `table`, which its session lent: each datagram is
+    /// read into one and held there for its peer, and the largest a link of the port receives
+    /// whole is a slot. `None` when the table has no slot free to read into.
+    pub fn lent(socket: S, table: LentByteCells) -> Option<Self> {
+        Self::lent_in_book(socket, table, &Rc::new(RefCell::new(PortBook::of(None))))
+    }
+
+    /// [`Self::lent`], keeping its peers and their datagrams in `book`, which the stack's ports
+    /// share.
+    pub(crate) fn lent_in_book(
+        socket: S,
+        table: LentByteCells,
+        book: &Rc<RefCell<PortBook>>,
+    ) -> Option<Self> {
+        let read = table.claim()?;
+        Some(Self::over(socket, PortRx::Lent { table, read }, book))
+    }
+
+    fn over(socket: S, rx: PortRx, book: &Rc<RefCell<PortBook>>) -> Self {
         Self {
             socket,
-            peers: RefCell::new(Vec::new()),
-            fresh: RefCell::new(VecDeque::new()),
-            buf: RefCell::new(vec![0u8; rx_capacity]),
-            spare: RefCell::new(Vec::new()),
+            id: book.borrow_mut().next_port(),
+            book: Rc::clone(book),
+            rx: RefCell::new(rx),
             strays: Cell::new(0),
             overflows: Cell::new(0),
         }
@@ -879,7 +1159,8 @@ impl<S: DatagramSocket> UdpPort<S> {
         self.strays.get()
     }
 
-    /// Datagrams dropped because their peer had [`PORT_PEER_BACKLOG`] waiting already.
+    /// Datagrams dropped because their peer had [`PORT_PEER_BACKLOG`] waiting already, or because
+    /// no slot of the session's table was free to read the next one into.
     pub fn overflows(&self) -> u32 {
         self.overflows.get()
     }
@@ -889,7 +1170,7 @@ impl<S: DatagramSocket> UdpPort<S> {
     /// when the read failed and no new source waits either.
     pub fn take_fresh(port: &Rc<Self>) -> Result<Option<PortPeer<S>>, S::Error> {
         let pumped = port.pump();
-        let next = port.fresh.borrow_mut().pop_front();
+        let next = with_rows!(port.book.borrow_mut(), |rows| rows.take_fresh(port.id));
         match next {
             Some(peer) => Ok(Some(PortPeer {
                 port: Rc::clone(port),
@@ -902,79 +1183,72 @@ impl<S: DatagramSocket> UdpPort<S> {
     /// Take everything the socket holds and sort it. A read that is already sorting (a link read
     /// from inside another's receive) leaves the socket to it.
     fn pump(&self) -> Result<(), S::Error> {
-        let Ok(mut buf) = self.buf.try_borrow_mut() else {
+        let Ok(mut rx) = self.rx.try_borrow_mut() else {
             return Ok(());
         };
-        while let Some((len, from)) = self.socket.try_recv(&mut buf)? {
-            self.sort(from, datagram_of(&buf, len));
+        while let Some((len, from)) = self.socket.try_recv(rx.read_into())? {
+            self.sort(from, len, &mut rx);
         }
         Ok(())
     }
 
-    /// Hand `datagram`, taken from `from`, to the link of its peer, open a link for the source of
-    /// an `InitSyn` that has none, and drop and count anything else.
-    fn sort(&self, from: SocketAddr, datagram: &[u8]) {
-        let mut peers = self.peers.borrow_mut();
-        if let Some(inbox) = peers.iter_mut().find(|inbox| inbox.peer == from) {
-            if inbox.datagrams.len() < PORT_PEER_BACKLOG {
-                inbox.datagrams.push_back(self.held(datagram));
+    /// Hand the datagram of `len` bytes `rx` just read from `from` to the link of its peer, open
+    /// a link for the source of an `InitSyn` that has none, and drop and count anything else.
+    fn sort(&self, from: SocketAddr, len: usize, rx: &mut PortRx) {
+        let id = self.id;
+        let mut book = self.book.borrow_mut();
+        let kept = with_rows!(book, |rows| {
+            if rows.knows(id, from) {
+                rows.queued_for(id, from) < PORT_PEER_BACKLOG
+                    && rx
+                        .keep(len)
+                        .is_some_and(|held| rows.enqueue(id, from, held))
+            } else if is_init_syn(rx.read(len)) {
+                rx.keep(len).is_some_and(|held| rows.take(id, from, held))
             } else {
-                self.overflows.set(self.overflows.get().saturating_add(1));
+                self.strays.set(self.strays.get().saturating_add(1));
+                true
             }
-            return;
-        }
-        if !is_init_syn(datagram) {
-            self.strays.set(self.strays.get().saturating_add(1));
-            return;
-        }
-        let mut datagrams = VecDeque::new();
-        datagrams.push_back(self.held(datagram));
-        peers.push(PeerInbox {
-            peer: from,
-            datagrams,
         });
-        self.fresh.borrow_mut().push_back(from);
+        if !kept {
+            self.overflows.set(self.overflows.get().saturating_add(1));
+        }
     }
 
-    /// `datagram` in a buffer of its own until its link reads it: one a link gave back when there
-    /// is one, else a new one.
-    fn held(&self, datagram: &[u8]) -> Vec<u8> {
-        let mut held = self.spare.borrow_mut().pop().unwrap_or_default();
-        held.clear();
-        held.extend_from_slice(datagram);
-        held
-    }
-
-    /// `held`, read by its link, kept for the next datagram sorted; past as many as one peer's
-    /// backlog it goes, so a burst that is over leaves no more buffers than a backlog holds.
-    fn give_back(&self, held: Vec<u8>) {
-        let mut spare = self.spare.borrow_mut();
-        if spare.len() < PORT_PEER_BACKLOG {
-            spare.push(held);
+    /// `held`, read by its link, back to the port ([`PortRx::give_back`]). A port that is reading
+    /// meanwhile lets it go instead, which gives a slot back to its table as well.
+    fn give_back(&self, held: Held) {
+        if let Ok(mut rx) = self.rx.try_borrow_mut() {
+            rx.give_back(held);
         }
     }
 
     /// The next datagram taken for `peer`.
-    fn take_for(&self, peer: SocketAddr) -> Option<Vec<u8>> {
-        self.peers
-            .borrow_mut()
-            .iter_mut()
-            .find(|inbox| inbox.peer == peer)
-            .and_then(|inbox| inbox.datagrams.pop_front())
+    fn take_for(&self, peer: SocketAddr) -> Option<Held> {
+        with_rows!(self.book.borrow_mut(), |rows| rows.take_for(self.id, peer))
     }
 
     /// Whether a datagram taken for `peer` waits to be read.
     fn holds_for(&self, peer: SocketAddr) -> bool {
-        self.peers
-            .borrow()
-            .iter()
-            .any(|inbox| inbox.peer == peer && !inbox.datagrams.is_empty())
+        with_rows!(self.book.borrow_mut(), |rows| rows.holds_for(self.id, peer))
     }
 
     /// `peer`'s link is gone: what was taken for it goes, and its next `InitSyn` opens a link.
     fn forget(&self, peer: SocketAddr) {
-        self.peers.borrow_mut().retain(|inbox| inbox.peer != peer);
-        self.fresh.borrow_mut().retain(|fresh| *fresh != peer);
+        if let Ok(mut book) = self.book.try_borrow_mut() {
+            with_rows!(book, |rows| rows.forget(self.id, peer));
+        }
+    }
+}
+
+/// A port that goes takes its peers' rows and their datagrams with it, so the rows it held serve
+/// the stack's next port.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket> Drop for UdpPort<S> {
+    fn drop(&mut self) {
+        if let Ok(mut book) = self.book.try_borrow_mut() {
+            with_rows!(book, |rows| rows.forget_port(self.id));
+        }
     }
 }
 
@@ -1056,13 +1330,14 @@ impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
         let pumped = self.port.pump();
-        if let Some(datagram) = self.port.take_for(self.peer) {
+        if let Some(held) = self.port.take_for(self.peer) {
+            let datagram = held.as_slice();
             // Cut to the buffer, as the stack cuts a datagram longer than the read.
             let len = datagram.len().min(buf.len());
             if let (Some(to), Some(from)) = (buf.get_mut(..len), datagram.get(..len)) {
                 to.copy_from_slice(from);
             }
-            self.port.give_back(datagram);
+            self.port.give_back(held);
             return Ok(Some((len, self.peer)));
         }
         pumped.map(|()| None).map_err(PortPeerError::Socket)
@@ -1216,11 +1491,7 @@ mod tests {
             .expect("the share of the peer whose InitSyn came");
         let mut buf = [0u8; 64];
         assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
-        assert_eq!(
-            port.spare.borrow().len(),
-            1,
-            "the read gave its buffer back"
-        );
+        assert_eq!(spare(&port).len(), 1, "the read gave its buffer back");
         let mut held = None;
         for round in 0..3 {
             queued(&port.socket, b"put");
@@ -1229,18 +1500,165 @@ mod tests {
                 .expect("the socket reads")
                 .is_none());
             assert!(
-                port.spare.borrow().is_empty(),
+                spare(&port).is_empty(),
                 "round {round}: the datagram is held in the spare buffer"
             );
             assert_eq!(peer.try_recv(&mut buf), Ok(Some((3, PEER))));
             assert_eq!(&buf[..3], b"put");
-            let at = port.spare.borrow()[0].as_ptr();
+            let at = spare(&port)[0];
             assert_eq!(
                 *held.get_or_insert(at),
                 at,
                 "round {round}: the same buffer"
             );
         }
+    }
+
+    /// The buffers of its own a port keeps for the next datagram, by where each lies.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    fn spare<S: DatagramSocket>(port: &UdpPort<S>) -> Vec<*const u8> {
+        match &*port.rx.borrow() {
+            PortRx::Own { spare, .. } => spare.iter().map(|buffer| buffer.as_ptr()).collect(),
+            PortRx::Lent { .. } => Vec::new(),
+        }
+    }
+
+    /// A port over slots its session lent reads each datagram into one and holds it there for its
+    /// peer's link, the next read taking another slot; with none free it drops the datagram and
+    /// counts it, and reads into the same slot again. A slot the link read goes back to the table.
+    /// The CONTROL is the same datagrams over memory of the port's own, which holds both.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn a_port_over_lent_slots_drops_a_datagram_it_has_no_slot_for() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::byte_cells_bytes(64, 2).expect("within the address space");
+        let region: &'static mut [Block] =
+            std::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every slot claimed from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let table = arena.lend_byte_cells(64, 2).expect("the port's table");
+        let mut buf = [0u8; 64];
+
+        let own = Rc::new(UdpPort::new(Loop::default(), 64));
+        queued(&own.socket, SYN);
+        let peer = UdpPort::take_fresh(&own)
+            .expect("the socket reads")
+            .expect("the share of the peer");
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+        queued(&own.socket, b"one");
+        queued(&own.socket, b"two");
+        assert!(UdpPort::take_fresh(&own)
+            .expect("the socket reads")
+            .is_none());
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((3, PEER))));
+        assert_eq!(&buf[..3], b"one");
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((3, PEER))));
+        assert_eq!(&buf[..3], b"two", "CONTROL: held in a buffer of its own");
+        assert_eq!(own.overflows(), 0);
+
+        let lent = Rc::new(UdpPort::lent(Loop::default(), table).expect("a slot to read into"));
+        assert_eq!(table.in_use(), 1, "the slot read into");
+        queued(&lent.socket, SYN);
+        let peer = UdpPort::take_fresh(&lent)
+            .expect("the socket reads")
+            .expect("the share of the peer");
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+        assert_eq!(
+            table.in_use(),
+            1,
+            "the slot the InitSyn was held in went back"
+        );
+        queued(&lent.socket, b"one");
+        queued(&lent.socket, b"two");
+        assert!(UdpPort::take_fresh(&lent)
+            .expect("the socket reads")
+            .is_none());
+        assert_eq!(table.in_use(), 2, "one held, one read into");
+        assert_eq!(lent.overflows(), 1, "no slot was free to hold the second");
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((3, PEER))));
+        assert_eq!(&buf[..3], b"one");
+        assert_eq!(table.in_use(), 1, "the slot read went back");
+        assert_eq!(peer.try_recv(&mut buf), Ok(None), "the second was dropped");
+
+        let _last = table.claim().expect("the table's last slot");
+        assert!(
+            UdpPort::lent(Loop::default(), table).is_none(),
+            "a table with no slot free gives no port"
+        );
+    }
+
+    /// Ports over rows a session lent keep their peers and their datagrams there, and the ports of
+    /// one stack share them: a peer past the peers' rows is not taken and its `InitSyn` is counted
+    /// as an overflow, and the row a peer held serves the next once its link goes. The CONTROL is
+    /// a port over rows of its own, which takes that peer.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn ports_over_lent_rows_share_them_and_take_no_peer_past_them() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::table_bytes::<PortPeerRow>(1)
+            .and_then(|peers| Arena::table_bytes::<QueuedDatagram>(4).map(|queue| peers + queue))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            std::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every row lent from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let rows = PortRows::over(
+            arena.lend(1).expect("the peers' rows"),
+            arena.lend(4).expect("the queue's rows"),
+        );
+        let book = Rc::new(RefCell::new(PortBook::of(Some(rows))));
+        let first = Rc::new(UdpPort::in_book(Loop::default(), 64, &book));
+        let second = Rc::new(UdpPort::in_book(Loop::default(), 64, &book));
+        let mut buf = [0u8; 64];
+
+        queued(&first.socket, SYN);
+        let peer = UdpPort::take_fresh(&first)
+            .expect("the socket reads")
+            .expect("the one peer the rows hold");
+        queued_from(&second.socket, SYN, Sender::Stranger);
+        assert!(
+            UdpPort::take_fresh(&second)
+                .expect("the socket reads")
+                .is_none(),
+            "no row left for a peer of the other port"
+        );
+        assert_eq!(second.overflows(), 1);
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+        drop(peer);
+        queued_from(&second.socket, SYN, Sender::Stranger);
+        assert!(
+            UdpPort::take_fresh(&second)
+                .expect("the socket reads")
+                .is_some(),
+            "the row the first peer held"
+        );
+
+        let own = Rc::new(UdpPort::new(Loop::default(), 64));
+        queued(&own.socket, SYN);
+        let _first = UdpPort::take_fresh(&own)
+            .expect("the socket reads")
+            .expect("a peer");
+        queued_from(&own.socket, SYN, Sender::Stranger);
+        assert!(
+            UdpPort::take_fresh(&own)
+                .expect("the socket reads")
+                .is_some(),
+            "CONTROL: rows of its own take a second peer"
+        );
     }
 
     /// A datagram is the bytes the socket reported, cut to the buffer it was read into.
