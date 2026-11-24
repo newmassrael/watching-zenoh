@@ -1046,12 +1046,13 @@ impl<C> fmt::Debug for Refused<C> {
 }
 
 /// An entity undeclared.
-pub struct Undeclared<R> {
+pub struct Undeclared<T> {
     /// The id its retraction names.
     pub id: EntityId,
-    /// The row, for the caller to drop where it holds no lock; `None` while a call of its
-    /// callback runs, whose last unpin hands it back.
-    pub row: Option<R>,
+    /// What the caller drops where it holds no lock: the callback of a kind that has one, the row
+    /// let go of around it, or the row of a kind that has none; `None` while a call of its
+    /// callback runs, whose last unpin hands the row back.
+    pub taken: Option<T>,
     /// The key expression declaration the entity held last, retracted with it: its id goes on
     /// the wire after the entity's retraction.
     pub keyexpr: Option<ExprId>,
@@ -1077,7 +1078,8 @@ pub struct OpenedInterest {
 
 /// A write filter or a matching listener undeclared.
 pub struct Unwatched<R> {
-    /// The row, as [`Undeclared::row`].
+    /// The row, for the caller to drop where it holds no lock; `None` while a call of its
+    /// callback runs, whose last unpin hands it back.
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
@@ -1293,11 +1295,14 @@ fn release_keyexpr<P: Storage>(
 }
 
 /// Remove the entity `handle` names from `table`, and its hold of the declaration its key names.
-fn undeclare_entity<K, R: Entity, P: Storage, const N: usize>(
+// What the caller drops is taken out of the row here (`hand`), once for every caller, so the
+// whole row is moved no further than this.
+fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
     table: &mut SlotMap<K, R, N, P>,
     keyexprs: &mut Keyexprs<P>,
     handle: Handle<K>,
-) -> Option<Undeclared<R>> {
+    hand: impl FnOnce(R) -> T,
+) -> Option<Undeclared<T>> {
     let (id, prefix, idle) = table
         .get(handle)
         .map(|row| (row.entity_id(), row.key_prefix(), row.retire()))?;
@@ -1310,7 +1315,7 @@ fn undeclare_entity<K, R: Entity, P: Storage, const N: usize>(
     let keyexpr = prefix.and_then(|prefix| release_keyexpr(keyexprs, prefix));
     Some(Undeclared {
         id,
-        row: removal.taken(),
+        taken: removal.taken().map(hand),
         keyexpr,
     })
 }
@@ -1742,17 +1747,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Ok(declared)
     }
 
-    /// Undeclare the subscriber `handle` names. The row leaves every lookup now and no call of it
-    /// begins. When a call of its callback runs ([`Self::begin_subscriber`]) the row is not handed
-    /// back here: the call that ends last lets it go ([`Self::release_subscriber`]), so the
-    /// undeclaring caller returns only once `subscribers().holds_slot(handle)` is false, after the
-    /// last call has returned and the row, with its callback, was dropped (P11). The same holds for
-    /// every kind with a callback.
+    /// Undeclare the subscriber `handle` names, its callback handed back. The row leaves every
+    /// lookup now and no call of it begins. When a call of its callback runs
+    /// ([`Self::begin_subscriber`]) nothing is handed back here: the call that ends last lets the
+    /// row go ([`Self::release_subscriber`]), so the undeclaring caller returns only once
+    /// `subscribers().holds_slot(handle)` is false, after the last call has returned and the row,
+    /// with its callback, was dropped (P11). The same holds for every kind with a callback.
     pub fn undeclare_subscriber(
         &mut self,
         handle: SubscriberHandle,
-    ) -> Option<Undeclared<Subscriber<F, P>>> {
-        let undeclared = undeclare_entity(&mut self.subscribers, &mut self.keyexprs, handle)?;
+    ) -> Option<Undeclared<F::Subscriber>> {
+        let undeclared = undeclare_entity(
+            &mut self.subscribers,
+            &mut self.keyexprs,
+            handle,
+            SubscriberRow::into_callback,
+        )?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
         Some(undeclared)
     }
@@ -1797,14 +1807,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         )
     }
 
-    /// Undeclare the queryable `handle` names.
+    /// Undeclare the queryable `handle` names, its callback handed back.
     pub fn undeclare_queryable(
         &mut self,
         handle: QueryableHandle,
-    ) -> Option<Undeclared<Queryable<F, P>>> {
+    ) -> Option<Undeclared<F::Queryable>> {
         let queryables =
             <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)?;
-        undeclare_entity(queryables, &mut self.keyexprs, handle)
+        undeclare_entity(
+            queryables,
+            &mut self.keyexprs,
+            handle,
+            QueryableRow::into_callback,
+        )
     }
 
     /// Declare a liveliness token on `key`.
@@ -1835,7 +1850,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Undeclare the liveliness token `handle` names.
     pub fn undeclare_token(&mut self, handle: TokenHandle) -> Option<Undeclared<TokenRow<P::Key>>> {
         let tokens = <F::LivelinessPresence as Presence>::get_mut::<Tokens<P>>(&mut self.tokens)?;
-        undeclare_entity(tokens, &mut self.keyexprs, handle)
+        undeclare_entity(tokens, &mut self.keyexprs, handle, core::convert::identity)
     }
 
     /// Declare a liveliness subscriber on `key`, asking for the tokens alive now with `history`.
@@ -1876,16 +1891,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         )
     }
 
-    /// Undeclare the liveliness subscriber `handle` names: its id is its Interest's, whose Final
-    /// goes on the wire.
+    /// Undeclare the liveliness subscriber `handle` names, its callback handed back: its id is its
+    /// Interest's, whose Final goes on the wire.
     pub fn undeclare_liveliness_subscriber(
         &mut self,
         handle: LivelinessSubscriberHandle,
-    ) -> Option<Undeclared<LivelinessSubscriber<F, P>>> {
+    ) -> Option<Undeclared<F::LivelinessSubscriber>> {
         let subscribers = <F::LivelinessPresence as Presence>::get_mut::<
             LivelinessSubscribers<F, P>,
         >(&mut self.liveliness_subscribers)?;
-        undeclare_entity(subscribers, &mut self.keyexprs, handle)
+        undeclare_entity(
+            subscribers,
+            &mut self.keyexprs,
+            handle,
+            LivelinessSubscriberRow::into_callback,
+        )
     }
 
     // ---- Interests, write filters and matching listeners ------------------------------------

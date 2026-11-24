@@ -5389,7 +5389,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 };
                 tables
                     .undeclare_subscriber(handle)
-                    .map(|undeclared| (handle, undeclared.row.map(|row| row.into_callback())))
+                    .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
                 Some((_, Some(row))) => self.give_back(row.into_holds()),
@@ -5420,7 +5420,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 };
                 tables
                     .undeclare_queryable(handle)
-                    .map(|undeclared| (handle, undeclared.row.map(|row| row.into_callback())))
+                    .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
                 Some((_, Some(row))) => self.give_back(row.into_holds()),
@@ -5438,7 +5438,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 };
                 tables
                     .undeclare_liveliness_subscriber(handle)
-                    .map(|undeclared| (handle, undeclared.row.map(|row| row.into_callback())))
+                    .map(|undeclared| (handle, undeclared.taken))
             };
             match undeclared {
                 Some((_, Some(row))) => self.give_back(row.into_holds()),
@@ -6412,7 +6412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &interest_final::<C>(u64::from(id)));
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
-            Some((handle, undeclared.row.map(|row| row.into_callback())))
+            Some((handle, undeclared.taken))
         });
         // The row, and its callback with it, is let go of here with no lock held; one a call of
         // which runs is let go of by the call that ends last.
@@ -6460,7 +6460,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&core.session.registry).undeclare_subscriber(handle)?;
-            let row = undeclared.row.map(|row| row.into_callback());
+            let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
@@ -7443,7 +7443,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             let undeclared = tables_mut(&core.session.registry).undeclare_queryable(handle)?;
-            let row = undeclared.row.map(|row| row.into_callback());
+            let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
@@ -7537,7 +7537,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "group")]
         core.transport.retract_from_groups(id);
         // The rows went before the links are told: a send never finds the tables borrowed.
-        let key = undeclared.row.as_ref().map(|row| row.key().as_str());
+        let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
         core.retract_at(token_place, &|actions: &McuActions<C>| {
             if let Some(key) = key {
                 retract_token(actions, id, names.map(|names| names.names(key)));
