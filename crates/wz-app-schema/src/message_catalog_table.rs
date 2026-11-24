@@ -5,16 +5,16 @@
 //!
 //! The generator (`scripts/lib/message_catalog.py`) turns a catalog document into one `const`
 //! [`Table`] of these rows; a host reads the same document at run time with
-//! `message_catalog::Catalog::parse`. The rows are the catalog's resolved form: every
-//! reference a document makes by name (a node, a profile) is an index here, and every number is
-//! the value it stands for. Nothing in this module allocates, so an image without an allocator
+//! `wz_app_frame::message_catalog::Catalog::parse`. The rows are the catalog's resolved form:
+//! every reference a document makes by name (a node, a profile) is an index here, and every number
+//! is the value it stands for. Nothing in this module allocates, so an image without an allocator
 //! links the tables as they are.
 //!
 //! The rows judge nothing. A table is accepted when the catalog reader accepts it:
-//! `message_catalog::Catalog::from_table` turns it back into a document and runs every
-//! rule the reader runs on a text, and the generator writes that test beside each table it emits.
-//! So a fixed-memory image and a host that read one catalog hold the same messages by the same
-//! rules, and there is one implementation of the rules that depend on a profile.
+//! `wz_app_frame::message_catalog::Catalog::from_table` turns it back into a document and runs
+//! every rule the reader runs on a text, and the generator writes that test beside each table it
+//! emits. So a fixed-memory image and a host that read one catalog hold the same messages by the
+//! same rules, and there is one implementation of the rules that depend on a profile.
 //!
 //! The protection profiles and the header values stay JSON text: the profile is the
 //! `e2e_profile` document and is read where a sender or a receiver is made.

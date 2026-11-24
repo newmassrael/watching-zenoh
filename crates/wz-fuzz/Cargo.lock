@@ -1154,6 +1154,9 @@ dependencies = [
 [[package]]
 name = "wz-app-schema"
 version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
 
 [[package]]
 name = "wz-capi-c"

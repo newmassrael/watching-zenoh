@@ -92,7 +92,7 @@ use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::{width_mask, Crc};
 use crate::e2e_profile::{
-    optional, read_crc_object, read_json, CrcFields, DocError, Pointer, MAX_FIELDS,
+    optional, read_crc_object, read_json, read_name, CrcFields, DocError, Pointer, MAX_FIELDS,
 };
 
 /// The largest whole message a segment profile may admit, in bytes.
@@ -280,7 +280,7 @@ impl SegmentProfile {
         let doc = Pointer::text("");
         let entries = doc.object(root)?;
         doc.check_keys(entries, &["name", SEGMENTS_KEY])?;
-        let name = doc.key("name").read_name(doc.required(entries, "name")?)?;
+        let name = read_name(&doc.key("name"), doc.required(entries, "name")?)?;
 
         let path = Pointer::text("/segments");
         let body = path.object(doc.required(entries, SEGMENTS_KEY)?)?;
@@ -519,7 +519,7 @@ fn read_fields(value: &Json5Value, path: &Pointer<'_>) -> Result<Vec<Field>, Doc
         here.check_keys(entries, &["name", "bytes", "order", "equals"])?;
 
         let name_at = here.key("name");
-        let name = name_at.read_name(here.required(entries, "name")?)?;
+        let name = read_name(&name_at, here.required(entries, "name")?)?;
         if fields.iter().any(|f| f.name == name) {
             return Err(name_at.refuse(format!("two fields are called `{name}`")));
         }

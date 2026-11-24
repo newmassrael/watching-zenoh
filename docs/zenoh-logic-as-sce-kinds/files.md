@@ -77,7 +77,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/instance_key_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/lib.rs` | S10, S11 | |
 | `crates/wz-app-frame/src/message_catalog.rs` | S11 | |
-| `crates/wz-app-frame/src/message_catalog_table.rs` | S11 | |
 | `crates/wz-app-frame/src/message_catalog_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-app-frame/src/message_payload.rs` | S11 | |
 | `crates/wz-app-frame/src/message_payload_tests.rs` | excluded: test | Test-only file by its name. |
@@ -91,7 +90,10 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/segment_chain.rs` | S11 | |
 | `crates/wz-app-frame/src/segment_profile.rs` | S10 | |
 | `crates/wz-app-frame/src/segment_sender.rs` | S10 | |
+| `crates/wz-app-schema/src/catalog_plan.rs` | S11 | |
+| `crates/wz-app-schema/src/json_doc.rs` | S11 | |
 | `crates/wz-app-schema/src/lib.rs` | S11 | |
+| `crates/wz-app-schema/src/message_catalog_table.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_lex.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_parse.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_schema.rs` | S11 | |
