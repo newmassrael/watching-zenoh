@@ -1016,7 +1016,7 @@ pub(crate) unsafe fn declare_queryable_on(
                 // so a queryable that states no links is declared as it always was.
                 // A session that has handed out every entity id refuses the queryable with the
                 // code this ABI gives a declaration whose id space is spent.
-                let Some(id) = state.shared.declare_queryable_on_links(
+                let Ok(id) = state.shared.declare_queryable_on_links(
                     ke,
                     WireKey::literal(),
                     complete,

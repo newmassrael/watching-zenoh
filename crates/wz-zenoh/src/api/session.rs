@@ -1252,9 +1252,7 @@ impl Engine {
                             timestamps,
                         ),
                     )
-                    .ok_or_else(|| {
-                        zerror!("the engine has no entity id left for a subscriber").into()
-                    })
+                    .map_err(|refused| zerror!("the engine refused a subscriber: {refused}").into())
             }
         }
     }
@@ -1458,9 +1456,7 @@ impl Engine {
                             promotion,
                         ),
                     )
-                    .ok_or_else(|| {
-                        zerror!("the engine has no entity id left for a queryable").into()
-                    })
+                    .map_err(|refused| zerror!("the engine refused a queryable: {refused}").into())
             }
         }
     }
@@ -1654,8 +1650,8 @@ impl Engine {
                         wz_capi_core::runtime::session::LivelinessOptions::new(),
                         links,
                     )
-                    .ok_or_else(|| {
-                        zerror!("the engine has no entity id left for a liveliness token").into()
+                    .map_err(|refused| {
+                        zerror!("the engine refused a liveliness token: {refused}").into()
                     })
             }
         }
@@ -1730,9 +1726,8 @@ impl Engine {
                         links,
                         tokio_engine::liveliness_sink(callback, notifier),
                     )
-                    .ok_or_else(|| {
-                        zerror!("the engine has no entity id left for a liveliness subscriber")
-                            .into()
+                    .map_err(|refused| {
+                        zerror!("the engine refused a liveliness subscriber: {refused}").into()
                     })
             }
         }
