@@ -124,8 +124,6 @@ pub mod run_arena;
 pub mod slot_admin;
 // A client of a router that answers queries, on the slot profile: the dialler over a fixed list of
 // endpoints, and the declarations sent on every session as it establishes.
-// Totality debt TD-225 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_client;
 // The latest sample of a subscription, in storage the image declared: what a node that
