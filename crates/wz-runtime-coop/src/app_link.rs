@@ -69,9 +69,9 @@ use crate::session_drive::{
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
 };
 use crate::stream_link::{
-    StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
+    stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
 };
-use crate::udp_link::{DatagramSocket, Received, UdpDriver, UDP_RX_CAPACITY};
+use crate::udp_link::{datagram_ends_fit, DatagramSocket, Received, UdpDriver, UDP_RX_CAPACITY};
 
 /// The longest an open waits for the program to report the link up, in milliseconds: the
 /// connect timeout of a zenoh-pico session, which this engine's dial is held to as a whole.
@@ -857,32 +857,28 @@ impl PendingDial<HeapLink> for PendingAppLink {
                 let held = self.held.take()?;
                 let (rx, tx) = self.buffers.take()?;
                 Some(if self.datagram {
+                    let socket = AppDatagramSocket {
+                        held,
+                        peer: self.to,
+                        reads_sources: true,
+                    };
                     heap_link(
                         self.cells.as_ref(),
-                        self.owner_waits.datagram(UdpDriver::initiator_in(
-                            AppDatagramSocket {
-                                held,
-                                peer: self.to,
-                                reads_sources: true,
-                            },
-                            self.to,
-                            rx,
-                            tx,
-                        )),
+                        datagram_ends_fit(&socket, Some(self.to)),
+                        || {
+                            self.owner_waits
+                                .datagram(UdpDriver::initiator_in(socket, self.to, rx, tx))
+                        },
                     )
                 } else {
-                    heap_link(
-                        self.cells.as_ref(),
-                        self.owner_waits.stream(StreamDriver::over(
-                            AppStreamSocket {
-                                held,
-                                local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                                peer: self.to,
-                            },
-                            rx,
-                            tx,
-                        )),
-                    )
+                    let stream = AppStreamSocket {
+                        held,
+                        local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                        peer: self.to,
+                    };
+                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
+                        self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+                    })
                 })
             }
         }
@@ -1384,28 +1380,27 @@ impl SessionLinks for AppLinks {
         match to.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
+                let socket = AppDatagramSocket::dial_bounded(
+                    &self.transport,
+                    &self.waits,
+                    to.at,
+                    self.open_bound.as_ref(),
+                )?;
                 heap_link(
                     self.cells.as_ref(),
-                    self.owner_waits.datagram(UdpDriver::initiator_in(
-                        AppDatagramSocket::dial_bounded(
-                            &self.transport,
-                            &self.waits,
-                            to.at,
-                            self.open_bound.as_ref(),
-                        )?,
-                        to.at,
-                        rx,
-                        tx,
-                    )),
+                    datagram_ends_fit(&socket, Some(to.at)),
+                    || {
+                        self.owner_waits
+                            .datagram(UdpDriver::initiator_in(socket, to.at, rx, tx))
+                    },
                 )
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                heap_link(
-                    self.cells.as_ref(),
-                    self.owner_waits
-                        .stream(StreamDriver::over(self.dial.dial(to.at)?, rx, tx)),
-                )
+                let stream = self.dial.dial(to.at)?;
+                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
+                    self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+                })
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
@@ -1562,8 +1557,11 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
         heap_link(
             self.cells.as_ref(),
-            self.owner_waits
-                .datagram(UdpDriver::initiator_in(socket, peer, rx, tx)),
+            datagram_ends_fit(&socket, Some(peer)),
+            || {
+                self.owner_waits
+                    .datagram(UdpDriver::initiator_in(socket, peer, rx, tx))
+            },
         )
         .map(Some)
     }
@@ -1596,10 +1594,9 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        heap_link(
-            self.cells.as_ref(),
-            self.owner_waits.stream(StreamDriver::over(stream, rx, tx)),
-        )
+        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), || {
+            self.owner_waits.stream(StreamDriver::over(stream, rx, tx))
+        })
         .map(Some)
     }
 

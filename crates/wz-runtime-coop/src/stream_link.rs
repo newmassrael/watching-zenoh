@@ -54,7 +54,7 @@ use crate::link_storage::{RxStore, TxLender, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
-use crate::udp_link::{ends_fit, EndsFit, SERVICE_WAIT_MS};
+use crate::udp_link::{ends_fit, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
 /// the batch behind it.
@@ -268,13 +268,19 @@ impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
 
 /// What a stack makes of a connected stream and holds as one of its links
 /// ([`StreamSocket::Link`]).
-pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + EndsFit + Sized {
+pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
     /// The link over the connected `socket`, receiving into `rx` and building its frames in `tx`.
     fn over(socket: S, rx: B, tx: X) -> Self;
 
     /// Have the link's owner wait on it, where the link lies ([`StreamDriver::wait_by_owner`]).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn wait_by_owner(&mut self);
+}
+
+/// Whether a stream link over `stream` names both its ends in the rows of the build
+/// ([`ends_fit`]), asked of the stream before a link is made over it.
+pub fn stream_ends_fit<S: StreamSocket>(stream: &S) -> bool {
+    ends_fit(S::PROTO, stream.local(), stream.peer())
 }
 
 /// The link a stack holds over the connected `socket` ([`StreamSocket::Link`]).
@@ -325,12 +331,6 @@ impl StreamSocket for NoStream {
     }
 
     fn shutdown(&self) {
-        match *self {}
-    }
-}
-
-impl EndsFit for NoStream {
-    fn ends_fit(&self) -> bool {
         match *self {}
     }
 }
@@ -1328,12 +1328,6 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
 
     fn lost(&self) -> Option<LostCause> {
         self.lost.get()
-    }
-}
-
-impl<S: StreamSocket, B: RxStore, T: TxStore> EndsFit for StreamDriver<S, B, T> {
-    fn ends_fit(&self) -> bool {
-        ends_fit(S::PROTO, self.socket.local(), self.socket.peer())
     }
 }
 

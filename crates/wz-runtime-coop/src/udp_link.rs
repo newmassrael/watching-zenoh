@@ -291,12 +291,14 @@ pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
             .all(|at| Locator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
 }
 
-/// A link whose two ends are known from the addresses it was opened over, asked before it is
-/// admitted whether the rows of the build name them ([`ends_fit`]).
-pub trait EndsFit {
-    /// Whether both ends fit; `true` while one end is not known yet (an accepting datagram link,
-    /// which takes a peer only when its ends fit).
-    fn ends_fit(&self) -> bool;
+/// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
+/// ([`ends_fit`]), asked of what the link is made of before it is made; `true` while the peer is
+/// not known yet (an accepting link, which takes a peer only when its ends fit).
+pub fn datagram_ends_fit<S: DatagramSocket>(socket: &S, peer: Option<SocketAddr>) -> bool {
+    match peer {
+        Some(peer) => ends_fit(LinkProto::Udp, socket.local(), peer),
+        None => true,
+    }
 }
 
 /// The session's link over one socket `S`, with its receive buffer in `B` and its outbound frames
@@ -567,15 +569,6 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
         match self.socket.send_to(peer, bytes) {
             Ok(()) => LinkSendOutcome::Sent,
             Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
-        }
-    }
-}
-
-impl<S: DatagramSocket, B: RxStore, T: TxStore> EndsFit for UdpDriver<S, B, T> {
-    fn ends_fit(&self) -> bool {
-        match self.binding.peer() {
-            Some(peer) => ends_fit(LinkProto::Udp, self.socket.local(), peer),
-            None => true,
         }
     }
 }
