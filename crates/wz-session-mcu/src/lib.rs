@@ -77,8 +77,6 @@ extern crate alloc;
 extern crate std;
 
 // R2827 — the application layer attached to the session drive.
-// Totality debt TD-224 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod app_layer;
 // Decision D7's contract: a node is asked to hold a peer by its zid. The transports (the admin
 // query, the control port, the declared peers) differ only in what feeds it.

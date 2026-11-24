@@ -418,7 +418,8 @@ where
                 // One final: the peer's. A query answered from this node's own queryables
                 // would be a second, and a session on this profile does not loop a get back.
                 1,
-                Some(now_ms + u64::from(timeout_ms)),
+                // A clock this far along has no later instant: the get then waits on its final.
+                Some(now_ms.saturating_add(u64::from(timeout_ms))),
                 ReplyAcceptance::Matching(request.keyexpr),
                 sink,
             )
