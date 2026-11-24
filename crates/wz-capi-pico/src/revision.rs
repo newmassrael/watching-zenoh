@@ -57,8 +57,10 @@
 /// `wz_ext_replay_subscriber_counts_t`, `wz_ext_e2e_verdict_t` (and so of the verdict a
 /// `wz_ext_replay_sample_t` carries), `wz_ext_instance_key_t`, `wz_ext_message_entry_t`,
 /// `wz_ext_event_t` and `wz_ext_segment_result_t`, so a program built against 4 hands structs whose
-/// first field the library reads as their size. From 5 on a field is added at the end, read or
-/// written only in a struct whose `struct_size` holds it, so adding one does not move the revision.
+/// first field the library reads as their size. The reading a program's resource source writes
+/// (`wz_ext_resource_reading_t`) took one too, which the library sets before it calls the source.
+/// From 5 on a field is added at the end, read or written only in a struct whose `struct_size`
+/// holds it, so adding one does not move the revision.
 pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 5;
 
 wz_abi_stamp::stamp!(

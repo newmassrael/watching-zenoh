@@ -318,12 +318,16 @@ uint8_t wz_ext_supervision_state(uint8_t checkpoint);
 
 /* What the source writes: the readings it has, and which of them it has. A
  * field whose bit in available is clear is not read, whatever the source left in
- * it. */
+ * it. The library hands the source the struct with struct_size set to its bytes,
+ * every field zeroed, and the source writes no byte past struct_size: a field is
+ * only ever added at the end, so a source compiled before it leaves it
+ * unanswered. */
 #define WZ_EXT_SNAPSHOT_HAS_CPU 1
 #define WZ_EXT_SNAPSHOT_HAS_HEAP 2
 #define WZ_EXT_SNAPSHOT_HAS_TASKS 4
 
 typedef struct wz_ext_resource_reading_t {
+  size_t struct_size;    /* set by the library; see above */
   uint8_t available;     /* the WZ_EXT_SNAPSHOT_HAS_* bits */
   uint8_t reserved;
   uint16_t cpu_permille; /* busy share since the last reading, in thousandths */

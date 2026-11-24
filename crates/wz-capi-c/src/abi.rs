@@ -1659,7 +1659,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// (`crate::acl_verdict`, `wz_capi_c_config_acl_verdicts`), one new symbol answering refusals in
 /// the revision-4 verdict rows, in a build with `config-verdict` and `interceptors` (both on by
 /// default).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 20;
+///
+/// It moves to 21 with no new symbol: the reading a program's resource source writes
+/// (`wz_capi_c_resource_reading_t`) starts with `struct_size`, which the library sets before it
+/// calls the source and past which the source writes nothing, so a source built against 20 writes
+/// its readings where the library reads the size and the availability bits.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 21;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;
