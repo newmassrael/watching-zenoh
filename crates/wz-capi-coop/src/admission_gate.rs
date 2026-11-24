@@ -23,8 +23,6 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
 
-use crate::prelude::*;
-
 /// Whether the engine has admitted a link: shared between the gate the link's task reads through
 /// and the engine's wire for that link, which opens it.
 #[derive(Clone, Default)]
