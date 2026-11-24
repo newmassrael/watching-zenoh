@@ -301,11 +301,13 @@ fn read_be(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b))
 }
 
+/// Write the low `out.len()` bytes of `value`, most significant first. A field
+/// is at most 8 bytes wide (the profile refuses a wider one), so this is a
+/// copy of the tail of the value's own big-endian bytes: a per-byte shift loop
+/// over a length the compiler cannot bound is vectorised at every inlined call.
 pub(crate) fn write_be(out: &mut [u8], value: u64) {
     let n = out.len();
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = (value >> (8 * (n - 1 - i))) as u8;
-    }
+    out.copy_from_slice(&value.to_be_bytes()[8 - n..]);
 }
 
 /// Feed one covered piece of `frame` to `digest`, as it stands on the wire.
@@ -831,4 +833,33 @@ pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
         payload_offset: view.payload_offset,
         payload_bytes: view.payload_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_be, write_be};
+    use crate::e2e_crc::width_mask;
+
+    /// Every byte distinct and the top bit set, so a byte out of place or a
+    /// sign carried down shows.
+    const VALUE: u64 = 0x8877_6655_4433_2211;
+
+    #[test]
+    fn write_be_lays_every_width_most_significant_byte_first() {
+        for width in 1..=8usize {
+            let mut out = [0xEEu8; 10];
+            write_be(&mut out[1..1 + width], VALUE);
+            for (i, &byte) in out[1..1 + width].iter().enumerate() {
+                let wanted = (VALUE >> (8 * (width - 1 - i))) as u8;
+                assert_eq!(byte, wanted, "width {width}, byte {i}");
+            }
+            assert_eq!(out[0], 0xEE, "width {width} wrote before the field");
+            assert!(
+                out[1 + width..].iter().all(|&b| b == 0xEE),
+                "width {width} wrote past the field"
+            );
+            let low = VALUE & width_mask((width * 8) as u8);
+            assert_eq!(read_be(&out[1..1 + width]), low, "width {width}");
+        }
+    }
 }
