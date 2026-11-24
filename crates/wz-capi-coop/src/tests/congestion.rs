@@ -303,7 +303,7 @@ mod stalled_link {
     use wz_session_core::session_init_params::{HeldDrop, TxQueueConf, WAIT_BEFORE_CLOSE_US};
     use wz_session_core::WhatAmI;
 
-    use super::super::{client_config, open_with, until};
+    use super::super::{client_config, config_zid, open_with, until};
     use crate::CoopConfig;
 
     /// How long a blocking publish waits for room before the session is closed.
@@ -409,7 +409,7 @@ mod stalled_link {
     fn behind_a_blocking_publish(tx_queue: TxQueueConf) -> Behind {
         let peer = open_with(CoopConfig {
             whatami: WhatAmI::Peer,
-            zid: Some(vec![0xa7; 4]),
+            zid: config_zid(0xa7),
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
             ..client_config()
         });
@@ -417,7 +417,7 @@ mod stalled_link {
         SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
         let publisher = open_with(CoopConfig {
             endpoints: vec![endpoint],
-            zid: Some(vec![0xb7; 4]),
+            zid: config_zid(0xb7),
             tx_queue,
             ..client_config()
         });
@@ -516,7 +516,7 @@ mod stalled_link {
     ) -> (Option<Result<usize, FanoutError>>, bool, u64) {
         let peer = open_with(CoopConfig {
             whatami: WhatAmI::Peer,
-            zid: Some(vec![0xa8; 4]),
+            zid: config_zid(0xa8),
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
             ..client_config()
         });
@@ -524,7 +524,7 @@ mod stalled_link {
         SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
         let publisher = open_with(CoopConfig {
             endpoints: vec![endpoint],
-            zid: Some(vec![0xb8; 4]),
+            zid: config_zid(0xb8),
             tx_queue: stalling(TxQueueConf {
                 wait_before_drop_us: DROP_WAIT_US,
                 held_drop: HeldDrop::WaitForRoom,
@@ -682,7 +682,7 @@ mod stalled_link {
 
         let publisher = open_with(CoopConfig {
             whatami: WhatAmI::Peer,
-            zid: Some(vec![0xb8; 4]),
+            zid: config_zid(0xb8),
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
             tx_queue: stalling(tx_queue),
             ..client_config()
@@ -693,12 +693,12 @@ mod stalled_link {
         // it is open: what is sent to it fills its connection.
         let stalled = open_with(CoopConfig {
             endpoints: vec![endpoint.clone()],
-            zid: Some(vec![0xa8; 4]),
+            zid: config_zid(0xa8),
             ..client_config()
         });
         let reading = open_with(CoopConfig {
             endpoints: vec![endpoint],
-            zid: Some(vec![0xc8; 4]),
+            zid: config_zid(0xc8),
             ..client_config()
         });
         let heard = Arc::new(AtomicUsize::new(0));

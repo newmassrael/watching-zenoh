@@ -20,7 +20,7 @@ use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
 
-use super::{client_config, open_with, Engine};
+use super::{client_config, config_zid, open_with, Engine};
 use crate::CoopConfig;
 
 /// What one droppable publish that fills the slow stream carries: many frames, so that a few of
@@ -74,7 +74,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     }
     let publisher = stepped(CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![0xa1; 4]),
+        zid: config_zid(0xa1),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         limits,
         // A droppable publish waits at most a millisecond for the slow peer's own stream, which
@@ -91,7 +91,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let good = stepped(CoopConfig {
         endpoints: vec![endpoint.clone()],
-        zid: Some(vec![0xc1; 4]),
+        zid: config_zid(0xc1),
         ..client_config()
     });
     let into = heard.clone();
@@ -110,7 +110,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     eventually("the good peer's face", || publisher.faces_up() == 1);
     let slow = stepped(CoopConfig {
         endpoints: vec![endpoint],
-        zid: Some(vec![0xc2; 4]),
+        zid: config_zid(0xc2),
         ..client_config()
     });
     eventually("the slow peer's face", || publisher.faces_up() == 2);

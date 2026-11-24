@@ -84,7 +84,7 @@ use wz_capi_port::os::{Mutex, MutexGuard};
 
 use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
-use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, LinkSnapshot};
+use wz_session_core::face::{FaceEventKind, FaceLinkRow};
 use wz_session_core::link::LinkKind;
 
 use crate::abi::z_owned_string_t;
@@ -415,11 +415,6 @@ fn pico_whatami(wire: u8) -> z_whatami_t {
     }
 }
 
-/// The transport pico reports for one established face.
-fn transport_of(snapshot: &FaceSnapshot) -> z_loaned_transport_t {
-    pico_transport(snapshot.zid, snapshot.whatami, snapshot.is_multicast)
-}
-
 /// The transport pico reports of the peer `zid` in the wire role `whatami`.
 fn pico_transport(zid: [u8; 16], whatami: u8, is_multicast: bool) -> z_loaned_transport_t {
     z_loaned_transport_t {
@@ -491,17 +486,6 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
 /// `} else if (remote_addr->len == 16 + sizeof(uint16_t)) {`), and a raweth receive gives four
 /// bytes of the source MAC (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
 /// `addr->len = sizeof(ETH_ALEN);`). MEASURED against the real library: `dst=` and `mtu=1514`.
-fn link_of(zid: [u8; 16], link: &LinkSnapshot) -> z_loaned_link_t {
-    pico_link(
-        zid,
-        &link.src,
-        &link.dst,
-        (link.kind, link.mtu),
-        link.group.as_ref().map(|group| group.endpoint.as_str()),
-    )
-}
-
-/// The link pico reports for the link of `row`, as [`link_of`] reads a snapshot's.
 fn link_of_row(row: &FaceLinkRow) -> z_loaned_link_t {
     pico_link(
         row.zid,
@@ -1105,27 +1089,42 @@ impl Connectivity {
         next_in(&self.transports, at)
     }
 
-    /// A face arrived or left: tell every listener, in pico's order.
+    /// A row of a face that arrived or left: tell every listener, in pico's order.
     ///
-    /// Arrival is the transport, then its link; departure is the link, then the
-    /// transport.
-    pub(crate) fn on_face_event(&self, kind: FaceEventKind, snapshot: &FaceSnapshot) {
+    /// Arrival is the transport, at the face's first row, then each link; departure is each
+    /// link, then the transport, at the face's last row. A face with no link is told by one row,
+    /// which is its transport alone.
+    pub(crate) fn on_face_row(&self, kind: FaceEventKind, row: &FaceLinkRow) {
+        // Rows the session's queue lost after this one (`row.lost_after`) are told to no listener:
+        // pico calls its listeners from the task that saw the peer come or go and queues nothing
+        // (`_z_connectivity_peer_disconnected`, cited in the module doc), so its listeners have no
+        // event that says one was missed. Nor is a live listener brought to the faces as they
+        // stand, as a replaying one is: what it was told is noted only while it replays.
+        let has_link = row.links > 0;
         match kind {
             FaceEventKind::Up => {
-                self.fan_transport(Z_SAMPLE_KIND_PUT, snapshot);
-                self.fan_links(Z_SAMPLE_KIND_PUT, snapshot);
+                if row.link == 0 {
+                    self.fan_transport(Z_SAMPLE_KIND_PUT, row);
+                }
+                if has_link {
+                    self.fan_link(Z_SAMPLE_KIND_PUT, row);
+                }
             }
             FaceEventKind::Down => {
-                self.fan_links(Z_SAMPLE_KIND_DELETE, snapshot);
-                self.fan_transport(Z_SAMPLE_KIND_DELETE, snapshot);
+                if has_link {
+                    self.fan_link(Z_SAMPLE_KIND_DELETE, row);
+                }
+                if row.is_last_of_face() {
+                    self.fan_transport(Z_SAMPLE_KIND_DELETE, row);
+                }
             }
         }
     }
 
-    fn fan_transport(&self, kind: z_sample_kind_t, snapshot: &FaceSnapshot) {
+    fn fan_transport(&self, kind: z_sample_kind_t, row: &FaceLinkRow) {
         let key = ToldKey {
-            zid: snapshot.zid,
-            is_multicast: snapshot.is_multicast,
+            zid: row.zid,
+            is_multicast: row.is_multicast,
             link: 0,
         };
         let mut at = 0;
@@ -1135,7 +1134,7 @@ impl Connectivity {
             delivery.deliver(
                 z_loaned_transport_event_t {
                     kind,
-                    transport: transport_of(snapshot),
+                    transport: transport_of_row(row),
                 },
                 key,
             );
@@ -1143,26 +1142,20 @@ impl Connectivity {
         }
     }
 
-    fn fan_links(&self, kind: z_sample_kind_t, snapshot: &FaceSnapshot) {
-        let transport = transport_of(snapshot);
+    fn fan_link(&self, kind: z_sample_kind_t, row: &FaceLinkRow) {
+        let transport = transport_of_row(row);
         let mut at = 0;
         while let Some((object, hold)) = next_in(&self.links, &mut at) {
             // SAFETY: `hold` keeps the place, and so its listener, standing for the call.
             let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
             if listener.wants(&transport) {
-                for (index, link) in snapshot.links.iter().enumerate() {
-                    listener.delivery.deliver(
-                        z_loaned_link_event_t {
-                            kind,
-                            link: link_of(snapshot.zid, link),
-                        },
-                        ToldKey {
-                            zid: snapshot.zid,
-                            is_multicast: snapshot.is_multicast,
-                            link: index,
-                        },
-                    );
-                }
+                listener.delivery.deliver(
+                    z_loaned_link_event_t {
+                        kind,
+                        link: link_of_row(row),
+                    },
+                    ToldKey::of_row(row),
+                );
             }
             drop(hold);
         }
@@ -2367,6 +2360,7 @@ pub(crate) mod tests {
 
     use std::sync::OnceLock;
     use wz_capi_core::faces::SharedSession;
+    use wz_session_core::face::{FaceSnapshot, LinkSnapshot};
     use wz_session_core::link::LinkKind;
 
     use wz_capi_core::runtime::runtime_impl::TokioTime;
@@ -2518,6 +2512,29 @@ pub(crate) mod tests {
             is_multicast: false,
             is_shm: false,
         }
+    }
+
+    /// Tell `hub` of `face` as an engine tells it, a row at a time.
+    fn tell(hub: &Connectivity, kind: FaceEventKind, face: &FaceSnapshot) {
+        FaceLinkRow::each_of_snapshot(face, |row| hub.on_face_row(kind, &row));
+    }
+
+    /// The transport pico reports for `face`, read off its first row as an event's is.
+    fn transport_of(face: &FaceSnapshot) -> z_loaned_transport_t {
+        transport_of_row(&FaceLinkRow::of_face_alone(face))
+    }
+
+    /// The link pico reports for `link` of the peer `zid`, read off its row as an event's is.
+    fn link_of(zid: [u8; 16], link: &LinkSnapshot) -> z_loaned_link_t {
+        let face = FaceSnapshot {
+            zid,
+            whatami: 1,
+            is_qos: false,
+            is_multicast: link.group.is_some(),
+            is_shm: false,
+            links: vec![link.clone()],
+        };
+        link_of_row(&FaceLinkRow::of_snapshot(&face, 0).expect("the face's one link"))
     }
 
     fn face(first: u8, multicast: bool, src: &str) -> FaceSnapshot {
@@ -2694,8 +2711,8 @@ pub(crate) mod tests {
             .expect("a place is free");
 
         let peer = face(7, false, "tcp/127.0.0.1:7447");
-        hub.on_face_event(FaceEventKind::Up, &peer);
-        hub.on_face_event(FaceEventKind::Down, &peer);
+        tell(&hub, FaceEventKind::Up, &peer);
+        tell(&hub, FaceEventKind::Down, &peer);
         assert_eq!(
             seen(log),
             [
@@ -2730,9 +2747,9 @@ pub(crate) mod tests {
             .declare_link(&engine, false, Some((zid, false)), link_closure(log))
             .expect("a place is free");
 
-        hub.on_face_event(FaceEventKind::Up, &face(7, false, "tcp/a"));
-        hub.on_face_event(FaceEventKind::Up, &face(8, false, "tcp/other-zid"));
-        hub.on_face_event(FaceEventKind::Up, &face(7, true, "tcp/multicast"));
+        tell(&hub, FaceEventKind::Up, &face(7, false, "tcp/a"));
+        tell(&hub, FaceEventKind::Up, &face(8, false, "tcp/other-zid"));
+        tell(&hub, FaceEventKind::Up, &face(7, true, "tcp/multicast"));
         assert_eq!(seen(log), ["link PUT tcp/a"]);
         // SAFETY: the listener declared above, let go of once.
         unsafe { release_link_listener(link) };
@@ -2936,7 +2953,7 @@ pub(crate) mod tests {
             .expect("a place is free");
         // SAFETY: the listener's owner holds it until the end of the test.
         let id = unsafe { (*object).id };
-        hub.on_face_event(FaceEventKind::Up, &face(3, false, "tcp/x"));
+        tell(&hub, FaceEventKind::Up, &face(3, false, "tcp/x"));
         assert_eq!(log.released.load(Ordering::SeqCst), 0);
 
         let mut at = 0;
@@ -2948,7 +2965,7 @@ pub(crate) mod tests {
             1,
             "the context is released by the time undeclare returns"
         );
-        hub.on_face_event(FaceEventKind::Down, &face(3, false, "tcp/x"));
+        tell(&hub, FaceEventKind::Down, &face(3, false, "tcp/x"));
         assert_eq!(
             seen(log),
             ["transport PUT 3"],
@@ -3073,7 +3090,7 @@ pub(crate) mod tests {
         // SAFETY: each listener declared above, let go of once.
         unsafe { release_link_listener(first) };
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
-        hub.on_face_event(FaceEventKind::Up, &face(4, false, "tcp/y"));
+        tell(&hub, FaceEventKind::Up, &face(4, false, "tcp/y"));
         assert_eq!(
             seen(log)
                 .iter()

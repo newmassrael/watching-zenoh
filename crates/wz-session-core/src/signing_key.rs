@@ -127,10 +127,13 @@ impl KeyBlock {
     /// A block of zeros.
     const ZERO: Self = Self([0; SIGNING_KEY_MAX]);
 
+    /// The words the block is, which the assertion above makes a whole number.
+    const WORDS: usize = SIGNING_KEY_MAX / core::mem::size_of::<usize>();
+
     /// Store zero over every byte of the block, a word at a time.
     fn wipe(&mut self) {
         let words = self.0.as_mut_ptr().cast::<usize>();
-        for at in 0..SIGNING_KEY_MAX / core::mem::size_of::<usize>() {
+        for at in 0..Self::WORDS {
             // SAFETY: the block is aligned to 8, at least a word's alignment, and is a whole
             // number of words long, so word `at` lies in it, aligned, and is the block's alone.
             unsafe { core::ptr::write_volatile(words.add(at), 0) };

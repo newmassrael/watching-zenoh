@@ -345,11 +345,13 @@ mod tests {
             is_multicast: false,
             is_shm: false,
             link: 0,
+            links: 1,
             src: RowText::of("udp/127.0.0.1:1"),
             dst: RowText::of("udp/127.0.0.1:2"),
             kind: None,
             mtu: 0,
             group_endpoint: None,
+            lost_after: 0,
         }
     }
 

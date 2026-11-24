@@ -18,7 +18,7 @@ use core::cell::{Cell, Ref, RefMut};
 
 use crate::bounded::Storage;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-use crate::face::{FaceEventKind, FaceSnapshot};
+use crate::face::{FaceEventKind, FaceLinkRow};
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::face_plane::FaceReports;
 use crate::key_arena::KeySpace;
@@ -145,24 +145,18 @@ impl<P: SessionParts> SessionState<P>
 where
     P::Watchers: FaceReports,
 {
-    /// The face `snapshot` makes, when something watches the faces (an event is the snapshot it
-    /// carries); none, and no snapshot made, otherwise. Watchers that can never watch make none in
-    /// any case, so their build has no snapshot to link.
-    pub fn face_of(&self, snapshot: impl FnOnce() -> Option<FaceSnapshot>) -> Option<FaceSnapshot> {
-        if !<P::Watchers as FaceReports>::WATCHES || !self.watchers.watched() {
-            return None;
-        }
-        snapshot()
+    /// Whether a face that comes up or goes is worth its rows: something watches the faces.
+    /// Watchers that can never watch answer `false` as a constant, so their build reads no row.
+    pub fn faces_watched(&self) -> bool {
+        <P::Watchers as FaceReports>::WATCHES && self.watchers.watched()
     }
 
-    /// Tell the watchers of the faces that `face` came up or went, with the session's other
-    /// deliveries ([`Self::face_of`] says whether there is anything to tell).
-    // Out of line: the face lost and the face up each tell, with the snapshot dropped once.
+    /// Tell the watchers of the faces a row of a face that came up or went, with the session's
+    /// other deliveries ([`Self::faces_watched`] says whether there is anyone to tell).
+    // Out of line: the face lost and the face up each tell, a row at a time.
     #[inline(never)]
-    pub fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
-        if let Some(face) = face {
-            self.watchers.happened(kind, face);
-        }
+    pub fn report_face_row(&self, kind: FaceEventKind, row: FaceLinkRow) {
+        self.watchers.happened(kind, row);
     }
 }
 
@@ -625,49 +619,47 @@ mod tests {
     }
 
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    fn face() -> FaceSnapshot {
-        FaceSnapshot {
+    fn row() -> FaceLinkRow {
+        FaceLinkRow {
             zid: [7; 16],
             whatami: 0,
             is_qos: false,
             is_multicast: false,
             is_shm: false,
-            links: std::vec::Vec::new(),
+            link: 0,
+            links: 1,
+            src: crate::face::RowText::of("tcp/127.0.0.1:1"),
+            dst: crate::face::RowText::of("tcp/127.0.0.1:2"),
+            kind: None,
+            mtu: 0,
+            group_endpoint: None,
+            lost_after: 0,
         }
     }
 
-    /// A state whose build watches no face makes no snapshot and reports nothing.
+    /// A state whose build watches no face is never watched, and a row reported to it is kept
+    /// nowhere.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
-    fn a_state_that_watches_no_face_makes_no_snapshot() {
+    fn a_state_that_watches_no_face_is_never_watched() {
         let state = new_state::<Unwatched>();
-        let mut made = false;
-        assert!(state
-            .face_of(|| {
-                made = true;
-                Some(face())
-            })
-            .is_none());
-        assert!(!made, "no snapshot is made for nobody");
-        state.report_face(FaceEventKind::Up, Some(face()));
+        assert!(!state.faces_watched(), "no row is read for nobody");
+        state.report_face_row(FaceEventKind::Up, row());
     }
 
-    /// A state with a plane makes a snapshot only while something watches, and reports it there.
+    /// A state with a plane is watched only while something watches, and a row reported to it is
+    /// queued there. Turned red by a state that reads itself watched with no watcher, which would
+    /// read every face's rows for nobody.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
-    fn a_state_reports_a_face_to_its_plane_while_it_is_watched() {
+    fn a_state_reports_a_face_row_to_its_plane_while_it_is_watched() {
         let state = new_state::<Watched>();
-        assert!(
-            state.face_of(|| Some(face())).is_none(),
-            "nothing watches yet"
-        );
+        assert!(!state.faces_watched(), "nothing watches yet");
         state.watchers.watch(alloc::sync::Arc::new(|_, _| {}));
-        let snapshot = state.face_of(|| Some(face()));
-        assert!(snapshot.is_some());
-        state.report_face(FaceEventKind::Down, snapshot);
-        state.report_face(FaceEventKind::Up, None);
+        assert!(state.faces_watched());
+        state.report_face_row(FaceEventKind::Down, row());
         let (kind, told) = state.watchers.next_event().unwrap();
         assert_eq!((kind, told.zid), (FaceEventKind::Down, [7; 16]));
-        assert!(state.watchers.next_event().is_none(), "no face, no event");
+        assert!(state.watchers.next_event().is_none(), "one row, one event");
     }
 }

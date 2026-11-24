@@ -72,6 +72,19 @@ impl TokenCall for Call {
     }
 }
 
+impl WatchCall for Call {
+    fn same_row(&self, other: &Self) -> bool {
+        self.row == other.row
+    }
+
+    fn hand(&self, event: DeclEvent<'_>) {
+        self.log.note(format!(
+            "{} watch {:?} {} {} {:?}",
+            self.row, event.kind, event.id, event.keyexpr, event.peer
+        ));
+    }
+}
+
 /// A tally that keeps the rounds handed out and the samples they held.
 #[derive(Default)]
 pub(crate) struct Counted {
@@ -94,11 +107,13 @@ impl RoundCalls for Kept {
     type Subscriber = Call;
     type Liveliness = Call;
     type Queryable = Call;
+    type Watch = Call;
     type Leg = u32;
     type ReplyCallback = ();
     type Tokens = Present;
     type Replies = Present;
     type Queries = Present;
+    type Watches = Present;
     type Capture = Present;
     type Group = Present;
     type Locks = StdLocks;
@@ -112,11 +127,13 @@ impl RoundCalls for Lean {
     type Subscriber = Call;
     type Liveliness = Call;
     type Queryable = Call;
+    type Watch = Call;
     type Leg = u32;
     type ReplyCallback = ();
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
+    type Watches = Absent;
     type Capture = Absent;
     type Group = Absent;
     type Locks = StdLocks;
@@ -450,4 +467,160 @@ fn a_query_is_held_where_queries_are_kept_and_refused_where_they_are_not() {
     assert_eq!(log.ended(), 2, "the refused query's call is ended");
     assert_eq!(lean.counts().held_over, 1);
     assert_eq!(log.handed(), ["3 query q/1 9"]);
+}
+
+/// A peer's declaration is written once for the watches it reaches one after the other and handed
+/// to each with its key and its peer; a round that keeps no watch refuses it, counted as dropped.
+#[test]
+fn a_declaration_is_held_once_for_its_watches_and_refused_where_watches_are_not() {
+    let log = Arc::new(Log::default());
+    let peer: &[u8] = &[0xa1, 0x02];
+    let event = DeclEvent {
+        kind: DeclEventKind::Declared,
+        id: 9,
+        keyexpr: "w/1",
+        peer: Some(peer),
+    };
+    let kept = round::<Kept>();
+    let (first, second) = (
+        Call {
+            row: 1,
+            log: log.clone(),
+        },
+        Call {
+            row: 2,
+            log: log.clone(),
+        },
+    );
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        assert!(kept.offer_decl_watch(first, event, None));
+        assert!(kept.offer_decl_watch(second, event, None));
+        assert!(
+            kept.has_room(3, 2),
+            "the second watch joined the first one's record"
+        );
+        assert!(!kept.has_room(4, 0), "one record was written");
+        kept.seal();
+    }
+    assert!(kept.deliver());
+    assert_eq!(
+        log.handed(),
+        [
+            "1 watch Declared 9 w/1 Some([161, 2])",
+            "2 watch Declared 9 w/1 Some([161, 2])"
+        ]
+    );
+    assert_eq!(log.ended(), 2);
+
+    let lean = round::<Lean>();
+    let call = Call {
+        row: 3,
+        log: log.clone(),
+    };
+    // SAFETY: as above.
+    unsafe {
+        assert!(!lean.offer_decl_watch(call, event, None));
+        lean.seal();
+    }
+    assert!(!lean.deliver(), "nothing was held");
+    assert_eq!(log.handed().len(), 2, "the refused event is handed to none");
+    assert_eq!(log.ended(), 3, "the refused event's call is ended");
+    assert_eq!(
+        lean.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 0
+        }
+    );
+}
+
+/// A retraction names no key and a loss counts its events, each a record of its own; an event
+/// naming a peer longer than a zenoh id has nowhere the record holds it, and is refused as unplaced.
+#[test]
+fn a_retraction_and_a_loss_are_held_and_a_peer_past_a_zid_is_unplaced() {
+    let log = Arc::new(Log::default());
+    let call = |row| Call {
+        row,
+        log: log.clone(),
+    };
+    let long = [1u8; ZID_MAX + 1];
+    let kept = round::<Kept>();
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        let undeclared = DeclEvent {
+            kind: DeclEventKind::Undeclared,
+            id: 4,
+            keyexpr: "",
+            peer: None,
+        };
+        assert!(kept.offer_decl_watch(call(1), undeclared, None));
+        let lost = DeclEvent {
+            kind: DeclEventKind::Lost,
+            id: 3,
+            ..undeclared
+        };
+        assert!(kept.offer_decl_watch(call(1), lost, None));
+        let past = DeclEvent {
+            kind: DeclEventKind::Declared,
+            id: 5,
+            keyexpr: "w/2",
+            peer: Some(&long),
+        };
+        assert!(!kept.offer_decl_watch(call(1), past, None));
+        kept.seal();
+    }
+    assert!(kept.deliver());
+    assert_eq!(
+        log.handed(),
+        ["1 watch Undeclared 4  None", "1 watch Lost 3  None"]
+    );
+    assert_eq!(log.ended(), 3);
+    assert_eq!(
+        kept.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 1
+        }
+    );
+}
+
+/// A sealed round takes no record, so a source that writes several at once is told there is no
+/// room before it writes the first.
+#[test]
+fn a_sealed_round_has_no_room() {
+    let log = Arc::new(Log::default());
+    let kept = round::<Kept>();
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        assert!(kept.has_room(1, 1), "an empty round has room");
+        let event = DeclEvent {
+            kind: DeclEventKind::Synced,
+            id: 0,
+            keyexpr: "",
+            peer: None,
+        };
+        let call = Call {
+            row: 1,
+            log: log.clone(),
+        };
+        assert!(kept.offer_decl_watch(call, event, None));
+        kept.seal();
+        assert!(!kept.has_room(1, 0), "a sealed round takes nothing");
+    }
+    assert!(kept.deliver());
+    // SAFETY: as above.
+    assert!(
+        unsafe { kept.has_room(1, 1) },
+        "a delivered round has room again"
+    );
+}
+
+/// A build that keeps no watch gives the record of one no room in the round's rows.
+#[test]
+fn a_round_that_keeps_no_watch_gives_its_record_no_size() {
+    type Record = <<Lean as RoundCalls>::Watches as Presence>::Record<HeldWatch>;
+    assert_eq!(core::mem::size_of::<Record>(), 0);
 }

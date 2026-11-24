@@ -3799,6 +3799,30 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the events a listener holds during its history: zenoh-pico queues them on the heap with no constant, and zenoh tells the history and the events under one lock, holding none."
 
 [[limit]]
+id = "MAX_FACE_WATCH_ROWS"
+kconfig = "WZ_LIMIT_MAX_FACE_WATCH_ROWS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The rows of transports and links that came or went a session holds for the
+program's watchers of its faces between two deliveries, reserved when the
+session opens; a session that holds fewer faces reserves fewer. A row that
+finds every row held is not kept and nothing is allocated for it: the
+watchers are told, once, how many rows were lost after the last row kept.
+It must be at least 1.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the face events waiting for a watcher: zenoh-pico calls its connectivity listeners from the task that saw the transport come or go, and zenoh tells them under one lock, so neither holds them in a queue."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"

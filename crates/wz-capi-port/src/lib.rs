@@ -82,6 +82,9 @@ pub mod decl_watch;
 mod drive;
 mod engine;
 pub mod entity_place;
+// A watcher of the faces' snapshots told through their rows, and one of their rows through their
+// snapshots.
+pub mod face_rows;
 pub mod group;
 pub mod held_key;
 mod held_slab;

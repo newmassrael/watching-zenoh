@@ -402,11 +402,6 @@ impl DeclaredKeyexpr {
         self.declared_on(shared).map(|d| d.share_on(shared))
     }
 
-    /// Another holder of the literal key's text, without the declaration.
-    pub(crate) fn share_text(&self) -> KeyText {
-        self.literal.share()
-    }
-
     /// A borrow of this key in the loaned layout, carrying the declaration so a
     /// caller that publishes on it aliases as pico's `z_publisher_keyexpr` loan
     /// does. Valid while `self` stays at its address.

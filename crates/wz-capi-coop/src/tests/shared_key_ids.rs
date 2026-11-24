@@ -31,7 +31,7 @@ use wz_session_core::WhatAmI;
 
 use super::get::{count_end, ignore_reply, remote_get};
 use super::listen::{eventually, Stepped};
-use super::{client_config, Engine, LOOPBACK};
+use super::{client_config, config_zid, Engine, LOOPBACK};
 use crate::{CoopConfig, KeyWireFormRefused, OpenError, OpenKeyIds};
 
 /// The dictionary both ends hold: a key, a key below it, and a prefix a get names a key under.
@@ -93,7 +93,7 @@ fn listener_with(key_ids: OpenKeyIds, form: KeyWireForm) -> (Stepped, String) {
     let engine = open_with_keys(
         CoopConfig {
             whatami: WhatAmI::Peer,
-            zid: Some(vec![0xa1; 4]),
+            zid: config_zid(0xa1),
             listen: vec![LISTEN.to_owned()],
             ..client_config()
         },
@@ -127,7 +127,7 @@ fn dialler_with(
         open_with_keys(
             CoopConfig {
                 endpoints: vec![endpoint.to_owned()],
-                zid: Some(vec![0xc1; 4]),
+                zid: config_zid(0xc1),
                 ..client_config()
             },
             key_ids,

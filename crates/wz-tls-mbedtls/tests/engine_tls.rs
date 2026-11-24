@@ -31,7 +31,7 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
-use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
+use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, SessionZid, TxQueueConf};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
@@ -58,7 +58,7 @@ fn base_config() -> CoopConfig {
     CoopConfig {
         endpoints: Vec::new(),
         whatami: WhatAmI::Client,
-        zid: Some(vec![0xb1; 4]),
+        zid: Some(SessionZid::from([0xb1; 4])),
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
@@ -167,7 +167,7 @@ fn client_dial(authority: &Authority, mutual_as: Option<&End>) -> TlsDial<PosixT
 
 /// A session that listens on a loopback `tls/` port the kernel picks and dials nothing, with the
 /// endpoint it is bound to.
-fn listening(dial: TlsDial<PosixTcpDial>, zid: Vec<u8>) -> (Stepped, String) {
+fn listening(dial: TlsDial<PosixTcpDial>, zid: SessionZid) -> (Stepped, String) {
     let engine = open(
         dial,
         CoopConfig {
@@ -186,7 +186,7 @@ fn listening(dial: TlsDial<PosixTcpDial>, zid: Vec<u8>) -> (Stepped, String) {
 fn client(
     dial: TlsDial<PosixTcpDial>,
     endpoint: &str,
-    zid: Vec<u8>,
+    zid: SessionZid,
     open_timeout_ms: u64,
 ) -> Result<Stepped, OpenError> {
     open(
@@ -232,7 +232,7 @@ fn a_session_opens_over_a_chain_verified_tls_link_and_carries_a_put_each_way() {
     let _library = library();
     let authority = Authority::new();
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
-    let (listener, endpoint) = listening(listener_dial(&server, None), vec![0xa1; 4]);
+    let (listener, endpoint) = listening(listener_dial(&server, None), SessionZid::from([0xa1; 4]));
     assert!(
         endpoint.starts_with("tls/127.0.0.1:") && !endpoint.ends_with(":0"),
         "the endpoint names the scheme and the port the kernel picked: {endpoint}"
@@ -243,7 +243,7 @@ fn a_session_opens_over_a_chain_verified_tls_link_and_carries_a_put_each_way() {
     let peer = client(
         client_dial(&authority, None),
         &endpoint,
-        vec![0xc1; 4],
+        SessionZid::from([0xc1; 4]),
         5_000,
     )
     .expect("the client opens over tls");
@@ -270,7 +270,10 @@ fn under_mutual_tls_a_listener_holds_a_face_for_each_vouched_client_and_none_for
     let authority = Authority::new();
     let stranger = Authority::new();
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
-    let (listener, endpoint) = listening(listener_dial(&server, Some(&authority)), vec![0xa1; 4]);
+    let (listener, endpoint) = listening(
+        listener_dial(&server, Some(&authority)),
+        SessionZid::from([0xa1; 4]),
+    );
     let heard = hearing(&listener);
 
     let mut peers = Vec::new();
@@ -280,7 +283,7 @@ fn under_mutual_tls_a_listener_holds_a_face_for_each_vouched_client_and_none_for
             client(
                 client_dial(&authority, Some(&own)),
                 &endpoint,
-                vec![id; 4],
+                SessionZid::from([id; 4]),
                 5_000,
             )
             .expect("a vouched client opens"),
@@ -301,7 +304,7 @@ fn under_mutual_tls_a_listener_holds_a_face_for_each_vouched_client_and_none_for
     let refused = client(
         client_dial(&authority, Some(&strange)),
         &endpoint,
-        vec![0xc3; 4],
+        SessionZid::from([0xc3; 4]),
         1_500,
     );
     assert!(
@@ -317,12 +320,12 @@ fn a_client_that_does_not_trust_the_listeners_root_never_opens() {
     let authority = Authority::new();
     let stranger = Authority::new();
     let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
-    let (listener, endpoint) = listening(listener_dial(&server, None), vec![0xa1; 4]);
+    let (listener, endpoint) = listening(listener_dial(&server, None), SessionZid::from([0xa1; 4]));
 
     let refused = client(
         client_dial(&stranger, None),
         &endpoint,
-        vec![0xc1; 4],
+        SessionZid::from([0xc1; 4]),
         5_000,
     );
     assert!(
@@ -335,7 +338,7 @@ fn a_client_that_does_not_trust_the_listeners_root_never_opens() {
     let _peer = client(
         client_dial(&authority, None),
         &endpoint,
-        vec![0xc2; 4],
+        SessionZid::from([0xc2; 4]),
         5_000,
     )
     .expect("a client that trusts the root opens");
@@ -366,13 +369,14 @@ fn a_pinned_tls_link_carries_a_session_whose_zid_is_its_keys_zid() {
     let client_id: &'static Identity = Box::leak(Box::new(
         Identity::generate(c"CN=wz-pinned-client").unwrap(),
     ));
-    let (listener, endpoint) = listening(pinned(server_id, true), server_id.zid().to_vec());
+    let (listener, endpoint) =
+        listening(pinned(server_id, true), SessionZid::from(server_id.zid()));
     assert_eq!(listener.faces_up(), 0, "CONTROL: no face before a client");
 
     let peer = client(
         pinned(client_id, false),
         &endpoint,
-        client_id.zid().to_vec(),
+        SessionZid::from(client_id.zid()),
         5_000,
     )
     .expect("a client that states its key's zid opens");

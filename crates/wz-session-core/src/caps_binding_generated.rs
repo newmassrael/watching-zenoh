@@ -778,6 +778,18 @@ pub const MAX_CONNECTIVITY_REPLAY_EVENTS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_FACE_WATCH_ROWS`] is bound.
+pub const MAX_FACE_WATCH_ROWS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_STATIC_CONNECT`] is bound.
 pub const MAX_STATIC_CONNECT: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

@@ -54,11 +54,13 @@ impl RoundCalls for Local {
     type Subscriber = Infallible;
     type Liveliness = Infallible;
     type Queryable = Begun;
+    type Watch = core::convert::Infallible;
     type Leg = u32;
     type ReplyCallback = ();
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
+    type Watches = Absent;
     type Capture = Absent;
     type Group = Absent;
     type Locks = StdLocks;
@@ -77,11 +79,13 @@ impl RoundCalls for Linked {
     type Subscriber = Infallible;
     type Liveliness = Infallible;
     type Queryable = Begun;
+    type Watch = core::convert::Infallible;
     type Leg = u32;
     type ReplyCallback = ();
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
+    type Watches = Absent;
     type Capture = Absent;
     type Group = Absent;
     type Locks = StdLocks;

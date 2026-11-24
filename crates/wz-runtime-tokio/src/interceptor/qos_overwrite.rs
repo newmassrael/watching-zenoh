@@ -192,7 +192,7 @@ pub struct PayloadRange {
 impl PayloadRange {
     /// Whether a payload of `size` bytes is inside the range.
     pub fn contains(&self, size: u64) -> bool {
-        self.start.is_none_or(|s| size >= s) && self.end.map_or(true, |e| size <= e)
+        self.start.is_none_or(|s| size >= s) && self.end.is_none_or(|e| size <= e)
     }
 }
 

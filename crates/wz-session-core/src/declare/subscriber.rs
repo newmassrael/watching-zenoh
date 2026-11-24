@@ -1227,9 +1227,15 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
         // R311gb-3d / Track 2 — fan through the DeclSink seam via
         // the no-heap SSOT: build the `(id, resolved-keyexpr)`
         // view once and hand each observer `&dyn DeclView`.
+        // The key as the row just bound keeps it, so a holder that reads it past the call holds
+        // its block rather than copy it.
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
+            held: peer
+                .declared
+                .find(id)
+                .and_then(crate::bounded::KeyBacking::held),
         };
         self.dispatch_declared_borrowed(&view);
         // R311kh — membership changed: re-evaluate the matching

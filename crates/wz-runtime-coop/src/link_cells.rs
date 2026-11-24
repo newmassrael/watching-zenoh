@@ -39,8 +39,11 @@ use crate::session_drive::SessionDatagramLink;
 struct CellHead {
     handles: Cell<usize>,
     owner: Owner,
-    whole: Cell<Option<unsafe fn(NonNull<CellHead>)>>,
+    whole: Cell<Option<DropWhole>>,
 }
+
+/// What drops the whole value of a cell whose handles name parts of it, given the cell's head.
+type DropWhole = unsafe fn(NonNull<CellHead>);
 
 /// Where a cell's memory came from, which is where it goes back.
 enum Owner {

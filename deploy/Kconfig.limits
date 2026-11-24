@@ -653,6 +653,17 @@ config WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS
 	  the replay's window is told by comparing the transports that stand with
 	  those the listener was told, which may lose one reconnect.
 
+config WZ_LIMIT_MAX_FACE_WATCH_ROWS
+	int "MAX_FACE_WATCH_ROWS"
+	default 16
+	help
+	  The rows of transports and links that came or went a session holds for the
+	  program's watchers of its faces between two deliveries, reserved when the
+	  session opens; a session that holds fewer faces reserves fewer. A row that
+	  finds every row held is not kept and nothing is allocated for it: the
+	  watchers are told, once, how many rows were lost after the last row kept.
+	  It must be at least 1.
+
 config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"
 	default 8
