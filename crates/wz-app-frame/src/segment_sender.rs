@@ -67,7 +67,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::e2e_profile::{check_distinct, child, object, read_json, read_uint, DocError};
+use crate::e2e_profile::{read_json, DocError, Pointer};
 use crate::segment_profile::SegmentProfile;
 
 /// What a sender does after the message that carried the largest transfer
@@ -380,8 +380,9 @@ impl SegmentSender {
 /// holds a value past its field, or leaves one of the caller's fields out.
 fn template(profile: &SegmentProfile, values_text: &str) -> Result<Vec<u8>, DocError> {
     let root = read_json(values_text)?;
-    let entries = object(&root, "")?;
-    check_distinct(entries, "")?;
+    let doc = Pointer::text("");
+    let entries = doc.object(&root)?;
+    doc.check_distinct(entries)?;
 
     let fields = profile.fields();
     let mut header = vec![0u8; profile.header_bytes()];
@@ -409,39 +410,30 @@ fn template(profile: &SegmentProfile, values_text: &str) -> Result<Vec<u8>, DocE
 
     let mut stated = vec![false; fields.len()];
     for (key, value) in entries {
-        let path = child("", key);
+        let path = doc.key(key);
         let Some(index) = fields.iter().position(|f| &f.name == key) else {
-            return Err(DocError::invalid(
-                path,
-                format!("the profile has no field called `{key}`"),
-            ));
+            return Err(path.refuse(format!("the profile has no field called `{key}`")));
         };
         if let Some(why) = written_by(index) {
-            return Err(DocError::invalid(
-                path,
-                format!("the field `{key}` {why}: it cannot be stated"),
-            ));
+            return Err(path.refuse(format!("the field `{key}` {why}: it cannot be stated")));
         }
-        let value = read_uint(value, &path)?;
+        let value = path.read_uint(value)?;
         let field = &fields[index];
         if value > field.max_value() {
-            return Err(DocError::invalid(
-                path,
-                format!("{value:#x} does not fit the field's {} bytes", field.bytes),
-            ));
+            return Err(path.refuse(format!(
+                "{value:#x} does not fit the field's {} bytes",
+                field.bytes
+            )));
         }
         field.write(&mut header, value);
         stated[index] = true;
     }
     if let Some(missing) = (0..fields.len()).find(|&i| !stated[i] && written_by(i).is_none()) {
         let name = &fields[missing].name;
-        return Err(DocError::invalid(
-            child("", name),
-            format!(
-                "the field `{name}` is not stated: every field the profile and the \
-                 mechanism do not write needs a value"
-            ),
-        ));
+        return Err(doc.key(name).refuse(format!(
+            "the field `{name}` is not stated: every field the profile and the \
+             mechanism do not write needs a value"
+        )));
     }
     Ok(header)
 }

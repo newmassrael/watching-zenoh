@@ -92,8 +92,7 @@ use wz_session_core::json5::Json5Value;
 
 use crate::e2e_crc::{width_mask, Crc};
 use crate::e2e_profile::{
-    array, at, check_keys, child, object, optional, read_crc_object, read_json, read_name,
-    read_string, read_uint, required, CrcFields, DocError, MAX_FIELDS,
+    optional, read_crc_object, read_json, CrcFields, DocError, Pointer, MAX_FIELDS,
 };
 
 /// The largest whole message a segment profile may admit, in bytes.
@@ -272,13 +271,14 @@ impl SegmentProfile {
     /// Read and validate a segment profile from JSON text.
     pub fn parse(text: &str) -> Result<Self, DocError> {
         let root = read_json(text)?;
-        let entries = object(&root, "")?;
-        check_keys(entries, &["name", SEGMENTS_KEY], "")?;
-        let name = read_name(required(entries, "name", "")?, "/name")?;
+        let doc = Pointer::text("");
+        let entries = doc.object(&root)?;
+        doc.check_keys(entries, &["name", SEGMENTS_KEY])?;
+        let name = doc.key("name").read_name(doc.required(entries, "name")?)?;
 
-        let path = "/segments";
-        let body = object(required(entries, SEGMENTS_KEY, "")?, path)?;
-        check_keys(
+        let path = Pointer::text("/segments");
+        let body = path.object(doc.required(entries, SEGMENTS_KEY)?)?;
+        path.check_keys(
             body,
             &[
                 "fields",
@@ -289,18 +289,16 @@ impl SegmentProfile {
                 "offset",
                 "total_max",
             ],
-            path,
         )?;
-        let fields = read_fields(required(body, "fields", path)?, &child(path, "fields"))?;
+        let fields = read_fields(path.required(body, "fields")?, &path.key("fields"))?;
         let header_bytes = fields.iter().map(|f| f.bytes).sum();
 
         let crc = match optional(body, "crc") {
-            Some(value) => Some(read_crc(value, &child(path, "crc"), &fields)?),
+            Some(value) => Some(read_crc(value, &path.key("crc"), &fields)?),
             None => None,
         };
         if crc.is_none() && fields.iter().all(|f| f.equals.is_none()) {
-            return Err(DocError::invalid(
-                path,
+            return Err(path.refuse(
                 "the profile has no `equals` field and no `crc`: nothing would tell a piece \
                  from any other payload",
             ));
@@ -313,35 +311,34 @@ impl SegmentProfile {
             taken.push((crc.field, "crc"));
         }
         let mut role = |key: &'static str| -> Result<usize, DocError> {
-            let role_path = child(path, key);
-            let name = read_string(required(body, key, path)?, &role_path)?;
-            let index = field_named(&fields, name, &role_path)?;
-            claim(&fields, &mut taken, index, key, &role_path)?;
+            let role_at = path.key(key);
+            let name = role_at.read_string(path.required(body, key)?)?;
+            let index = field_named(&fields, name, &role_at)?;
+            claim(&fields, &mut taken, index, key, &role_at)?;
             Ok(index)
         };
         let transfer = role("transfer")?;
         let total = role("total")?;
         let offset = role("offset")?;
 
-        let stream_path = child(path, "stream");
+        let stream_at = path.key("stream");
         let mut stream = Vec::new();
         if let Some(value) = optional(body, "stream") {
-            for (i, item) in array(value, &stream_path)?.iter().enumerate() {
-                let here = at(&stream_path, i);
-                let name = read_string(item, &here)?;
+            for (i, item) in stream_at.array(value)?.iter().enumerate() {
+                let here = stream_at.index(i);
+                let name = here.read_string(item)?;
                 let index = field_named(&fields, name, &here)?;
                 claim(&fields, &mut taken, index, "stream", &here)?;
                 stream.push(index);
             }
         }
 
-        let max_path = child(path, "total_max");
-        let total_max = read_uint(required(body, "total_max", path)?, &max_path)?;
+        let max_at = path.key("total_max");
+        let total_max = max_at.read_uint(path.required(body, "total_max")?)?;
         if total_max == 0 || total_max > MAX_TOTAL_BYTES {
-            return Err(DocError::invalid(
-                max_path,
-                format!("`total_max` is 1 to {MAX_TOTAL_BYTES} bytes, this one is {total_max}"),
-            ));
+            return Err(max_at.refuse(format!(
+                "`total_max` is 1 to {MAX_TOTAL_BYTES} bytes, this one is {total_max}"
+            )));
         }
 
         Ok(Self {
@@ -467,11 +464,11 @@ impl SegmentProfile {
     }
 }
 
-fn field_named(fields: &[Field], name: &str, path: &str) -> Result<usize, DocError> {
+fn field_named(fields: &[Field], name: &str, path: &Pointer<'_>) -> Result<usize, DocError> {
     fields
         .iter()
         .position(|f| f.name == name)
-        .ok_or_else(|| DocError::invalid(path, format!("no field is called `{name}`")))
+        .ok_or_else(|| path.refuse(format!("no field is called `{name}`")))
 }
 
 /// Give `index` the role `role`, refusing a field that already has one or that
@@ -482,74 +479,63 @@ fn claim(
     taken: &mut Vec<(usize, &'static str)>,
     index: usize,
     role: &'static str,
-    path: &str,
+    path: &Pointer<'_>,
 ) -> Result<(), DocError> {
     let name = &fields[index].name;
     if let Some((_, earlier)) = taken.iter().find(|(i, _)| *i == index) {
-        return Err(DocError::invalid(
-            path,
-            format!("the field `{name}` is already the {earlier} field: a field has one role"),
-        ));
+        return Err(path.refuse(format!(
+            "the field `{name}` is already the {earlier} field: a field has one role"
+        )));
     }
     if fields[index].equals.is_some() {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "the field `{name}` holds a fixed value (`equals`), so it cannot be the \
-                 {role} field"
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "the field `{name}` holds a fixed value (`equals`), so it cannot be the \
+             {role} field"
+        )));
     }
     taken.push((index, role));
     Ok(())
 }
 
-fn read_fields(value: &Json5Value, path: &str) -> Result<Vec<Field>, DocError> {
-    let items = array(value, path)?;
+fn read_fields(value: &Json5Value, path: &Pointer<'_>) -> Result<Vec<Field>, DocError> {
+    let items = path.array(value)?;
     if items.is_empty() || items.len() > MAX_FIELDS {
-        return Err(DocError::invalid(
-            path,
-            format!(
-                "a segment profile has 1 to {MAX_FIELDS} fields, this one has {}",
-                items.len()
-            ),
-        ));
+        return Err(path.refuse(format!(
+            "a segment profile has 1 to {MAX_FIELDS} fields, this one has {}",
+            items.len()
+        )));
     }
     let mut fields: Vec<Field> = Vec::with_capacity(items.len());
     let mut offset = 0usize;
     for (i, item) in items.iter().enumerate() {
-        let here = at(path, i);
-        let entries = object(item, &here)?;
-        check_keys(entries, &["name", "bytes", "order", "equals"], &here)?;
+        let here = path.index(i);
+        let entries = here.object(item)?;
+        here.check_keys(entries, &["name", "bytes", "order", "equals"])?;
 
-        let name = read_name(required(entries, "name", &here)?, &child(&here, "name"))?;
+        let name_at = here.key("name");
+        let name = name_at.read_name(here.required(entries, "name")?)?;
         if fields.iter().any(|f| f.name == name) {
-            return Err(DocError::invalid(
-                child(&here, "name"),
-                format!("two fields are called `{name}`"),
-            ));
+            return Err(name_at.refuse(format!("two fields are called `{name}`")));
         }
-        let bytes_path = child(&here, "bytes");
-        let bytes = read_uint(required(entries, "bytes", &here)?, &bytes_path)?;
+        let bytes_at = here.key("bytes");
+        let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
         if !(1..=8).contains(&bytes) {
-            return Err(DocError::invalid(
-                bytes_path,
-                format!("a field is 1 to 8 bytes wide, this one is {bytes}"),
-            ));
+            return Err(
+                bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}"))
+            );
         }
         let bytes = bytes as usize;
         let order = match optional(entries, "order") {
             None => Order::Big,
             Some(v) => {
-                let order_path = child(&here, "order");
-                match read_string(v, &order_path)? {
+                let order_at = here.key("order");
+                match order_at.read_string(v)? {
                     "big" => Order::Big,
                     "little" => Order::Little,
                     other => {
-                        return Err(DocError::invalid(
-                            order_path,
-                            format!("`{other}` is not a byte order: write \"big\" or \"little\""),
-                        ))
+                        return Err(order_at.refuse(format!(
+                            "`{other}` is not a byte order: write \"big\" or \"little\""
+                        )))
                     }
                 }
             }
@@ -557,13 +543,12 @@ fn read_fields(value: &Json5Value, path: &str) -> Result<Vec<Field>, DocError> {
         let equals = match optional(entries, "equals") {
             None => None,
             Some(v) => {
-                let equals_path = child(&here, "equals");
-                let wanted = read_uint(v, &equals_path)?;
+                let equals_at = here.key("equals");
+                let wanted = equals_at.read_uint(v)?;
                 if wanted & !width_mask((bytes * 8) as u8) != 0 {
-                    return Err(DocError::invalid(
-                        equals_path,
-                        format!("{wanted:#x} does not fit the field's {bytes} bytes"),
-                    ));
+                    return Err(equals_at.refuse(format!(
+                        "{wanted:#x} does not fit the field's {bytes} bytes"
+                    )));
                 }
                 Some(wanted)
             }
@@ -589,15 +574,12 @@ impl CrcFields for &[Field] {
         self[index].bytes
     }
 
-    fn may_hold_crc(&self, index: usize, path: &str) -> Result<(), DocError> {
+    fn may_hold_crc(&self, index: usize, path: &Pointer<'_>) -> Result<(), DocError> {
         if self[index].equals.is_some() {
-            return Err(DocError::invalid(
-                path,
-                format!(
-                    "the crc field `{}` holds a fixed value (`equals`): it holds the result",
-                    self[index].name
-                ),
-            ));
+            return Err(path.refuse(format!(
+                "the crc field `{}` holds a fixed value (`equals`): it holds the result",
+                self[index].name
+            )));
         }
         Ok(())
     }
@@ -607,7 +589,7 @@ impl CrcFields for &[Field] {
     }
 }
 
-fn read_crc(value: &Json5Value, path: &str, fields: &[Field]) -> Result<CrcSpec, DocError> {
+fn read_crc(value: &Json5Value, path: &Pointer<'_>, fields: &[Field]) -> Result<CrcSpec, DocError> {
     let crc = read_crc_object(value, path, &fields)?;
     Ok(CrcSpec {
         field: crc.field,
