@@ -1971,8 +1971,6 @@ pub mod group_view;
 // `all(codec-response, alloc)` (`dispatch_response_final` on
 // `all(codec-response-final, alloc)`). Mirrors the `SubscriberRegistry`
 // shape.
-// Totality debt TD-094 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod reply;
 
 // R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
