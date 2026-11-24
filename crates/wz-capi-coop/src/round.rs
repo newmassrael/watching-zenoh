@@ -798,8 +798,25 @@ impl Table {
 
 /// The calls of the subscribers a put of the session's own reaches, in the order the session's
 /// table reached them, each begun on its row ([`Round::captured`]).
+///
+/// A fixed array the put takes out of the round whole and holds in its own frame while it hands
+/// the calls out with no lock held, so it takes no heap after the open; its cost is stack. One is
+/// `MAX_SUBSCRIPTIONS` calls of at most 16 bytes (a row's address and a 4-byte handle: 16 on a
+/// 64-bit target, 8 on a 32-bit one) and a length: at the build's default of 100 subscribers,
+/// 1,608 bytes on a 64-bit target and 804 on a 32-bit one. A subscriber's callback that puts on
+/// its own session from inside the call holds a second one in a frame above the first, and so
+/// on, as zenoh-pico's put re-enters its subscribers at any depth: the session bounds no such
+/// nesting, so its depth, and the stack it takes, are the program's, each level these bytes
+/// beside the callback's own frame. Shared rows of the arena would hand a nested put's calls to
+/// the round when they overflow, which reorders the calls zenoh-pico makes inline, so the frame
+/// keeps its own.
 #[cfg(feature = "local-subscriber")]
 pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
+
+// A call is a row's address and a handle; the stack cost stated on `Captured` holds while it
+// stays so small.
+#[cfg(feature = "local-subscriber")]
+const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= 16);
 
 /// A row of the session's tables to let go of, whose last call ended after its entity was
 /// undeclared ([`Round::take_released`]).
