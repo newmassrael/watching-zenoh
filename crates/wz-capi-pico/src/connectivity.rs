@@ -75,7 +75,9 @@ use core::ffi::{c_int, c_void};
 
 use wz_capi_port::os::{Mutex, MutexGuard};
 
-use wz_session_core::face::{FaceEventKind, FaceSnapshot, LinkSnapshot};
+use wz_capi_port::SessionEngine;
+use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, LinkSnapshot};
+use wz_session_core::link::LinkKind;
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
@@ -405,23 +407,38 @@ fn pico_whatami(wire: u8) -> z_whatami_t {
 
 /// The transport pico reports for one established face.
 fn transport_of(snapshot: &FaceSnapshot) -> z_loaned_transport_t {
+    pico_transport(snapshot.zid, snapshot.whatami, snapshot.is_multicast)
+}
+
+/// The transport pico reports of the peer `zid` in the wire role `whatami`.
+fn pico_transport(zid: [u8; 16], whatami: u8, is_multicast: bool) -> z_loaned_transport_t {
     z_loaned_transport_t {
-        zid: z_id_t { id: snapshot.zid },
-        whatami: pico_whatami(snapshot.whatami),
+        zid: z_id_t { id: zid },
+        whatami: pico_whatami(whatami),
         // Hard-coded `false` in pico, which negotiates neither on unicast.
         is_qos: false,
-        is_multicast: snapshot.is_multicast,
+        is_multicast,
         is_shm: false,
     }
 }
 
-/// Every transport pico reports: each unicast face, then each member of each group the
-/// session joined, which pico lists as a multicast transport of its own
+/// Every transport and link pico reports, a row at a time: each unicast face, then each member of
+/// each group the session joined, which pico lists as a multicast transport of its own
 /// (`vendor/zenoh-pico/src/api/api.c` @
 /// `z_result_t z_info_transports(const z_loaned_session_t *zs, z_moved_closure_transport_t *callback) {`).
-/// The engine holds the faces and the groups, and lists them in that order.
-fn connected(engine: &Engine) -> Vec<FaceSnapshot> {
-    engine.face_snapshots()
+/// No lock of the session is held between two rows, so a program's callback runs between them.
+fn rows(engine: &Engine) -> impl Iterator<Item = FaceLinkRow> + '_ {
+    let mut at = 0;
+    core::iter::from_fn(move || {
+        let row = SessionEngine::face_link_at(engine, at)?;
+        at += 1;
+        Some(row)
+    })
+}
+
+/// The transport pico reports for the face of `row`.
+fn transport_of_row(row: &FaceLinkRow) -> z_loaned_transport_t {
+    pico_transport(row.zid, row.whatami, row.is_multicast)
 }
 
 /// The text pico's `_z_endpoint_to_string` makes of a group endpoint: the locator without
@@ -465,23 +482,49 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
 /// bytes of the source MAC (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
 /// `addr->len = sizeof(ETH_ALEN);`). MEASURED against the real library: `dst=` and `mtu=1514`.
 fn link_of(zid: [u8; 16], link: &LinkSnapshot) -> z_loaned_link_t {
-    let raweth = link
-        .group
-        .as_ref()
-        .is_some_and(|group| group.endpoint.starts_with("reth/"));
+    pico_link(
+        zid,
+        &link.src,
+        &link.dst,
+        (link.kind, link.mtu),
+        link.group.as_ref().map(|group| group.endpoint.as_str()),
+    )
+}
+
+/// The link pico reports for the link of `row`, as [`link_of`] reads a snapshot's.
+fn link_of_row(row: &FaceLinkRow) -> z_loaned_link_t {
+    pico_link(
+        row.zid,
+        &row.src,
+        &row.dst,
+        (row.kind, row.mtu),
+        row.group_endpoint.as_deref(),
+    )
+}
+
+/// The link pico reports from `src` to `dst` of a link of `kind` and `mtu`, a group member's
+/// starting at the endpoint the group was joined by.
+fn pico_link(
+    zid: [u8; 16],
+    src: &str,
+    dst: &str,
+    (kind, mtu): (Option<LinkKind>, u16),
+    group_endpoint: Option<&str>,
+) -> z_loaned_link_t {
+    let raweth = group_endpoint.is_some_and(|endpoint| endpoint.starts_with("reth/"));
     let (mtu, is_streamed, is_reliable) = if raweth {
         (1514, false, false)
     } else {
-        pico_link_properties(link.kind, link.mtu)
+        pico_link_properties(kind, mtu)
     };
-    let src = link.group.as_ref().map_or_else(
-        || link.src.clone(),
-        |group| pico_group_endpoint_text(&group.endpoint),
-    );
-    let dst = if raweth { "" } else { link.dst.as_str() };
+    let src = match group_endpoint {
+        Some(endpoint) => ConnText::new(pico_group_endpoint_text(endpoint).as_bytes()),
+        None => ConnText::new(src.as_bytes()),
+    };
+    let dst = if raweth { "" } else { dst };
     z_loaned_link_t {
         zid: z_id_t { id: zid },
-        src: ConnText::new(src.as_bytes()),
+        src,
         dst: ConnText::new(dst.as_bytes()),
         mtu,
         is_streamed,
@@ -902,10 +945,10 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
-            for snapshot in connected(Arc::as_ref(engine)) {
+            for row in rows(Arc::as_ref(engine)).filter(|row| row.link == 0) {
                 delivery.call(z_loaned_transport_event_t {
                     kind: Z_SAMPLE_KIND_PUT,
-                    transport: transport_of(&snapshot),
+                    transport: transport_of_row(&row),
                 });
             }
             delivery.finish_replay();
@@ -947,14 +990,11 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
-            for snapshot in connected(Arc::as_ref(engine)) {
-                if !listener.wants(&transport_of(&snapshot)) {
-                    continue;
-                }
-                for link in &snapshot.links {
+            for row in rows(Arc::as_ref(engine)) {
+                if listener.wants(&transport_of_row(&row)) {
                     listener.delivery.call(z_loaned_link_event_t {
                         kind: Z_SAMPLE_KIND_PUT,
-                        link: link_of(snapshot.zid, link),
+                        link: link_of_row(&row),
                     });
                 }
             }
@@ -1571,8 +1611,8 @@ pub unsafe extern "C" fn z_info_transports(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in connected(engine_ref(handle)) {
-            let mut transport = transport_of(&snapshot);
+        for row in rows(engine_ref(handle)).filter(|row| row.link == 0) {
+            let mut transport = transport_of_row(&row);
             if let Some(call) = closure.call {
                 call(&mut transport, closure.context.0);
             }
@@ -1643,18 +1683,15 @@ pub unsafe extern "C" fn z_info_links(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in connected(engine_ref(handle)) {
-            let peer = transport_of(&snapshot);
+        for row in rows(engine_ref(handle)) {
             if let Some((zid, multicast)) = filter {
-                if zid != peer.zid.id || multicast != peer.is_multicast {
+                if zid != row.zid || multicast != row.is_multicast {
                     continue;
                 }
             }
-            for link in &snapshot.links {
-                let mut held = HeldLink(link_of(snapshot.zid, link));
-                if let Some(call) = closure.call {
-                    call(&mut held.0, closure.context.0);
-                }
+            let mut held = HeldLink(link_of_row(&row));
+            if let Some(call) = closure.call {
+                call(&mut held.0, closure.context.0);
             }
         }
         Z_OK

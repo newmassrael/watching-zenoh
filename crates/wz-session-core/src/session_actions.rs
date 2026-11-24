@@ -5138,6 +5138,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         alloc::vec![render(self.link_driver())]
     }
 
+    /// The ends of each link of the session, handed to `visit` in place, in the order
+    /// [`Self::link_endpoints_all`] lists them and a link whose driver names none with blank ends,
+    /// until `visit` answers `false`. Nothing is copied, so a reader that writes the ends into a
+    /// row of its own allocates nothing.
+    pub fn visit_link_endpoints(&self, mut visit: impl FnMut(&crate::link::LinkEndpoints) -> bool) {
+        let blank = crate::link::LinkEndpoints::default();
+        #[cfg(feature = "transport-multilink")]
+        {
+            let links = self
+                .links
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !links.is_empty() {
+                for link in links.iter() {
+                    if !visit(link.link_driver().link_endpoints().unwrap_or(&blank)) {
+                        break;
+                    }
+                }
+                return;
+            }
+        }
+        let _ = visit(self.link_driver().link_endpoints().unwrap_or(&blank));
+    }
+
     /// `resource-snapshot` — what this session's receive path has counted: the
     /// messages and the spacing of the ones that made an interval. Cumulative, so
     /// a reader takes a window by subtracting two readings.
