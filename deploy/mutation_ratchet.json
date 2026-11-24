@@ -43,7 +43,13 @@
       ],
       "timeout_multiplier": 3,
       "why": "The hand-written part of the codec crate: the variable-length integer, the node role and the encoding id table. The rest of the crate is generated from sources/codecs into out/ and is not a scope's file.",
-      "row": null
+      "row": {
+        "caught": 53,
+        "missed": 6,
+        "unviable": 26,
+        "timeout": 0,
+        "kill_rate": 0.8983
+      }
     },
     "capi-pico-doors": {
       "package": "wz-capi-pico",
@@ -54,7 +60,13 @@
       ],
       "timeout_multiplier": 4,
       "why": "Door glue of the pico C ABI: the encoding, string array and identity doors, each a C export over a Rust value whose edge cases (a null or empty argument, an out-of-range index, the byte order of a rendered id) a C program relies on. The multiplier is higher because the crate's suite opens sessions over loopback.",
-      "row": null
+      "row": {
+        "caught": 20,
+        "missed": 2,
+        "unviable": 21,
+        "timeout": 0,
+        "kill_rate": 0.9091
+      }
     }
   }
 }
