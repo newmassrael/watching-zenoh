@@ -135,9 +135,7 @@ fn a_begun_dial_completes_its_handshake_one_step_for_each_ask() {
         "a made stream stays made"
     );
 
-    stream
-        .send_parts(&[&4u16.to_le_bytes(), b"ping"])
-        .expect("the batch leaves");
+    stream.write_all(b"\x04\x00ping").expect("the batch leaves");
     let mut got = Vec::new();
     let mut buf = [0u8; 16];
     for _ in 0..100 {

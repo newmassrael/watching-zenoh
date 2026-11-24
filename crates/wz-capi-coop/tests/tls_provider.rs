@@ -124,9 +124,7 @@ fn ping(config: CapiTlsConfig, port: u16) -> thread::JoinHandle<Result<Vec<u8>, 
     thread::spawn(move || {
         let client = provider(&config);
         let stream = client.dial(at(port))?;
-        stream
-            .send_parts(&[b"ping".as_slice()])
-            .expect("the stream takes bytes");
+        stream.write_all(b"ping").expect("the stream takes bytes");
         Ok(read_within(&stream, 4, Duration::from_secs(5)).unwrap_or_default())
     })
 }
@@ -135,9 +133,7 @@ fn ping(config: CapiTlsConfig, port: u16) -> thread::JoinHandle<Result<Vec<u8>, 
 fn pong(listener: &Listener) -> Option<Vec<u8>> {
     let stream = accept_within(listener, Duration::from_secs(10))?;
     let got = read_within(&stream, 4, Duration::from_secs(5))?;
-    stream
-        .send_parts(&[b"pong".as_slice()])
-        .expect("the stream takes bytes");
+    stream.write_all(b"pong").expect("the stream takes bytes");
     Some(got)
 }
 
@@ -386,9 +382,7 @@ fn a_begun_dial_meets_the_listener_on_one_thread_and_no_roots_refuse_it() {
         thread::sleep(Duration::from_millis(1));
     }
     let accepted = accepted.expect("the connection the listener took");
-    dialled
-        .send_parts(&[b"ping".as_slice()])
-        .expect("the stream takes bytes");
+    dialled.write_all(b"ping").expect("the stream takes bytes");
     assert_eq!(
         read_within(&accepted, 4, Duration::from_secs(5)),
         Some(b"ping".to_vec())

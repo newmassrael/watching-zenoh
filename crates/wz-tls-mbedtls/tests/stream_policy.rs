@@ -107,9 +107,7 @@ fn chain_listener(server: &End, mutual_roots: Option<&Authority>) -> TlsDial<Pos
 
 /// Send a batch as the stream link writes one and read its echo back.
 fn echo_through<S: StreamSocket>(stream: &S) {
-    stream
-        .send_parts(&[&4u16.to_le_bytes(), b"ping"])
-        .expect("the batch leaves");
+    stream.write_all(b"\x04\x00ping").expect("the batch leaves");
     let mut got = Vec::new();
     let mut buf = [0u8; 16];
     for _ in 0..100 {
@@ -149,7 +147,7 @@ fn serve_echo<S: StreamSocket>(stream: &S) {
             Some(n) => {
                 seen += n;
                 if seen == 4 {
-                    stream.send_parts(&[&buf[..4]]).expect("the echo leaves");
+                    stream.write_all(&buf[..4]).expect("the echo leaves");
                     seen = 0;
                 }
             }
