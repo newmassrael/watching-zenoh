@@ -778,6 +778,13 @@ pub mod plane_lock;
 /// registered in, as the session's state ends them. Unconditional: its rows are a bounded table.
 pub mod pending_get;
 
+/// The session's round of deliveries: what the session hands its callbacks under its lock, held
+/// until the lock is let go and handed to them after it, with the calls it owes and the kinds of
+/// record it keeps named by the engine. Its rows are shared with the deliveries across threads,
+/// so it is gated as [`face`] is.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod round;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
