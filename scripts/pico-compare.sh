@@ -115,7 +115,10 @@ wz_artifact_root_init "$root" || exit 2
 
 examples="$root/vendor/zenoh-pico/examples/unix/c11"
 pico_lib="$WZ_ARTIFACTS/target/zenoh-pico-build/lib"
-wz_lib="$WZ_ARTIFACTS/crates/target/release"
+# The wz library of every mode is built as a deployer receives it (crates/Cargo.toml `ship`: fat LTO, one
+# codegen unit), so a comparison with the original reads the library that ships and every arm one profile.
+wz_profile=ship
+wz_lib="$WZ_ARTIFACTS/crates/target/$wz_profile"
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
@@ -157,7 +160,7 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
         || { echo "pico-compare: NOT-MEASURED, no cargo words for the $wz_engine engine"; exit 2; }
     rm -f "$out/wz-engine"
     # shellcheck disable=SC2086 # the cargo words are words on purpose
-    (cd crates && cargo build --release -p wz-capi-pico $wz_args) >"$out/build-wz.log" 2>&1 \
+    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-pico $wz_args) >"$out/build-wz.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the wz library did not build (see $out/build-wz.log)"; exit 2; }
     echo "$wz_engine" >"$out/wz-engine"
 fi
@@ -214,7 +217,7 @@ build_bench() {
 build_zenoh_c_family() {
     local prefix="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
     local ref="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
-    local wz_c_lib="$WZ_ARTIFACTS/crates/target/release" args bench variant lib libname
+    local wz_c_lib="$wz_lib" args bench variant lib libname
     mkdir -p "$out/bin-c"
     WZ_ZENOH_C_PREFIX="$prefix" WZ_ZENOH_C_REF="$ref" bash scripts/install-zenoh-c.sh >"$out/build-zenoh-c.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the zenoh-c release did not install (see $out/build-zenoh-c.log)"; exit 2; }
@@ -223,7 +226,7 @@ build_zenoh_c_family() {
     args="$(python3 -I scripts/lib/wz_config.py --drop-in-features c "$prefix/include/zenoh_configure.h")" \
         || { echo "pico-compare: NOT-MEASURED, no drop-in features for $prefix/include/zenoh_configure.h"; exit 2; }
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build --release -p wz-capi-c $args) >"$out/build-wz-c.log" 2>&1 \
+    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-c $args) >"$out/build-wz-c.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, wz-capi-c did not build (see $out/build-wz-c.log)"; exit 2; }
     for bench in paced_pub count_sub; do
         for variant in P W; do
@@ -474,10 +477,10 @@ parity_build_pico() {
     [ -n "$lib_p" ] || parity_fail "no libzenohpico.so under $default"
     args="$(parity_preset_args zenoh-pico)" || exit 2
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build --release -p wz-capi-pico $args) >"$dir/build-wz.log" 2>&1 \
+    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-pico $args) >"$dir/build-wz.log" 2>&1 \
         || parity_fail "wz-capi-pico did not build for the preset (see $dir/build-wz.log)"
     cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
-    cp "$WZ_ARTIFACTS/crates/target/release/libwz_capi_pico.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
+    cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
             name=zenohpico
@@ -514,10 +517,10 @@ parity_build_c() {
     drop_in="$(python3 -I scripts/lib/wz_config.py --drop-in-features c "$prefix/include/zenoh_configure.h" 2>&1)" \
         || drop_in="not derived: $drop_in"
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build --release -p wz-capi-c $args) >"$dir/build-wz.log" 2>&1 \
+    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-c $args) >"$dir/build-wz.log" 2>&1 \
         || parity_fail "wz-capi-c did not build for the preset (see $dir/build-wz.log)"
     cp -a "$prefix/lib"/libzenohc.so* "$dir/lib-P/" || parity_fail "the zenoh-c library did not copy"
-    cp "$WZ_ARTIFACTS/crates/target/release/libwz_capi_c.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
+    cp "$wz_lib/libwz_capi_c.so" "$dir/lib-W/" || parity_fail "the wz library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
             name=zenohc
@@ -683,7 +686,7 @@ perf_external_arm() {
     fi
 }
 
-# perf_wz_arm <dir> <arm> <features>: wz-capi-pico in release for its default features and <features> (a comma
+# perf_wz_arm <dir> <arm> <features>: wz-capi-pico in $wz_profile for its default features and <features> (a comma
 # list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
 # <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
 # (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
@@ -694,7 +697,7 @@ perf_wz_arm() {
         || perf_fail "arm $arm has no build on the $wz_engine engine (wz_config.py --bench-cargo-args $wz_engine '$features')"
     report="$dir/build-wz-$arm.json"
     # shellcheck disable=SC2086 # the cargo words are words on purpose
-    (cd crates && cargo build --release --message-format=json-render-diagnostics -p zenoh-pico-sys \
+    (cd crates && cargo build --profile "$wz_profile" --message-format=json-render-diagnostics -p zenoh-pico-sys \
         -p wz-capi-pico $args) >"$report" 2>"$dir/build-wz-$arm.log" \
         || perf_fail "wz-capi-pico for arm $arm did not build (see $dir/build-wz-$arm.log)"
     inc="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pico-sys-include "$report")" \
