@@ -1411,6 +1411,26 @@ impl PcapngCursor {
         self.sections
     }
 
+    /// A walk positioned at the start of a container that goes on from earlier
+    /// containers of one capture, which retained `secrets_spent` bytes of
+    /// Decryption Secrets between them.
+    ///
+    /// The budget is the capture's and not one container's: begun again for each
+    /// container, a capture split into many would keep that many times the cap.
+    pub fn continuing(secrets_spent: usize) -> Self {
+        Self {
+            dsb_bytes: secrets_spent.min(MAX_DECRYPTION_SECRETS_BYTES),
+            ..Self::new()
+        }
+    }
+
+    /// Decryption-secret bytes retained so far, against the budget: what a walk
+    /// of the next container of the same capture goes on from
+    /// ([`Self::continuing`]).
+    pub fn secrets_spent(&self) -> usize {
+        self.dsb_bytes
+    }
+
     /// The interfaces of the section currently being read.
     pub fn interfaces(&self) -> &[Interface] {
         &self.interfaces

@@ -489,6 +489,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // chooses them as it chooses the frame ceilings. No symbol moves; the
     // memory rule of the struct does, and a caller compiled against revision 60
     // reads the two as zero, which keeps the preset's figures.
+    // 62, for `wz_dissect_live_follow_next`: a handle told that the container it
+    // follows has ended goes on into the next container of the same capture,
+    // its dissection whole and its packet numbers running on.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -506,7 +509,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 61;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 62;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4122,7 +4125,9 @@ fn follow_answer(walked: Result<usize, wz_capture::FollowError>) -> c_int {
 /// As for [`wz_dissect_live_follow`]. A container refused as
 /// [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] is not lent: the handle keeps reading
 /// the one it was lent before, and the refused bytes are the caller's again
-/// when the call returns.
+/// when the call returns. [`WZ_DISSECT_ERR_INVALID_ARG`] on a handle
+/// [`wz_dissect_live_follow_next`] moved on to a later container: its packet
+/// numbers count across containers and no longer name positions in one.
 ///
 /// # Safety
 /// As for [`wz_dissect_live_follow`], and the `len` bytes at `bytes` must stay
@@ -4140,6 +4145,12 @@ pub unsafe extern "C" fn wz_dissect_live_follow_lent(
     }
     // SAFETY: caller contract above.
     let handle = unsafe { &mut *handle };
+    // A handle that moved on to a later container numbers its packets across
+    // containers, and a lent container is read by the positions those numbers
+    // stand for in it.
+    if handle.moved_container() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
     follow_answer(handle.follow_lent(lent(bytes, len)))
 }
 
@@ -4183,6 +4194,60 @@ pub unsafe extern "C" fn wz_dissect_live_followed(
     // SAFETY: caller contract above.
     unsafe { *out = consumed };
     WZ_DISSECT_OK
+}
+
+/// (ABI 62) — THE CONTAINER A HANDLE FOLLOWS HAS ENDED, and `bytes` is the next
+/// container of the same capture: a writer that splits one capture into
+/// several files hands each over whole, with its own headers.
+///
+/// # What goes on, and what begins again
+///
+/// The dissection goes on: the flows and their sessions (the negotiated
+/// values, the declared keys, a fragment chain still open), the lost count, the
+/// counts of what a ceiling took, the census's memory and the decryption keys.
+/// The walk of the container begins again, and packet numbers go on from the
+/// last number the handle gave, so a record never names one number twice;
+/// `*first_packet` is the number the next container's first packet takes,
+/// which a caller subtracts to find a packet in its own file. See
+/// [`live::LiveDissection::follow_next`].
+///
+/// # Which bytes are read
+///
+/// `bytes` is the next container from its first byte, as for
+/// [`wz_dissect_live_follow`], and may end inside a block: later calls of that
+/// door with more of the same container go on reading it. The bytes past the
+/// last whole block of the previous container are not read; call
+/// [`wz_dissect_live_followed`] before this door to learn whether there were
+/// any.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null argument.
+/// [`WZ_DISSECT_ERR_BAD_CAPTURE`] when the next container does not read; the
+/// handle has moved on to it all the same, and `*first_packet` is written.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, `bytes` must point
+/// to at least `len` readable bytes, and `first_packet` must be a writable
+/// `uint64_t`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow_next(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    first_packet: *mut u64,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() || first_packet.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above.
+    let container = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let (first, walked) = handle.follow_next(container);
+    // SAFETY: null-checked above.
+    unsafe { *first_packet = first as u64 };
+    follow_answer(walked)
 }
 
 /// R2102 — take the messages decoded since the last drain, into a buffer YOU
@@ -6908,6 +6973,10 @@ mod tests {
     /// `wz_dissect_live_open_with`: the sized options a live handle is opened
     /// under, their refusals, and a serial line declared through them.
     mod live_options;
+
+    /// `wz_dissect_live_follow_next`: one capture written as two containers,
+    /// read by one handle, against the same capture read as one.
+    mod next_container;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -10671,7 +10740,10 @@ mod tests {
         // caller owns in (read under the size it writes, nothing kept of it)
         // and the handle out, released by `wz_dissect_live_close`.
         // 61, for that struct growing two fields at its end; no symbol moves.
-        assert_eq!(wz_dissect_abi_version(), 61);
+        // 62, for `wz_dissect_live_follow_next`: one symbol, a container's bytes
+        // in and a `uint64_t` the caller owns out; nothing is retained of the
+        // bytes and no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 62);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

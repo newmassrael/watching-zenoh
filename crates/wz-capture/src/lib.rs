@@ -10449,6 +10449,13 @@ impl Dissection {
             self.capture_reported_drops = Some(pcapng::DropLedger::new());
         }
         let dissection = &mut *self;
+        // A container after the first of a capture numbers its packets from where
+        // the one before it stopped, and names its sections after that one's.
+        let CursorCarry {
+            first_packet,
+            first_section,
+            ..
+        } = cursor.carried;
         // The walk is `CaptureCursor::walk`, the same function
         // `captured_frame` runs to hand a packet out by number, so the number a
         // message is anchored to here and the number a caller asks for there
@@ -10465,6 +10472,10 @@ impl Dissection {
             .walk(bytes, |event| {
                 match event {
                     CaptureEvent::Frame(f) => {
+                        let f = CapturedFrame {
+                            index: first_packet + f.index,
+                            ..f
+                        };
                         // R311y720 — the INTERFACE travels with the packet. A
                         // classic pcap has one, numbered 0, which is also what
                         // `push_packet_at` passes.
@@ -10484,7 +10495,10 @@ impl Dissection {
                     CaptureEvent::Stats(s) => dissection
                         .capture_reported_drops
                         .get_or_insert_with(pcapng::DropLedger::new)
-                        .note_interface_total(&s),
+                        .note_interface_total(&pcapng::InterfaceStats {
+                            section: first_section + s.section,
+                            ..s
+                        }),
                     CaptureEvent::Drops(dropped) => dissection
                         .capture_reported_drops
                         .get_or_insert_with(pcapng::DropLedger::new)
@@ -10568,6 +10582,23 @@ enum Container {
 #[derive(Debug, Clone, Default)]
 pub struct CaptureCursor {
     inner: CaptureCursorInner,
+    /// What the containers before this one in the same capture leave it to go
+    /// on from; nothing for the first.
+    carried: CursorCarry,
+}
+
+/// What the walk of a container takes over from the containers before it in
+/// one capture ([`CaptureCursor::next_container`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct CursorCarry {
+    /// The number the container's first packet takes in the capture.
+    first_packet: usize,
+    /// The sections the earlier containers began, so that a section of this one
+    /// is named apart from theirs where a section names something (a drop
+    /// total, per section and interface).
+    first_section: usize,
+    /// The Decryption Secrets bytes the earlier containers retained.
+    secrets_spent: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10604,6 +10635,38 @@ impl CaptureCursor {
         }
     }
 
+    /// The walk of the NEXT container of a capture written as several, going on
+    /// from this one: its first packet takes the number `first_packet`, its
+    /// sections are named after the ones this walk began, and the Decryption
+    /// Secrets budget is what this walk left of it.
+    ///
+    /// The packet numbers a walk hands out stay the container's own (the number
+    /// [`captured_frame`] takes); [`Dissection::follow_container`] adds
+    /// [`Self::first_packet`] to them, so the dissection's numbering runs on
+    /// across containers as it runs on across pushes.
+    pub fn next_container(&self, first_packet: usize) -> Self {
+        let (sections, secrets_spent) = match &self.inner {
+            CaptureCursorInner::Ng(c) => (c.sections(), c.secrets_spent()),
+            CaptureCursorInner::Undecided | CaptureCursorInner::Classic(_) => {
+                (0, self.carried.secrets_spent)
+            }
+        };
+        Self {
+            inner: CaptureCursorInner::Undecided,
+            carried: CursorCarry {
+                first_packet,
+                first_section: self.carried.first_section + sections,
+                secrets_spent,
+            },
+        }
+    }
+
+    /// The number this container's first packet takes in the capture: `0` for a
+    /// walk [`Self::next_container`] did not make.
+    pub fn first_packet(&self) -> usize {
+        self.carried.first_packet
+    }
+
     /// Settle the format if `bytes` is long enough to say, and report which it
     /// is. `None` means the container has not yet said.
     fn decide(&mut self, bytes: &[u8]) -> Option<Container> {
@@ -10612,7 +10675,7 @@ impl CaptureCursor {
                 return None;
             }
             self.inner = if pcapng::looks_like_pcapng(bytes) {
-                CaptureCursorInner::Ng(pcapng::PcapngCursor::new())
+                CaptureCursorInner::Ng(pcapng::PcapngCursor::continuing(self.carried.secrets_spent))
             } else {
                 CaptureCursorInner::Classic(pcap::PcapCursor::new())
             };
@@ -15163,6 +15226,39 @@ mod datagram_tests {
             .follow_container(&mut cursor, &file)
             .expect("the second window follows");
         assert_eq!(followed.capture_reported_drops(), Some(17));
+    }
+
+    /// THE NEXT CONTAINER OF A CAPTURE NUMBERS ITS PACKETS ON AND ADDS ITS DROP
+    /// TOTAL. Each container's first section is section 0 of its own file, so a
+    /// ledger that took the second container's interface 0 for the first's would
+    /// keep the larger total and lose the smaller: 10 and then 3 are 13 lost.
+    #[test]
+    fn the_next_container_numbers_on_and_adds_its_drop_total() {
+        let packet = [0u8; 4];
+        let mut first = pcapng::write(&[(1, 6)], &[(0, 1_000, &packet), (0, 2_000, &packet)]);
+        first.extend_from_slice(&isb_block(0, Some(10)));
+        let mut second = pcapng::write(&[(1, 6)], &[(0, 3_000, &packet)]);
+        second.extend_from_slice(&isb_block(0, Some(3)));
+
+        let mut d = Dissection::new();
+        let mut cursor = CaptureCursor::new();
+        let read = d.follow_container(&mut cursor, &first);
+        assert_eq!(read.expect("the first container follows"), 2);
+        let mut next = cursor.next_container(d.next_packet_index());
+        assert_eq!(next.first_packet(), 2);
+        let read = d.follow_container(&mut next, &second);
+        assert_eq!(read.expect("the second container follows"), 1);
+        assert_eq!(
+            d.next_packet_index(),
+            3,
+            "the second container's packet is the third of the capture"
+        );
+        assert_eq!(next.consumed(), second.len(), "the walk is the second's");
+        assert_eq!(
+            d.capture_reported_drops(),
+            Some(13),
+            "each container's drop total counts once"
+        );
     }
 
     /// One ISB carrying only `isb_ifdrop`. Kept beside its user rather than

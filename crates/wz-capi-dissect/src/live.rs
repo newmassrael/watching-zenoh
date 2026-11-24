@@ -501,6 +501,9 @@ pub struct LiveDissection {
     /// [`Self::from_capture`] leaves it at the end of the file it read, which
     /// is what lets a replayed handle be followed as the writer appends more.
     cursor: CaptureCursor,
+    /// Which container of the capture [`Self::cursor`] walks: `0` for the first,
+    /// one more for each [`Self::follow_next`] that moved the handle on.
+    container: u64,
     /// The keys this handle decrypts TLS and QUIC with (the capture's own
     /// Decryption Secrets Blocks as the feed meets them, and every key log
     /// [`Self::add_keylog`] was handed) and one opener per flow it began. Shown
@@ -671,6 +674,53 @@ impl LiveDissection {
         named
     }
 
+    /// THE CONTAINER BEING FOLLOWED HAS ENDED, and `bytes` is the NEXT container
+    /// of the same capture, from its first byte: a whole container with its own
+    /// headers, as a writer that splits one capture into several files writes
+    /// it. Returns the number the next container's first packet takes, and what
+    /// [`Self::follow`] of `bytes` returns.
+    ///
+    /// Nothing of the dissection begins again: the flows and their sessions, a
+    /// fragment chain still open, the counts of what was lost and what a ceiling
+    /// took, the census's memory and the decryption keys go on as they would
+    /// within one container. What begins again is the walk of the container. Its
+    /// packets are numbered on from the last packet this handle numbered, its
+    /// sections are named after the ones before it, and the Decryption Secrets
+    /// budget is the capture's (see [`CaptureCursor::next_container`]).
+    ///
+    /// A handle that has read nothing of any container is not moved: this is
+    /// then [`Self::follow`]. The move stands when `bytes` does not read, so a
+    /// caller hands the next container to [`Self::follow`] as it grows.
+    pub fn follow_next(&mut self, bytes: &[u8]) -> (usize, Result<usize, FollowError>) {
+        let first_packet = self.dissection.next_packet_index();
+        if self.cursor.consumed() > 0 {
+            self.cursor = self.cursor.next_container(first_packet);
+            self.container += 1;
+        }
+        (first_packet, self.follow(bytes))
+    }
+
+    /// Whether this handle has gone on from the first container it read to a
+    /// later one ([`Self::follow_next`]).
+    ///
+    /// A packet number then counts across containers, so it is not a position in
+    /// the container a caller holds: the field documents read no container
+    /// again, and a container is not lent to it.
+    pub fn moved_container(&self) -> bool {
+        self.container > 0
+    }
+
+    /// The container the field documents may read packets again from: the one
+    /// handed in, or none once the handle has moved on from its first container,
+    /// whose packets the handle numbers apart from the container's own count.
+    fn reread_container<'c>(&self, capture: &'c [u8]) -> &'c [u8] {
+        if self.moved_container() {
+            &[]
+        } else {
+            capture
+        }
+    }
+
     /// How many bytes of the container [`Self::follow`] has consumed.
     ///
     /// A consumer that already knows how far its writer's cursor reached does
@@ -702,6 +752,7 @@ impl LiveDissection {
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
+            container: 0,
             keys: wz_tls_record::pass::LiveDecryptor::new(),
         }
     }
@@ -1354,6 +1405,7 @@ impl LiveDissection {
         filter: &wz_capture::filter::Filter,
     ) -> Option<String> {
         self.drain(&mut []);
+        let capture = self.reread_container(capture);
         let ids = HandleIds::of(self);
         let hook = self.progress;
         let ask = |done: u64, total: u64| asked(hook, done, total);
@@ -1546,6 +1598,7 @@ impl LiveDissection {
         max_rows: u64,
     ) -> Option<D> {
         self.drain(&mut []);
+        let capture = self.reread_container(capture);
         let ids = HandleIds::of(self);
         let hook = self.progress;
         let ask = |done: u64, total: u64| asked(hook, done, total);

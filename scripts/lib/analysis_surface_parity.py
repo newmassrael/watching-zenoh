@@ -1051,6 +1051,18 @@ ONLY_CAPI = {
         "has no list to follow.",
         (),
     ),
+    # A handle going on from one container of a capture into the next. Filed in
+    # the round that added the symbol.
+    "an OPEN handle going on into the next container of one capture": (
+        "wz_dissect_live_follow_next",
+        "DELIBERATE, for the reason the row for a dissection that outlives the "
+        "call gives. The door exists for a linking consumer whose capture helper "
+        "writes one capture as several files and who must keep one dissection "
+        "across them, so the lost count, the session context and the packet "
+        "numbers run on. The command line holds its dissection in its own process "
+        "and has no handle to carry from one file to the next.",
+        (),
+    ),
     # What an open handle holds now, beside its ceilings. Filed in the round
     # that added the symbol.
     "what an OPEN handle still HOLDS, beside its ceilings": (

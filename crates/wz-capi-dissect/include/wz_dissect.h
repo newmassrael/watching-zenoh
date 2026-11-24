@@ -2220,7 +2220,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 61
+#define WZ_DISSECT_ABI_REVISION 62
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -7248,6 +7248,81 @@ int wz_dissect_live_follow(wz_dissect_live *h, const unsigned char *bytes,
  * WZ_DISSECT_ERR_INVALID_ARG for a null handle or a null `out`. */
 int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
 
+/* (ABI 62) -- ONE CAPTURE WRITTEN AS SEVERAL CONTAINERS: tell a handle that the
+ * container it follows has ended, and hand it the next one.
+ *
+ * A capture helper that rotates its output writes one capture as a sequence of
+ * files, each a whole container with its own Section Header and Interface
+ * Descriptions, and switches files at a block boundary, so no packet spans two.
+ * Opening a new handle per file would begin the dissection again. This door
+ * keeps it:
+ *
+ *     wz_dissect_live *h;
+ *     uint64_t first;
+ *     wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h);
+ *     wz_dissect_live_follow(h, piece0, piece0_len);         // as it grows
+ *     ...
+ *     wz_dissect_live_follow_next(h, piece1, piece1_len, &first);
+ *     wz_dissect_live_follow(h, piece1, piece1_len_now);     // piece1 grows
+ *
+ * WHAT GOES ON. The whole dissection: every flow and its session (the
+ * negotiated values, the keys declared, a fragment chain still open and a TCP
+ * stream waiting for its next segment, which the next container carries on),
+ * wz_dissect_live_lost, the counts under `dropped_by_limits`, the census's
+ * memory of its planes, the decryption keys, and the Decryption Secrets budget,
+ * which is the capture's and not one file's. The capture tool's own drop counts
+ * add across containers: each container's sections are counted apart.
+ *
+ * WHAT BEGINS AGAIN. The walk of the container: wz_dissect_live_followed counts
+ * the bytes of the container being followed, and wz_dissect_live_follow takes
+ * the whole prefix of THAT container from now on.
+ *
+ * PACKET NUMBERS RUN ON. The next container's first packet takes the number
+ * after the last one the handle gave (a pushed packet included), and
+ * `*first_packet` is that number. A record's packet anchor, a field row's
+ * `first_byte.packet` and every other packet number this handle writes count
+ * across containers, so no number is given twice; to find a packet in your own
+ * file, subtract the `*first_packet` of the container it came in. That is the
+ * number wz_dissect_pcap_frame_bytes takes for that file. A number restarted
+ * per container would have needed the container on every record, and the
+ * record's layout is fixed.
+ *
+ * WHAT A MOVED HANDLE NO LONGER DOES. Its packet numbers are not positions in
+ * any one container, so it reads no container again: the field documents a
+ * moved handle writes (wz_dissect_live_fields_where, _fields_since,
+ * _fields_since_window, _row_facts_since) ignore the container passed to them,
+ * write `"capture_reread":false`, carry no datagram row and leave
+ * `frame_offset` and `l2` null. Pass NULL and 0. For the same reason it is not
+ * lent a container: wz_dissect_live_follow_lent on a moved handle is
+ * WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * WHEN THE PREVIOUS CONTAINER MAY BE RELEASED. A handle that copied its
+ * containers (wz_dissect_live_open, wz_dissect_live_open_with,
+ * wz_dissect_pcap_replay, wz_dissect_live_follow) holds nothing of a container
+ * after the call that read it, so the previous one may be released as soon as
+ * this door returns. A handle that was LENT a container (wz_dissect_pcap_replay_lent,
+ * wz_dissect_live_follow_lent) keeps reading it for the flows it lent, and the
+ * promise those doors ask still holds: keep it until the handle is closed. The
+ * containers after it are copied.
+ *
+ * A SE`UENCE OF CLOSED FILES is read the same way, as one capture: follow the
+ * first, follow_next each one after it, then wz_dissect_live_end once the last
+ * has been read. Do not open the first with wz_dissect_pcap_replay when more
+ * follow: that door ends the handle at the end of its file, which spends the
+ * patience a reassembly gap was waiting on before the next file could fill it.
+ *
+ * The bytes the previous container held past its last whole block are not
+ * read; call wz_dissect_live_followed before this door to learn whether there
+ * were any. A handle that has read nothing yet is not moved, and this door is
+ * then wz_dissect_live_follow.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a NULL argument. WZ_DISSECT_ERR_BAD_CAPTURE
+ * when the next container does not read; the handle has moved on to it all
+ * the same and `*first_packet` is written, so later calls of
+ * wz_dissect_live_follow hand it the container as it grows. */
+int wz_dissect_live_follow_next(wz_dissect_live *h, const unsigned char *bytes,
+                                size_t len, uint64_t *first_packet);
+
 /* Take the messages decoded since the last drain into `out`, which holds
  * `cap` records; `*written` receives how many were filled.
  *
@@ -9354,7 +9429,10 @@ int wz_dissect_pcap_replay_lent(const unsigned char *bytes, size_t len,
                                 int limits, wz_dissect_live **out);
 
 /* `len` is how much of the lent container is readable and committed now, as
- * for wz_dissect_live_follow; see the paragraph above for what is promised. */
+ * for wz_dissect_live_follow; see the paragraph above for what is promised.
+ * WZ_DISSECT_ERR_INVALID_ARG on a handle wz_dissect_live_follow_next moved on
+ * to a later container (ABI 62): its packet numbers count across containers
+ * and name no position in a lent one. */
 int wz_dissect_live_follow_lent(wz_dissect_live *h, const unsigned char *bytes,
                                 size_t len);
 

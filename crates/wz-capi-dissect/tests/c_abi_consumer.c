@@ -1267,6 +1267,44 @@ static int check_open_with_door(void) {
     return 0;
 }
 
+/* (ABI 62) -- ONE CAPTURE AS TWO CONTAINERS, driven from C: a handle that
+ * read the first goes on into the second, numbers its packets on from the
+ * first's, hands out the messages of both, and is lent no container after it
+ * moved. */
+static int check_follow_next_door(void) {
+    unsigned char frame[64];
+    unsigned char first[24 + 3 * (16 + 64)];
+    unsigned char second[24 + 2 * (16 + 64)];
+    wz_dissect_record buf[16];
+    wz_dissect_live *h = NULL;
+    size_t frame_len = udp_keepalive_frame(frame);
+    size_t first_len = pcap_of_frames(first, frame, frame_len, 3);
+    size_t second_len = pcap_of_frames(second, frame, frame_len, 2);
+    uint64_t first_packet = 0;
+    size_t n = 0;
+    int rc;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "follow_next open rc=%d", rc);
+    rc = wz_dissect_live_follow_next(h, second, second_len, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null first_packet rc=%d", rc);
+    rc = wz_dissect_live_follow(h, first, first_len);
+    CHECK(rc == WZ_DISSECT_OK, "first container rc=%d", rc);
+    rc = wz_dissect_live_follow_next(h, second, second_len, &first_packet);
+    CHECK(rc == WZ_DISSECT_OK, "next container rc=%d", rc);
+    CHECK(first_packet == 3, "the next container begins at packet %llu, not 3",
+          (unsigned long long)first_packet);
+    rc = wz_dissect_live_drain(h, buf, 16, &n);
+    CHECK(rc == WZ_DISSECT_OK && n == 5, "five keep-alives, drained %zu", n);
+    CHECK(buf[3].anchor == 3 && buf[4].anchor == 4,
+          "the second container's packets are numbered on: %llu %llu",
+          (unsigned long long)buf[3].anchor, (unsigned long long)buf[4].anchor);
+    rc = wz_dissect_live_follow_lent(h, second, second_len);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a moved handle lent rc=%d", rc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* R2205 (open-debt item 560) -- THE BYTES UNDER THE DESCRIPTION, driven from C.
  *
  * Its own function and not another arm of check_live_door for the reason that
@@ -5418,6 +5456,11 @@ int main(void) {
 
     /* (ABI 60) -- and the open that takes its options as a sized struct. */
     if (check_open_with_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 62) -- and one capture read as two containers by one handle. */
+    if (check_follow_next_door() != 0) {
         return 1;
     }
 
