@@ -585,7 +585,9 @@ pub enum PlanFrom {
     /// endpoints than it holds rows for, or whose other numbers or limits are not the region's,
     /// is refused under the limit that differs.
     Region(&'static ArenaRegion),
-    /// The config the open is handed, laid out at the open ([`ArenaPlan::count`]).
+    /// The config the open is handed, laid out at the open ([`ArenaPlan::count`]): a build
+    /// with `runtime-plan`, whose image carries the walk of the rows.
+    #[cfg(any(feature = "runtime-plan", test))]
     Config,
 }
 

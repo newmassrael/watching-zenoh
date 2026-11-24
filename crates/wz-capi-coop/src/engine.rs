@@ -43,14 +43,16 @@ use portable_atomic::AtomicU64;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
+#[cfg(any(feature = "runtime-plan", test))]
+use crate::arena::AllocatorMemory;
 #[cfg(feature = "advanced-cache")]
 use crate::arena::CacheSpan;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::arena::HandedTable;
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
-    PlanFrom, SessionArena, SessionRows, TransportTables,
+    ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind, EntityPlace,
+    EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables, PlanFrom,
+    SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
@@ -459,15 +461,16 @@ fn clock_beside(
     }
 }
 
-/// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
+/// The policies a session `CoopEngine::open` opens from `config` runs under: the one place that
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
 /// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
+#[cfg(any(feature = "runtime-plan", feature = "listen", feature = "group", test))]
 pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
-/// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
+/// The session limits a session `CoopEngine::open` opens from `config` holds its tables to: the
 /// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, read
 /// where the config holds it: only a value that owns limits of its own (a link's parameters, a
 /// group's) takes a copy.
@@ -546,7 +549,7 @@ impl From<TransportRefusal> for OpenError {
 
 /// The key ids every node of a deployment shares that an open hands the session, and the
 /// endpoints whose key-wire form is stated apart from the session's
-/// ([`CoopEngine::open_with_key_ids`]). A build without `shared-key-ids` hands none, and an ABI
+/// (`CoopEngine::open_with_key_ids`). A build without `shared-key-ids` hands none, and an ABI
 /// that opens in either build says so with [`Self::none`].
 #[derive(Clone, Default)]
 pub struct OpenKeyIds {
@@ -726,6 +729,7 @@ fn lend_session(
     let mut plan = ArenaPlan::vacant();
     match from {
         PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
+        #[cfg(any(feature = "runtime-plan", test))]
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
     lay_out_open(&mut plan, cell_bytes, held)?;
@@ -3772,6 +3776,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ///
     /// The session runs under the snapshot this open resolves from `config` (`resolve_policy`);
     /// an ABI that has resolved its own opens with [`Self::open_with_policy`].
+    #[cfg(any(feature = "runtime-plan", test))]
     pub fn open(
         links: L,
         clock: C,
@@ -3785,6 +3790,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// [`Self::open`], the session running under `policy`, the snapshot its creator resolved:
     /// every link's session is handed it, a link's declarations are replayed at the pace it
     /// states, and two links to one node are told apart by its `link-tie-order`.
+    #[cfg(any(feature = "runtime-plan", test))]
     #[inline]
     pub fn open_with_policy(
         links: L,
@@ -3807,6 +3813,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     ///
     /// The session's arena is the allocator's ([`AllocatorMemory`]); an ABI that reserves it
     /// elsewhere opens with [`Self::open_in`].
+    #[cfg(any(feature = "runtime-plan", test))]
     #[inline]
     pub fn open_with_key_ids(
         links: L,
@@ -3833,6 +3840,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// joins no group and dials no endpoint, and is [`OpenError::Arena`]. The links' buffers are
     /// lent from it to `links` before anything is bound or dialled
     /// (`SessionLinks::lend_buffers`), so a link the session opens reads and encodes in the arena.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub fn open_in(
         links: L,
         clock: C,
@@ -3857,10 +3865,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         )
     }
 
-    /// [`Self::open_in`], its config read from `source` inside the open, once, before anything
-    /// else: an ABI that builds the config from its own values hands the source (a maker of the
-    /// config is one), so the config is never a value of its frame, which the open's handshake runs
-    /// under. The source writes the endpoints' texts into the rows the open lends for them, and is
+    /// `Self::open_in` (a build with `runtime-plan`), its config read from `source` inside the
+    /// open, once, before anything else: an ABI that builds the config from its own values hands
+    /// the source (a maker of the config is one), so the config is never a value of its frame,
+    /// which the open's handshake runs under. The source writes the endpoints' texts into the rows the open lends for them, and is
     /// let go of before anything is bound or dialled ([`OpenSource`]).
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
