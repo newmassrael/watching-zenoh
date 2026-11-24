@@ -321,7 +321,7 @@ pub(crate) fn feed(profile: &Profile, digest: &mut Digest<'_>, item: Cover, fram
 
 /// The CRC of `frame` as the profile feeds it: the covered pieces, in the
 /// profile's order, each as it stands on the wire.
-fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
+pub(crate) fn crc_over(profile: &Profile, frame: &[u8]) -> u64 {
     let mut digest = profile.crc().engine.start();
     for &item in &profile.crc().cover {
         feed(profile, &mut digest, item, frame);
@@ -353,11 +353,12 @@ fn resolve(
     address: Option<u64>,
 ) -> Result<(u64, Vec<u64>), BuildError> {
     let field = &profile.fields()[index];
-    let path = child("", &field.name);
+    // Built only for a refusal: a value that resolves names no path.
+    let path = || child("", &field.name);
     if let Some(derive) = &field.derive {
         if supplied.is_some() {
             return Err(invalid(
-                path,
+                path(),
                 format!(
                     "the field `{}` is derived from `{ADDRESS}`: leave it out",
                     field.name
@@ -384,7 +385,7 @@ fn resolve(
             if !field.parts.is_empty() {
                 let names: Vec<&str> = field.parts.iter().map(|p| p.name.as_str()).collect();
                 return Err(invalid(
-                    path,
+                    path(),
                     format!(
                         "the field `{}` is split into parts: supply an object with {}",
                         field.name,
@@ -394,7 +395,7 @@ fn resolve(
             }
             if *value > field.max_value() {
                 return Err(invalid(
-                    path,
+                    path(),
                     format!(
                         "{value} does not fit the {}-byte field `{}`",
                         field.bytes, field.name
@@ -406,26 +407,26 @@ fn resolve(
         Supplied::Parts(given) => {
             if field.parts.is_empty() {
                 return Err(invalid(
-                    path,
+                    path(),
                     format!("the field `{}` is not split: supply a number", field.name),
                 ));
             }
             for (i, (name, _)) in given.iter().enumerate() {
                 let Some(part) = field.parts.iter().find(|p| &p.name == name) else {
                     return Err(invalid(
-                        child(&path, name),
+                        child(&path(), name),
                         format!("the field `{}` has no part called `{name}`", field.name),
                     ));
                 };
                 if given[..i].iter().any(|(earlier, _)| earlier == name) {
                     return Err(invalid(
-                        child(&path, name),
+                        child(&path(), name),
                         format!("the part `{name}` is supplied twice"),
                     ));
                 }
                 if part.derive.is_some() {
                     return Err(invalid(
-                        child(&path, name),
+                        child(&path(), name),
                         format!(
                             "the part `{name}` of `{}` is derived from `{ADDRESS}`: leave it out",
                             field.name
@@ -445,13 +446,13 @@ fn resolve(
                 }
                 let Some((_, v)) = given.iter().find(|(n, _)| n == &part.name) else {
                     return Err(invalid(
-                        path,
+                        path(),
                         format!("no value for the part `{}` of `{}`", part.name, field.name),
                     ));
                 };
                 if *v > part.max_value() {
                     return Err(invalid(
-                        child(&path, &part.name),
+                        child(&path(), &part.name),
                         format!(
                             "{v} does not fit the {}-bit part `{}` of `{}`",
                             part.width, part.name, field.name
@@ -493,14 +494,15 @@ pub fn build(profile: &Profile, values: &Values, payload: &[u8]) -> Result<Built
     let (crc_at, length_at) = (profile.crc().field, profile.length().field);
 
     for (i, (name, _)) in values.entries.iter().enumerate() {
-        let path = child("", name);
+        // Built only for a refusal: a value that is accepted names no path.
+        let path = || child("", name);
         let Some(index) = profile.field_index(name) else {
-            return Err(invalid(path, format!("no field is called `{name}`")));
+            return Err(invalid(path(), format!("no field is called `{name}`")));
         };
         if index == crc_at || index == length_at {
             let role = if index == crc_at { "crc" } else { "length" };
             return Err(invalid(
-                path,
+                path(),
                 format!("the {role} field `{name}` is computed: leave it out"),
             ));
         }
@@ -509,7 +511,7 @@ pub fn build(profile: &Profile, values: &Values, payload: &[u8]) -> Result<Built
             .any(|(earlier, _)| earlier == name)
         {
             return Err(invalid(
-                path,
+                path(),
                 format!("the field `{name}` is supplied twice"),
             ));
         }
@@ -724,8 +726,56 @@ pub fn expect(
     })
 }
 
-/// Read `frame` under `profile`.
-pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
+/// A frame read where it lies: the facts [`open`] reports about it, and its fields read from the
+/// frame's own bytes when they are asked for. What a receiver that judges every frame reads, so
+/// it keeps no copy of any field; [`open`] is this with every field written out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenedView<'f> {
+    frame: &'f [u8],
+    /// The CRC field as received.
+    pub crc_found: u64,
+    /// The CRC recomputed over the received bytes.
+    pub crc_computed: u64,
+    /// Whether they agree.
+    pub crc_ok: bool,
+    /// The length field as received.
+    pub length_found: u64,
+    /// What the profile's length rule gives for this frame's body.
+    pub length_expected: u64,
+    /// Whether they agree. Information, not a verdict.
+    pub length_matches_frame: bool,
+    /// Where the body starts.
+    pub payload_offset: usize,
+    /// The body's size: the frame less the header.
+    pub payload_bytes: usize,
+}
+
+impl OpenedView<'_> {
+    /// The integer the field at `index` holds on the wire.
+    pub fn raw(&self, profile: &Profile, index: usize) -> u64 {
+        let field = &profile.fields()[index];
+        read_be(&self.frame[field.offset..field.offset + field.bytes])
+    }
+
+    /// The logical value of the field at `index`: its integer with the `xor` undone.
+    pub fn value(&self, profile: &Profile, index: usize) -> u64 {
+        self.raw(profile, index) ^ profile.fields()[index].xor
+    }
+
+    /// The value of part `part` of the split field at `index`.
+    pub fn part(&self, profile: &Profile, index: usize, part: usize) -> u64 {
+        let part = &profile.fields()[index].parts[part];
+        (self.value(profile, index) >> part.lsb) & part.max_value()
+    }
+
+    /// The counter, as the judge reads it.
+    pub fn counter(&self, profile: &Profile) -> u64 {
+        self.value(profile, profile.counter().field)
+    }
+}
+
+/// Read `frame` under `profile`, where it lies.
+pub fn open_view<'f>(profile: &Profile, frame: &'f [u8]) -> Result<OpenedView<'f>, OpenError> {
     let header = profile.header_bytes();
     if frame.len() < header {
         return Err(OpenError::ShortFrame {
@@ -733,34 +783,16 @@ pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
             need: header,
         });
     }
-    let fields: Vec<FieldReport> = profile
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let raw = read_be(&frame[field.offset..field.offset + field.bytes]);
-            let value = raw ^ field.xor;
-            let parts = field
-                .parts
-                .iter()
-                .map(|p| (value >> p.lsb) & p.max_value())
-                .collect();
-            FieldReport {
-                index,
-                raw,
-                value,
-                parts,
-            }
-        })
-        .collect();
-
-    let crc_found = fields[profile.crc().field].raw;
+    let crc_field = &profile.fields()[profile.crc().field];
+    let crc_found = read_be(&frame[crc_field.offset..crc_field.offset + crc_field.bytes]);
     let crc_computed = crc_over(profile, frame);
     let payload_bytes = frame.len() - header;
-    let length_found = fields[profile.length().field].raw;
+    let length_field = &profile.fields()[profile.length().field];
+    let length_found =
+        read_be(&frame[length_field.offset..length_field.offset + length_field.bytes]);
     let length_expected = profile.length_for(payload_bytes);
-    Ok(OpenedFrame {
-        fields,
+    Ok(OpenedView {
+        frame,
         crc_found,
         crc_computed,
         crc_ok: crc_found == crc_computed,
@@ -769,5 +801,34 @@ pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
         length_matches_frame: length_found == length_expected,
         payload_offset: header,
         payload_bytes,
+    })
+}
+
+/// Read `frame` under `profile`, every field written out: [`open_view`] with its fields.
+pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
+    let view = open_view(profile, frame)?;
+    let fields: Vec<FieldReport> = profile
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| FieldReport {
+            index,
+            raw: view.raw(profile, index),
+            value: view.value(profile, index),
+            parts: (0..field.parts.len())
+                .map(|part| view.part(profile, index, part))
+                .collect(),
+        })
+        .collect();
+    Ok(OpenedFrame {
+        fields,
+        crc_found: view.crc_found,
+        crc_computed: view.crc_computed,
+        crc_ok: view.crc_ok,
+        length_found: view.length_found,
+        length_expected: view.length_expected,
+        length_matches_frame: view.length_matches_frame,
+        payload_offset: view.payload_offset,
+        payload_bytes: view.payload_bytes,
     })
 }

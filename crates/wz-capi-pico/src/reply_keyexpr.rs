@@ -44,24 +44,10 @@ pub(crate) const PARAM_SEPARATOR: u8 = b';';
 /// must end the list or precede a `;`. Without them a parameter such as
 /// `no_anyke` or `_anykey=1` would be read as the flag.
 pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
-    let mut start = 0usize;
-    while start <= parameters.len() {
-        let Some(offset) = parameters[start..]
-            .windows(ANYKE_PARAM.len())
-            .position(|window| window == ANYKE_PARAM)
-        else {
-            return false;
-        };
-        let pos = start + offset;
-        let end = pos + ANYKE_PARAM.len();
-        let left_ok = pos == 0 || parameters[pos - 1] == PARAM_SEPARATOR;
-        let right_ok = end == parameters.len() || parameters[end] == PARAM_SEPARATOR;
-        if left_ok && right_ok {
-            return true;
-        }
-        start = end + 1;
-    }
-    false
+    // The flag stands alone between separators or the ends: one whole parameter.
+    parameters
+        .split(|byte| *byte == PARAM_SEPARATOR)
+        .any(|parameter| parameter == ANYKE_PARAM)
 }
 
 /// Whether `reply` is covered by the query — zenoh's `reply ⊆ query` contract as

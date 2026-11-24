@@ -643,8 +643,9 @@ pub unsafe extern "C" fn z_liveliness_get(
     }
 }
 
-/// One leg's reply callback, as the registry's walk mints it: the port's `ReplyCallback`, named
-/// here because this crate takes the port only with some of its features.
+/// One leg's reply callback, as the registry's walk mints it: the registry's own
+/// (`wz_capi_core::faces::ReplyCallback`), named here because this crate takes the port only with
+/// some of its features.
 #[cfg(feature = "liveliness-get")]
 type LegCallback = Box<dyn FnMut(&dyn wz_runtime_tokio::reply_sink::ReplyView) + Send>;
 

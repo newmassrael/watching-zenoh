@@ -1040,11 +1040,6 @@ pub fn multicast_tx_group_announcement<R>(
     }
 }
 
-/// The most bytes the `ext_keyexpr` body of a retraction takes: its inner header, a ten-byte id
-/// and a key of the build's longest.
-#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
-const RETRACTION_KEY_BYTES: usize = crate::caps::MAX_KEYEXPR_BYTES.saturating_add(11);
-
 /// [`crate::declare_build::build_group_retraction`] written from its parts, its key's
 /// `ext_keyexpr` body on the stack, and handed to `f` as a message lent for the call; refused
 /// with `LengthOutOfRange` for a key past the build's longest, and `FeatureDisabled` for a kind
@@ -1059,30 +1054,29 @@ pub fn multicast_tx_group_retraction<R>(
     use crate::declare_form::GroupDeclaration;
     use crate::send_wire_error::SendWireError;
     let refused = SendWireError::Codec(sce_forge_runtime::codec::CodecError::LengthOutOfRange);
-    let mut buf = [0u8; RETRACTION_KEY_BYTES];
-    let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(
+    // A group holds no limits snapshot of its own: its key is bounded by the build's longest.
+    let named = crate::lent_control::NamedKeyexpr::new(
         key.mapping_id,
         key.suffix.unwrap_or(""),
-        &mut buf,
+        crate::limits::MaxKeyexprBytesHeld::default(),
     )
-    .ok_or(refused)?;
-    let named = buf.get(..len).ok_or(refused)?;
+    .map_err(|_| refused)?;
     match what {
         #[cfg(feature = "declare-subscriber")]
         GroupDeclaration::Subscriber => multicast_tx_declaration(
-            &crate::lent_control::undeclare_subscriber_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_subscriber_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
         #[cfg(feature = "declare-queryable")]
         GroupDeclaration::Queryable { .. } => multicast_tx_declaration(
-            &crate::lent_control::undeclare_queryable_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_queryable_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
         #[cfg(feature = "liveliness-token")]
         GroupDeclaration::Token => multicast_tx_declaration(
-            &crate::lent_control::undeclare_token_declaration(id, Some(named)),
+            &crate::lent_control::undeclare_token_declaration(id, Some(&named)),
             f,
         )
         .ok_or(refused),
@@ -3816,16 +3810,16 @@ mod group_declarations_written_from_parts {
 
     /// Every kind this build has a declaration plane of.
     fn kinds() -> Vec<GroupDeclaration> {
-        let mut kinds = Vec::new();
-        #[cfg(feature = "declare-subscriber")]
-        kinds.push(GroupDeclaration::Subscriber);
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: true });
-        #[cfg(feature = "declare-queryable")]
-        kinds.push(GroupDeclaration::Queryable { complete: false });
-        #[cfg(feature = "liveliness-token")]
-        kinds.push(GroupDeclaration::Token);
-        kinds
+        Vec::from([
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber,
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: true },
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete: false },
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token,
+        ])
     }
 
     /// The keys a group names: a literal, an alias with a suffix, an alias alone, and a multi-byte

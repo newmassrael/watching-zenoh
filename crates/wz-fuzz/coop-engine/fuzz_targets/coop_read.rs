@@ -31,7 +31,9 @@ use std::sync::Arc;
 use libfuzzer_sys::fuzz_target;
 use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
 use wz_capi_coop::{CoopConfig, CoopEngine};
-use wz_capi_port::{QueryCallback, QueryHolder, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{
+    QueryCallback, QueryHolder, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+};
 use wz_fuzz_ingress_common::{
     advance_ms, handshake_replies, now_us, reset_clock, units, CountingAlloc, Window, BATCH,
     GROWTH_LIMIT,
@@ -92,6 +94,13 @@ impl SessionLinks for Links {
     type Pump = Feed;
 
     type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
+    // The fed link names no handle a thread outside it could wait on.
+    type Waits = wz_runtime_coop::session_drive::NoWaits;
+
+    fn waits(&self) -> Self::Waits {
+        wz_runtime_coop::session_drive::NoWaits
+    }
 
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
@@ -180,10 +189,8 @@ fuzz_target!(|data: &[u8]| {
         WireKey::literal(),
         Locality::Any,
         None,
-        Arc::new(|| {
-            Box::new(|sample: &dyn SampleView| {
-                assert!(!sample.keyexpr().is_empty(), "a sample names its key");
-            }) as Box<dyn FnMut(&dyn SampleView) + Send>
+        SubscriberSink::shared(|sample: &dyn SampleView| {
+            assert!(!sample.keyexpr().is_empty(), "a sample names its key");
         }),
     );
     let _ = engine.declare_queryable_on_wire(

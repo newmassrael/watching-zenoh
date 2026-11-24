@@ -526,19 +526,6 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         None
     }
 
-    /// Every live row with its place, in slot order, to change: [`Self::live_handle_at_mut`]'s
-    /// places.
-    pub(crate) fn live_places_mut(&mut self) -> impl Iterator<Item = (usize, &mut T)> + '_ {
-        self.meta
-            .iter()
-            .zip(self.rows.iter_mut())
-            .enumerate()
-            .filter_map(|(at, (slot, row))| match (slot.state, row) {
-                (State::Live, Some(row)) => Some((at, row)),
-                _ => None,
-            })
-    }
-
     /// The live row at `place`, whatever its generation, with its handle, to change: what a
     /// reader that keeps places rather than handles reads, one that is valid only while the table
     /// does not change (a match cache kept against a count that moves with every insert and

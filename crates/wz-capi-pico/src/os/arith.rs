@@ -100,7 +100,8 @@ pub type Stamp = (i64, u16);
 /// repairs.
 pub fn wall_elapsed_ms(now: Stamp, then: Stamp) -> u32 {
     let secs = now.0.wrapping_sub(then.0) as u32;
-    let millis = i32::from(now.1) - i32::from(then.1);
+    // Two `u16` differ by less than an `i32` spans.
+    let millis = i32::from(now.1).wrapping_sub(i32::from(then.1));
     secs.wrapping_mul(1000).wrapping_add(millis as u32)
 }
 
@@ -133,7 +134,13 @@ pub fn format_iso(
     if year > 9999 || month > 99 || day > 99 || hour > 99 || minute > 99 || second > 99 {
         return None;
     }
-    let two = |v: u16| [b'0' + (v / 10) as u8, b'0' + (v % 10) as u8];
+    // Each field is below 100 here, so each digit is below ten.
+    let two = |v: u16| {
+        [
+            b'0'.wrapping_add((v / 10) as u8),
+            b'0'.wrapping_add((v % 10) as u8),
+        ]
+    };
     let (yh, yl) = (two(year / 100), two(year % 100));
     let (mo, d, h, mi, s) = (two(month), two(day), two(hour), two(minute), two(second));
     Some([

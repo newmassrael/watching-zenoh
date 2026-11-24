@@ -57,6 +57,7 @@
 //! policy does. A build without the capability refuses the member by name.
 
 use core::fmt;
+use core::ops::ControlFlow;
 
 use crate::keyexpr_canon::KeyexprRefusal;
 use crate::limit_binding::{write_outside, LimitEntry, LimitValue, Outside, UNBOUNDED};
@@ -127,13 +128,191 @@ impl<'a> LimitStatement<'a> {
     }
 }
 
+/// The policies one layer states, each once, by the build's table: for each policy of
+/// [`POLICIES`], the place among its values of the value it is to take, or none. The facts of a
+/// layer of [`Statement`]s whose ids its holder found in the table, a byte a policy where the
+/// two ids take four words a statement, read by the resolution where they lie ([`Stated::Set`]).
+/// A later statement of a policy replaces an earlier one, so the order the policies were stated
+/// in is no fact the set keeps, and no resolution reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicySet {
+    /// One more than the place of each policy's value among its values; `0` where the set states
+    /// none.
+    values: [u8; POLICY_COUNT],
+}
+
+impl Default for PolicySet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PolicySet {
+    /// A set that states nothing.
+    pub const fn new() -> Self {
+        Self {
+            values: [0; POLICY_COUNT],
+        }
+    }
+
+    /// `statement` held in the set, in place of an earlier statement of its policy: refused, the
+    /// set left as it was, for a policy the build does not have and a value the policy does not
+    /// have. Whether a stage after the build may decide the policy, and whether the build's domain
+    /// holds the value, the resolution judges, as it judges a statement of a slice.
+    pub fn state<'a>(&mut self, statement: Statement<'a>) -> Result<(), Reason<'a>> {
+        let (policy, value) = (statement.policy, statement.value);
+        let Some((entry, held)) = POLICIES
+            .iter()
+            .zip(self.values.iter_mut())
+            .find(|(entry, _)| entry.id() == policy)
+        else {
+            return Err(Reason::UnknownPolicy { policy, value });
+        };
+        let place = entry.values().iter().position(|known| *known == value);
+        match place.and_then(|place| u8::try_from(place.checked_add(1)?).ok()) {
+            Some(place) => {
+                *held = place;
+                Ok(())
+            }
+            None => Err(Reason::UnknownValue {
+                policy: entry.id(),
+                value,
+                values: entry.values(),
+            }),
+        }
+    }
+
+    /// Whether the set states the policy whose id is `policy`.
+    pub fn holds(&self, policy: &str) -> bool {
+        POLICIES
+            .iter()
+            .zip(self.values.iter())
+            .any(|(entry, held)| *held != 0 && entry.id() == policy)
+    }
+
+    /// The id of the value the set states for the policy whose id is `policy`, which is the
+    /// build's own; `None` when it states none.
+    pub fn value_of(&self, policy: &str) -> Option<&'static str> {
+        let (entry, held) = POLICIES
+            .iter()
+            .zip(self.values.iter())
+            .find(|(entry, _)| entry.id() == policy)?;
+        let place = usize::from(*held).checked_sub(1)?;
+        entry.values().get(place).copied()
+    }
+
+    /// Whether the set states nothing.
+    pub fn is_empty(&self) -> bool {
+        self.values.iter().all(|held| *held == 0)
+    }
+
+    /// How many policies the set states.
+    pub fn len(&self) -> usize {
+        self.values.iter().filter(|held| **held != 0).count()
+    }
+}
+
+/// The limits of a session one layer states, each once, by the build's table: for each limit of
+/// [`SESSION_LIMITS`], the value it is to take, or none. The facts of a layer of
+/// [`LimitStatement`]s of a session's limits whose ids its holder found in the table, read by the
+/// resolution where they lie ([`StatedLimits::Set`]). A limit of a runtime and a capacity alone
+/// are not limits of a session, and a holder whose layer states one refuses it as it reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitSet {
+    values: [Option<LimitValue>; SESSION_LIMIT_COUNT],
+}
+
+impl Default for LimitSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LimitSet {
+    /// A set that states nothing.
+    pub const fn new() -> Self {
+        Self {
+            values: [None; SESSION_LIMIT_COUNT],
+        }
+    }
+
+    /// `statement` held in the set: refused, the set left as it was, for an id that is no limit of
+    /// a session the build has, and for a limit the set states already, as the resolution refuses a
+    /// limit a layer states twice. The value the resolution judges, as it judges a statement of a
+    /// slice.
+    pub fn state<'a>(&mut self, statement: LimitStatement<'a>) -> Result<(), Reason<'a>> {
+        let limit = statement.limit;
+        let Some((entry, held)) = SESSION_LIMITS
+            .iter()
+            .zip(self.values.iter_mut())
+            .find(|(entry, _)| entry.id() == limit)
+        else {
+            return Err(Reason::UnknownLimit { limit });
+        };
+        if held.is_some() {
+            return Err(Reason::LimitStatedTwice { limit: entry.id() });
+        }
+        *held = Some(statement.value);
+        Ok(())
+    }
+
+    /// The value the set states for the limit whose id is `limit`; `None` when it states none.
+    pub fn value_of(&self, limit: &str) -> Option<LimitValue> {
+        SESSION_LIMITS
+            .iter()
+            .zip(self.values.iter())
+            .find(|(entry, _)| entry.id() == limit)
+            .and_then(|(_, held)| *held)
+    }
+
+    /// Whether the set states nothing.
+    pub fn is_empty(&self) -> bool {
+        self.values.iter().all(Option::is_none)
+    }
+}
+
+/// What one layer states of the policies: the statements as its source spelled them, each id
+/// found in the build's table as the resolution reads it, or a set a holder keeps by that table.
+/// One resolution reads both: a statement of a slice becomes the place of its policy and its value
+/// in the table, where a set holds them already.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stated<'s, 'a> {
+    /// Statements by their ids, each policy once, in the order the layer states them.
+    Read(&'s [Statement<'a>]),
+    /// Statements by the build's table.
+    Set(&'s PolicySet),
+}
+
+impl Default for Stated<'_, '_> {
+    /// Nothing stated.
+    fn default() -> Self {
+        Self::Read(&[])
+    }
+}
+
+/// What one layer states of the limits: as [`Stated`] states the policies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatedLimits<'s, 'a> {
+    /// Statements by their ids, each limit once, in the order the layer states them.
+    Read(&'s [LimitStatement<'a>]),
+    /// Statements of a session's limits by the build's table.
+    Set(&'s LimitSet),
+}
+
+impl Default for StatedLimits<'_, '_> {
+    /// Nothing stated.
+    fn default() -> Self {
+        Self::Read(&[])
+    }
+}
+
 /// One layer: the statements of one origin, in the order it states them.
 #[derive(Clone, Copy, Debug)]
 pub struct Layer<'s, 'a> {
     /// Where the statements come from; the origin of each value they set.
     pub origin: Origin,
     /// What the layer states.
-    pub statements: &'s [Statement<'a>],
+    pub statements: Stated<'s, 'a>,
 }
 
 /// What the open's caller states beside the document ([`Origin::Api`]): a profile that stands in
@@ -144,9 +323,9 @@ pub struct Overrides<'s, 'a> {
     /// The id of the profile the caller names, if it names one.
     pub profile: Option<&'a str>,
     /// What the caller states, each policy once.
-    pub statements: &'s [Statement<'a>],
+    pub statements: Stated<'s, 'a>,
     /// The limits the caller states, each limit once.
-    pub limits: &'s [LimitStatement<'a>],
+    pub limits: StatedLimits<'s, 'a>,
 }
 
 /// What a resolution starts from: the snapshot of the policies, and the snapshots of the limits
@@ -212,7 +391,7 @@ impl Profile {
     pub const fn layer(&self) -> Layer<'static, 'static> {
         Layer {
             origin: Origin::Profile(self.id),
-            statements: self.statements,
+            statements: Stated::Read(self.statements),
         }
     }
 }
@@ -910,41 +1089,65 @@ fn compose<'a>(
 ) -> Resolved {
     let mut resolved = Resolved::unchanged(base);
     for layer in layers {
-        for (at, statement) in layer.statements.iter().enumerate() {
-            if let Err(reason) = apply(table, &mut resolved, layer, at, statement) {
-                refusals.push(Refusal {
+        let Resolved {
+            policy, provenance, ..
+        } = &mut resolved;
+        let _ = select_each(table, policy, layer.statements, |outcome| {
+            match outcome {
+                // The place of a policy in `table`, which the provenance has one origin for each
+                // of.
+                Ok(index) => {
+                    if let Some(held) = provenance.origins.get_mut(index) {
+                        *held = layer.origin;
+                    }
+                }
+                Err(reason) => refusals.push(Refusal {
                     layer: layer.origin,
                     reason,
-                });
+                }),
             }
-        }
+            ControlFlow::Continue(())
+        });
     }
     resolved
 }
 
-/// The statement at `at` of `layer` applied to `resolved`, which a refusal leaves as it was.
-fn apply<'a>(
+/// Each statement of `stated`, in its order, selected in `snapshot` by the policies of `table`:
+/// `outcome` is handed the place in `table` of each policy selected, or why it was refused, which
+/// leaves `snapshot` as it was, and ends the walk by breaking. A statement of a slice is found in
+/// `table` by its ids and a statement of a set is there already, so a set is read only by
+/// [`POLICIES`], the table it was stated by.
+fn select_each<'a>(
     table: &[PolicyEntry; POLICY_COUNT],
-    resolved: &mut Resolved,
-    layer: &Layer<'_, 'a>,
-    at: usize,
-    statement: &Statement<'a>,
-) -> Result<(), Reason<'a>> {
-    let index = select_policy(
-        table,
-        &mut resolved.policy,
-        layer.statements.get(..at).unwrap_or_default(),
-        statement,
-    )?;
-    // The place of a policy in `table`, which the provenance has one origin for each of.
-    if let Some(held) = resolved.provenance.origins.get_mut(index) {
-        *held = layer.origin;
+    snapshot: &mut SessionPolicy,
+    stated: Stated<'_, 'a>,
+    mut outcome: impl FnMut(Result<usize, Reason<'a>>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    match stated {
+        Stated::Read(statements) => {
+            for (at, statement) in statements.iter().enumerate() {
+                let earlier = statements.get(..at).unwrap_or_default();
+                outcome(select_policy(table, snapshot, earlier, statement))?;
+            }
+        }
+        Stated::Set(set) => {
+            for (index, (entry, held)) in table.iter().zip(set.values.iter()).enumerate() {
+                // A place of `0` states nothing; one past the policy's values none either.
+                let Some(value) = usize::from(*held)
+                    .checked_sub(1)
+                    .and_then(|place| entry.values().get(place))
+                else {
+                    continue;
+                };
+                outcome(select_at(index, entry, snapshot, value))?;
+            }
+        }
     }
-    Ok(())
+    ControlFlow::Continue(())
 }
 
-/// `statement`, which its layer states after `earlier`, selected in `snapshot` by the policies of
-/// `table`, which a refusal leaves as it was: the place of the policy in `table`.
+/// `statement`, which its layer states after `earlier`, found in `table` by its ids and selected
+/// in `snapshot`, which a refusal leaves as it was: the place of the policy in `table`.
 fn select_policy<'a>(
     table: &[PolicyEntry; POLICY_COUNT],
     snapshot: &mut SessionPolicy,
@@ -959,10 +1162,24 @@ fn select_policy<'a>(
     else {
         return Err(Reason::UnknownPolicy { policy, value });
     };
-    let id = entry.id();
     if earlier.iter().any(|stated| stated.policy == policy) {
-        return Err(Reason::StatedTwice { policy: id, value });
+        return Err(Reason::StatedTwice {
+            policy: entry.id(),
+            value,
+        });
     }
+    select_at(index, entry, snapshot, value)
+}
+
+/// The value whose id is `value` for the policy `entry`, at `index` of its table, which its layer
+/// states once, selected in `snapshot`, which a refusal leaves as it was: `index`.
+fn select_at<'a>(
+    index: usize,
+    entry: &PolicyEntry,
+    snapshot: &mut SessionPolicy,
+    value: &'a str,
+) -> Result<usize, Reason<'a>> {
+    let id = entry.id();
     if entry.binding() == Binding::Build {
         return Err(Reason::BuildBound { policy: id, value });
     }
@@ -1038,59 +1255,86 @@ impl FoundLimit {
 /// onto `refusals`. What it returns is the caller's to drop when a refusal was pushed.
 fn compose_limits<'a>(
     base: &Base,
-    layers: &[(LimitOrigin, &[LimitStatement<'a>])],
+    layers: &[(LimitOrigin, StatedLimits<'_, 'a>)],
     refusals: &mut Refusals<'a>,
 ) -> ResolvedLimits {
     let runtime = base.runtime_limits.unwrap_or(RuntimeLimits::BUILD);
     let mut resolved = ResolvedLimits::unchanged(base.session_limits, runtime);
     let holds_runtime = base.runtime_limits.is_some();
     for &(origin, statements) in layers {
-        for (at, statement) in statements.iter().enumerate() {
-            let earlier = statements.get(..at).unwrap_or_default();
-            if let Err(reason) =
-                apply_limit(&mut resolved, holds_runtime, origin, earlier, statement)
-            {
-                refusals.push(Refusal {
+        let ResolvedLimits {
+            session,
+            runtime,
+            provenance,
+        } = &mut resolved;
+        let runtime = holds_runtime.then_some(runtime);
+        let _ = select_limit_each(session, runtime, statements, |outcome| {
+            match outcome {
+                // The place of a limit in its table, which the provenance has one origin for each
+                // of.
+                Ok(FoundLimit::Session(index, _)) => {
+                    if let Some(held) = provenance.session.get_mut(index) {
+                        *held = origin;
+                    }
+                }
+                Ok(FoundLimit::Runtime(index, _)) => {
+                    if let Some(held) = provenance.runtime.get_mut(index) {
+                        *held = origin;
+                    }
+                }
+                // A capacity is refused before anything is selected, so it is never what was
+                // selected.
+                Ok(FoundLimit::Capacity(_)) => {}
+                Err(reason) => refusals.push(Refusal {
                     layer: origin.origin(),
                     reason,
-                });
+                }),
             }
-        }
+            ControlFlow::Continue(())
+        });
     }
     resolved
 }
 
-/// `statement` of a layer whose `origin` is given and whose statements before it are `earlier`,
-/// applied to `resolved`, which a refusal leaves as it was.
-fn apply_limit<'a>(
-    resolved: &mut ResolvedLimits,
-    holds_runtime: bool,
-    origin: LimitOrigin,
-    earlier: &[LimitStatement<'a>],
-    statement: &LimitStatement<'a>,
-) -> Result<(), Reason<'a>> {
-    let runtime = holds_runtime.then_some(&mut resolved.runtime);
-    match select_stated_limit(&mut resolved.session, runtime, earlier, statement)? {
-        // The place of a limit in its table, which the provenance has one origin for each of.
-        FoundLimit::Session(index, _) => {
-            if let Some(held) = resolved.provenance.session.get_mut(index) {
-                *held = origin;
+/// Each statement of `stated`, in its order, selected in `session`, or in `runtime` for a limit of
+/// a runtime when the creator holds one (`Some`): `outcome` is handed where each limit was found,
+/// or why it was refused, which leaves the snapshots as they were, and ends the walk by breaking.
+fn select_limit_each<'a>(
+    session: &mut SessionLimits,
+    mut runtime: Option<&mut RuntimeLimits>,
+    stated: StatedLimits<'_, 'a>,
+    mut outcome: impl FnMut(Result<FoundLimit, Reason<'a>>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    match stated {
+        StatedLimits::Read(statements) => {
+            for (at, statement) in statements.iter().enumerate() {
+                outcome(select_stated_limit(
+                    session,
+                    runtime.as_deref_mut(),
+                    statements.get(..at).unwrap_or_default(),
+                    statement,
+                ))?;
             }
         }
-        FoundLimit::Runtime(index, _) => {
-            if let Some(held) = resolved.provenance.runtime.get_mut(index) {
-                *held = origin;
+        StatedLimits::Set(set) => {
+            for (index, (entry, held)) in SESSION_LIMITS.iter().zip(set.values.iter()).enumerate() {
+                let Some(value) = *held else {
+                    continue;
+                };
+                outcome(select_found(
+                    session,
+                    runtime.as_deref_mut(),
+                    FoundLimit::Session(index, entry),
+                    value,
+                ))?;
             }
         }
-        // A capacity is refused before anything is selected, so it is never what was selected.
-        FoundLimit::Capacity(_) => {}
     }
-    Ok(())
+    ControlFlow::Continue(())
 }
 
-/// `statement`, which its layer states after `earlier`, selected in `session`, or in `runtime`
-/// for a limit of a runtime when the creator holds one (`Some`), which a refusal leaves as they
-/// were: where the limit was found.
+/// `statement`, which its layer states after `earlier`, found by its id and selected as
+/// [`select_found`] selects it: where the limit was found.
 fn select_stated_limit<'a>(
     session: &mut SessionLimits,
     runtime: Option<&mut RuntimeLimits>,
@@ -1101,10 +1345,22 @@ fn select_stated_limit<'a>(
     let Some(found) = FoundLimit::find(limit) else {
         return Err(Reason::UnknownLimit { limit });
     };
-    let id = found.id();
     if earlier.iter().any(|stated| stated.limit == limit) {
-        return Err(Reason::LimitStatedTwice { limit: id });
+        return Err(Reason::LimitStatedTwice { limit: found.id() });
     }
+    select_found(session, runtime, found, value)
+}
+
+/// `value` for the limit `found`, which its layer states once, selected in `session`, or in
+/// `runtime` for a limit of a runtime when the creator holds one (`Some`), which a refusal leaves
+/// as they were: `found`.
+fn select_found<'a>(
+    session: &mut SessionLimits,
+    runtime: Option<&mut RuntimeLimits>,
+    found: FoundLimit,
+    value: LimitValue,
+) -> Result<FoundLimit, Reason<'a>> {
+    let id = found.id();
     match found {
         FoundLimit::Capacity(_) => return Err(Reason::LimitBuildOnly { limit: id }),
         // Before the scope and the value: a limit no machine reads is refused whatever is stated.
@@ -1145,7 +1401,7 @@ fn select_limit<'a, S: 'static>(
             value: refused.value,
             why: refused.why,
         }),
-        // Refused before a value is selected (`apply_limit`); a caller that skips that order is
+        // Refused before a value is selected (`select_found`); a caller that skips that order is
         // refused the same way rather than accepted.
         None => Err(Reason::LimitNotRead { limit: entry.id() }),
     }
@@ -1190,16 +1446,17 @@ pub fn resolve_under<'a>(
 }
 
 /// What the `wz` member of a document states, read by a caller that keeps no tree of it: the
-/// profile it names, the statements of its `wz/policies` and those of its `wz/limits`, each in
-/// the document's order. `Default` is a document with no `wz` member.
+/// profile it names, the statements of its `wz/policies` and those of its `wz/limits`, each read
+/// in the document's order or held by the build's table. `Default` is a document with no `wz`
+/// member.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DocumentLayers<'s, 'a> {
     /// The id `wz/profile` names, if it names one.
     pub profile: Option<&'a str>,
     /// The members of `wz/policies`.
-    pub statements: &'s [Statement<'a>],
+    pub statements: Stated<'s, 'a>,
     /// The members of `wz/limits`.
-    pub limits: &'s [LimitStatement<'a>],
+    pub limits: StatedLimits<'s, 'a>,
 }
 
 /// `base` with the document's layers and what the caller states over them, as
@@ -1295,14 +1552,21 @@ pub fn resolve_under_into<'a>(
         statements: overrides.statements,
     };
     write_layer(&POLICIES, policy, &api)?;
-    for (at, statement) in overrides.limits.iter().enumerate() {
-        let earlier = overrides.limits.get(..at).unwrap_or_default();
-        select_stated_limit(limits, None, earlier, statement).map_err(|reason| Refusal {
+    let mut refused = None;
+    let _ = select_limit_each(limits, None, overrides.limits, |outcome| match outcome {
+        Ok(_) => ControlFlow::Continue(()),
+        Err(reason) => {
+            refused = Some(reason);
+            ControlFlow::Break(())
+        }
+    });
+    match refused {
+        Some(reason) => Err(Refusal {
             layer: Origin::Api,
             reason,
-        })?;
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Each statement of `layer` selected in `snapshot` by the policies of `table`, in its order, up
@@ -1314,14 +1578,21 @@ fn write_layer<'a>(
     snapshot: &mut SessionPolicy,
     layer: &Layer<'_, 'a>,
 ) -> Result<(), Refusal<'a>> {
-    for (at, statement) in layer.statements.iter().enumerate() {
-        let earlier = layer.statements.get(..at).unwrap_or_default();
-        select_policy(table, snapshot, earlier, statement).map_err(|reason| Refusal {
+    let mut refused = None;
+    let _ = select_each(table, snapshot, layer.statements, |outcome| match outcome {
+        Ok(_) => ControlFlow::Continue(()),
+        Err(reason) => {
+            refused = Some(reason);
+            ControlFlow::Break(())
+        }
+    });
+    match refused {
+        Some(reason) => Err(Refusal {
             layer: layer.origin,
             reason,
-        })?;
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// The profile of the build whose id is `id`, or `None` when `id` is; an id the build has no
@@ -1355,7 +1626,7 @@ mod from_json5 {
     use super::KeyIdsReason;
     use super::{
         compose_document, Base, DocumentLayers, LimitStatement, Origin, Overrides, Reason, Refusal,
-        Refusals, Resolved, Statement,
+        Refusals, Resolved, Stated, StatedLimits, Statement,
     };
     use crate::json5::{number_as_u64, Json5Value};
     use crate::limit_binding::{LimitValue, UNBOUNDED};
@@ -1441,8 +1712,8 @@ mod from_json5 {
         let read = read_wz(tree, &mut refusals);
         let document = DocumentLayers {
             profile: read.profile,
-            statements: &read.statements,
-            limits: &read.limits,
+            statements: Stated::Read(&read.statements),
+            limits: StatedLimits::Read(&read.limits),
         };
         let resolved = compose_document(table, base, document, overrides, &mut refusals);
         // The reader of `wz/key-ids` cannot count the dictionary against a limit the same
@@ -1739,8 +2010,143 @@ mod tests {
     fn document<'s, 'a>(statements: &'s [Statement<'a>]) -> Layer<'s, 'a> {
         Layer {
             origin: Origin::Document,
-            statements,
+            statements: Stated::Read(statements),
         }
+    }
+
+    /// A set holds the facts of the statements it was stated from, and the resolution reads it as
+    /// it reads them, in whatever order they came: the same snapshot, from the same layer.
+    #[test]
+    fn a_set_resolves_as_the_statements_it_holds_in_any_order() {
+        let (Some(overload), Some(ring)) =
+            (another::<SubscriberOverload>(), another::<EventRingFull>())
+        else {
+            // The build allows one value of each: there is nothing to state but the defaults.
+            return;
+        };
+        let stated = [
+            Statement::new("subscriber-overload", id_of(overload)),
+            Statement::new("event-ring-full", id_of(ring)),
+        ];
+        let reversed = [stated[1], stated[0]];
+        let mut set = PolicySet::new();
+        for statement in reversed {
+            set.state(statement)
+                .expect("the build has the policy and the value");
+        }
+        assert_eq!(set.len(), 2);
+        assert!(set.holds("event-ring-full") && !set.holds("key-set"));
+        let resolved = |statements| {
+            resolve(
+                SessionPolicy::defaults(),
+                &[Layer {
+                    origin: Origin::Api,
+                    statements,
+                }],
+            )
+            .expect("every value allowed")
+        };
+        let from_set = resolved(Stated::Set(&set));
+        assert_eq!(resolved(Stated::Read(&stated)), from_set);
+        assert_eq!(resolved(Stated::Read(&reversed)), from_set);
+        assert_eq!(from_set.policy.event_ring_full(), ring);
+        assert_eq!(
+            from_set.provenance.origin("subscriber-overload"),
+            Some(Origin::Api)
+        );
+    }
+
+    /// A set keeps the last value stated of a policy, where a slice refuses the second statement;
+    /// a policy or a value the build does not have is refused as the resolution of a slice refuses
+    /// it, and leaves the set as it was.
+    #[test]
+    fn a_set_keeps_the_last_value_of_a_policy_and_refuses_what_the_build_lacks() {
+        let mut set = PolicySet::new();
+        set.state(Statement::new("key-set", "closed"))
+            .expect("a value of the policy");
+        set.state(Statement::new("key-set", "open"))
+            .expect("a value of the policy");
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.value_of("key-set"), Some("open"));
+        assert_eq!(set.value_of("event-ring-full"), None);
+        assert_eq!(
+            set.state(Statement::new("no-such-policy", "on")),
+            Err(Reason::UnknownPolicy {
+                policy: "no-such-policy",
+                value: "on"
+            })
+        );
+        assert!(matches!(
+            set.state(Statement::new("key-set", "ajar")),
+            Err(Reason::UnknownValue {
+                policy: "key-set",
+                value: "ajar",
+                ..
+            })
+        ));
+        let resolved = resolve(
+            SessionPolicy::defaults(),
+            &[Layer {
+                origin: Origin::Api,
+                statements: Stated::Set(&set),
+            }],
+        )
+        .expect("the last value allowed");
+        assert_eq!(resolved.policy.key_set(), KeySet::Open);
+        assert!(PolicySet::new().is_empty() && !set.is_empty());
+    }
+
+    /// Every value of every policy has a place a set's byte holds.
+    #[test]
+    fn every_value_of_every_policy_has_a_place_a_set_holds() {
+        for entry in POLICIES.iter() {
+            assert!(
+                entry.values().len() < usize::from(u8::MAX),
+                "{}",
+                entry.id()
+            );
+        }
+    }
+
+    /// A set of limits resolves as the statements it holds, and refuses a second statement of a
+    /// limit and an id that is no limit of a session as it reads them.
+    #[test]
+    fn a_limit_set_resolves_as_its_statements_and_refuses_a_second_one() {
+        let value = SessionLimits::defaults().max_subscriptions().as_value();
+        let stated = [LimitStatement::new("MAX_SUBSCRIPTIONS", value)];
+        let mut set = LimitSet::new();
+        set.state(stated[0]).expect("a limit of a session");
+        assert_eq!(set.value_of("MAX_SUBSCRIPTIONS"), Some(value));
+        assert_eq!(set.value_of("MAX_QUERYABLES"), None);
+        assert_eq!(
+            set.state(stated[0]),
+            Err(Reason::LimitStatedTwice {
+                limit: "MAX_SUBSCRIPTIONS"
+            })
+        );
+        assert_eq!(
+            set.state(LimitStatement::new("NO_SUCH_LIMIT", value)),
+            Err(Reason::UnknownLimit {
+                limit: "NO_SUCH_LIMIT"
+            })
+        );
+        let resolved = |limits| {
+            resolve_under(
+                SessionPolicy::defaults(),
+                Overrides {
+                    limits,
+                    ..Overrides::default()
+                },
+            )
+            .expect("the build's value")
+        };
+        let from_set = resolved(StatedLimits::Set(&set));
+        assert_eq!(resolved(StatedLimits::Read(&stated)), from_set);
+        assert_eq!(
+            from_set.limits.provenance.origin("MAX_SUBSCRIPTIONS"),
+            Some(Origin::Api)
+        );
+        assert!(LimitSet::new().is_empty() && !set.is_empty());
     }
 
     /// The one refusal of `refusals`.
@@ -1904,7 +2310,7 @@ mod tests {
         let open = [Statement::new("key-set", "open")];
         let api = Layer {
             origin: Origin::Api,
-            statements: &open,
+            statements: Stated::Read(&open),
         };
         let resolved =
             resolve(SessionPolicy::defaults(), &[document(&open), api]).expect("two layers");
@@ -1933,7 +2339,7 @@ mod tests {
         let layers = [
             Layer {
                 origin: Origin::Profile("test"),
-                statements: &profile,
+                statements: Stated::Read(&profile),
             },
             document(&doc),
         ];
@@ -2144,7 +2550,7 @@ mod tests {
     /// The open's limits, and nothing else.
     fn limits_alone<'s, 'a>(limits: &'s [LimitStatement<'a>]) -> Overrides<'s, 'a> {
         Overrides {
-            limits,
+            limits: StatedLimits::Read(limits),
             ..Overrides::default()
         }
     }
@@ -2540,28 +2946,28 @@ mod tests {
             Overrides::default(),
             Overrides {
                 profile: None,
-                statements: &stated,
-                limits: &[],
+                statements: Stated::Read(&stated),
+                limits: StatedLimits::Read(&[]),
             },
             Overrides {
                 profile: Some("upstream"),
-                statements: &[],
-                limits: &[],
+                statements: Stated::Read(&[]),
+                limits: StatedLimits::Read(&[]),
             },
             Overrides {
                 profile: Some("no-such-profile"),
-                statements: &stated,
-                limits: &[],
+                statements: Stated::Read(&stated),
+                limits: StatedLimits::Read(&[]),
             },
             Overrides {
                 profile: None,
-                statements: &twice,
-                limits: &[],
+                statements: Stated::Read(&twice),
+                limits: StatedLimits::Read(&[]),
             },
             Overrides {
                 profile: None,
-                statements: &no_such_policy,
-                limits: &limit,
+                statements: Stated::Read(&no_such_policy),
+                limits: StatedLimits::Read(&limit),
             },
             limits_alone(&limit),
             limits_alone(&no_such_limit),
@@ -2592,8 +2998,8 @@ mod tests {
             let mut limits = SessionLimits::defaults();
             let overrides = Overrides {
                 profile: None,
-                statements: &stated,
-                limits: &[],
+                statements: Stated::Read(&stated),
+                limits: StatedLimits::Read(&[]),
             };
             assert_eq!(
                 resolve_under_into(overrides, &mut policy, &mut limits),
@@ -2872,7 +3278,7 @@ mod tests {
             let tree = parse(&text).unwrap();
             let stated = [LimitStatement::new("MAX_SUBSCRIPTIONS", api.as_value())];
             let overrides = Overrides {
-                limits: &stated,
+                limits: StatedLimits::Read(&stated),
                 ..Overrides::default()
             };
             let resolved = resolve_document_under(SessionPolicy::defaults(), &tree, overrides);
@@ -3129,8 +3535,8 @@ mod tests {
             )];
             let overrides = Overrides {
                 profile: None,
-                statements: &stated,
-                limits: &[],
+                statements: Stated::Read(&stated),
+                limits: StatedLimits::Read(&[]),
             };
             let resolved = resolve_document_under(base, &tree, overrides).expect("allowed");
             assert_eq!(resolved.policy.event_ring_full(), EventRingFull::DEFAULT);
@@ -3162,8 +3568,8 @@ mod tests {
             let read = statements_from_json5(&tree).expect("well formed");
             let layers = DocumentLayers {
                 profile: read.profile,
-                statements: &read.statements,
-                limits: &read.limits,
+                statements: Stated::Read(&read.statements),
+                limits: StatedLimits::Read(&read.limits),
             };
             let base = SessionPolicy::defaults();
             let stated = [Statement::new(
@@ -3174,8 +3580,8 @@ mod tests {
                 Overrides::default(),
                 Overrides {
                     profile: None,
-                    statements: &stated,
-                    limits: &[],
+                    statements: Stated::Read(&stated),
+                    limits: StatedLimits::Read(&[]),
                 },
             ] {
                 assert_eq!(
@@ -3228,18 +3634,18 @@ mod tests {
                 Overrides::default(),
                 Overrides {
                     profile: None,
-                    statements: &stated,
-                    limits: &[],
+                    statements: Stated::Read(&stated),
+                    limits: StatedLimits::Read(&[]),
                 },
                 Overrides {
                     profile: Some("upstream"),
-                    statements: &[],
-                    limits: &[],
+                    statements: Stated::Read(&[]),
+                    limits: StatedLimits::Read(&[]),
                 },
                 Overrides {
                     profile: Some("no-such-profile"),
-                    statements: &stated,
-                    limits: &[],
+                    statements: Stated::Read(&stated),
+                    limits: StatedLimits::Read(&[]),
                 },
             ];
             for overrides in cases {
@@ -3265,8 +3671,8 @@ mod tests {
             let tree = parse(r#"{ wz: { policies: { "key-set": "open" } } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("upstream"),
-                statements: &[],
-                limits: &[],
+                statements: Stated::Read(&[]),
+                limits: StatedLimits::Read(&[]),
             };
             let resolved = resolve_document_under(SessionPolicy::defaults(), &tree, overrides);
             if !upstream_allowed() {
@@ -3287,8 +3693,8 @@ mod tests {
             let tree = parse(r#"{ wz: { profile: "upstream" } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("no-such-profile"),
-                statements: &[],
-                limits: &[],
+                statements: Stated::Read(&[]),
+                limits: StatedLimits::Read(&[]),
             };
             let refusals =
                 resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();
@@ -3316,8 +3722,8 @@ mod tests {
             let tree = parse(r#"{ wz: { profile: "no-such-profile" } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("upstream"),
-                statements: &[],
-                limits: &[],
+                statements: Stated::Read(&[]),
+                limits: StatedLimits::Read(&[]),
             };
             let refusals =
                 resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();
@@ -3347,8 +3753,8 @@ mod tests {
             ];
             let overrides = Overrides {
                 profile: None,
-                statements: &stated,
-                limits: &[],
+                statements: Stated::Read(&stated),
+                limits: StatedLimits::Read(&[]),
             };
             let refusals =
                 resolve_document_under(SessionPolicy::defaults(), &tree, overrides).unwrap_err();

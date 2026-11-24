@@ -12,7 +12,7 @@ use super::limit;
 
 pub(super) const MAX_KEYEXPR_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_KEYEXPR_BYTES"), 256);
 pub(super) const KEY_ARENA_BYTES: usize = limit(option_env!("WZ_LIMIT_KEY_ARENA_BYTES"), 97152);
-pub(super) const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 16);
+pub(super) const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 100);
 pub(super) const MATCH_MEMO_SLOTS: usize = limit(option_env!("WZ_LIMIT_MATCH_MEMO_SLOTS"), 8);
 pub(super) const MATCH_MEMO_FIXED_SLOTS: usize =
     limit(option_env!("WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS"), 0);
@@ -24,7 +24,7 @@ pub(super) const DELIVERY_LANE_BYTES: usize =
     limit(option_env!("WZ_LIMIT_DELIVERY_LANE_BYTES"), 65536);
 pub(super) const DELIVERY_LANE_CALLBACKS: usize =
     limit(option_env!("WZ_LIMIT_DELIVERY_LANE_CALLBACKS"), 256);
-pub(super) const MAX_QUERYABLES: usize = limit(option_env!("WZ_LIMIT_MAX_QUERYABLES"), 16);
+pub(super) const MAX_QUERYABLES: usize = limit(option_env!("WZ_LIMIT_MAX_QUERYABLES"), 100);
 pub(super) const MAX_PENDING_QUERIES: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_QUERIES"), 16);
 pub(super) const LINK_NOTED_REQUESTS: usize =
@@ -33,16 +33,16 @@ pub(super) const MAX_DECL_OBSERVERS: usize = limit(option_env!("WZ_LIMIT_MAX_DEC
 pub(super) const MAX_LIVELINESS_SUBSCRIPTIONS: usize =
     limit(option_env!("WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"), 8);
 pub(super) const MAX_LOCAL_TOKENS: usize = limit(option_env!("WZ_LIMIT_MAX_LOCAL_TOKENS"), 8);
-pub(super) const MAX_PUBLISHERS: usize = limit(option_env!("WZ_LIMIT_MAX_PUBLISHERS"), 16);
+pub(super) const MAX_PUBLISHERS: usize = limit(option_env!("WZ_LIMIT_MAX_PUBLISHERS"), 100);
 pub(super) const MAX_QUERIERS: usize = limit(option_env!("WZ_LIMIT_MAX_QUERIERS"), 16);
 pub(super) const MAX_MATCHING_LISTENERS: usize =
     limit(option_env!("WZ_LIMIT_MAX_MATCHING_LISTENERS"), 16);
 pub(super) const MAX_DECLARED_KEYEXPRS: usize =
-    limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 80);
+    limit(option_env!("WZ_LIMIT_MAX_DECLARED_KEYEXPRS"), 332);
 pub(super) const HELD_SESSIONS: usize = limit(option_env!("WZ_LIMIT_HELD_SESSIONS"), 4);
-pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"), 16);
-pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 16);
-pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 8);
+pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"), 18);
+pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 18);
+pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 18);
 pub(super) const HELD_PAYLOADS: usize = limit(option_env!("WZ_LIMIT_HELD_PAYLOADS"), 32);
 pub(super) const HELD_CONFIGS: usize = limit(option_env!("WZ_LIMIT_HELD_CONFIGS"), 8);
 pub(super) const HELD_HELLOS: usize = limit(option_env!("WZ_LIMIT_HELD_HELLOS"), 16);
@@ -58,7 +58,7 @@ pub(super) const CONFIG_TEXT_BYTES: usize = limit(option_env!("WZ_LIMIT_CONFIG_T
 pub(super) const MAX_PENDING_LIVELINESS_GETS: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"), 8);
 pub(super) const MAX_PENDING_DECLARES: usize =
-    limit(option_env!("WZ_LIMIT_MAX_PENDING_DECLARES"), 32);
+    limit(option_env!("WZ_LIMIT_MAX_PENDING_DECLARES"), 101);
 pub(super) const MAX_INBOUND_SUB_INTERESTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"), 16);
 pub(super) const MAX_PEER_KEYEXPR_ALIASES: usize =

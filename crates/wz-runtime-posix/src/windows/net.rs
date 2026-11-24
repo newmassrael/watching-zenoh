@@ -23,11 +23,6 @@ use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::group_transport::GroupInterface;
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
-wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::LinkReadiness;
-}
-
 use super::{
     close, in6_addr, in_addr, last_error, name_of, open_socket, poll_readable, set_flag,
     set_option, RawAddr, WindowsNetError,
@@ -373,23 +368,72 @@ impl DatagramSocket for WindowsUdpSocket {
         *error == WindowsNetError::Socket(ws::WSAEAFNOSUPPORT)
     }
 
+    fn address_in_use(error: &WindowsNetError) -> bool {
+        *error == WindowsNetError::Bind(ws::WSAEADDRINUSE)
+    }
+
     wz_runtime_coop::with_heap_link_seams! {
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            super::SocketReadiness::of(self.socket)
+        type Waits = super::WindowsWaits;
+
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
+
     }
 }
 
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "host-multicast")]
     impl WindowsUdpSocket {
-        /// A wait for room on this socket made by a thread other than its owner's, on a duplicate
-        /// of the socket; `None` when it cannot be duplicated.
-        pub(crate) fn writability(
-            &self,
-        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
-            super::SocketReadiness::writable_of(self.socket)
+        /// What a wait for room on this socket names it by.
+        pub(crate) fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
+        }
+    }
+}
+
+wz_runtime_coop::with_heap_link_seams! {
+    /// A wake of [`WindowsWaits`](super::WindowsWaits): a datagram socket on the loopback,
+    /// non-blocking, ready once a waker sends it a byte.
+    #[cfg(feature = "alloc")]
+    struct SocketWake(WindowsUdpSocket);
+
+    #[cfg(feature = "alloc")]
+    impl alloc::task::Wake for SocketWake {
+        fn wake(self: alloc::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+            // A wake that finds the socket's buffer full is ready already.
+            let _ = self.0.send_to(self.0.local, &[1]);
+        }
+    }
+
+    /// The wake of a session over this platform's sockets: `None` when the loopback gives no
+    /// socket.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn self_wake() -> Option<wz_runtime_coop::session_drive::StackWake> {
+        let socket =
+            WindowsUdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).ok()?;
+        super::set_nonblocking(socket.socket, true).ok()?;
+        let on = wz_runtime_coop::session_drive::WaitOn::Wake(socket.socket);
+        Some(wz_runtime_coop::session_drive::StackWake {
+            on,
+            waker: core::task::Waker::from(alloc::sync::Arc::new(SocketWake(socket))),
+        })
+    }
+
+    /// Read what the wake `socket` holds until it holds nothing: the wake is quiet again.
+    pub(crate) fn drain_wake(socket: ws::SOCKET) {
+        let mut buf = [0u8; 64];
+        let room = i32::try_from(buf.len()).unwrap_or(i32::MAX);
+        loop {
+            // SAFETY: a live buffer of the length passed, on a non-blocking socket of the caller's.
+            let read = unsafe { ws::recv(socket, buf.as_mut_ptr(), room, 0) };
+            if read <= 0 {
+                return;
+            }
         }
     }
 }
@@ -594,6 +638,33 @@ mod tests {
         )));
     }
 
+    /// A bind of a port another socket holds is refused as that, kept apart from a system with no
+    /// socket to give and from a family it lacks. CONTROL: no socket left is `Exhausted`. Turned
+    /// red by a refusal that names every failed bind one way.
+    #[test]
+    fn a_port_another_socket_holds_is_refused_as_in_use() {
+        use wz_runtime_coop::session_drive::LinkOpenError;
+        use wz_runtime_coop::udp_link::bind_refused;
+
+        let first = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
+        let taken = WindowsUdpSocket::bind(first.local())
+            .err()
+            .expect("the port is held");
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(taken),
+            LinkOpenError::AddressInUse
+        );
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(WindowsNetError::Socket(ws::WSAEMFILE)),
+            LinkOpenError::Exhausted,
+            "CONTROL: no socket left"
+        );
+        assert_eq!(
+            bind_refused::<WindowsUdpSocket>(WindowsNetError::Socket(ws::WSAEAFNOSUPPORT)),
+            LinkOpenError::Unsupported
+        );
+    }
+
     #[test]
     fn an_interface_of_the_other_family_is_refused_before_the_system_is_asked() {
         let socket = WindowsUdpSocket::bind(LOOPBACK).expect("an IPv4 socket");
@@ -656,56 +727,103 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        /// A wait over several sockets names each of them to the system, the set's last one too:
-        /// a datagram queued there ends it at once. A wait over more sockets than the set holds is
-        /// the bounded look, which ends within a millisecond. CONTROL: a wait over quiet sockets
-        /// that fill the set sleeps its time. Turned red by a set that keeps only the first socket,
-        /// or one that waits on part of a larger set for the whole time.
-        #[cfg(feature = "alloc")]
+        /// The stack's waits name each socket to the system, the set's last one too: a datagram
+        /// queued there ends the wait at once. A wait over more sockets than the set holds, or one
+        /// that names a handle of another stack's, is the bounded look. CONTROL: a wait over quiet
+        /// sockets that fill the set sleeps its time. Turned red by a set that keeps only the first
+        /// socket, or one that waits on part of a larger set for the whole time.
         #[test]
-        fn a_wait_over_several_sockets_names_each_and_one_past_its_set_looks() {
-            use std::sync::Arc;
+        fn the_stacks_waits_name_each_socket_and_look_at_what_they_cannot() {
             use std::time::{Duration, Instant};
             use std::vec::Vec;
-            use wz_runtime_coop::session_drive::LinkReadiness;
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
+            let waits = super::super::WindowsWaits;
             let (quiet, sender) = pair();
             let ready = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
-            let wait_on = |socket: &WindowsUdpSocket| -> Arc<dyn LinkReadiness> {
-                Arc::new(super::super::SocketReadiness::duplicate(socket.socket).expect("a duplicate"))
+            let on = |socket: &WindowsUdpSocket| {
+                LinkWait::input(socket.input_wait().expect("a socket names its handle"))
             };
-            let first = super::super::SocketReadiness::duplicate(quiet.socket).expect("a duplicate");
-            let mut others: Vec<Arc<dyn LinkReadiness>> = (1..crate::WAIT_SET_SOCKETS)
-                .map(|_| wait_on(&quiet))
-                .collect();
+            let mut set: Vec<LinkWait> = (0..crate::WAIT_SET_SOCKETS).map(|_| on(&quiet)).collect();
 
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 100);
+            waits.wait(&set, 100);
             assert!(
                 started.elapsed() >= Duration::from_millis(80),
                 "CONTROL: quiet sockets that fill the set sleep the wait's time"
             );
 
-            others.push(wait_on(&quiet));
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
+            waits.wait(&[on(&quiet), LinkWait::input(WaitOn::AppLink(7))], 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a handle of another stack's is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            set.push(on(&quiet));
+            let started = Instant::now();
+            waits.wait(&set, 5_000);
             assert!(
                 started.elapsed() < Duration::from_millis(1_000),
                 "a wait past the set is the bounded look, took {:?}",
                 started.elapsed()
             );
 
-            others.pop();
-            others.pop();
-            others.push(wait_on(&ready));
-            assert_eq!(others.len() + 1, crate::WAIT_SET_SOCKETS, "the set is full");
+            set.pop();
+            set.pop();
+            set.push(on(&ready));
             sender.send_to(ready.local(), b"wake").expect("a send");
             let started = Instant::now();
-            first.wait_ready_among(false, &others, 5_000);
+            waits.wait(&set, 5_000);
             assert!(
                 started.elapsed() < Duration::from_millis(2_500),
                 "the datagram on the set's last socket ended the wait, took {:?}",
                 started.elapsed()
+            );
+        }
+
+        /// A session's wake ends a wait over the sockets beside it once its waker is woken from
+        /// another thread, and the wait that found it reads it quiet: the next wait sleeps its
+        /// time. CONTROL: before the waker is woken the wait sleeps too. Turned red by a wake that
+        /// is never named to `WSAPoll`, or one left ready after the wait that found it.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_sessions_wake_ends_the_wait_beside_it_and_is_quiet_after() {
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits};
+
+            let waits = super::super::WindowsWaits;
+            let (quiet, _sender) = pair();
+            let wake = waits.wake().expect("the loopback makes a wake");
+            let set = [
+                LinkWait::input(quiet.input_wait().expect("a socket names its handle")),
+                LinkWait::input(wake.on),
+            ];
+            let started = Instant::now();
+            waits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "CONTROL: nothing woke it"
+            );
+            let waker = wake.waker.clone();
+            let waking = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                waker.wake();
+            });
+            let started = Instant::now();
+            waits.wait(&set, 10_000);
+            let waited = started.elapsed();
+            waking.join().expect("the waking thread");
+            assert!(
+                waited < Duration::from_secs(5),
+                "the wake ended the wait: {waited:?}"
+            );
+            let started = Instant::now();
+            waits.wait(&set, 50);
+            assert!(
+                started.elapsed() >= Duration::from_millis(40),
+                "the wait that found the wake read it quiet"
             );
         }
     }

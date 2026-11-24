@@ -27,7 +27,10 @@ pub fn units_per_second(unit: Unit) -> i64 {
 pub fn elapsed(now: (i64, i64), then: (i64, i64), sub_per_second: i64, unit: Unit) -> i64 {
     let per_second = units_per_second(unit);
     let whole = now.0.saturating_sub(then.0).saturating_mul(per_second);
-    let part = (now.1 - then.1) / (sub_per_second / per_second);
+    // A unit is never finer than the reading's parts, so the scale is one or more; a scale of
+    // none would be a reading of no parts, which says nothing below a second.
+    let scale = sub_per_second.checked_div(per_second).unwrap_or(0);
+    let part = now.1.saturating_sub(then.1).checked_div(scale).unwrap_or(0);
     whole.saturating_add(part)
 }
 
@@ -40,14 +43,22 @@ pub fn clamped(elapsed: i64) -> u64 {
 /// one carry: the nanoseconds start below a second and gain less than one.
 pub fn advance(reading: (i64, i64), unit: Unit, duration: u64) -> (i64, i64) {
     let per_second = units_per_second(unit).unsigned_abs();
-    let whole = duration / per_second;
-    let part = (duration % per_second) * (NANOS_PER_SECOND.unsigned_abs() / per_second);
+    // `units_per_second` is one or more, so neither division refuses.
+    let whole = duration.checked_div(per_second).unwrap_or(0);
+    let left = duration.checked_rem(per_second).unwrap_or(0);
+    let scale = NANOS_PER_SECOND
+        .unsigned_abs()
+        .checked_div(per_second)
+        .unwrap_or(0);
+    // What is left of a second, in nanoseconds: below a second, so it is an `i64`.
+    let part = left.wrapping_mul(scale);
     let mut secs = reading.0.saturating_add_unsigned(whole);
-    // `part` is below a second, so it is an `i64`.
-    let mut nanos = reading.1 + part as i64;
+    // The reading's nanoseconds and `part` are each below a second, so their sum fits, and one
+    // carry brings it back below a second.
+    let mut nanos = reading.1.wrapping_add(part as i64);
     if nanos >= NANOS_PER_SECOND {
-        secs += 1;
-        nanos -= NANOS_PER_SECOND;
+        secs = secs.saturating_add(1);
+        nanos = nanos.wrapping_sub(NANOS_PER_SECOND);
     }
     (secs, nanos)
 }

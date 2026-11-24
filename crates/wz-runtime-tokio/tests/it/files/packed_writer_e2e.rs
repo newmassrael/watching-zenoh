@@ -445,8 +445,11 @@ async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
             let block = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
             let payload = vec![0x3cu8; 1024];
             for _ in 0..COUNT {
+                let key = init_actions
+                    .named_by(STREAM_KEY, 7)
+                    .expect("the stream's key is named by its declaration");
                 init_actions
-                    .send_plain_put_qos(7, None, &payload, Some(block), true, false, Priority::Data)
+                    .send_plain_put_qos(key, &payload, Some(block), true, false, Priority::Data)
                     .expect("a session with no namespace sends the put plain")
                     .expect("a stream put routes");
             }

@@ -64,6 +64,7 @@ fn registrations_made_while_building_are_there_afterwards() {
     let id = cell
         .init_with(|observer| {
             observer
+                .tables
                 .subscribers
                 .register_sink("a/b", Locality::Any, sink_that_counts_its_drop(&drops))
                 .expect("the subscriber registers")
@@ -71,12 +72,12 @@ fn registrations_made_while_building_are_there_afterwards() {
         .expect("built");
     let mut guard = cell.borrow_mut();
     assert_eq!(
-        guard.subscribers.len(),
+        guard.tables.subscribers.len(),
         1,
         "the registration is in the cell"
     );
     assert!(
-        guard.subscribers.unregister(id),
+        guard.tables.subscribers.unregister(id),
         "the id the registration returned names the subscriber the cell holds"
     );
 }
@@ -87,6 +88,7 @@ fn a_second_build_is_refused_and_leaves_the_observer_as_it_was() {
     let drops = Arc::new(AtomicUsize::new(0));
     cell.init_with(|observer| {
         observer
+            .tables
             .subscribers
             .register_sink("a", Locality::Any, sink_that_counts_its_drop(&drops))
             .expect("registers")
@@ -104,7 +106,7 @@ fn a_second_build_is_refused_and_leaves_the_observer_as_it_was() {
         0,
         "nothing was dropped by the refusal"
     );
-    assert_eq!(cell.borrow_mut().subscribers.len(), 1);
+    assert_eq!(cell.borrow_mut().tables.subscribers.len(), 1);
 }
 
 #[test]
@@ -161,6 +163,7 @@ fn dropping_the_cell_drops_what_was_registered_once() {
         cell.init_with(|observer| {
             for pattern in ["a", "b", "c"] {
                 observer
+                    .tables
                     .subscribers
                     .register_sink(pattern, Locality::Any, sink_that_counts_its_drop(&drops))
                     .expect("registers");

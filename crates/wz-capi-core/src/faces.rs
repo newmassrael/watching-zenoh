@@ -123,6 +123,7 @@ use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
 use wz_session_core::bounded::Heap;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
@@ -160,9 +161,49 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, SubscriberSink, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId,
+    StatementNotHonoured, SubId, TokenId, WireKey,
 };
+
+/// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
+/// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
+/// [`face_liveliness_sink`].
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+
+/// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
+
+/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
+pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
+}
+
+/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
+pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: LivelinessSample<'_>| sink.call(sample))
+    })
+}
+
+/// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
+/// each face's session registers a callback of its own. A port's callback
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+pub type SubscriberSink =
+    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
+/// through a shared borrow, and the sink is let go of with the last of them, after its last call.
+pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> SubscriberSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: &dyn SampleView| sink.call(sample))
+    })
+}
 
 /// Mints one queryable callback per face.
 ///
@@ -270,6 +311,11 @@ struct FilterEntry {
     /// moved the answer is the same, which is what lets a put skip the work of asking.
     #[cfg(target_has_atomic = "64")]
     cache: Option<FilterCache>,
+    /// How a write of the filter's entity that brings nothing of its own goes the plain way,
+    /// stated once by the entity that declared the filter ([`SharedSession::keep_write_filter_plain`]):
+    /// the facts it is sent from and the declaration naming its whole key. `None` sends it the
+    /// general way.
+    plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
 }
 
 /// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
@@ -5009,6 +5055,16 @@ impl SharedSession {
         }
     }
 
+    /// One more holder of declaration `mapping_id`, which a holder already holds: it stays
+    /// declared until this holder lets go too ([`Self::release_keyexpr`]), and nothing goes on
+    /// the wire. A declaration no longer held takes none.
+    pub fn retain_keyexpr(&self, mapping_id: ExprId) {
+        let mut guard = self.lock();
+        if let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) {
+            guard.tables.retain_keyexpr(handle);
+        }
+    }
+
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// — the SSOT every new face is replayed from. In the order of their rows: a
     /// row a retracted declaration left is taken by the next one, so this is the
@@ -5359,7 +5415,7 @@ impl SharedSession {
         timeout_ms: u32,
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
-        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+        leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> usize {
         let opts =
             crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
@@ -5724,6 +5780,49 @@ impl SharedSession {
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> FilteredPut {
+        self.put_filtered_plain(filter, keyexpr, payload, Some((*params, mapping_id)))
+    }
+
+    /// State how a write of the entity holding write filter `filter` that brings nothing of its
+    /// own goes the plain way: kept in the filter's row, read by [`Self::put_kept_plain`].
+    pub fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    ) {
+        if let Some(entry) = self.lock().filters.iter_mut().find(|e| e.id == filter) {
+            entry.plain = plain;
+        }
+    }
+
+    /// [`Self::put_plain_filtered`] for a write that brings nothing of its own, sent the plain way
+    /// the filter's row keeps, read in the same step of the registry as the filter's kept answer;
+    /// [`FilteredPut::NotPlain`], nothing sent, when the row keeps none.
+    pub fn put_kept_plain(&self, filter: FilterId, keyexpr: &str, payload: &[u8]) -> FilteredPut {
+        self.put_filtered_plain(filter, keyexpr, payload, None)
+    }
+
+    /// The plain form the row of write filter `filter` keeps.
+    fn kept_plain(
+        &self,
+        filter: FilterId,
+    ) -> Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)> {
+        self.lock()
+            .filters
+            .iter()
+            .find(|e| e.id == filter)
+            .and_then(|e| e.plain)
+    }
+
+    /// The body of [`Self::put_plain_filtered`] and [`Self::put_kept_plain`]: the plain form
+    /// `given`, or the one the filter's row keeps.
+    fn put_filtered_plain(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    ) -> FilteredPut {
         #[cfg(all(target_has_atomic = "64", not(debug_assertions)))]
         {
             let kept = {
@@ -5742,18 +5841,26 @@ impl SharedSession {
                         // for them; it is asked the long way, which reads them.
                         .filter(|entry| !entry.count_local)
                         .and_then(|entry| {
+                            let plain = given.or(entry.plain);
                             let token = guard.filter_token(entry.plane)?;
                             let kept = entry.cache?;
-                            ((kept.generation, kept.epoch_sum) == token)
-                                .then_some((kept.inactive, targets))
+                            ((kept.generation, kept.epoch_sum) == token).then_some((
+                                kept.inactive,
+                                targets,
+                                plain,
+                            ))
                         })
                 }
             };
-            if let Some((inactive, targets)) = kept {
+            if let Some((inactive, targets, plain)) = kept {
                 if inactive {
                     return FilteredPut::Suppressed;
                 }
-                return self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params);
+                let Some((params, mapping_id)) = plain else {
+                    return FilteredPut::NotPlain;
+                };
+                return self
+                    .put_plain_after_filter(&targets, keyexpr, mapping_id, payload, &params);
             }
         }
         let targets = self.fan_targets();
@@ -5766,7 +5873,10 @@ impl SharedSession {
         if self.write_filter_active(filter) {
             return FilteredPut::Suppressed;
         }
-        self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params)
+        let Some((params, mapping_id)) = given.or_else(|| self.kept_plain(filter)) else {
+            return FilteredPut::NotPlain;
+        };
+        self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, &params)
     }
 
     /// The part of [`Self::put_plain_declared`] that follows the filter, on faces already read.
@@ -5826,7 +5936,7 @@ impl SharedSession {
                 if session.peer_wants_no_put_on(keyexpr) {
                     continue;
                 }
-                match session.publish_plain_declared(mapping_id, payload, params) {
+                match session.publish_plain_declared(keyexpr, mapping_id, payload, params) {
                     Ok(()) => {}
                     // Per-face and transient, as in the general fan-out: the surviving faces
                     // still receive the sample.
@@ -6474,10 +6584,10 @@ impl SharedSession {
         })
     }
 
-    /// The question a write filter on `keyexpr` asks every face, `form` being how its caller
-    /// names the key: a publisher's under the `aggregation/publishers` aggregate that includes
+    /// The question a write filter on `keyexpr` asks every face, `ask` being how its caller
+    /// names the key, kept as a form of the filter's own: a publisher's under the `aggregation/publishers` aggregate that includes
     /// the key, else as asked. See [`FilterAsk`].
-    fn filter_ask(&self, plane: FilterPlane, keyexpr: &str, form: InterestForm) -> FilterAsk {
+    fn filter_ask(&self, plane: FilterPlane, keyexpr: &str, ask: InterestAsk<'_>) -> FilterAsk {
         let aggregate = match plane {
             FilterPlane::Subscribers => self.aggregation.publisher_aggregate(keyexpr),
             FilterPlane::Queryables { .. } => None,
@@ -6493,7 +6603,7 @@ impl SharedSession {
             },
             None => FilterAsk {
                 key: keyexpr.to_owned(),
-                form,
+                form: ask.to_form(),
             },
         }
     }
@@ -6533,7 +6643,7 @@ impl SharedSession {
         plane: FilterPlane,
         keyexpr: String,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Option<FilterId> {
         let mut guard = self.lock();
@@ -6567,6 +6677,7 @@ impl SharedSession {
             count_local,
             #[cfg(target_has_atomic = "64")]
             cache: None,
+            plain: None,
         });
         Some(id)
     }
@@ -7449,7 +7560,6 @@ mod matching_aggregate_tests {
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
-        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
         let declare = |shared: &SharedSession| {
             SessionEngine::declare_subscriber_on_wire(
                 shared,
@@ -7457,7 +7567,7 @@ mod matching_aggregate_tests {
                 WireKey::literal(),
                 wz_session_core::locality::Locality::Any,
                 None,
-                sink.clone(),
+                wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {}),
             )
         };
         assert!(
@@ -7507,7 +7617,9 @@ mod matching_aggregate_tests {
                 None,
                 &mut || -> wz_capi_port::ReplyCallback {
                     minted.set(minted.get() + 1);
-                    Box::new(|_view: &dyn wz_session_core::reply_sink::ReplyView| {})
+                    wz_capi_port::ReplyCallback::shared(
+                        |_view: &dyn wz_session_core::reply_sink::ReplyView| {},
+                    )
                 },
             )
         };
@@ -7986,6 +8098,48 @@ mod matching_aggregate_tests {
             put(crate::node_policy::NodePolicy::from_node_config(&stated).expect("compiles"))
                 .is_none(),
             "a node with a policy sends through the general publish, which judges the put"
+        );
+    }
+
+    /// A bare write reads the plain form its filter's row keeps: held back while the filter says
+    /// nothing matches, kept form or none, and answered `NotPlain`, nothing sent, once the row
+    /// that kept the form is gone.
+    #[test]
+    fn a_bare_put_reads_the_plain_form_its_filter_keeps() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let mapping = shared
+            .declare_keyexpr("wz/plain/kept".to_owned())
+            .expect("the first alias id is not exhausted");
+        let options = PublishOptions::put().with_locality(Locality::Remote);
+        if !wz_session_core::publish_options::SENDS_PLAIN_PUTS {
+            // No plain lane in this build: what the test holds here is that the build says so.
+            assert!(plain_params(&options).is_none());
+            return;
+        }
+        let params = plain_params(&options).expect("a build with the lane sends plain puts");
+        let filter = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                "wz/plain/kept".to_owned(),
+                &WireKey::literal(),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::Suppressed
+        );
+        shared.keep_write_filter_plain(filter, Some((params, mapping)));
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::Suppressed
+        );
+        shared.undeclare_write_filter(filter);
+        assert_eq!(
+            shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
+            FilteredPut::NotPlain
         );
     }
 
@@ -10282,7 +10436,7 @@ mod face_up_order_tests {
         let asked = |links: LinkRestriction| {
             let own = Arc::new(AtomicUsize::new(0));
             let counted = own.clone();
-            let mut mint = move || -> wz_capi_port::ReplyCallback {
+            let mut mint = move || -> ReplyCallback {
                 let counted = counted.clone();
                 Box::new(move |_view: &dyn ReplyView| {
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -10338,8 +10492,7 @@ mod face_up_order_tests {
         let engine = shared.engine_ref();
 
         let asked = |links: LinkRestriction| {
-            let mut mint =
-                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            let mut mint = || wz_capi_port::ReplyCallback::shared(|_view: &dyn ReplyView| {});
             SessionEngine::liveliness_get_on_link_set(
                 engine,
                 "wz/link/live",
@@ -10361,9 +10514,7 @@ mod face_up_order_tests {
             "no set: every link is asked"
         );
 
-        let sink: SubscriberSink = Arc::new(|| {
-            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
-        });
+        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let limited = SessionEngine::declare_subscriber_on_link_set(
             engine,
             "wz/link/sub",

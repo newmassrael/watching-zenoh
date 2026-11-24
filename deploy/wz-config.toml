@@ -2199,7 +2199,7 @@ kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2213,12 +2213,8 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration."
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `z_result_t res = z_declare_subscriber(z_loan(s2), sub, z_loan(rids2[i]), z_move(callback), NULL);`), so a session of the pico ABI takes every subscriber a pico program of its tests declares."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
-
-[limit.pico_preset]
-value = 3
-reason = "zenoh-pico keeps its subscribers in a list on the heap with no count of its own; the most its API tests hold on one session at once is three (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_declare_subscriber(z_session_loan(&s2), &sub2, z_view_keyexpr_loan(&k_pub),`), and each of its examples holds one."
 
 [[limit]]
 id = "MATCH_MEMO_SLOTS"
@@ -2346,19 +2342,20 @@ zenoh = "none"
 reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
 [limit.pico_preset]
-value = 4380
-reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 3 subscribers, 4380 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run."
+value = 4768
+reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 100 subscribers, 4768 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run."
 
 [[limit]]
 id = "DELIVERY_LANE_CALLBACKS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_CALLBACKS"
 kind = "bound"
 driven = "remote"
+on_heap = "capacity"
 default = 256
-storage = "quota"
+storage = "both"
 scope = "entity"
-binding_heap = "live"
-binding_fixed = "none"
+binding_heap = "open"
+binding_fixed = "build"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2373,13 +2370,17 @@ least 1.
 zenoh = "none"
 reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
+[limit.pico_preset]
+value = 64
+reason = "zenoh-pico keeps no delivery lane: it calls each subscriber's callback from its receive buffer. The preset is one callback for each record the round holds at the preset's DELIVERY_LANE_EVENTS (64), and above the most one record owes at the preset's other values (3 subscribers, 2 liveliness subscribers), which the gate asks room for. zenoh-pico's subscriber examples (z_sub, z_sub_thr) declare one subscriber on a session, so a round of their samples fills on its records as at the build's 256; a round of samples that each reach several fills on its callbacks sooner and is handed out sooner, and the rest of the batch waits in the link until it is emptied (RoundGate, crates/wz-capi-coop/src/round.rs), so nothing is lost and nothing is reordered."
+
 [[limit]]
 id = "MAX_QUERYABLES"
 kconfig = "WZ_LIMIT_MAX_QUERYABLES"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2393,12 +2394,8 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration."
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `assert(z_declare_queryable(z_loan(s2), qle, z_loan(ke), z_move(callback), NULL) == _Z_RES_OK);`), so a session of the pico ABI takes every queryable a pico program of its tests declares."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queryables: HashMap<Id, Arc<QueryableState>>,`"]
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico bounds its queryables by no count; the most its API tests hold on one session at once is four, a queryable on a key no get names and three more, in one test of its matching listeners (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `void test_matching_listener_querier(bool complete, bool background) {`), and each of its examples holds one."
 
 [[limit]]
 id = "MAX_PENDING_QUERIES"
@@ -2538,7 +2535,7 @@ kconfig = "WZ_LIMIT_MAX_PUBLISHERS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2553,11 +2550,7 @@ refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico has no constant for them; the default is MAX_SUBSCRIPTIONS's, the other side of the same traffic."
-
-[limit.pico_preset]
-value = 2
-reason = "zenoh-pico bounds its publishers by no count; its examples and its API tests hold one at a time on a session, and the pico API program of the MCU speed matrix (deploy/zephyr-mcu-speed) holds two, the one it measures and the one that stops its peer."
+reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico keeps them in a list on the heap with no constant of its own; the default is the most its own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `if (z_declare_publisher(z_loan(s1), pub, z_loan(rids1[i]), NULL) < 0) {`), so a session of the pico ABI takes every publisher a pico program of its tests declares."
 
 [[limit]]
 id = "MAX_QUERIERS"
@@ -2580,7 +2573,7 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default is MAX_QUERYABLES's, the other side of the same traffic."
+reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default holds sixteen, more than any of zenoh-pico's own tests holds on one session at once."
 
 [limit.pico_preset]
 value = 2
@@ -2606,7 +2599,7 @@ and queriers. Declaring one more is refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default lets each publisher of the default MAX_PUBLISHERS hold one."
+reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default holds sixteen, more than any of zenoh-pico's own tests holds on one session at once."
 
 [limit.pico_preset]
 value = 1
@@ -2618,7 +2611,7 @@ kconfig = "WZ_LIMIT_MAX_DECLARED_KEYEXPRS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 80
+default = 332
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2633,11 +2626,11 @@ one more distinct key is refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (16 subscribers, 16 queryables, 8 tokens, 8 liveliness subscribers, 16 publishers, 16 queriers)."
+reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (100 subscribers, 100 queryables, 8 tokens, 8 liveliness subscribers, 100 publishers, 16 queriers)."
 
 [limit.pico_preset]
-value = 14
-reason = "zenoh-pico bounds its declared keys by no count; as the default is, the preset is one key for each entity the other values of the preset admit (3 subscribers, 4 queryables, 2 tokens, 1 liveliness subscriber, 2 publishers, 2 queriers)."
+value = 306
+reason = "zenoh-pico bounds its declared keys by no count, and its client test holds a hundred on one session at once (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `z_declare_keyexpr(z_loan(s1), &expr, z_loan(ke));`); as the default is, the preset is one key for each entity the other values of the preset admit (100 subscribers, 100 queryables, 2 tokens, 2 liveliness subscribers, 100 publishers, 2 queriers)."
 
 [[limit]]
 id = "HELD_SESSIONS"
@@ -2660,12 +2653,16 @@ program reserved none (object-pool). One more is refused at its open.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the sessions a program opens, and zenoh-pico allocates each on the heap with no constant; four lets a program hold a session per role it plays (a client, a peer, a test's two ends) with room left."
 
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its sessions by no count; each of its examples opens one, and its API tests hold two at once, the two ends of what they check (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_open(&s2, z_config_move(&c2), NULL));`). Every entity pool is sized for these sessions, so the preset holds the entities of two."
+
 [[limit]]
 id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
 kind = "bound"
 driven = "local"
-default = 16
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2680,14 +2677,18 @@ the library reserves at its first object when the program reserved none
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_SUBSCRIPTIONS's default, one held sample for each subscriber of a session."
+reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; eighteen is the largest sample channel zenoh-pico's API tests open full (`vendor/zenoh-pico/tests/z_api_local_subscriber_test.c` @ `z_fifo_channel_sample_new(&subscriber_callback1, &subscriber_handler1, 16);`), the one handed to it while it is full and the one the program took."
+
+[limit.pico_preset]
+value = 5
+reason = "zenoh-pico bounds its samples by no count; its examples hold the most through a channel of three (`vendor/zenoh-pico/examples/unix/c11/z_pull.c` @ `size_t ring_size = 3;`, `vendor/zenoh-pico/examples/unix/c11/z_sub_channel.c` @ `z_fifo_channel_sample_new(&closure, &handler, 3);`): the three it keeps, the one handed in while it is full and the one the program took, five. Its API tests hold four at most, the samples an advanced subscriber recovers (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `for (int idx = 1; idx <= 4; idx++) {`)."
 
 [[limit]]
 id = "HELD_REPLIES"
 kconfig = "WZ_LIMIT_HELD_REPLIES"
 kind = "bound"
 driven = "local"
-default = 16
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2702,14 +2703,18 @@ its source untouched.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_PENDING_QUERIES's default, one held reply for each get a session holds pending."
+reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; eighteen is the reply channel zenoh-pico's querier example opens full (`vendor/zenoh-pico/examples/unix/c11/z_querier.c` @ `z_fifo_channel_reply_new(&closure, &handler, 16);`), the one handed to it while it is full and the one the program took."
+
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its replies by no count; its examples' gets are answered once by the one queryable they run beside, and the one that keeps replies in a channel keeps one (`vendor/zenoh-pico/examples/unix/c11/z_get_channel.c` @ `z_ring_channel_reply_new(&closure, &handler, 1);`): the one kept, the one handed in and the one the program took, three. Its API tests take each reply before the next get."
 
 [[limit]]
 id = "HELD_QUERIES"
 kconfig = "WZ_LIMIT_HELD_QUERIES"
 kind = "bound"
 driven = "local"
-default = 8
+default = 18
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2724,7 +2729,11 @@ One more is refused, its source untouched.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eight is MAX_PENDING_FINALS's default, the queries a session holds for its callbacks at once."
+reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eighteen is the query channel zenoh-pico's API tests open full (`vendor/zenoh-pico/tests/z_api_queryable_test.c` @ `z_fifo_channel_query_new(&cb1, &h1, 16);`), the one handed to it while it is full and the one the program took."
+
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its queries by no count; its example that keeps queries in a channel is asked once by each get of the one querier it runs beside (`vendor/zenoh-pico/examples/unix/c11/z_queryable_channel.c` @ `z_ring_channel_query_new(&closure, &handler, 10);`): the one kept, the one handed in and the one the program took, three. Its API tests take each query before the next get."
 
 [[limit]]
 id = "HELD_PAYLOADS"
@@ -2746,7 +2755,11 @@ answers out of memory and leaves its payload null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. A payload takes a slot from the constructor or clone that makes it until it is moved into a put, a reply or a writer, or dropped; a held sample's or reply's payload is part of that object and takes none. zenoh-pico's programs hold three at once at the most (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), a writer's result coming after the three are moved into it and a put's payload moved as it is sent. Thirty-two, more than ten such sets, is room for a host program whose threads each build theirs at once; the pico preset holds zenoh-pico's own three."
+
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its payloads by no count; its examples hold three at once at the most, the parts a writer joins (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), and its API tests no more. A held sample's or reply's payload is its own and takes none of these."
 
 [[limit]]
 id = "HELD_CONFIGS"
@@ -2797,6 +2810,10 @@ is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the hellos a program keeps, and zenoh-pico allocates each clone on the heap with no constant; sixteen is MAX_SCOUT_HELLOS's default, a kept hello for each Hello one scouting window records."
 
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its kept hellos by no count; none of its examples or API tests clones a hello, its scout reading each where the callback lends it (`vendor/zenoh-pico/examples/unix/c11/z_scout.c` @ `void callback(z_loaned_hello_t *hello, void *context) {`). One keeps z_hello_clone answering for a program that keeps the hello it found."
+
 [[limit]]
 id = "HELD_PAYLOAD_BYTES"
 kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
@@ -2819,6 +2836,10 @@ holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+
+[limit.pico_preset]
+value = 32768
+reason = "zenoh-pico bounds its payloads' bytes by no count. The largest payload a program or test of the preset builds is twice its FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the one the fragmentation test puts past the receiving ceiling (`crates/wz-capi-pico/tests/it/files/fragmentation_roundtrip.rs` @ `const TOO_BIG: usize = 2 * CEILING;`): 8,192 bytes and a 16-byte head take a block of 16,384. The other half holds what the held samples, replies, queries and strings of its examples carry, each a few tens of bytes. A program that builds a payload larger than a block of the area is refused where zenoh-pico would allocate it, as zenoh-pico is on a heap that small."
 
 [[limit]]
 id = "CONFIG_ENTRIES"
@@ -2866,7 +2887,7 @@ which ends at the first Hello, takes one.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen, the build's default for the tables of one session's entities (MAX_SUBSCRIPTIONS), holds a scout on a segment of a dozen nodes with room."
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen holds a scout on a segment of a dozen nodes with room."
 
 [limit.pico_preset]
 value = 1
@@ -2977,7 +2998,7 @@ kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
 kind = "bound"
 driven = "remote"
 on_heap = "advisory"
-default = 32
+default = 101
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2995,11 +3016,7 @@ counted, never sent in part.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it."
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico answers an interest from the heap with no count; the answer to a match-all interest is a declaration for each subscriber and a final, so the preset is one more than its 3 subscribers, as the build requires of this limit over MAX_SUBSCRIPTIONS and MAX_LOCAL_TOKENS."
+reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it, and zenoh-pico answers one from the heap with no count. The answer to a match-all interest is a declaration for each subscriber and a final, so the default is one more than MAX_SUBSCRIPTIONS's 100, as the build requires of this limit over MAX_SUBSCRIPTIONS and MAX_LOCAL_TOKENS."
 
 [[limit]]
 id = "MAX_INBOUND_SUB_INTERESTS"
@@ -3337,7 +3354,7 @@ with no periodic jobs refuses it.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen is MAX_PUBLISHERS's default, a heartbeat for each publisher of a session."
+reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen holds a heartbeat for each of sixteen publishers of a session."
 
 [[limit]]
 id = "MAX_LOCATOR_LEN"

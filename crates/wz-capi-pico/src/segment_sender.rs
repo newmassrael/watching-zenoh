@@ -303,7 +303,7 @@ unsafe fn split_reporting(
                 &format!(
                     "piece {} of {pieces} of transfer {transfer} was not sent (code {error}); \
                      the transfer number is used",
-                    sent + 1
+                    sent.saturating_add(1)
                 ),
             );
             (

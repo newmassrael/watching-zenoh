@@ -1030,9 +1030,10 @@ mod tests {
     /// The BATCHING path on the fixed backing: the combination `caps.rs`'s
     /// `MAX_PENDING_DECLARES` note said would lose a chain's `Final`, and the
     /// one `bounded-heapless` creates. A full token table makes each chain
-    /// `MAX_LOCAL_TOKENS + 1` = 9 items; four in one frame need 36 against 32.
-    /// Three are staged whole, the fourth is refused whole and reported, and
-    /// every staged chain still ends in its own `Final`.
+    /// `MAX_LOCAL_TOKENS + 1` items; one frame carries one interest more than the
+    /// buffer holds chains of, under the build's own bounds. The chains that fit
+    /// are staged whole, the last is refused whole and reported, and every staged
+    /// chain still ends in its own `Final`.
     #[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
     #[test]
     fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
@@ -1060,13 +1061,14 @@ mod tests {
                 extensions: None,
             })
         };
-        let frame = [interest(1), interest(2), interest(3), interest(4)];
+        let chain = caps::MAX_LOCAL_TOKENS + 1;
+        let fits = caps::MAX_PENDING_DECLARES / chain;
+        let frame: alloc::vec::Vec<NetworkMessage> = (1..=fits as u64 + 1).map(interest).collect();
         let mut pending = new_pending();
         let refused = reg.dispatch_messages(&frame, &HashMap::new(), &mut pending);
-        let chain = caps::MAX_LOCAL_TOKENS + 1;
         assert_eq!(
             (refused, count(&pending)),
-            (1, (3 * caps::MAX_LOCAL_TOKENS, 3)),
+            (1, (fits * caps::MAX_LOCAL_TOKENS, fits)),
             "(chains refused, (tokens staged, finals staged))"
         );
         for (n, staged) in pending.chunks(chain).enumerate() {

@@ -777,6 +777,11 @@ impl Pair {
         self.dialler.as_ref().expect("the dialling session is open")
     }
 
+    /// The listening session, which holds the subscriber and the queryable the dialler reaches.
+    pub(crate) fn listener(&self) -> &z_owned_session_t {
+        &self.listener
+    }
+
     /// Put from the dialler until the listener hears one, then ask until a get is answered.
     unsafe fn converge(&self) {
         let deadline = Instant::now() + WAIT_BOUND;

@@ -1108,8 +1108,9 @@ unsafe fn declare_subscriber_state(
 fn fire_miss(slot: &MissSlot, miss: &Miss) {
     let source = miss.source();
     let mut zid = [0u8; crate::zid::Z_ID_SIZE];
-    let n = source.zid().len().min(zid.len());
-    zid[..n].copy_from_slice(&source.zid()[..n]);
+    for (to, from) in zid.iter_mut().zip(source.zid()) {
+        *to = *from;
+    }
     let value = ze_miss_t {
         source: z_entity_global_id_t {
             zid: z_id_t { id: zid },
@@ -1455,14 +1456,15 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
         // `z_liveliness_declare_subscriber(&sess_rc, liveliness_subscriber, z_keyexpr_loan(&keyexpr), callback, &opt);`),
         // so it gets that call's whole-key declaration and interest on it.
-        // The subscriber's place is taken before anything is declared, so a full pool refuses
-        // the declaration and declares nothing.
-        let Some(slot) =
-            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
-        else {
+        // The subscriber's place is taken from its session before anything is declared, so a
+        // session with no place left refuses the declaration and declares nothing.
+        let engine = state.engine.clone();
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &engine,
+            crate::object_slot::Kind::LivelinessSubscriber,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let engine = state.engine.clone();
         let key = match crate::keyexpr::DeclaredKeyexpr::declare(&engine, &ke, None) {
             Ok(key) => key,
             Err(rc) => return rc,

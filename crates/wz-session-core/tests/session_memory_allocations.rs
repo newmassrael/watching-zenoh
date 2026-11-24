@@ -151,7 +151,7 @@ fn tables_filled_to_their_limits_hold_at_most_the_reported_total() {
             app_half
                 .liveliness_subscribers
                 .register(
-                    &mut *face_half.tokens,
+                    &*face_half.tokens,
                     index as u64,
                     &key,
                     false,

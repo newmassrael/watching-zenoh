@@ -148,7 +148,11 @@ const _: () = assert!(
 /// at most: one for a dial, and on the tokio engine no bound for a listener, which accepts every
 /// link that completes its handshake whatever its limits state.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn links_of(listen: Option<&str>, _limits: &SessionLimits) -> Option<usize> {
+pub(crate) fn links_of(
+    listen: Option<&str>,
+    _dials: bool,
+    _limits: &SessionLimits,
+) -> Option<usize> {
     match listen {
         None => Some(1),
         Some(_) => None,
@@ -156,11 +160,14 @@ pub(crate) fn links_of(listen: Option<&str>, _limits: &SessionLimits) -> Option<
 }
 
 /// How many links a session whose open listens on `listen` (none for one that only dials) holds
-/// at most on the cooperative engine under `limits`: one for a dial; for a listener, the faces its
-/// `MAX_FACES` admits and its dial, as the open bounds it; none for a group, which rejoins the
-/// messages of every member, nor for a value over the build's, which the open refuses.
+/// at most on the cooperative engine under `limits`: one for a dial; for a listener, the faces
+/// besides its dial that its `MAX_FACES` admits (`crate::session::faces_besides_dial`) and the
+/// dial's own link only when it `dials`, as the engine's arena lends the dial role a link only
+/// to a session that lists an endpoint to dial (its `dials`), so a listener holds its
+/// `MAX_FACES` either way; none for a group, which rejoins the messages of every member, nor for
+/// a value over the build's, which the open refuses.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn links_of(listen: Option<&str>, limits: &SessionLimits) -> Option<usize> {
+pub(crate) fn links_of(listen: Option<&str>, dials: bool, limits: &SessionLimits) -> Option<usize> {
     let Some(endpoint) = listen else {
         return Some(1);
     };
@@ -170,9 +177,11 @@ pub(crate) fn links_of(listen: Option<&str>, limits: &SessionLimits) -> Option<u
     }
     #[cfg(not(feature = "peer"))]
     let _ = endpoint;
-    wz_capi_coop::arena::admitted_faces(limits)
-        .ok()?
-        .checked_add(1)
+    crate::session::faces_besides_dial(
+        Some(wz_capi_coop::arena::admitted_faces(limits).ok()?),
+        dials,
+    )
+    .checked_add(usize::from(dials))
 }
 
 /// What sizes the transmit row's count: the queue sizes the snapshot states on the tokio engine,
@@ -414,28 +423,38 @@ mod tests {
     }
 
     /// A session that only dials holds one link; a listener on the tokio engine holds links to no
-    /// bound, and on the cooperative engine its faces' bound and its dial: the build's
-    /// `MAX_FACES` for a session that states none, and the value a session lowers it to.
+    /// bound, and on the cooperative engine its faces' bound, its dial one of them when it dials
+    /// and holding no link when it does not: the build's `MAX_FACES` for a session that states
+    /// none, and the value a session lowers it to.
     #[test]
     fn a_dial_holds_one_link_and_a_listener_its_engines_bound() {
         let limits = SessionLimits::defaults();
-        assert_eq!(links_of(None, &limits), Some(1));
+        assert_eq!(links_of(None, true, &limits), Some(1));
         #[cfg(feature = "engine-tokio")]
-        assert_eq!(links_of(Some("tcp/127.0.0.1:7447"), &limits), None);
+        assert_eq!(links_of(Some("tcp/127.0.0.1:7447"), false, &limits), None);
         #[cfg(not(feature = "engine-tokio"))]
         {
             assert_eq!(
-                links_of(Some("tcp/127.0.0.1:7447"), &limits),
-                Some(wz_session_core::caps::MAX_FACES + 1)
+                links_of(Some("tcp/127.0.0.1:7447"), false, &limits),
+                Some(wz_session_core::caps::MAX_FACES)
             );
             let mut lowered = SessionLimits::defaults();
             if lowered
                 .select_max_faces(wz_session_core::limit_binding::Quota::at_most(10))
                 .is_ok()
             {
-                assert_eq!(links_of(Some("tcp/127.0.0.1:7447"), &lowered), Some(11));
+                // A listener that dials nothing lends its dial role no link.
                 assert_eq!(
-                    links_of(None, &lowered),
+                    links_of(Some("tcp/127.0.0.1:7447"), false, &lowered),
+                    Some(10)
+                );
+                // A listener that dials a peer holds it as one of its ten, as pico's does.
+                assert_eq!(
+                    links_of(Some("tcp/127.0.0.1:7447"), true, &lowered),
+                    Some(10)
+                );
+                assert_eq!(
+                    links_of(None, true, &lowered),
                     Some(1),
                     "a dial holds one link still"
                 );
@@ -443,7 +462,7 @@ mod tests {
         }
         #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
         assert_eq!(
-            links_of(Some("udp/224.0.0.224:7446#iface=lo"), &limits),
+            links_of(Some("udp/224.0.0.224:7446#iface=lo"), false, &limits),
             None
         );
     }

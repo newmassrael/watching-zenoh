@@ -16,7 +16,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use wz_runtime_coop::faces::{EndpointTextRefused, EndpointTexts};
+use wz_runtime_coop::faces::{EndpointRole, EndpointTextRefused, EndpointTexts};
 
 use crate::arena::ArenaRefused;
 use crate::engine::{CoopConfig, EndpointRefusal, OpenError, Refusal};
@@ -61,33 +61,36 @@ impl<'a> EndpointWriter<'a> {
     /// Write the text of the next endpoint to dial. [`OpenError::Unreachable`] for a text longer
     /// than a row, `MAX_LOCATOR_LEN` bytes, naming it.
     pub fn dial(&mut self, text: &str) -> Result<(), OpenError> {
-        self.texts
-            .write_dial(text)
-            .map(drop)
-            .map_err(|why| unwritten(text, why, OpenError::Unreachable))
+        self.write(text, EndpointRole::Dial)
     }
 
     /// Write the text of the next endpoint to listen on. [`OpenError::Listen`] for a text longer
     /// than a row, naming it.
     pub fn listen(&mut self, text: &str) -> Result<(), OpenError> {
+        self.write(text, EndpointRole::Listen)
+    }
+
+    /// Write `text` in the next row of `role`: the one body of both.
+    #[inline(never)]
+    fn write(&mut self, text: &str, role: EndpointRole) -> Result<(), OpenError> {
         self.texts
-            .write_listen(text)
+            .write(role, text)
             .map(drop)
-            .map_err(|why| unwritten(text, why, OpenError::Listen))
+            .map_err(|why| unwritten(text, why, role))
     }
 }
 
-/// The open's refusal of the endpoint `text` that has no row: one longer than a row is refused as
-/// `as_open`'s endpoint, one to dial or one to listen on; one past the rows the open lent, which
-/// its config counted, as an arena that does not hold what the source wrote.
-fn unwritten(
-    text: &str,
-    why: EndpointTextRefused,
-    as_open: fn(EndpointRefusal) -> OpenError,
-) -> OpenError {
+/// The open's refusal of the endpoint `text` of `role` that has no row: one longer than a row is
+/// refused as an endpoint to listen on or to dial, as its role is; one past the rows the open
+/// lent, which its config counted, as an arena that does not hold what the source wrote.
+fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenError {
     match why {
         EndpointTextRefused::TooLong { .. } => {
-            as_open(EndpointRefusal::new(text, Refusal::TextTooLong))
+            let refusal = EndpointRefusal::new(text, Refusal::TextTooLong);
+            match role {
+                EndpointRole::Listen => OpenError::Listen(refusal),
+                EndpointRole::Dial => OpenError::Unreachable(refusal),
+            }
         }
         EndpointTextRefused::Full => OpenError::Arena(ArenaRefused::TooLarge),
     }

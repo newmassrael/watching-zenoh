@@ -9,8 +9,8 @@
 //! What a link means to the protocol (its handshake, what is declared over it, what its loss takes
 //! with it) is the session's. A [`LinkSupervisor`] decides what has happened to a face's link
 //! ([`Moved`]) and hands that back, and the session acts on it; it asks the session of a link only
-//! what [`FaceSession`] names. So the driver owns the facts of the links (their tasks, their
-//! waits, their buffers' leases) once, and the session owns what it declared over them once
+//! what [`FaceSession`] names. So the driver owns the facts of the links (their tasks and their
+//! waits) once, and the session owns what it declared over them once
 //! (`docs/c-abi-architecture.md`, P1 and P2).
 //!
 //! Every table here is reserved when the supervisor is made, for as many faces, ports and waits as
@@ -18,7 +18,6 @@
 //! (P3).
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Deref;
 
@@ -30,8 +29,8 @@ use wz_session_core::zid_hex::same_zid;
 
 use crate::link_cells::CellRc;
 use crate::session_drive::{
-    wait_any, AndRoom, LinkListener, LinkOpenError, LinkReadiness, LinkWritability, Locator,
-    OpenedLink, PendingDial, RxLease, SessionDatagramLink, SessionLinks,
+    LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
+    SessionDatagramLink, SessionLinks, WaitOn,
 };
 use crate::CoopLocalJoinHandle;
 
@@ -77,16 +76,15 @@ pub trait FaceRecord {
 }
 
 /// One link of a face: the session's half of it (`S`), the task that runs it, the link as the
-/// session's step reads it and as its owner's read is lent its buffer, and the waits its owner
-/// makes for its input and its room. It reads as the session's half (`Deref`): what the session
-/// sends over the link is that half's.
+/// session's step reads it, and what its owner waits on for its input and its room, read off the
+/// link when it is made. It reads as the session's half (`Deref`): what the session sends over
+/// the link is that half's.
 pub struct Wire<S> {
     session: S,
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: CellRc<dyn SessionDatagramLink>,
-    ungated: CellRc<dyn SessionDatagramLink>,
-    readiness: Option<Arc<dyn LinkReadiness>>,
-    writability: Option<Arc<dyn LinkWritability>>,
+    input: Option<WaitOn>,
+    room: Option<WaitOn>,
 }
 
 /// Whether `link` has input in its stack it cannot read until another link gives a receive buffer
@@ -106,23 +104,22 @@ fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
 
 impl<S> Wire<S> {
     /// The link whose session half is `session`, run by `task`: `link` is what the session's
-    /// step reads, behind whatever gates the session put on it, and `ungated` the same link
-    /// without them, which lends its owner's read the receive buffer.
+    /// step reads, behind whatever gates the session put on it, and `input_wait` and `room_wait`
+    /// what its owner waits on for its input and its room, read off the link without the gates
+    /// ([`SessionDatagramLink::input_wait`], [`SessionDatagramLink::room_wait`]).
     pub fn new(
         session: S,
         task: CoopLocalJoinHandle<DriverOutcome>,
         link: CellRc<dyn SessionDatagramLink>,
-        ungated: CellRc<dyn SessionDatagramLink>,
-        readiness: Option<Arc<dyn LinkReadiness>>,
-        writability: Option<Arc<dyn LinkWritability>>,
+        input_wait: Option<WaitOn>,
+        room_wait: Option<WaitOn>,
     ) -> Self {
         Self {
             session,
             task,
             link,
-            ungated,
-            readiness,
-            writability,
+            input: input_wait,
+            room: room_wait,
         }
     }
 
@@ -146,9 +143,9 @@ impl<S> Wire<S> {
         self.link.owes_write()
     }
 
-    /// The wait for room on the link, when its stack gives one.
-    pub fn writability(&self) -> Option<&Arc<dyn LinkWritability>> {
-        self.writability.as_ref()
+    /// What a wait for room on the link waits on, when its stack gives one.
+    pub fn room_wait(&self) -> Option<WaitOn> {
+        self.room
     }
 }
 
@@ -214,14 +211,35 @@ impl<S, D> Link<S, D> {
 /// opens into a row of the memory it reserved then (`docs/c-abi-architecture.md`, P1 and P3):
 /// a dial or a port names its endpoint by its row, and nothing copies the text after the open.
 /// The dial rows are at most the build's `MAX_STATIC_CONNECT`, and the listen rows at most its
-/// `MAX_ADMIN_LOCATORS`, the listening locators a node holds; each row at most
-/// `MAX_LOCATOR_LEN` bytes.
+/// `MAX_ADMIN_LOCATORS`, the listening locators a node holds, which the session's plan holds each
+/// count to before it lends the rows; each row at most `MAX_LOCATOR_LEN` bytes.
 pub struct EndpointTexts {
-    dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
-    listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
+    dial: EndpointRows,
+    listen: EndpointRows,
 }
 
-/// Why an endpoint's text has no row ([`EndpointTexts::write_dial`]).
+/// The rows of one role's endpoint texts ([`EndpointTexts`]). The two roles' tables are one type,
+/// bounded by the larger of their two limits, so one body writes and reads either.
+pub type EndpointRows = BoundedVec<LocatorText, ENDPOINT_TEXT_ROWS, Lent>;
+
+/// The most rows of either role's endpoint texts a build lends: the larger of
+/// `MAX_STATIC_CONNECT` and `MAX_ADMIN_LOCATORS`.
+pub const ENDPOINT_TEXT_ROWS: usize = if caps::MAX_STATIC_CONNECT > caps::MAX_ADMIN_LOCATORS {
+    caps::MAX_STATIC_CONNECT
+} else {
+    caps::MAX_ADMIN_LOCATORS
+};
+
+/// Which of a session's endpoints a text is: one it dials, or one it listens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRole {
+    /// An endpoint the session dials.
+    Dial,
+    /// An endpoint the session listens on.
+    Listen,
+}
+
+/// Why an endpoint's text has no row ([`EndpointTexts::write`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointTextRefused {
     /// The text is longer than a row, `MAX_LOCATOR_LEN` bytes; `len` is its length.
@@ -236,32 +254,58 @@ pub enum EndpointTextRefused {
 impl EndpointTexts {
     /// The texts of a session whose open lent `dial` for its endpoints to dial and `listen` for
     /// those to listen on, none written yet.
-    pub fn over(
-        dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
-        listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
-    ) -> Self {
+    pub fn over(dial: EndpointRows, listen: EndpointRows) -> Self {
         Self { dial, listen }
     }
 
-    /// Write the text of the next endpoint to dial, in the order the session dials them: its
-    /// place, which its dial names it by ([`DialEndpoint::Listed`]).
-    pub fn write_dial(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
-        write_row(&mut self.dial, text)
+    /// Write the text of the next endpoint of `role`, in the order the session dials them or
+    /// listens on them: its place, which a dial names it by ([`DialEndpoint::Listed`]) or a port
+    /// by ([`DialEndpoint::Port`]).
+    #[inline(never)]
+    pub fn write(&mut self, role: EndpointRole, text: &str) -> Result<usize, EndpointTextRefused> {
+        let rows = match role {
+            EndpointRole::Dial => &mut self.dial,
+            EndpointRole::Listen => &mut self.listen,
+        };
+        let row = LocatorText::try_from(text)
+            .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
+        let at = rows.len();
+        rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
+        Ok(at)
     }
 
-    /// Write the text of the next endpoint to listen on: its place, which its port names it by.
+    /// [`Self::write`] of an endpoint to dial.
+    #[inline]
+    pub fn write_dial(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
+        self.write(EndpointRole::Dial, text)
+    }
+
+    /// [`Self::write`] of an endpoint to listen on.
+    #[inline]
     pub fn write_listen(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
-        write_row(&mut self.listen, text)
+        self.write(EndpointRole::Listen, text)
+    }
+
+    /// The text of the endpoint of `role` at `at`; empty past the last.
+    #[inline(never)]
+    pub fn text(&self, role: EndpointRole, at: usize) -> &str {
+        let rows = match role {
+            EndpointRole::Dial => &self.dial,
+            EndpointRole::Listen => &self.listen,
+        };
+        rows.get(at).map_or("", LocatorText::as_str)
     }
 
     /// The text of the endpoint to dial at `at`; empty past the last.
+    #[inline]
     pub fn dial_text(&self, at: usize) -> &str {
-        self.dial.get(at).map_or("", LocatorText::as_str)
+        self.text(EndpointRole::Dial, at)
     }
 
     /// The text of the endpoint to listen on at `at`; empty past the last.
+    #[inline]
     pub fn listen_text(&self, at: usize) -> &str {
-        self.listen.get(at).map_or("", LocatorText::as_str)
+        self.text(EndpointRole::Listen, at)
     }
 
     /// How many endpoints the session dials.
@@ -273,18 +317,6 @@ impl EndpointTexts {
     pub fn listens(&self) -> usize {
         self.listen.len()
     }
-}
-
-/// Write `text` in the next row of `rows`: its place.
-fn write_row<const N: usize>(
-    rows: &mut BoundedVec<LocatorText, N, Lent>,
-    text: &str,
-) -> Result<usize, EndpointTextRefused> {
-    let row = LocatorText::try_from(text)
-        .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
-    let at = rows.len();
-    rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
-    Ok(at)
 }
 
 /// Which endpoint a dial reaches: one of the session's own to dial, by its row; one of those it
@@ -329,7 +361,7 @@ impl<D> Dial<D> {
 /// its links are stated for, when the session states one.
 struct Listening<P> {
     listener: Box<dyn LinkListener<P>>,
-    readiness: Option<Arc<dyn LinkReadiness>>,
+    input: Option<WaitOn>,
     endpoint: Option<usize>,
 }
 
@@ -380,33 +412,33 @@ pub enum Accepted<P> {
 pub enum IdleWait {
     /// Nothing: a link holds input already, or its own loop waits for it.
     None,
-    /// The next input of any of these links, or the next connection on any of these ports, for
-    /// at most this many milliseconds.
-    Input(Vec<Arc<dyn LinkReadiness>>, u32),
-    /// The next input of the one link waited on, read into that link's own buffer by a read that
-    /// waits in itself for at most this many milliseconds, as zenoh-pico's read task waits in its
-    /// socket's `recv` (`vendor/zenoh-pico/src/transport/unicast/read.c` @
-    /// `_z_unicast_client_read`).
-    Read(FaceId, RxLease, u32),
+    /// The next input of any of these links, or the next connection on any of these ports, or
+    /// room on a link that asks for it as well, or a wake of their stack's waited on beside them,
+    /// for at most `ms` milliseconds.
+    Input {
+        /// The links, ports and wakes waited on.
+        on: Vec<LinkWait>,
+        /// The longest the wait takes.
+        ms: u32,
+    },
     /// Nothing to wait on: the next dial, or the next look at a port that gives no wait, for at
     /// most this many milliseconds.
     Sleep(u32),
 }
 
 impl IdleWait {
-    /// Wait, sleeping with `sleep` (milliseconds) where there is nothing to wait on. The wait
-    /// keeps what it was made of, emptied, and what its read brought, for the session to hand
-    /// back ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its reads
-    /// wait.
+    /// Wait on the links and ports with `waits`, the waits of their stack
+    /// ([`SessionLinks::waits`]), sleeping with `sleep` (milliseconds) where there is nothing to
+    /// wait on. The wait keeps what it was made of, emptied, for the session to hand back
+    /// ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its reads wait.
     #[inline(never)]
-    pub fn wait(&mut self, sleep: impl FnOnce(u32)) {
+    pub fn wait(&mut self, waits: &impl LinkWaits, sleep: impl FnOnce(u32)) {
         match self {
             IdleWait::None => {}
-            IdleWait::Input(waits, ms) => {
-                wait_any(waits, *ms);
-                waits.clear();
+            IdleWait::Input { on, ms } => {
+                waits.wait(on, *ms);
+                on.clear();
             }
-            IdleWait::Read(_, lease, ms) => lease.read(*ms),
             IdleWait::Sleep(ms) => sleep(*ms),
         }
     }
@@ -420,7 +452,7 @@ pub struct LinkSupervisor<L: SessionLinks, F> {
     /// face past it is refused, never grown into.
     faces: Vec<F>,
     listeners: Vec<Listening<L::Pump>>,
-    waits: Vec<Arc<dyn LinkReadiness>>,
+    waits: Vec<LinkWait>,
     next_face: FaceId,
 }
 
@@ -489,10 +521,10 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// texts when the session states one.
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
-        let readiness = listener.readiness().map(Arc::from);
+        let input = listener.input_wait();
         self.listeners.push(Listening {
             listener,
-            readiness,
+            input,
             endpoint,
         });
         Ok(())
@@ -630,17 +662,17 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         }
     }
 
-    /// What a publish that waits for an outbound slot waits on: the wait of each face's link that
-    /// owes its stack the rest of a frame, ending on its room and its input (`AndRoom`). A link
-    /// whose stack gives no wait is not in it.
+    /// What a publish that waits for an outbound slot waits on: each face's link that owes its
+    /// stack the rest of a frame, for its room and its input. A link whose stack gives no wait is
+    /// not in it.
     #[cfg(feature = "session-unicast-accept")]
-    pub fn owing_waits(&self) -> Vec<Arc<dyn LinkReadiness>> {
+    pub fn owing_waits(&self) -> Vec<LinkWait> {
         self.faces
             .iter()
             .filter_map(|face| face.link().wire())
             .filter(|wire| wire.owes_write())
-            .filter_map(|wire| wire.readiness.as_ref())
-            .map(|ready| AndRoom::of(ready.clone()))
+            .filter_map(|wire| wire.input)
+            .map(LinkWait::input_or_room)
             .collect()
     }
 
@@ -649,22 +681,22 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// `others` after them; no wait at all when a link holds input. A link that owes its stack the
     /// rest of a frame is waited on for room as well. A link that waits in its own loop, or a port
     /// that gives no wait, bounds the wait at a look; a dial under way or waiting bounds it at its
-    /// next look. The one link waited on, alone, is read in place of the wait when `may_lend` says
-    /// a buffer may be lent and the link lends one. `now_us` reads the clock, which only a face
-    /// waiting to be dialled asks.
+    /// next look. `beside`, a wake of the stack's (the program's word that the session's clock moved
+    /// on), ends whatever wait the links make, a sleep to the next dial among them; it makes no
+    /// wait where they make none. `now_us` reads the clock, which only a face waiting to be
+    /// dialled asks.
     pub fn idle_wait(
         &mut self,
         most: u32,
         now_us: &mut dyn FnMut() -> u64,
-        may_lend: impl Fn() -> bool,
-        others: impl IntoIterator<Item = Arc<dyn LinkReadiness>>,
+        others: impl IntoIterator<Item = LinkWait>,
+        beside: Option<LinkWait>,
     ) -> IdleWait {
         let mut holds = false;
         let mut waits = core::mem::take(&mut self.waits);
         let mut own_loop = false;
         let mut dial_left_ms = None;
-        let mut read_face = None;
-        for (at, face) in self.faces.iter().enumerate() {
+        for face in &self.faces {
             match face.link() {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
@@ -672,12 +704,11 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                     } else if waits_for_buffer(&wire.link) {
                         // Its input waits in the stack until another link gives a receive
                         // buffer back, which that link's own input wakes the read for.
-                    } else if let Some(ready) = &wire.readiness {
+                    } else if let Some(on) = wire.input {
                         if wire.link.owes_write() {
-                            waits.push(AndRoom::of(ready.clone()));
+                            waits.push(LinkWait::input_or_room(on));
                         } else {
-                            waits.push(ready.clone());
-                            read_face = Some(at);
+                            waits.push(LinkWait::input(on));
                         }
                     } else {
                         own_loop = true;
@@ -700,8 +731,8 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         }
         let mut look_again = false;
         for listening in &self.listeners {
-            match &listening.readiness {
-                Some(ready) => waits.push(ready.clone()),
+            match listening.input {
+                Some(on) => waits.push(LinkWait::input(on)),
                 None => look_again = true,
             }
         }
@@ -710,26 +741,34 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             Some(left) => u32::try_from(left).map_or(most, |left| left.min(most)),
             None => most,
         };
+        // A sleep a wake beside it ends is a wait on the wake.
+        let sleep = |ms: u32, waits: &mut Vec<LinkWait>| match beside {
+            Some(on) => {
+                waits.push(on);
+                IdleWait::Input {
+                    on: core::mem::take(waits),
+                    ms,
+                }
+            }
+            None => IdleWait::Sleep(ms),
+        };
         let wait = match (waits.is_empty(), look_again) {
             // A port that gives no wait is looked at again after a bounded sleep.
-            (true, true) if most > 0 => IdleWait::Sleep(most.min(1)),
+            (true, true) if most > 0 => sleep(most.min(1), &mut waits),
             (true, _) => match dial_left_ms {
-                Some(_) if most > 0 => IdleWait::Sleep(most),
+                Some(_) if most > 0 => sleep(most, &mut waits),
                 _ => IdleWait::None,
             },
             (false, _) if most > 0 => {
-                let lent = match (read_face, waits.len(), own_loop || look_again) {
-                    (Some(at), 1, false) if may_lend() => self.lend_rx_at(at),
-                    _ => None,
-                };
+                waits.extend(beside);
                 let most = if own_loop || look_again {
                     most.min(1)
                 } else {
                     most
                 };
-                match lent {
-                    Some((face, lease)) => IdleWait::Read(face, lease, most),
-                    None => IdleWait::Input(core::mem::take(&mut waits), most),
+                IdleWait::Input {
+                    on: core::mem::take(&mut waits),
+                    ms: most,
                 }
             }
             _ => IdleWait::None,
@@ -740,36 +779,14 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         wait
     }
 
-    /// The lease of the receive buffer of the link of the face at `at`, for a read's wait to be
-    /// made in the read of that link, with the face's number; `None` from a link that gives none.
-    fn lend_rx_at(&self, at: usize) -> Option<(FaceId, RxLease)> {
-        let held = self.faces.get(at)?;
-        let lease = held.link().wire()?.ungated.lend_rx()?;
-        Some((held.id(), lease))
-    }
-
     /// Take back a read's wait, once made ([`IdleWait::wait`]): the buffer of its waits, which
-    /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept, and the
-    /// lease its read was made in, landed on
-    /// the link of the face that lent it. A lease whose face has gone, or holds another link by
-    /// now, is let go of.
+    /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept.
     pub fn waited(&mut self, wait: IdleWait) {
         match wait {
-            // A wait made of more than the buffer (the program's clock word beside it) leaves the
-            // larger of the two here.
-            IdleWait::Input(spare, _) => {
+            // The larger of the two buffers stays here.
+            IdleWait::Input { on: spare, .. } => {
                 if spare.capacity() > self.waits.capacity() {
                     self.waits = spare;
-                }
-            }
-            IdleWait::Read(face, lease, _) => {
-                if let Some(wire) = self
-                    .faces
-                    .iter()
-                    .find(|held| held.id() == face)
-                    .and_then(|held| held.link().wire())
-                {
-                    wire.ungated.land_rx(lease);
                 }
             }
             IdleWait::None | IdleWait::Sleep(_) => {}
@@ -809,7 +826,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
 mod tests {
     use super::*;
     use alloc::rc::Rc;
+    use alloc::vec;
     use core::cell::Cell;
+    use core::sync::atomic::Ordering;
     use wz_session_core::link::RxFrame;
 
     use crate::{ClockSource, CoopLocalSet, CoopRuntime};
@@ -892,6 +911,11 @@ mod tests {
     impl SessionLinks for Net {
         type Pump = Rc<Quiet>;
         type Dial = Answer;
+        type Waits = crate::session_drive::NoWaits;
+
+        fn waits(&self) -> Self::Waits {
+            crate::session_drive::NoWaits
+        }
 
         fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Rc<Quiet>>, LinkOpenError> {
             Err(LinkOpenError::Unsupported)
@@ -951,7 +975,56 @@ mod tests {
             local.run_until_idle();
         }
         let link = CellRc::boxed(Quiet { holds }).into_link();
-        Wire::new(session, task, link.clone(), link, None, None)
+        let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+        Wire::new(session, task, link, input_wait, room_wait)
+    }
+
+    /// A link its owner waits on by `on`, owing its stack a write when `owes`.
+    struct Waited {
+        on: WaitOn,
+        owes: bool,
+    }
+
+    impl SessionDatagramLink for Waited {
+        fn service(&self) {}
+
+        fn try_recv(&self) -> Option<RxFrame> {
+            None
+        }
+
+        fn owes_write(&self) -> bool {
+            self.owes
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            Some(self.on)
+        }
+    }
+
+    /// An established wire over a link waited on by `on`, owing a write when `owes`.
+    fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
+        let task = local.spawn_local(async { DriverOutcome::Terminated });
+        let link = CellRc::boxed(Waited { on, owes }).into_link();
+        let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+        Wire::new(session(true, None), task, link, input_wait, room_wait)
+    }
+
+    /// What a wait of a stack was asked last: how many entries, for how long.
+    #[derive(Default)]
+    struct Asked {
+        entries: core::sync::atomic::AtomicUsize,
+        ms: core::sync::atomic::AtomicU32,
+    }
+
+    impl LinkWaits for Asked {
+        fn wait(&self, on: &[LinkWait], timeout_ms: u32) {
+            self.entries.store(on.len(), Ordering::Relaxed);
+            self.ms.store(timeout_ms, Ordering::Relaxed);
+        }
+
+        fn wait_room(&self, _on: WaitOn, _timeout_us: u64) -> bool {
+            true
+        }
     }
 
     fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
@@ -1185,17 +1258,17 @@ mod tests {
         };
         let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
         assert!(matches!(
-            faces.idle_wait(10, &mut now, || true, []),
+            faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(4)
         ));
         faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
         assert!(matches!(
-            faces.idle_wait(10, &mut now, || true, []),
+            faces.idle_wait(10, &mut now, [], None),
             IdleWait::Sleep(1)
         ));
         faces.put_link(0, Link::Held { zid: Vec::new() });
         assert!(matches!(
-            faces.idle_wait(10, &mut now, || true, []),
+            faces.idle_wait(10, &mut now, [], None),
             IdleWait::None
         ));
         assert_eq!(clock_reads, 1, "only the waiting face read the clock");
@@ -1205,9 +1278,93 @@ mod tests {
         faces.put_link(0, Link::Up(wire(&local, session(true, None), true, false)));
         assert!(faces.holds_input());
         assert!(matches!(
-            faces.idle_wait(10, &mut || 0u64, || true, []),
+            faces.idle_wait(10, &mut || 0u64, [], None),
             IdleWait::None
         ));
+    }
+
+    /// A read waits on each link's handle, for its input, and for its room as well while it owes
+    /// its stack a write; what is waited on beside the links (a group's input) follows them.
+    /// Turned red by a link that owes and is waited on for its input alone, or one that does not
+    /// owe and wakes its owner on room.
+    #[test]
+    fn a_read_waits_on_each_links_handle_and_on_its_room_while_it_owes() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let group = LinkWait::input(WaitOn::Socket(9));
+        for (owes, first) in [
+            (false, LinkWait::input(WaitOn::Socket(3))),
+            (true, LinkWait::input_or_room(WaitOn::Socket(3))),
+        ] {
+            let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), owes)), 1);
+            match faces.idle_wait(10, &mut || 0u64, [group], None) {
+                IdleWait::Input { on, ms } => {
+                    assert_eq!(on, [first, group], "owes {owes}");
+                    assert_eq!(ms, 10);
+                }
+                _ => panic!("a wait on the link and the group"),
+            }
+        }
+    }
+
+    /// A wait on links is the stack's for the whole time, and leaves its buffer emptied.
+    /// Turned red by a wait that bounds the links' wait short of its time.
+    #[test]
+    fn a_wait_on_links_is_the_stacks_for_the_whole_time() {
+        let link = LinkWait::input(WaitOn::Socket(3));
+        let asked = Asked::default();
+        let mut wait = IdleWait::Input {
+            on: vec![link],
+            ms: 10,
+        };
+        wait.wait(&asked, |_| panic!("no sleep"));
+        assert_eq!(asked.entries.load(Ordering::Relaxed), 1);
+        assert_eq!(asked.ms.load(Ordering::Relaxed), 10);
+        assert!(matches!(wait, IdleWait::Input { ref on, .. } if on.is_empty()));
+    }
+
+    /// A wake beside the links joins the wait they make, after them; a sleep to the next dial
+    /// becomes a wait on the wake for the same time; and where they make no wait, it makes none.
+    /// CONTROL: without it the same faces sleep. Turned red by a wake that is left out of a
+    /// sleep, which the program's word could then not end, or one that makes a wait of its own.
+    #[test]
+    fn a_wake_beside_the_links_joins_their_wait_and_makes_none_of_its_own() {
+        let wake = LinkWait::input(WaitOn::Wake(5));
+        let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
+        assert!(
+            matches!(
+                faces.idle_wait(10, &mut || 1_000u64, [], None),
+                IdleWait::Sleep(4)
+            ),
+            "CONTROL: a sleep to the next dial"
+        );
+        match faces.idle_wait(10, &mut || 1_000u64, [], Some(wake)) {
+            IdleWait::Input { on, ms } => {
+                assert_eq!(on, [wake]);
+                assert_eq!(ms, 4, "the sleep's time");
+            }
+            _ => panic!("a sleep beside a wake waits on it"),
+        }
+        faces.put_link(0, Link::Held { zid: Vec::new() });
+        assert!(
+            matches!(
+                faces.idle_wait(10, &mut || 0u64, [], Some(wake)),
+                IdleWait::None
+            ),
+            "the wake made a wait of its own"
+        );
+
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let link = LinkWait::input(WaitOn::Socket(3));
+        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
+        match faces.idle_wait(10, &mut || 0u64, [], Some(wake)) {
+            IdleWait::Input { on, ms } => {
+                assert_eq!(on, [link, wake], "the wake after the links");
+                assert_eq!(ms, 10);
+            }
+            _ => panic!("a wait on the link and the wake"),
+        }
     }
 
     #[test]

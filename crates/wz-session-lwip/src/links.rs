@@ -175,6 +175,15 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
     // The port's lwIP has no IPv6 (`Self::bind_driver` refuses that family).
     const IPV6: bool = false;
 
+    wz_runtime_coop::with_heap_link_seams! {
+        // Its links name no handle a thread outside them could wait on.
+        type Waits = wz_runtime_coop::session_drive::NoWaits;
+
+        fn waits(&self) -> wz_runtime_coop::session_drive::NoWaits {
+            wz_runtime_coop::session_drive::NoWaits
+        }
+    }
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its
         // InitSyn.
@@ -325,16 +334,13 @@ mod tests {
                 pump: acceptor_pump,
             } = links.open_acceptor(7541).expect("bind acceptor");
             let acceptor_link = acceptor_sink.clone();
-            let acceptor_actions = new_session_actions(
-                acceptor_sink,
-                params(0xa1),
-                CoopTime::new(&runtime),
-                Counting(1),
-            );
+            let acceptor_actions =
+                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
             let _acceptor = spawn_session(
                 &local,
                 acceptor_pump,
                 acceptor_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -362,6 +368,7 @@ mod tests {
                 &local,
                 initiator_pump,
                 initiator_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),

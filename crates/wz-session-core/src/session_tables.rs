@@ -51,6 +51,7 @@ use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
+use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
     any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
 };
@@ -64,6 +65,7 @@ use crate::row_callback::RowCallback;
 use crate::sink::RowAccess;
 use crate::slot_map::{Handle, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
+use crate::wire_key::MappedId;
 
 /// The markers that keep one table's handles from being taken by another.
 pub mod kind {
@@ -905,7 +907,7 @@ struct Declaring<'a, P: Storage> {
 impl<P: Storage> Declaring<'_, P> {
     /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let key = KeyMaker::key(self.keys, text).map_err(unkept)?;
+        let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
         let prefix = form.prefix.filter(|&prefix| {
             self.keyexprs.get(prefix).is_some_and(|row| {
                 row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
@@ -1068,7 +1070,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.keyexprs.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
         let handle = self
             .keyexprs
@@ -1089,6 +1091,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// its retraction to go on the wire.
     pub fn undeclare_keyexpr(&mut self, handle: KeyexprHandle) -> Option<ExprId> {
         release_keyexpr(&mut self.keyexprs, handle)
+    }
+
+    /// Take one more hold of the declaration `handle` names, for a holder of it that is copied,
+    /// with nothing on the wire: `false`, changing nothing, when it names no row now or the row
+    /// holds as many as its count holds.
+    pub fn retain_keyexpr(&mut self, handle: KeyexprHandle) -> bool {
+        let Some(row) = self.keyexprs.get_mut(handle) else {
+            return false;
+        };
+        match row.holds.checked_add(1) {
+            Some(holds) => {
+                row.holds = holds;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Retract the declaration `handle` names whatever holds it: its id, for its retraction to go
@@ -1159,6 +1177,36 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 suffix,
             },
             None => literal,
+        }
+    }
+
+    /// The key `key` names as the session sends it: its whole text, named on the wire by the
+    /// declaration its row holds while that declaration stands, and whole otherwise
+    /// ([`Self::wire_of`]). `None` for an empty key, which no row keeps.
+    pub fn named<'k>(&self, key: &'k EntityKey<P::Key>) -> Option<NamedKey<'k>> {
+        let whole = text(&key.key);
+        let declared = key
+            .prefix
+            .and_then(|prefix| self.keyexprs.get(prefix))
+            .and_then(|row| Some(Prefix::of(MappedId::new(row.id)?, text(&row.key))));
+        match declared {
+            Some(prefix) => NamedKey::under(whole, prefix).or_else(|| NamedKey::literal(whole)),
+            None => NamedKey::literal(whole),
+        }
+    }
+
+    /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
+    /// the session sends it: named by that declaration while it stands and begins the key, and
+    /// whole otherwise. `None` for an empty key.
+    pub fn named_by<'k>(&self, key: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
+        let declared = MappedId::new(id).and_then(|mapped| {
+            let handle = self.keyexpr_by_id(id)?;
+            let row = self.keyexprs.get(handle)?;
+            Some(Prefix::of(mapped, text(&row.key)))
+        });
+        match declared {
+            Some(prefix) => NamedKey::under(key, prefix).or_else(|| NamedKey::literal(key)),
+            None => NamedKey::literal(key),
         }
     }
 
@@ -1337,7 +1385,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.interests.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
         self.next_entity = id.checked_add(1);
         let handle = self
@@ -1581,7 +1629,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let gate = match accept {
             crate::reply_acceptance::ReplyAcceptance::Any => None,
             crate::reply_acceptance::ReplyAcceptance::Matching(key) => {
-                match KeyMaker::key(&self.keys, key) {
+                match KeyMaker::shared(&self.keys, key) {
                     Ok(key) => Some(key),
                     Err(why) => {
                         return Err(Refused {
@@ -1634,7 +1682,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// [`Self::begin_subscriber`].
     pub fn begin_reply(&self, handle: PendingGetHandle) -> Option<<F::Reply as RowCallback>::Call> {
         const {
-            assert!(!<F::Reply as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Reply, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.pending_gets.get(handle)?.callback.begin()
     }
@@ -1767,13 +1815,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// with once they are let go, `None` when no live row is named. End it with [`RowCallback::end`];
     /// when that says it was the last call of a row undeclared meanwhile, let the row go with
     /// [`Self::release_subscriber`]. A callback whose call reads the row where it lies is held only by
-    /// a table whose rows never move (P3, P11).
+    /// a table of the lent policy, whose rows lie in the arena (`row_may_lie_in`).
     pub fn begin_subscriber(
         &self,
         handle: SubscriberHandle,
     ) -> Option<<F::Subscriber as RowCallback>::Call> {
         const {
-            assert!(!<F::Subscriber as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.subscribers.get(handle)?.callback.begin()
     }
@@ -1791,7 +1839,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: QueryableHandle,
     ) -> Option<<F::Queryable as RowCallback>::Call> {
         const {
-            assert!(!<F::Queryable as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.queryables.get(handle)?.callback.begin()
     }
@@ -1809,10 +1857,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: LivelinessSubscriberHandle,
     ) -> Option<<F::LivelinessSubscriber as RowCallback>::Call> {
         const {
-            assert!(
-                !<F::LivelinessSubscriber as RowCallback>::READS_ROW_IN_PLACE
-                    || P::ENFORCES_CAPACITY
-            );
+            assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.liveliness_subscribers.get(handle)?.callback.begin()
     }
@@ -1833,7 +1878,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: MatchingListenerHandle,
     ) -> Option<<F::Matching as RowCallback>::Call> {
         const {
-            assert!(!<F::Matching as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Matching, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.matching.get(handle)?.callback.begin()
     }
@@ -1862,6 +1907,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// The queryables.
     pub fn queryables(&self) -> &Queryables<F, P> {
         &self.queryables
+    }
+
+    /// The queryables to ask, with the key expressions the session declared beside them as its
+    /// own id space: a peer's query names its key through the one while the other is asked, so
+    /// the two are borrowed apart.
+    #[cfg(feature = "storage-profile")]
+    pub fn queries_mut(
+        &mut self,
+    ) -> (crate::wireexpr_resolve::OwnSpace<'_>, &mut Queryables<F, P>) {
+        (P::own_space(&self.keyexprs), &mut self.queryables)
     }
 
     /// The liveliness tokens.
@@ -1965,6 +2020,14 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 }
 
+/// Whether a row whose callback is `Cb` may lie in a table of policy `P`: a callback whose calls
+/// read its row where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read on another thread while
+/// the tables are held, so its row lies only where no `&mut` of the tables, nor of what holds them,
+/// reaches it: in the arena, behind the pointer a table of the lent policy keeps (P3, P11).
+const fn row_may_lie_in<Cb: RowCallback, P: Storage>() -> bool {
+    !Cb::READS_ROW_IN_PLACE || P::LENT_AT_OPEN
+}
+
 /// A row whose calls read it where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read by them
 /// on other threads while the tables are held, so the dispatch reaches it only by a shared
 /// reference; a row the tables call while held is handed exclusively.
@@ -2024,6 +2087,13 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage> SubscriberRows
 impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P> {
     type Sink = F::Subscriber;
     type RowId = SubscriberHandle;
+
+    // The table set holds the key expressions the session declared: a peer's `M=0` key is read
+    // from them where they lie.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+        Some(P::own_space(&self.keyexprs))
+    }
 
     fn epoch(&self) -> u64 {
         self.subscriber_epoch
@@ -2124,22 +2194,43 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
     }
 }
 
-impl<Key: KeyBacking, Cb, P: Storage> QueryableRows
+/// As the subscribers' rows: a row whose calls read it where it lies is handed shared, one only
+/// the tables' holder reaches exclusively.
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage> QueryableRows
     for SlotMap<kind::Queryable, QueryableRow<Key, Cb>, { caps::MAX_QUERYABLES }, P>
 {
     type Sink = Cb;
+    type RowId = QueryableHandle;
 
-    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut Cb)>(&mut self, mut f: F) {
-        for (_, row) in self.live_places_mut() {
-            let found = QueryableRef {
-                #[cfg(feature = "alloc")]
-                id: u64::from(row.id),
-                pattern: text(&row.key.key),
-                facts: row.facts,
-                origin: row.origin,
-                complete: row.complete,
-            };
-            f(found, &mut row.callback);
+    fn each_row_mut<F: FnMut(QueryableRef<'_>, QueryableHandle, RowAccess<'_, Cb>)>(
+        &mut self,
+        mut f: F,
+    ) {
+        if Cb::READS_ROW_IN_PLACE {
+            for (_, handle, row) in self.live_handles() {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                f(found, handle, RowAccess::InPlace(&row.callback));
+            }
+        } else {
+            // The row's fields are borrowed apart: its key to read, its callback to change.
+            for (_, handle, row) in self.live_handles_mut() {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                f(found, handle, RowAccess::Held(&mut row.callback));
+            }
         }
     }
 
@@ -2158,12 +2249,17 @@ impl<Key: KeyBacking, Cb, P: Storage> QueryableRows
     }
 }
 
-impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTables<F, P> {
-    type Sink = F::Queryable;
+/// The queryables are asked as a table of their own, apart from the key expressions a peer's query
+/// is resolved through ([`SessionTables::queries_mut`]).
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage> crate::query::LocalQueryables
+    for SlotMap<kind::Queryable, QueryableRow<Key, Cb>, { caps::MAX_QUERYABLES }, P>
+{
+    type Sink = Cb;
+    type RowId = QueryableHandle;
 
     #[cfg(feature = "storage-profile")]
     fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool {
-        any_local_queryable(&self.queryables, query_keyexpr, require_complete)
+        any_local_queryable(self, query_keyexpr, require_complete)
     }
 
     #[cfg(feature = "alloc")]
@@ -2174,10 +2270,10 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
         aggregate: bool,
         staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
     ) -> usize {
-        stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
+        stage_queryable_interest(self, interest_id, pattern, aggregate, staged)
     }
 
-    fn fire_matching_queryables<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching_queryables<D: FnMut(QueryableHandle, RowAccess<'_, Self::Sink>)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: KeyFacts,
@@ -2185,14 +2281,7 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
         target: Option<crate::query_mode::QueryTarget>,
         deliver: D,
     ) -> usize {
-        fire_queryables(
-            &mut self.queryables,
-            keyexpr,
-            keyexpr_facts,
-            is_remote,
-            target,
-            deliver,
-        )
+        fire_queryables(self, keyexpr, keyexpr_facts, is_remote, target, deliver)
     }
 }
 

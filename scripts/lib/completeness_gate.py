@@ -89,20 +89,20 @@ class Fatal(Exception):
 @dataclasses.dataclass(frozen=True)
 class Suite:
     """One upstream test suite: the integration-test files that run it on wz (each one lane
-    invocation with a count guard) and, where the tree vendors upstream, the glob of its
+    invocation with a count guard) and, where the tree vendors upstream, the globs of its
     programs, which the files' declarations together must cover exactly."""
 
     key: str
     title: str
     files: tuple[str, ...]
-    upstream_glob: str | None
+    upstream_globs: tuple[str, ...]
 
 
 SUITES: tuple[Suite, ...] = (
     Suite("pico-api", "zenoh-pico API tests",
           ("pico_upstream_api_tests_on_wz", "pico_local_delivery_upstream_tests_on_wz"),
-          "vendor/zenoh-pico/tests/z_api_*_test.c"),
-    Suite("zenoh-c", "zenoh-c tests", ("zenoh_c_upstream_api_tests_on_wz",), None),
+          ("vendor/zenoh-pico/tests/z_api_*_test.c", "vendor/zenoh-pico/tests/z_client_test.c")),
+    Suite("zenoh-c", "zenoh-c tests", ("zenoh_c_upstream_api_tests_on_wz",), ()),
 )
 
 # The invocation of a file's `upstream_tests!` macro (not its `macro_rules!` definition), and
@@ -533,8 +533,9 @@ def read_board() -> Board:
             if path.is_file():
                 sources[stem] = path.read_text(encoding="utf-8")
         upstream = None
-        if suite.upstream_glob:
-            upstream = sorted(p.stem for p in ROOT.glob(suite.upstream_glob)) or None
+        if suite.upstream_globs:
+            found = {p.stem for glob in suite.upstream_globs for p in ROOT.glob(glob)}
+            upstream = sorted(found) or None
         suites.append(read_suite(suite, runci, sources, lanes_of_line, upstream))
     try:
         partial = sorted(depth_axis_census.partial_atoms())
@@ -750,7 +751,7 @@ def selftest() -> int:
     expect("a file with no whole-file guard is refused",
            "0 whole-file" in raises(lambda: whole_file_guard(RUNCI_SAMPLE, "absent")), True)
     lanes = lane_resolver(RUNCI_SAMPLE)
-    suite = Suite("s", "sample", ("one_file",), None)
+    suite = Suite("s", "sample", ("one_file",), ())
     # z_a and z_b run on wz; z_c only on the control: the three tests the sample lane guards.
     three = (RUST_SAMPLE.replace('run_upstream_test("z_e");', "")
              .replace('pinned("z_d", &WITH_HOOKS, &["_z_x"], Control::CannotLink(&["_z_x"]));',

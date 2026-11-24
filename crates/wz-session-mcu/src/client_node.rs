@@ -27,10 +27,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::SessionLinks;
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::registry_error::RegisterError;
@@ -43,7 +46,7 @@ use crate::connect_manager::{ConnectManager, EndpointSource};
 use crate::dial::{EventSink, McuActions, UdpDialer};
 
 /// Builds the sink each dialled session reports to.
-type DialSink<C> = Box<dyn FnMut(&Rc<McuActions<C>>) -> EventSink>;
+type DialSink<C> = Box<dyn FnMut(&SessionHandle<C>) -> EventSink>;
 
 /// What the application asked the node to declare on every session.
 enum Declaration {
@@ -76,7 +79,8 @@ where
     P: FnMut() -> SessionInitParams,
 {
     /// A node that holds a session with each endpoint of `endpoints`, over the network `links`.
-    /// `dial_params` gives each dialled session its parameters.
+    /// `dial_params` gives each dialled session its parameters, and `entropy` is the node's one
+    /// source, which every session it dials draws its handshake's secrets from.
     ///
     /// The node's observer is every session's, so it is held to one snapshot of the session
     /// limits: the `limits` of the parameters `dial_params` gives, which it is asked for once
@@ -87,6 +91,7 @@ where
         endpoints: &'static dyn EndpointSource,
         timeouts: SessionTimeouts,
         mut dial_params: P,
+        entropy: SessionEntropy,
     ) -> Self {
         // A snapshot of no byte has one value, the build's: a build whose every limit is one value
         // asks the parameters nothing.
@@ -100,7 +105,7 @@ where
         let on_event: DialSink<C> = Box::new(move |actions| {
             Box::new(dispatch_to(dial_observer.clone(), actions.clone())) as EventSink
         });
-        let dialer = UdpDialer::new(local, links, timeouts, dial_params, on_event);
+        let dialer = UdpDialer::new(local, links, timeouts, dial_params, on_event, entropy);
         Self {
             observer,
             manager: ConnectManager::new(endpoints, dialer),
@@ -168,15 +173,15 @@ where
     /// Send each established session the declarations it has not heard, and forget the sessions
     /// that are gone. A declaration that cannot be sent now is tried again at the next tick.
     fn declare_on_new_sessions(&mut self) {
-        let live: Vec<&Rc<McuActions<C>>> =
+        let live: Vec<&SessionHandle<C>> =
             self.manager.sessions().map(|(_, s)| s.actions()).collect();
         self.declared
-            .retain(|(done, _)| live.iter().any(|a| Rc::as_ptr(a) == *done));
+            .retain(|(done, _)| live.iter().any(|a| CellRc::as_ptr(a) == *done));
         for actions in live {
             if !actions.is_established() {
                 continue;
             }
-            let key = Rc::as_ptr(actions);
+            let key = CellRc::as_ptr(actions);
             let row = match self.declared.iter().position(|(done, _)| *done == key) {
                 Some(row) => row,
                 None => {
@@ -204,10 +209,10 @@ fn declare_one<C: ClockSource + 'static>(
         return false;
     };
     match declaration {
-        Declaration::Queryable(key) => actions
-            .send_declare_queryable(id, 0, Some(key), false)
-            .is_ok(),
-        Declaration::Subscriber(key) => actions.send_declare_subscriber(id, 0, Some(key)).is_ok(),
+        Declaration::Queryable(key) => NamedKey::literal(key)
+            .is_some_and(|key| actions.send_declare_queryable(id, key, false).is_ok()),
+        Declaration::Subscriber(key) => NamedKey::literal(key)
+            .is_some_and(|key| actions.send_declare_subscriber(id, key).is_ok()),
     }
 }
 
@@ -334,14 +339,14 @@ mod tests {
         } = far_links
             .open_acceptor(7447)
             .expect("bind the router's end");
-        let far_actions =
-            new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime), Counting(9));
+        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime));
         let seen = Rc::new(Seen::default());
         let router_sees = seen.clone();
         let _far = spawn_session(
             &local,
             far_pump,
             far_actions.clone(),
+            SessionEntropy::new(Counting(9)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -390,6 +395,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb1),
+            SessionEntropy::new(Counting(2)),
         );
         let settle = |node: &mut ClientNode<'_, _, _, _>| {
             for _ in 0..64 {
@@ -495,6 +501,7 @@ mod tests {
                 limits: stated,
                 ..params(0xb1)
             },
+            SessionEntropy::new(Counting(2)),
         );
         node.subscriber("test/a", sink()).expect("under the quota");
         node.subscriber("test/b", sink()).expect("under the quota");
@@ -521,6 +528,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb2),
+            SessionEntropy::new(Counting(2)),
         );
         for key in ["test/a", "test/b", "test/c"] {
             control

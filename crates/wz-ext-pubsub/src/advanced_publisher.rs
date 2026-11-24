@@ -233,7 +233,7 @@ impl WireQos {
     /// folds in this file already record paying for: an ungated call compiles
     /// under this crate's default features and breaks the `wz` facade's
     /// `--features ext-pubsub-advanced-publisher` build.
-    fn apply(&self, opts: PublishOptions) -> PublishOptions {
+    fn apply<'a>(&self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
         let opts = opts
             .with_locality(self.allowed_destination)
             .with_reliability(self.reliability);
@@ -486,7 +486,7 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     fn declare_publisher(
         &self,
         keyexpr: &str,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> Result<DeclaredPublisher<Self::Publisher>, AdvancedPublisherError>;
 
     /// Declare the cache queryable on the `@adv` key, answering out of `store`.
@@ -1068,7 +1068,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         }
         #[cfg(feature = "pubsub-attachment")]
         if let Some(att) = &options.attachment {
-            opts = opts.with_attachment(att.clone());
+            opts = opts.with_attachment(att);
         }
         let written = match &payload {
             SamplePayload::Bytes(bytes) => {
@@ -1330,7 +1330,7 @@ fn emit_heartbeat<P: AdvancedPublisherPlane>(
 /// nothing either way, so the ungated path is already correct for it — which is
 /// why the gate costs this function no correctness, only the ability to ask.
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-pub fn heartbeat_publish_options(sporadic: bool) -> PublishOptions {
+pub fn heartbeat_publish_options(sporadic: bool) -> PublishOptions<'static> {
     let opts = PublishOptions::put();
     #[cfg(feature = "pubsub-qos")]
     if sporadic {

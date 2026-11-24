@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
-use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
+use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::face::FaceEventKind;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -253,7 +253,7 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
                 None,
                 &mut || {
                     let replies = Arc::clone(&replies);
-                    Box::new(move |reply: &dyn ReplyView| {
+                    wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         if reply.kind() == ReplyKind::Put {
                             replies
                                 .lock()
@@ -421,13 +421,10 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
                 "wz/port/live/**",
                 WireKey::literal(),
                 history,
-                Arc::new(move || {
-                    let sink = Arc::clone(&sink);
-                    Box::new(move |sample| {
-                        sink.lock()
-                            .unwrap()
-                            .push((sample.kind, sample.keyexpr.to_owned()));
-                    })
+                wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                    sink.lock()
+                        .unwrap()
+                        .push((sample.kind, sample.keyexpr.to_owned()));
                 }),
             )
             .expect("a node has liveliness subscriptions");
@@ -523,7 +520,7 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
             .liveliness_get_on_wire(key, &WireKey::literal(), 0, None, &mut || {
                 let keys = Arc::clone(&keys);
                 let end = Ended(Arc::clone(&ended));
-                Box::new(move |reply: &dyn ReplyView| {
+                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     let _ = &end;
                     if reply.kind() == ReplyKind::Put {
                         keys.lock().unwrap().push(reply.keyexpr().to_owned());
@@ -593,7 +590,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_| {})),
+            wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
         .expect("a node with ids left declares");
     assert!(
@@ -641,7 +638,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_| {})),
+            wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
         .expect("a node with ids left declares");
     assert!(eventually(|| {
@@ -835,7 +832,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         assert_eq!(
             engine.get_on_wire(key, &WireKey::literal(), &stated, None, &mut || {
                 legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
+                wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {})
             }),
             Err(Refusal::NotHonoured(named)),
             "a get that states {named:?} is refused by that statement and asks no link"
@@ -848,14 +845,13 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             &WireKey::literal(),
             &QueryOptions::default(),
             None,
-            &mut || Box::new(|_: &dyn ReplyView| {})
+            &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {})
         ),
         Ok(1),
         "a get that states no set is the node's one leg"
     );
 
-    let sink: SubscriberSink =
-        Arc::new(|| Box::new(|_: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>);
+    let sink = || SubscriberSink::shared(|_: &dyn SampleView| {});
     assert_eq!(
         engine.declare_subscriber_on_link_set(
             key,
@@ -863,7 +859,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             Locality::Any,
             one,
             None,
-            sink.clone()
+            sink()
         ),
         Err(Refusal::NotHonoured(StatementNotHonoured::Links)),
         "a limited subscriber"
@@ -875,7 +871,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             Locality::Any,
             LinkRestriction::Any,
             None,
-            sink,
+            sink(),
         )
         .expect("no set is never refused, and a node has an id for a subscriber");
     engine.undeclare_subscriber(taken);
@@ -948,17 +944,14 @@ mod shared_memory {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(move || {
-                let sink = Arc::clone(&sink);
-                Box::new(move |sample: &dyn SampleView| {
-                    let shared = sample
-                        .payload_shared()
-                        .and_then(|bytes| bytes.shm_chunk())
-                        .is_some();
-                    sink.lock()
-                        .unwrap()
-                        .push((sample.payload().to_vec(), shared));
-                })
+            wz_capi_port::SubscriberSink::shared(move |sample: &dyn SampleView| {
+                let shared = sample
+                    .payload_shared()
+                    .and_then(|bytes| bytes.shm_chunk())
+                    .is_some();
+                sink.lock()
+                    .unwrap()
+                    .push((sample.payload().to_vec(), shared));
             }),
         );
         (got, id.expect("a node with ids left declares"))
@@ -1118,7 +1111,7 @@ mod shared_memory {
                     &QueryOptions::default(),
                     value.send_handle(),
                     None,
-                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                    &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {}),
                 ),
                 Ok(1),
                 "a node asks with a chunk on one leg"
@@ -1171,7 +1164,7 @@ mod shared_memory {
                     &QueryOptions::default(),
                     value.send_handle(),
                     None,
-                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                    &mut || wz_capi_port::ReplyCallback::shared(|_: &dyn ReplyView| {}),
                 )
                 .expect("a client asks with a chunk");
         });
@@ -1247,7 +1240,7 @@ mod shared_memory {
                     None,
                     &mut || {
                         let sink = Arc::clone(&sink);
-                        Box::new(move |reply: &dyn ReplyView| {
+                        wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                             if reply.kind() == ReplyKind::Put {
                                 let shared = reply
                                     .payload_shared()
@@ -1284,7 +1277,7 @@ mod shared_memory {
                 None,
                 &mut || {
                     let sink = Arc::clone(&sink);
-                    Box::new(move |reply: &dyn ReplyView| {
+                    wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         if reply.kind() == ReplyKind::Put {
                             let shared = reply
                                 .payload_shared()

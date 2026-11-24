@@ -32,7 +32,16 @@ pub(crate) fn config_keys(scheme: &str) -> Option<&'static [&'static str]> {
 
 /// The scheme an endpoint's text opens with, empty when it names none.
 pub(crate) fn scheme_of(endpoint: &str) -> &str {
-    endpoint.split_once('/').map_or("", |(scheme, _)| scheme)
+    cut(endpoint, b'/').map_or("", |(scheme, _)| scheme)
+}
+
+/// `text` cut at its first `separator`, an ASCII byte, which neither half keeps; `None` when
+/// `text` has none. Every separator of an endpoint's text is ASCII, so the text is read a byte at
+/// a time and not searched for a character's encoding, as `str::split_once` searches it.
+fn cut(text: &str, separator: u8) -> Option<(&str, &str)> {
+    let at = text.bytes().position(|byte| byte == separator)?;
+    let (head, tail) = text.split_at_checked(at)?;
+    Some((head, tail.get(1..)?))
 }
 
 /// An endpoint as pico reads it with a link's `keys`: views into the endpoint's own text.
@@ -49,12 +58,27 @@ pub(crate) struct PicoEndpoint<'a> {
 impl<'a> PicoEndpoint<'a> {
     /// Read `endpoint` as pico's link of `keys` reads it.
     pub(crate) fn read(endpoint: &'a str, keys: &'static [&'static str]) -> Self {
-        let (locator, config) = endpoint.split_once('#').unwrap_or((endpoint, ""));
-        let locator = locator.split_once('?').map_or(locator, |(bare, _)| bare);
+        let (locator, config) = cut(endpoint, b'#').unwrap_or((endpoint, ""));
+        let locator = cut(locator, b'?').map_or(locator, |(bare, _)| bare);
         let mut values = [None; MAX_KEYS];
         let mut malformed = false;
-        for pair in config.split(';').filter(|pair| !pair.is_empty()) {
-            let Some((key, value)) = pair.split_once('=') else {
+        // The pairs between the `;`, an empty one skipped.
+        let mut rest = Some(config);
+        while let Some(text) = rest {
+            let pair = match cut(text, b';') {
+                Some((pair, after)) => {
+                    rest = Some(after);
+                    pair
+                }
+                None => {
+                    rest = None;
+                    text
+                }
+            };
+            if pair.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = cut(pair, b'=') else {
                 malformed = true;
                 break;
             };
@@ -91,7 +115,7 @@ impl<'a> PicoEndpoint<'a> {
 
     /// Hands `put` the text pico keeps of the endpoint, piece by piece: the locator, then, when
     /// a pair is kept, `separator` and the pairs, `key=value`, joined by `;`.
-    pub(crate) fn write_text(&self, separator: &str, mut put: impl FnMut(&str)) {
+    fn write_text(&self, separator: &str, mut put: impl FnMut(&str)) {
         put(self.locator);
         let mut before = separator;
         for (key, value) in self.pairs() {
@@ -103,73 +127,69 @@ impl<'a> PicoEndpoint<'a> {
         }
     }
 
-    /// Writes the text pico keeps of the endpoint ([`Self::write_text`]) to the start of
-    /// `out` and gives its length. A text longer than `out` is refused with pico's
-    /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its reading of a config answers when it has no memory
-    /// to hold a value in (`vendor/zenoh-pico/src/protocol/config.c` @
-    /// `ret = _Z_ERR_SYSTEM_OUT_OF_MEMORY;`), and nothing of it is cut short.
-    #[cfg(not(feature = "engine-tokio"))]
-    pub(crate) fn write_into(
-        &self,
-        separator: &str,
-        out: &mut [u8],
-    ) -> Result<usize, crate::result::ZResult> {
+    /// The bytes of the text pico keeps of the endpoint ([`Self::write_text`]).
+    pub(crate) fn text_len(&self, separator: &str) -> usize {
         let mut len = 0usize;
-        let mut fits = true;
-        self.write_text(separator, |piece| {
-            let end = len.saturating_add(piece.len());
-            match out.get_mut(len..end) {
-                Some(room) if fits => {
-                    room.copy_from_slice(piece.as_bytes());
-                    len = end;
-                }
-                _ => fits = false,
-            }
-        });
-        if fits {
-            Ok(len)
-        } else {
-            Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
-        }
+        self.write_text(separator, |piece| len = len.saturating_add(piece.len()));
+        len
+    }
+
+    /// The text pico keeps of the endpoint ([`Self::write_text`]), made once at its length: the
+    /// one copy of it its holder keeps.
+    #[cfg(feature = "connectivity")]
+    pub(crate) fn text(&self, separator: &str) -> alloc::string::String {
+        let mut text = alloc::string::String::with_capacity(self.text_len(separator));
+        self.write_text(separator, |piece| text.push_str(piece));
+        text
     }
 }
 
-/// Reads a unicast endpoint the program wrote, in place, as pico reads it, for a session of the
+/// Whether a unicast endpoint the program wrote can be handed to a session of the cooperative
+/// engine as pico reads it ([`with_engine_text`]): a malformed config is refused with pico's
+/// `_Z_ERR_CONFIG_INVALID_VALUE`, and a kept text past the build's `MAX_LOCATOR_LEN`, the bound
+/// every locator text of a session is held to, with pico's `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, what its
+/// reading of a config answers when it has no memory to hold a value in
+/// (`vendor/zenoh-pico/src/protocol/config.c` @ `ret = _Z_ERR_SYSTEM_OUT_OF_MEMORY;`). Judged
+/// over the text where it lies, before anything is opened; nothing is written.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZResult> {
+    let Some(keys) = config_keys(scheme_of(endpoint)) else {
+        return Ok(());
+    };
+    let read = PicoEndpoint::read(endpoint, keys);
+    if read.is_malformed() {
+        return Err(crate::result::Z_ERR_CONFIG_INVALID_VALUE);
+    }
+    if read.text_len("#") > wz_session_core::caps::MAX_LOCATOR_LEN {
+        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    }
+    Ok(())
+}
+
+/// `use_text` handed a unicast endpoint the program wrote as pico reads it, for a session of the
 /// cooperative engine to dial or listen on: what pico's link reads stays for the engine, which
 /// carries it out or refuses it; the metadata and the config keys past the first one pico's link
 /// does not know are left out, as pico leaves them, so `tcp/127.0.0.1:7447#iface=lo` is dialled as
 /// `tcp/127.0.0.1:7447`, which pico's TCP link binds to no interface either. A scheme whose
-/// config this ABI does not read goes on as written. A malformed config is refused with pico's
-/// `_Z_ERR_CONFIG_INVALID_VALUE`.
+/// config this ABI does not read goes on as written.
 ///
-/// The text kept is made in a buffer of the build's `MAX_LOCATOR_LEN`, the bound every locator
-/// text of a session is held to, and written back over the endpoint, which it is never longer
-/// than, so the open grows nothing; a kept text past the bound is refused
-/// ([`PicoEndpoint::write_into`]).
-// Its buffer stays out of the frame of the open, which the open's handshake runs under.
+/// The text is made in a locator text of the stack, the form of the row the engine writes it
+/// into, so no text of an endpoint is a value of the heap. One [`checked_endpoint`] refused is
+/// handed over as written, for the engine to refuse by name.
 #[cfg(not(feature = "engine-tokio"))]
-#[inline(never)]
-pub(crate) fn engine_endpoint(
-    endpoint: &mut alloc::string::String,
-) -> Result<(), crate::result::ZResult> {
-    let Some(keys) = config_keys(scheme_of(endpoint.as_str())) else {
-        return Ok(());
+pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
+    let Some(keys) = config_keys(scheme_of(endpoint)) else {
+        return use_text(endpoint);
     };
-    let read = PicoEndpoint::read(endpoint.as_str(), keys);
-    if read.is_malformed() {
-        return Err(crate::result::Z_ERR_CONFIG_INVALID_VALUE);
+    let read = PicoEndpoint::read(endpoint, keys);
+    let mut kept = wz_session_core::locator_directory::LocatorText::new();
+    let mut fits = !read.is_malformed();
+    read.write_text("#", |piece| fits = fits && kept.push_str(piece).is_ok());
+    if fits {
+        use_text(kept.as_str())
+    } else {
+        use_text(endpoint)
     }
-    let mut kept = [0u8; wz_session_core::caps::MAX_LOCATOR_LEN];
-    let len = read.write_into("#", &mut kept)?;
-    // The pieces are the endpoint's own text cut at ASCII bytes, and keys of ASCII: the text is
-    // whole.
-    let kept = kept
-        .get(..len)
-        .and_then(|kept| core::str::from_utf8(kept).ok())
-        .ok_or(crate::result::Z_ERR_CONFIG_INVALID_VALUE)?;
-    endpoint.clear();
-    endpoint.push_str(kept);
-    Ok(())
 }
 
 #[cfg(all(test, not(feature = "engine-tokio")))]
@@ -181,8 +201,8 @@ mod tests {
 
     /// The endpoint the engine is handed for `written`.
     fn dialled(written: &str) -> Result<String, ZResult> {
-        let mut endpoint = written.to_owned();
-        engine_endpoint(&mut endpoint).map(|()| endpoint)
+        checked_endpoint(written)?;
+        Ok(with_engine_text(written, |text: &str| String::from(text)))
     }
 
     /// A TCP endpoint keeps what pico's TCP link reads and loses what it does not: an interface
@@ -230,22 +250,20 @@ mod tests {
         );
     }
 
-    /// The kept text fills a buffer of its own length and is refused by one a byte shorter; the
-    /// engine's endpoint is held to the build's `MAX_LOCATOR_LEN` the same way, measured on what
-    /// pico keeps and not on what was written.
+    /// The kept text is made at its own length; the engine's endpoint is held to the build's
+    /// `MAX_LOCATOR_LEN`, measured on what pico keeps and not on what was written, a text at the
+    /// bound taken and one a byte past it refused.
     #[test]
     fn a_kept_text_past_its_room_is_refused() {
         let keys = config_keys("udp").unwrap();
         let read = PicoEndpoint::read("udp/127.0.0.1:9000#tout=5;iface=lo", keys);
         let kept = "udp/127.0.0.1:9000#iface=lo;tout=5";
-        let mut room = [0u8; 34];
-        assert_eq!(kept.len(), room.len());
-        assert_eq!(read.write_into("#", &mut room), Ok(kept.len()));
-        assert_eq!(room.as_slice(), kept.as_bytes());
-        let mut short = [0u8; 33];
+        assert_eq!(read.text_len("#"), kept.len());
         assert_eq!(
-            read.write_into("#", &mut short),
-            Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
+            with_engine_text("udp/127.0.0.1:9000#tout=5;iface=lo", |text: &str| {
+                String::from(text)
+            }),
+            kept
         );
 
         let host = "h".repeat(MAX_LOCATOR_LEN - "tcp/:9000".len());
@@ -259,6 +277,25 @@ mod tests {
         assert_eq!(
             dialled(&format!("tcp/{host}h:9000")),
             Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+    }
+
+    /// An endpoint's text is cut at the first of each separator: the metadata goes, an empty pair
+    /// is skipped, a value keeps an `=` of its own, and a text with no scheme names none.
+    #[test]
+    fn an_endpoint_is_cut_at_its_first_separators() {
+        assert_eq!(cut("a#b#c", b'#'), Some(("a", "b#c")));
+        assert_eq!(cut("#", b'#'), Some(("", "")));
+        assert_eq!(cut("abc", b'#'), None);
+        assert_eq!(scheme_of("tcp/127.0.0.1:9000"), "tcp");
+        assert_eq!(scheme_of("no-scheme"), "");
+        assert_eq!(
+            dialled("udp/127.0.0.1:9000?rel=1#;;iface=lo;").as_deref(),
+            Ok("udp/127.0.0.1:9000#iface=lo")
+        );
+        assert_eq!(
+            dialled("tcp/127.0.0.1:9000#tout=5=6").as_deref(),
+            Ok("tcp/127.0.0.1:9000#tout=5=6")
         );
     }
 

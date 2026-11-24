@@ -112,8 +112,10 @@ DEBT_PLACEHOLDER = "debt-TBD"
 # A row is the reading's allocations a round rounded UP to three places, so the ceiling never
 # sits under the reading it was set from.
 PLACES = 1000
-# One family of the test's `FAMILIES` table: `("<name>", Round::<round>, Part::<part>)`.
-DECLARED_FAMILY = re.compile(r'^\s*\("([^"]+)",\s*Round::\w+,\s*Part::\w+\),?\s*$', re.M)
+# One family of the test's `FAMILIES` table: `("<name>", Round::<round>, Part::<part>)`, on one
+# line or spread over several as rustfmt writes an entry too wide for one, with its trailing comma.
+DECLARED_FAMILY = re.compile(
+    r'^\s*\(\s*"([^"]+)",\s*Round::\w+,\s*Part::\w+,?\s*\),?\s*$', re.M)
 LAYER = "C1nh"
 
 
@@ -644,6 +646,14 @@ def selftest() -> int:
     extra = declared(base, test_text.replace("];", '    ("e2e", Round::E2e, Part::All),\n];'))
     assert any("has no row" in f for f in extra), extra
     assert any("declares no family" in f for f in declared(base, "nothing here")), "no family read"
+    cases += 1
+
+    # An entry rustfmt spreads over several lines is read as one on a line is.
+    spread = test_text.replace('    ("get", Round::Get, Part::Calling),\n',
+                               '    (\n        "get",\n        Round::Get,\n        Part::Calling,\n'
+                               '    ),\n')
+    assert declared_families(spread) == ["put-small", "get"], declared_families(spread)
+    assert declared(base, spread) == [], declared(base, spread)
     cases += 1
 
     print(f"no_heap_ratchet_gate selftest: {cases} cases pass")

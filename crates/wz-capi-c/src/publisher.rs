@@ -374,7 +374,7 @@ pub(crate) struct PublisherState {
     /// that mutates its options struct after declaring changes nothing — and
     /// the `encoding` field is `z_moved_encoding_t*`, i.e. CONSUMED at declare,
     /// so reading it again per put would be reading a moved value.
-    base: PublishOptions,
+    base: PublishOptions<'static>,
     /// What a Put on this publisher is sent from when it is plain (no encoding, attachment,
     /// timestamp or source of its own, which `base` has none of), worked out once from `base`:
     /// a put that brings no options of its own is then sent without cloning `base` and reading
@@ -447,7 +447,7 @@ impl PublisherState {
 /// it. The one-local-delivery-per-session fan split lives in
 /// `wz_capi_core::faces::SharedSession::publish_all`, so the per-face replica
 /// count is no longer this function's problem.
-pub(crate) fn publisher_put_options() -> PublishOptions {
+pub(crate) fn publisher_put_options() -> PublishOptions<'static> {
     PublishOptions::put()
         .with_locality(Locality::Any)
         .with_priority(priority_from_c(Z_PRIORITY_DATA))
@@ -467,7 +467,7 @@ pub(crate) fn publisher_put_options() -> PublishOptions {
 /// field is null or a valid moved encoding.
 pub(crate) unsafe fn resolve_publisher_options(
     options: *mut z_publisher_options_t,
-) -> PublishOptions {
+) -> PublishOptions<'static> {
     let base = publisher_put_options();
     if options.is_null() {
         return base;
@@ -564,22 +564,23 @@ impl PutOverrides {
     /// Per-put encoding OVERRIDES the publisher's default (upstream's
     /// `PutBuilder::encoding` wins over `PublisherBuilder::encoding`); an
     /// absent one leaves the publisher's in place. The attachment is per-put
-    /// only — `z_publisher_options_t` carries no attachment field.
-    fn apply(self, base: PublishOptions) -> PublishOptions {
-        let with_encoding = match self.encoding {
-            Some(hint) => base.with_encoding(hint),
+    /// only — `z_publisher_options_t` carries no attachment field, and is borrowed from these
+    /// overrides for as long as the publish runs.
+    fn apply<'a>(&'a self, base: PublishOptions<'a>) -> PublishOptions<'a> {
+        let with_encoding = match &self.encoding {
+            Some(hint) => base.with_encoding_lent(hint),
             None => base,
         };
-        let with_attachment = match self.attachment {
+        let with_attachment = match self.attachment.as_deref() {
             Some(blob) => with_encoding.with_attachment(blob),
             None => with_encoding,
         };
-        let with_source_info = match self.source_info {
-            Some(info) => with_attachment.with_source_info(info),
+        let with_source_info = match &self.source_info {
+            Some(info) => with_attachment.with_source_info(info.clone()),
             None => with_attachment,
         };
-        match self.timestamp {
-            Some(hint) => with_source_info.with_timestamp(hint),
+        match &self.timestamp {
+            Some(hint) => with_source_info.with_timestamp(hint.clone()),
             None => with_source_info,
         }
     }
@@ -608,7 +609,7 @@ pub(crate) struct NodePublisher {
     zid: [u8; 16],
     keyexpr: KeyexprState,
     loaned_keyexpr: z_loaned_keyexpr_t,
-    base: PublishOptions,
+    base: PublishOptions<'static>,
     /// The id of the interest the publisher declared on the node's data plane, which tells the
     /// publisher's node the subscribers beyond its router: what its matching reads.
     interest: u64,
@@ -909,9 +910,9 @@ pub(crate) unsafe fn declare_publisher_stated(
                 wz_capi_core::faces::FilterPlane::Subscribers,
                 keyexpr.clone(),
                 &wz_capi_core::faces::WireKey::literal(),
-                Some(wz_session_core::declare_form::InterestForm {
+                Some(wz_session_core::declare_form::InterestAsk {
                     mapping_id: 0,
-                    suffix: Some(keyexpr.clone()),
+                    suffix: Some(keyexpr.as_str()),
                     aggregate: false,
                 }),
                 base.allowed_destination.allows_local(),
@@ -1379,14 +1380,16 @@ mod put_timestamp_tests {
         opts.timestamp = &ts as *const _ as *const c_void;
         // SAFETY: a live struct whose owned fields are null and whose timestamp
         // borrows `ts`, which outlives the call.
-        let stamped = unsafe { PutOverrides::take(&mut opts) }.apply(publisher_put_options());
+        let stamped_overrides = unsafe { PutOverrides::take(&mut opts) };
+        let stamped = stamped_overrides.apply(publisher_put_options());
         let hint = stamped.timestamp.expect("the per-put timestamp is carried");
         assert_eq!(hint.time, 0x0123_4567_89AB_CDEF);
         assert_eq!(hint.zid, vec![0xA1, 0xB2, 0xC3]);
 
         opts.timestamp = std::ptr::null();
         // SAFETY: as above, with a null timestamp.
-        let unstamped = unsafe { PutOverrides::take(&mut opts) }.apply(publisher_put_options());
+        let unstamped_overrides = unsafe { PutOverrides::take(&mut opts) };
+        let unstamped = unstamped_overrides.apply(publisher_put_options());
         assert!(
             unstamped.timestamp.is_none(),
             "null is upstream's unstamped"

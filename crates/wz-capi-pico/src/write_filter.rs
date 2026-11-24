@@ -51,7 +51,7 @@ use wz_capi_port::os::Mutex;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
 use crate::ffi::{LatchList, ReleaseLatch};
@@ -159,7 +159,7 @@ impl WriteFilter {
         count_local: bool,
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
-        let ask = interest_form(&shared, session.mode, key, wire);
+        let ask = interest_ask(&shared, session.mode, key, wire);
         let keyexpr = key.share_text();
         let id = shared
             .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
@@ -205,25 +205,39 @@ impl WriteFilter {
         self.shared.write_filter_active(self.id)
     }
 
-    /// Whether the filter keeps a put, a delete or a get from being sent: [`Self::active`],
-    /// unless the session holds a multicast group, where pico sends whatever the filter says
-    /// (the engine's `write_filter_holds_back`). A matching status still reads
-    /// [`Self::active`].
+    /// Whether the filter keeps a get from being sent: [`Self::active`], unless the session
+    /// holds a multicast group, where pico sends whatever the filter says (the engine's
+    /// `write_filter_holds_back`). A matching status still reads [`Self::active`]; a put and
+    /// a delete are judged by the engine in the step that sends them ([`Self::publish`]).
+    #[cfg(feature = "query")]
     pub(crate) fn holds_back(&self) -> bool {
         self.shared.write_filter_holds_back(self.id)
     }
 
-    /// [`Self::active`] followed by a plain put on a declared key, in one step of the
-    /// registry (the engine's `put_plain_filtered`).
-    pub(crate) fn put_plain(
+    /// State how a write of this filter's entity that brings nothing of its own goes the plain
+    /// way, once, at the entity's declare: the filter's row in the engine keeps it.
+    pub(crate) fn keep_plain(
+        &self,
+        plain: Option<(
+            wz_session_core::publish_options::PlainPutParams,
+            wz_session_core::wire_id::ExprId,
+        )>,
+    ) {
+        self.shared.keep_write_filter_plain(self.id, plain);
+    }
+
+    /// A put or a delete of the entity this filter is for, unless the filter holds it back: the
+    /// engine's one entry for it (`publish_filtered`). A write with no options of its own goes
+    /// the plain way the row keeps ([`Self::keep_plain`]), or comes back `NotPlain`.
+    pub(crate) fn publish(
         &self,
         keyexpr: &str,
-        mapping_id: wz_session_core::wire_id::ExprId,
+        wire: &WireKey,
         payload: &[u8],
-        params: &wz_session_core::publish_options::PlainPutParams,
+        opts: Option<&wz_session_core::publish_options::PublishOptions>,
     ) -> FilteredPut {
         self.shared
-            .put_plain_filtered(self.id, keyexpr, mapping_id, payload, params)
+            .publish_filtered(self.id, keyexpr, wire, payload, opts)
     }
 }
 
@@ -245,23 +259,23 @@ impl Drop for WriteFilter {
 }
 
 /// How the entity's Interest is put, or `None` for none — pico's rules, see the
-/// module doc.
-fn interest_form(
+/// module doc. The key is lent from the entity's own declaration and wire form.
+fn interest_ask<'a>(
     shared: &Arc<Engine>,
     mode: WhatAmI,
-    key: &DeclaredKeyexpr,
-    wire: &WireKey,
-) -> Option<InterestForm> {
+    key: &'a DeclaredKeyexpr,
+    wire: &'a WireKey,
+) -> Option<InterestAsk<'a>> {
     let client = mode == WhatAmI::Client;
     if !client && !shared.has_router_peer() {
         return None;
     }
     let (mapping_id, suffix) = if wire.mapping_id == 0 {
-        (0, Some(key.literal().to_owned()))
+        (0, Some(key.literal()))
     } else {
-        (wire.mapping_id, wire.suffix.clone())
+        (wire.mapping_id, wire.suffix.as_deref())
     };
-    Some(InterestForm {
+    Some(InterestAsk {
         mapping_id,
         suffix,
         aggregate: client,

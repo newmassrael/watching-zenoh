@@ -256,15 +256,15 @@ impl Block {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.contents().add(at), bytes.len());
     }
 
-    /// Another holder of the block.
-    fn share(&self) -> Self {
+    /// Another holder of the block; `None` when its holders are past half the address space, a
+    /// share leaked in a loop, which `Arc` aborts the process for and a payload is refused for.
+    fn share(&self) -> Option<Self> {
         let before = self.head().refs.fetch_add(1, Ordering::Relaxed);
-        // As `Arc` does: a count past half the address space is a share leaked in a loop.
-        assert!(
-            before <= isize::MAX as usize,
-            "a payload's block is shared past any count"
-        );
-        Self { head: self.head }
+        if before > isize::MAX as usize {
+            self.head().refs.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Self { head: self.head })
     }
 
     /// Whether this is the block's one holder.
@@ -452,7 +452,7 @@ impl ByteBuf {
     pub(crate) fn try_clone(&self) -> Result<Self, NoRoom> {
         let backing = match &self.backing {
             Store::Empty => Store::Empty,
-            Store::Shared(block) => Store::Shared(block.share()),
+            Store::Shared(block) => Store::Shared(block.share().ok_or(NoRoom)?),
             Store::Lent(_) => Self::copy_of(self.as_slice())?.backing,
         };
         Ok(Self {
@@ -612,13 +612,30 @@ unsafe fn payload_over(
     if let Some(block) = block {
         if start == block.span().0 && len <= filled {
             return Ok(ByteBuf {
-                backing: Store::Shared(block.share()),
+                backing: Store::Shared(block.share().ok_or(NoRoom)?),
                 len,
                 bounds: Vec::new(),
             });
         }
     }
     ByteBuf::copy_of(crate::abi::view_bytes(start, len).unwrap_or(&[]))
+}
+
+/// Put in `bytes` the payload [`payload_over`] makes of a moved slice's or string's state: one
+/// body, out of line, for `z_bytes_from_slice` and `z_bytes_from_string`, which differ only in
+/// the type of the state they read and the drop they owe it.
+///
+/// # Safety
+/// `bytes` is valid and writable, and the rest is as [`payload_over`] asks.
+#[inline(never)]
+unsafe fn store_payload_over(
+    bytes: *mut z_owned_bytes_t,
+    block: Option<&Block>,
+    filled: usize,
+    start: *const u8,
+    len: usize,
+) -> ZResult {
+    store_bytes(bytes, payload_over(block, filled, start, len))
 }
 
 /// The terminator an empty owned string's view points at, so its data is a C string with no block.
@@ -676,17 +693,19 @@ impl SliceState {
         }))
     }
 
-    /// This slice as a payload that SHARES its block.
-    fn shared_payload(&self) -> Result<ByteBuf, NoRoom> {
-        // SAFETY: `self_view` is this state's own view.
-        unsafe {
-            payload_over(
-                self.backing.as_ref(),
-                self.filled,
-                self.self_view._start,
-                self.self_view._len,
-            )
-        }
+    /// Put in `bytes` this slice as a payload that SHARES its block.
+    ///
+    /// # Safety
+    /// `bytes` is valid and writable.
+    unsafe fn store_shared(&self, bytes: *mut z_owned_bytes_t) -> ZResult {
+        // `self_view` is this state's own view.
+        store_payload_over(
+            bytes,
+            self.backing.as_ref(),
+            self.filled,
+            self.self_view._start,
+            self.self_view._len,
+        )
     }
 }
 
@@ -748,17 +767,19 @@ impl StringState {
         }))
     }
 
-    /// This string as a payload that SHARES its block, minus the terminator.
-    fn shared_payload(&self) -> Result<ByteBuf, NoRoom> {
-        // SAFETY: `self_view` is this state's own view.
-        unsafe {
-            payload_over(
-                self.backing.as_ref(),
-                self.filled,
-                self.self_view._start,
-                self.self_view._len,
-            )
-        }
+    /// Put in `bytes` this string as a payload that SHARES its block, minus the terminator.
+    ///
+    /// # Safety
+    /// `bytes` is valid and writable.
+    unsafe fn store_shared(&self, bytes: *mut z_owned_bytes_t) -> ZResult {
+        // `self_view` is this state's own view.
+        store_payload_over(
+            bytes,
+            self.backing.as_ref(),
+            self.filled,
+            self.self_view._start,
+            self.self_view._len,
+        )
     }
 }
 
@@ -1199,7 +1220,7 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
         let len = CStr::from_ptr(value).to_bytes().len();
         store_aliased_payload(
             bytes,
-            value as *const u8,
+            value.cast::<u8>(),
             len,
             Release::new(None, core::ptr::null_mut(), core::ptr::null_mut()),
         )
@@ -1347,7 +1368,7 @@ pub unsafe extern "C" fn z_string_data(string: *const z_loaned_string_t) -> *con
         if string.is_null() {
             core::ptr::null()
         } else {
-            (*string)._start as *const c_char
+            (*string)._start.cast::<c_char>()
         }
     })
 }
@@ -1663,12 +1684,10 @@ pub unsafe extern "C" fn z_bytes_from_slice(
             Z_ERR_NULL
         } else {
             match handle_ref::<z_owned_slice_t, SliceState>(&(*slice)._this) {
-                Some(state) => {
-                    // The payload takes over the slice's storage rather than
-                    // copying it (pico moves the allocation), so its address is
-                    // the slice's and an aliased slice's deleter waits for it.
-                    store_bytes(bytes, state.shared_payload())
-                }
+                // The payload takes over the slice's storage rather than
+                // copying it (pico moves the allocation), so its address is
+                // the slice's and an aliased slice's deleter waits for it.
+                Some(state) => state.store_shared(bytes),
                 None => Z_ERR_NULL,
             }
         };
@@ -1720,11 +1739,9 @@ pub unsafe extern "C" fn z_bytes_from_string(
             Z_ERR_NULL
         } else {
             match handle_ref::<z_owned_string_t, StringState>(&(*s)._this) {
-                Some(state) => {
-                    // As `z_bytes_from_slice`: the string's own storage, minus
-                    // its terminator.
-                    store_bytes(bytes, state.shared_payload())
-                }
+                // As `z_bytes_from_slice`: the string's own storage, minus
+                // its terminator.
+                Some(state) => state.store_shared(bytes),
                 None => Z_ERR_NULL,
             }
         };
@@ -1952,7 +1969,7 @@ pub unsafe extern "C" fn z_string_copy_from_substr(
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
-            core::slice::from_raw_parts(value as *const u8, len)
+            core::slice::from_raw_parts(value.cast::<u8>(), len)
         };
         store_string(str_out, StringState::boxed(bytes))
     })
@@ -2018,7 +2035,7 @@ pub unsafe extern "C" fn z_view_string_from_substr(
             return Z_ERR_NULL;
         }
         *str_out = z_view_string_t {
-            _start: value as *const u8,
+            _start: value.cast::<u8>(),
             _len: len,
             _pad: [0usize; 2],
         };
@@ -2269,6 +2286,61 @@ mod block_tests {
         assert_eq!(tail.as_slice(), b"tail");
     }
 
+    /// A block whose holders are past half the address space is not shared again: the share is
+    /// refused and the count left as it was, where `Arc` would abort the process.
+    #[test]
+    fn a_block_shared_past_any_count_is_refused() {
+        let block = Block::copy_of(b"held").expect("room");
+        let past = isize::MAX as usize + 1;
+        block.head().refs.store(past, Ordering::Relaxed);
+        assert!(block.share().is_none());
+        assert_eq!(block.head().refs.load(Ordering::Relaxed), past);
+        block.head().refs.store(1, Ordering::Relaxed);
+        let shared = block.share().expect("a second holder");
+        assert_eq!(block.head().refs.load(Ordering::Relaxed), 2);
+        drop(shared);
+        assert_eq!(block.head().refs.load(Ordering::Relaxed), 1);
+    }
+
+    /// A slice and a string moved into a payload through their doors share their block: the
+    /// payload's bytes are where the state held them, a string's terminator left out.
+    #[test]
+    fn a_moved_slice_and_string_share_their_block_with_the_payload() {
+        // SAFETY: each pointer handed over points at a live value of its type, which outlives
+        // the call, and each owned value is dropped once.
+        unsafe {
+            let mut slice = z_owned_slice_t::null_value();
+            assert_eq!(
+                z_slice_copy_from_buf(&mut slice, b"slice".as_ptr(), 5),
+                Z_OK
+            );
+            let start = (*z_slice_loan(&slice))._start;
+            let mut bytes = z_owned_bytes_t::null_value();
+            assert_eq!(
+                z_bytes_from_slice(&mut bytes, z_slice_move(&mut slice)),
+                Z_OK
+            );
+            assert!(slice.handle.is_null(), "the slice is spent");
+            let payload = bytes_ref(z_bytes_loan(&bytes)).expect("a payload");
+            assert_eq!(payload.as_slice(), b"slice");
+            assert_eq!(start_of(payload), start);
+            z_bytes_drop(z_bytes_move(&mut bytes));
+
+            let mut string = z_owned_string_t::null_value();
+            assert_eq!(z_string_copy_from_str(&mut string, c"text".as_ptr()), Z_OK);
+            let start = (*z_string_loan(&string))._start;
+            assert_eq!(
+                z_bytes_from_string(&mut bytes, z_string_move(&mut string)),
+                Z_OK
+            );
+            assert!(string.handle.is_null(), "the string is spent");
+            let payload = bytes_ref(z_bytes_loan(&bytes)).expect("a payload");
+            assert_eq!(payload.as_slice(), b"text");
+            assert_eq!(start_of(payload), start);
+            z_bytes_drop(z_bytes_move(&mut bytes));
+        }
+    }
+
     /// A string moved into a payload shares its block without its terminator; an empty string is
     /// a C string with no block.
     #[test]
@@ -2277,7 +2349,16 @@ mod block_tests {
         // SAFETY: the view is the state's own, over its block's written bytes.
         let terminated = unsafe { lent_bytes(state.self_view._start, 5) };
         assert_eq!(terminated, b"text\0");
-        let payload = state.shared_payload().expect("a share takes no room");
+        // SAFETY: the view is the state's own, over its block's written bytes.
+        let payload = unsafe {
+            payload_over(
+                state.backing.as_ref(),
+                state.filled,
+                state.self_view._start,
+                state.self_view._len,
+            )
+        }
+        .expect("a share takes no room");
         assert_eq!(start_of(&payload), state.self_view._start);
         assert_eq!(payload.as_slice(), b"text");
         let empty = StringState::boxed(&[]).expect("no room is asked for");

@@ -8,13 +8,15 @@
 //! # What they hold
 //!
 //! Each kind of object has a pool of its own (`crate::object_slot::Kind`): the objects behind the
-//! owned handles (on the tokio engine its sessions, and the publishers, subscribers, queryables,
-//! liveliness tokens and liveliness subscribers, and the samples, replies, queries and payloads a
-//! program holds), and what a program makes before any session: its configs and the hellos it
-//! keeps. Beside the pools lies the payloads' area: the bytes the owned payloads, strings and
-//! slices carry, in blocks of power-of-two sizes a payload takes the smallest of that holds it, of
-//! `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative engine lies in
-//! its own arena, not here.
+//! owned handles (on the tokio engine its sessions, publishers, subscribers, queryables,
+//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries and
+//! payloads a program holds), and what a program makes before any session: its configs and the
+//! hellos it keeps. Beside the pools lies the payloads' area: the bytes the owned payloads,
+//! strings and slices carry, in blocks of power-of-two sizes a payload takes the smallest of that
+//! holds it, of `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative
+//! engine lies in its own arena, not here, and so do its entities, each in a place its open laid
+//! out under the session's own limit (`crate::object_slot::held_places`): a count of the pools'
+//! for an entity does not apply there.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -49,9 +51,9 @@
 //!
 //! Each kind of object has a pool of its own, of as many slots as its count: the pool of one kind
 //! never lends a slot to another, so each holds what was stated for it and no more, whatever
-//! another kind of the same size has free. A slot is the smallest of the slot sizes the pools are
-//! reported by that holds its object, or for an object larger than the largest of them (a config
-//! of the build's text) the object's own size. A pool with no free slot refuses the object: the
+//! another kind of the same size has free. A slot is its object's own size, rounded up to the
+//! alignment of a slot: the size classes group the pools for the reports and size no slot. A pool
+//! with no free slot refuses the object: the
 //! call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having made, declared or opened nothing, and the
 //! refusal is counted. Nothing falls back to the heap: when the build's pools cannot be reserved
 //! either, the object is refused the same way. An object let go frees its slot for the next one,
@@ -96,6 +98,10 @@ pub(crate) struct Counts {
     pub(crate) configs: usize,
     /// Hellos a program keeps (`z_hello_clone`).
     pub(crate) hellos: usize,
+    /// Queriers of each session.
+    pub(crate) queriers: usize,
+    /// Key expressions of each session a program holds declared (`z_declare_keyexpr`).
+    pub(crate) keyexprs: usize,
     /// The bytes the payloads, strings and slices carry, their blocks' heads included.
     pub(crate) payload_bytes: usize,
 }
@@ -121,17 +127,20 @@ pub(crate) const fn class_of(size: usize, align: usize) -> Option<usize> {
     None
 }
 
-/// The bytes of each slot of the pool of a `T`: the smallest size class that holds it, or past
-/// the largest class its own size rounded up to the alignment of a slot. Evaluated when the build
-/// is compiled, so an object aligned past a slot fails the build rather than a reservation.
+/// The bytes of each slot of the pool of a `T`: its own size rounded up to the alignment of a
+/// slot, and one alignment for an object of no bytes, as a free slot holds the link to the next. A
+/// kind's pool lends its slots to no other kind, so a slot larger than its object would hold
+/// nothing more. Evaluated when the build is compiled, so an object aligned past a slot fails the
+/// build rather than a reservation.
 const fn slot_size<T>() -> usize {
     let size = core::mem::size_of::<T>();
     if core::mem::align_of::<T>() > SLOT_ALIGN {
         panic!("an object of the ABI is aligned past a slot of the process pools");
     }
-    match class_of(size, 1) {
-        Some(class) => slot_bytes(class),
-        None => size.next_multiple_of(SLOT_ALIGN),
+    if size == 0 {
+        SLOT_ALIGN
+    } else {
+        size.next_multiple_of(SLOT_ALIGN)
     }
 }
 
@@ -162,6 +171,8 @@ pub(crate) struct Bounds {
     queryables: Option<usize>,
     liveliness_tokens: Option<usize>,
     liveliness_subscribers: Option<usize>,
+    queriers: Option<usize>,
+    keyexprs: Option<usize>,
 }
 
 impl Bounds {
@@ -173,47 +184,89 @@ impl Bounds {
             queryables: limits.max_queryables().most(),
             liveliness_tokens: limits.max_local_tokens().most(),
             liveliness_subscribers: limits.max_liveliness_subscriptions().most(),
+            queriers: limits.max_queriers().most(),
+            keyexprs: limits.max_declared_keyexprs().most(),
         }
     }
 }
 
+/// `?` for the planning functions, which are `const` so that the build's plan is worked out
+/// when the library is compiled ([`BUILT_PLAN`]) and `?` is not.
+macro_rules! planned {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(unplanned) => return Err(unplanned),
+        }
+    };
+}
+
+/// `each` of an entity for every one of `sessions` sessions.
+const fn per_session(each: usize, sessions: usize) -> Result<usize, Unplanned> {
+    match each.checked_mul(sessions) {
+        Some(all) => Ok(all),
+        None => Err(Unplanned::TooLarge),
+    }
+}
+
+/// How many of an entity the pools hold for `sessions` sessions: `stated` held to `bound`, the
+/// bound itself for a count left at zero. A build without the plane (`has` false) holds none,
+/// whatever its limit says.
+const fn bounded(
+    has: bool,
+    sessions: usize,
+    stated: usize,
+    bound: Option<usize>,
+) -> Result<usize, Unplanned> {
+    if !has || sessions == 0 {
+        return Ok(0);
+    }
+    let each = match (stated, bound) {
+        (0, Some(bound)) => bound,
+        (0, None) => return Err(Unplanned::Unbounded),
+        (stated, Some(bound)) => {
+            if stated < bound {
+                stated
+            } else {
+                bound
+            }
+        }
+        (stated, None) => stated,
+    };
+    per_session(each, sessions)
+}
+
 /// The objects the pools hold, for all sessions together: each count read against the bounds of
 /// the limits of a session, the entity counts times the sessions.
-pub(crate) fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplanned> {
+pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplanned> {
     let sessions = stated.sessions;
-    let per_session = |each: usize| each.checked_mul(sessions).ok_or(Unplanned::TooLarge);
-    // A build without the plane holds none of its entities, whatever its limit says.
-    let bounded = |has: bool, stated: usize, bound: Option<usize>| {
-        if !has || sessions == 0 {
-            return Ok(0);
-        }
-        let each = match (stated, bound) {
-            (0, Some(bound)) => bound,
-            (0, None) => return Err(Unplanned::Unbounded),
-            (stated, Some(bound)) => stated.min(bound),
-            (stated, None) => stated,
-        };
-        per_session(each)
-    };
     Ok(Counts {
         sessions,
-        publishers: per_session(stated.publishers)?,
-        subscribers: bounded(true, stated.subscribers, bounds.subscribers)?,
-        queryables: bounded(
+        publishers: planned!(per_session(stated.publishers, sessions)),
+        subscribers: planned!(bounded(
+            true,
+            sessions,
+            stated.subscribers,
+            bounds.subscribers
+        )),
+        queryables: planned!(bounded(
             cfg!(feature = "queryable"),
+            sessions,
             stated.queryables,
             bounds.queryables,
-        )?,
-        liveliness_tokens: bounded(
+        )),
+        liveliness_tokens: planned!(bounded(
             cfg!(feature = "liveliness"),
+            sessions,
             stated.liveliness_tokens,
             bounds.liveliness_tokens,
-        )?,
-        liveliness_subscribers: bounded(
+        )),
+        liveliness_subscribers: planned!(bounded(
             cfg!(feature = "liveliness"),
+            sessions,
             stated.liveliness_subscribers,
             bounds.liveliness_subscribers,
-        )?,
+        )),
         samples: stated.samples,
         replies: stated.replies,
         queries: stated.queries,
@@ -224,13 +277,20 @@ pub(crate) fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplan
         } else {
             0
         },
+        queriers: planned!(bounded(
+            cfg!(feature = "query"),
+            sessions,
+            stated.queriers,
+            bounds.queriers,
+        )),
+        keyexprs: planned!(bounded(true, sessions, stated.keyexprs, bounds.keyexprs)),
         payload_bytes: stated.payload_bytes,
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 12;
+const KINDS: usize = 14;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,66 +302,105 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// The pools `objects` make: one per kind, each slot of the size of that kind's object.
-    pub(crate) fn of(objects: &Counts) -> Result<Self, Unplanned> {
+    pub(crate) const fn of(objects: &Counts) -> Result<Self, Unplanned> {
         let mut plan = Self {
             slots: [0; KINDS],
             sizes: [0; KINDS],
-            area: Blocks::area_of(objects.payload_bytes)?,
+            area: planned!(Blocks::area_of(objects.payload_bytes)),
         };
         // A session of the cooperative engine lies in its own arena; its pool is the program's to
         // reserve where the doors are.
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
-        plan.add::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
-        plan.add::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
-        plan.add::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
-        #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
-        #[cfg(feature = "liveliness")]
-        plan.add::<crate::liveliness::TokenState>(Kind::LivelinessToken, objects.liveliness_tokens);
-        #[cfg(feature = "liveliness")]
-        plan.add::<crate::pubsub::SubscriberState>(
-            Kind::LivelinessSubscriber,
-            objects.liveliness_subscribers,
-        );
-        plan.add::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
+        {
+            plan = plan.with::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
+        }
+        // An entity of the cooperative engine lies in its own session's arena, as many as the
+        // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
+        // the process's would let one session's entities spend another's.
+        #[cfg(feature = "engine-tokio")]
+        {
+            plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
+            plan =
+                plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
+        {
+            plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
+        {
+            plan = plan.with::<crate::liveliness::TokenState>(
+                Kind::LivelinessToken,
+                objects.liveliness_tokens,
+            );
+            plan = plan.with::<crate::pubsub::SubscriberState>(
+                Kind::LivelinessSubscriber,
+                objects.liveliness_subscribers,
+            );
+        }
+        plan = plan.with::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
         #[cfg(feature = "query")]
-        plan.add::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
+        {
+            plan = plan.with::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
+        }
         #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
-        plan.add::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
-        plan.add::<crate::config::ConfigState>(Kind::Config, objects.configs);
+        {
+            plan = plan.with::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
+        }
+        plan = plan.with::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
+        plan = plan.with::<crate::config::ConfigState>(Kind::Config, objects.configs);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-        plan.add::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
-        if plan.slots.iter().all(|&slots| slots == 0) && plan.area == 0 {
+        {
+            plan = plan.with::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        {
+            plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
+        }
+        plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
+        let mut kind = 0;
+        let mut holds = plan.area != 0;
+        while kind < KINDS {
+            holds |= plan.slots[kind] != 0;
+            kind += 1;
+        }
+        if !holds {
             return Err(Unplanned::Empty);
         }
-        plan.bytes()?;
+        planned!(plan.bytes());
         Ok(plan)
     }
 
-    /// The pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
-    fn add<T>(&mut self, kind: Kind, count: usize) {
+    /// This plan with the pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
+    const fn with<T>(mut self, kind: Kind, count: usize) -> Self {
         self.slots[kind as usize] = count;
         self.sizes[kind as usize] = const { slot_size::<T>() };
+        self
     }
 
     /// The bytes every pool's slots take together.
-    fn slot_bytes(&self) -> Result<usize, Unplanned> {
+    const fn slot_bytes(&self) -> Result<usize, Unplanned> {
         let mut total: usize = 0;
-        for (&slots, &size) in self.slots.iter().zip(self.sizes.iter()) {
-            total = slots
-                .checked_mul(size)
-                .and_then(|bytes| total.checked_add(bytes))
-                .ok_or(Unplanned::TooLarge)?;
+        let mut kind = 0;
+        while kind < KINDS {
+            total = match self.slots[kind].checked_mul(self.sizes[kind]) {
+                Some(bytes) => match total.checked_add(bytes) {
+                    Some(total) => total,
+                    None => return Err(Unplanned::TooLarge),
+                },
+                None => return Err(Unplanned::TooLarge),
+            };
+            kind += 1;
         }
         Ok(total)
     }
 
     /// The bytes the pools take together: the slots, then the payloads' area and its marks.
-    pub(crate) fn bytes(&self) -> Result<usize, Unplanned> {
-        self.slot_bytes()?
-            .checked_add(self.area + Blocks::marks_bytes(self.area))
-            .ok_or(Unplanned::TooLarge)
+    pub(crate) const fn bytes(&self) -> Result<usize, Unplanned> {
+        match planned!(self.slot_bytes()).checked_add(self.area + Blocks::marks_bytes(self.area)) {
+            Some(bytes) => Ok(bytes),
+            None => Err(Unplanned::TooLarge),
+        }
     }
 }
 
@@ -355,12 +454,14 @@ struct ClassCount {
     refused: usize,
 }
 
-/// The pools of one slot size together, as the doors report them.
+/// The pools of one size class together, as the doors report them: the class's largest slot, and
+/// the slots of the pools whose slots it holds and their bytes.
 #[cfg(any(test, feature = "object-pool"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClassReport {
     pub(crate) slot_bytes: usize,
     pub(crate) slots: usize,
+    pub(crate) bytes: usize,
     pub(crate) in_use: usize,
     pub(crate) high_water: usize,
     pub(crate) refused: usize,
@@ -422,7 +523,7 @@ struct Blocks {
 impl Blocks {
     /// The bytes of an area for `bytes` of payload: the multiple of `MIN_BLOCK` at or under it,
     /// refused past the largest block's offset an area can name.
-    fn area_of(bytes: usize) -> Result<usize, Unplanned> {
+    const fn area_of(bytes: usize) -> Result<usize, Unplanned> {
         let area = bytes - bytes % MIN_BLOCK;
         if area > block_bytes(ORDERS - 1) {
             return Err(Unplanned::TooLarge);
@@ -487,10 +588,13 @@ impl Blocks {
         *byte & bit != 0
     }
 
-    /// Put the block at `offset` of `order` first on its list of free blocks, marked.
+    /// Put the block at `offset` of `order` first on its list of free blocks, marked. Out of
+    /// line, as [`Self::unlink`] is: laying the area, splitting a block and joining one each
+    /// call it, and each would otherwise hold a copy.
     ///
     /// # Safety
     /// The block lies in the area and nothing holds it.
+    #[inline(never)]
     unsafe fn push(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
         let head = self.free[order];
         self.free_block(base, offset).write(FreeBlock {
@@ -510,6 +614,7 @@ impl Blocks {
     ///
     /// # Safety
     /// A free block of `order` starts at `offset`.
+    #[inline(never)]
     unsafe fn unlink(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
         let FreeBlock { prev, next, .. } = self.free_block(base, offset).read();
         if prev == NONE {
@@ -579,6 +684,9 @@ pub(crate) struct Pools {
     bytes: usize,
     origin: Origin,
     pools: [Pool; KINDS],
+    /// Where each kind's pool ends, from `base`: the pools lie one after another, so the pool a
+    /// place lies in is the first that ends past it.
+    ends: [usize; KINDS],
     counts: [ClassCount; CLASSES + 1],
     blocks: Blocks,
 }
@@ -597,18 +705,21 @@ impl Pools {
             fresh: 0,
             free: None,
         }; KINDS];
+        let mut ends = [0; KINDS];
         let mut at = 0;
-        for (kind, pool) in pools.iter_mut().enumerate() {
+        for (kind, (pool, end)) in pools.iter_mut().zip(ends.iter_mut()).enumerate() {
             pool.size = plan.sizes[kind];
             pool.start = at;
             pool.slots = plan.slots[kind];
             at += pool.slots * pool.size;
+            *end = at;
         }
         Self {
             base,
             bytes: at,
             origin,
             pools,
+            ends,
             counts: [ClassCount::default(); CLASSES + 1],
             blocks: Blocks::lay(base, at, plan.area),
         }
@@ -660,11 +771,9 @@ impl Pools {
         if at >= self.bytes {
             return false;
         }
-        let Some(pool) = self
-            .pools
-            .iter_mut()
-            .find(|pool| at < pool.start + pool.slots * pool.size)
-        else {
+        // The first pool that ends past the place, a pool of no slots ending where it starts.
+        let kind = self.ends.partition_point(|&end| end <= at);
+        let Some(pool) = self.pools.get_mut(kind) else {
             return false;
         };
         debug_assert_eq!(
@@ -695,14 +804,15 @@ impl Pools {
     #[cfg(any(test, feature = "object-pool"))]
     fn report(&self, class: usize) -> ClassReport {
         let count = &self.counts[class];
+        let pools = || {
+            self.pools
+                .iter()
+                .filter(move |pool| count_of(pool.size) == class)
+        };
         ClassReport {
             slot_bytes: slot_bytes(class),
-            slots: self
-                .pools
-                .iter()
-                .filter(|pool| count_of(pool.size) == class)
-                .map(|pool| pool.slots)
-                .sum(),
+            slots: pools().map(|pool| pool.slots).sum(),
+            bytes: pools().map(|pool| pool.slots * pool.size).sum(),
             in_use: count.in_use,
             high_water: count.high_water,
             refused: count.refused,
@@ -749,7 +859,7 @@ fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
 /// as the limits the library opens a session under admit within the build's value of the limit,
 /// and the held values' own limits. Refused only by a build whose counts are past the address
 /// space.
-fn built_counts() -> Result<Counts, Unplanned> {
+const fn built_counts() -> Result<Counts, Unplanned> {
     let limits = session_limits();
     let bounds = Bounds {
         subscribers: each::<{ caps::MAX_SUBSCRIPTIONS }>(limits.max_subscriptions()),
@@ -758,10 +868,15 @@ fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_subscribers: each::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
             limits.max_liveliness_subscriptions(),
         ),
+        queriers: each::<{ caps::MAX_QUERIERS }>(limits.max_queriers()),
+        keyexprs: each::<{ caps::MAX_DECLARED_KEYEXPRS }>(limits.max_declared_keyexprs()),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
-        publishers: each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()).unwrap_or(0),
+        publishers: match each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()) {
+            Some(publishers) => publishers,
+            None => 0,
+        },
         // Each of these at the bound of its limit, which a count left at zero takes.
         subscribers: 0,
         queryables: 0,
@@ -773,6 +888,9 @@ fn built_counts() -> Result<Counts, Unplanned> {
         bytes: caps::HELD_PAYLOADS,
         configs: caps::HELD_CONFIGS,
         hellos: caps::HELD_HELLOS,
+        // At the bound of their limits, as the entities above.
+        queriers: 0,
+        keyexprs: 0,
         payload_bytes: caps::HELD_PAYLOAD_BYTES,
     };
     resolve(&built, &bounds)
@@ -781,8 +899,11 @@ fn built_counts() -> Result<Counts, Unplanned> {
 /// How many of an entity one session holds: `value`, the limit the library opens a session under,
 /// within `CEILING`, the build's value of it, which sizes the pool; `None` where the limit holds no
 /// bound.
-fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
-    value.lent_under(Quota::at_most(CEILING)).ok()
+const fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
+    match value.lent_under(Quota::at_most(CEILING)) {
+        Ok(each) => Some(each),
+        Err(_) => None,
+    }
 }
 
 /// The pools of `plan` from the heap in one allocation, or `None` when the heap has not the
@@ -796,11 +917,21 @@ fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
 }
 
-/// The build's pools ([`built_counts`]): what the first object a program makes reserves when it
+/// The plan of the build's pools ([`built_counts`]), worked out when the library is compiled: the
+/// counts are the build's constants and the limits it opens sessions under, so nothing of it is
+/// left to the first object a program makes.
+const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
+    Ok(objects) => Plan::of(&objects),
+    Err(unplanned) => Err(unplanned),
+};
+
+/// The build's pools ([`BUILT_PLAN`]): what the first object a program makes reserves when it
 /// reserved none. `None` when the counts make no pool or the heap has not the memory.
 fn reserve_built() -> Option<Pools> {
-    let plan = built_counts().and_then(|objects| Plan::of(&objects)).ok()?;
-    reserve_from_heap(&plan)
+    match BUILT_PLAN {
+        Ok(plan) => reserve_from_heap(&plan),
+        Err(_) => None,
+    }
 }
 
 /// Whether `place` lies in the pools reserved now.
@@ -870,9 +1001,10 @@ pub(crate) unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
     });
 }
 
-/// The limits every session of this ABI opens under: the snapshot `z_open` hands its engine.
-fn session_limits() -> SessionLimits {
-    SessionLimits::defaults()
+/// The limits every session of this ABI opens under before its config states any: the snapshot
+/// `z_open` starts from (`crate::session::opening_limits`).
+const fn session_limits() -> SessionLimits {
+    crate::session::opening_limits()
 }
 
 // --- what the doors of `object-pool` ask of the pools ------------------------------------------
@@ -999,12 +1131,16 @@ mod tests {
         queryables: Some(3),
         liveliness_tokens: Some(2),
         liveliness_subscribers: Some(5),
+        queriers: Some(6),
+        keyexprs: Some(7),
     };
 
     const UNBOUNDED: Bounds = Bounds {
         subscribers: None,
         queryables: None,
         liveliness_tokens: None,
+        queriers: None,
+        keyexprs: None,
         liveliness_subscribers: None,
     };
 
@@ -1021,12 +1157,15 @@ mod tests {
         assert_eq!(class_of(16, 32), None);
     }
 
-    /// An object larger than the largest class has a slot of its own size, rounded up to the
-    /// alignment of a slot, and is counted after the last class; one a class holds takes the
-    /// class's slot.
+    /// An object takes a slot of its own size, rounded up to the alignment of a slot, whichever
+    /// class reports it; one larger than the largest class is counted after the last class; one of
+    /// no bytes takes the alignment, where a free slot keeps its link.
     #[test]
-    fn an_object_past_the_largest_class_takes_a_slot_of_its_own_size() {
-        assert_eq!(slot_size::<[u8; 100]>(), 128);
+    fn an_object_takes_a_slot_of_its_own_size() {
+        assert_eq!(slot_size::<[u8; 100]>(), 112);
+        assert_eq!(slot_size::<[u8; 112]>(), 112);
+        assert_eq!(slot_size::<()>(), SLOT_ALIGN);
+        assert_eq!(count_of(112), 3, "reported by the class of 128");
         assert_eq!(slot_size::<[u8; 16 * 1024]>(), 16 * 1024);
         assert_eq!(slot_size::<[u8; 16 * 1024 + 1]>(), 16 * 1024 + 16);
         assert_eq!(count_of(16 * 1024), CLASSES - 1);
@@ -1045,11 +1184,19 @@ mod tests {
             subscribers: 0,
             queryables: 9,
             liveliness_tokens: 1,
+            queriers: 0,
+            keyexprs: 2,
             ..counts()
         };
         let objects = resolve(&stated, &BOUNDED).expect("every count is bounded");
         assert_eq!(objects.sessions, 2);
         assert_eq!(objects.subscribers, 8, "the bound, four, per session");
+        assert_eq!(objects.keyexprs, 4, "two under the bound, per session");
+        if cfg!(feature = "query") {
+            assert_eq!(objects.queriers, 12, "the bound, six, per session");
+        } else {
+            assert_eq!(objects.queriers, 0, "a build that asks nothing holds none");
+        }
         if cfg!(feature = "queryable") {
             assert_eq!(objects.queryables, 6, "nine held to three, per session");
         } else {
@@ -1087,6 +1234,8 @@ mod tests {
             bytes: 8,
             configs: 9,
             hellos: 10,
+            queriers: 1,
+            keyexprs: 1,
             payload_bytes: 11,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
@@ -1193,6 +1342,39 @@ mod tests {
         assert_eq!(pools.held(), 0);
     }
 
+    /// A place goes back to the pool it lies in, found by where the pools end: past a pool of no
+    /// slots, to the next one. Turned red by a search that stops at the empty pool or the one
+    /// before it.
+    #[test]
+    fn a_place_goes_back_to_the_pool_it_lies_in_past_an_empty_one() {
+        let mut memory = Memory([0; 512]);
+        let plan = plan_of(&[
+            (Kind::Publisher, 2, 16),
+            (Kind::Subscriber, 0, 16),
+            (Kind::Bytes, 1, 64),
+        ]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        let last_publisher = {
+            let _first = pools.take(Kind::Publisher, 16).expect("a free slot");
+            pools.take(Kind::Publisher, 16).expect("a free slot")
+        };
+        let payload = pools.take(Kind::Bytes, 64).expect("the one payload slot");
+        assert!(
+            pools.give_back(payload),
+            "the payload's place is the pools'"
+        );
+        assert_eq!(
+            pools.take(Kind::Bytes, 64),
+            Some(payload),
+            "it went back to its own pool, past the empty one"
+        );
+        assert!(pools.give_back(last_publisher));
+        assert_eq!(pools.take(Kind::Publisher, 16), Some(last_publisher));
+        assert_eq!(pools.take(Kind::Subscriber, 16), None, "no slot of its own");
+    }
+
     /// The slots of a pool lie inside the memory, apart and aligned; a full pool refuses and
     /// counts it; a slot given back is the next one taken; a place outside is not the pools'.
     #[test]
@@ -1252,6 +1434,27 @@ mod tests {
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
         assert_eq!(pools.report(2).high_water, 3);
+        assert_eq!(pools.report(0).bytes, 2 * 16);
+        assert_eq!(pools.report(2).bytes, 3 * 64);
+    }
+
+    /// A class reports every pool whose slots it holds, slots of different sizes among them: its
+    /// largest slot, their slots and the bytes they take, which a reader adds up to what the
+    /// reservation took.
+    #[test]
+    fn a_class_reports_the_bytes_of_slots_smaller_than_its_own() {
+        let mut memory = Memory([0; 512]);
+        let plan = plan_of(&[(Kind::Bytes, 2, 48), (Kind::Publisher, 1, 64)]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        let report = pools.report(count_of(48));
+        assert_eq!(count_of(48), count_of(64), "one class holds both");
+        assert_eq!(
+            (report.slot_bytes, report.slots, report.bytes),
+            (64, 3, 2 * 48 + 64)
+        );
+        assert_eq!(plan.slot_bytes(), Ok(report.bytes));
     }
 
     /// Laying the pools writes nothing into their slots; a pool hands out its untouched slots lowest
@@ -1320,6 +1523,174 @@ mod tests {
         assert!(pools.give_back(first));
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
+    }
+
+    /// What each kind's slots hold and what they leave unused, printed for reading: each kind's
+    /// object size, its slot as the size classes give it, the slots the build's plan lays and the
+    /// bytes left in them; and what a slot of the object's own size, rounded to a slot's alignment,
+    /// would leave. Run with `cargo test -p wz-capi-pico --lib slot_bytes_each_kind_leaves --
+    /// --ignored --nocapture`, under the environment of the build to read.
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn the_slot_bytes_each_kind_leaves() {
+        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let (mut laid, mut left, mut left_exact) = (0usize, 0usize, 0usize);
+        let mut row = |name: &str, kind: Kind, size: usize| {
+            let count = plan.slots[kind as usize];
+            let slot = plan.sizes[kind as usize];
+            let exact = size.next_multiple_of(SLOT_ALIGN);
+            let unused = slot.saturating_sub(size).saturating_mul(count);
+            let unused_exact = exact.saturating_sub(size).saturating_mul(count);
+            laid += slot.saturating_mul(count);
+            left += unused;
+            left_exact += unused_exact;
+            std::println!(
+                "slot-row: {name:<22} size_of={size:>6} slot_bytes={slot:>6} exact={exact:>6} \
+                 count={count:>4} unused={unused:>7} unused_exact={unused_exact:>7}"
+            );
+        };
+        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        row(
+            "session",
+            Kind::Session,
+            core::mem::size_of::<crate::session::PicoSessionHandle>(),
+        );
+        row(
+            "publisher",
+            Kind::Publisher,
+            core::mem::size_of::<crate::pubsub::PublisherState>(),
+        );
+        row(
+            "subscriber",
+            Kind::Subscriber,
+            core::mem::size_of::<crate::pubsub::SubscriberState>(),
+        );
+        #[cfg(feature = "queryable")]
+        row(
+            "queryable",
+            Kind::Queryable,
+            core::mem::size_of::<crate::query::QueryableState>(),
+        );
+        #[cfg(feature = "liveliness")]
+        {
+            row(
+                "liveliness_token",
+                Kind::LivelinessToken,
+                core::mem::size_of::<crate::liveliness::TokenState>(),
+            );
+            row(
+                "liveliness_subscriber",
+                Kind::LivelinessSubscriber,
+                core::mem::size_of::<crate::pubsub::SubscriberState>(),
+            );
+        }
+        row(
+            "sample",
+            Kind::Sample,
+            core::mem::size_of::<crate::pubsub::SampleMarshal>(),
+        );
+        #[cfg(feature = "query")]
+        row(
+            "reply",
+            Kind::Reply,
+            core::mem::size_of::<crate::get::ReplyMarshal>(),
+        );
+        #[cfg(feature = "queryable")]
+        row(
+            "query",
+            Kind::Query,
+            core::mem::size_of::<crate::query::QueryMarshal>(),
+        );
+        row(
+            "bytes",
+            Kind::Bytes,
+            core::mem::size_of::<crate::bytes::ByteBuf>(),
+        );
+        row(
+            "config",
+            Kind::Config,
+            core::mem::size_of::<crate::config::ConfigState>(),
+        );
+        #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+        row(
+            "hello",
+            Kind::Hello,
+            core::mem::size_of::<crate::scout::KeptHello>(),
+        );
+        #[cfg(feature = "query")]
+        row(
+            "querier",
+            Kind::Querier,
+            core::mem::size_of::<crate::querier::QuerierState>(),
+        );
+        row(
+            "keyexpr",
+            Kind::Keyexpr,
+            core::mem::size_of::<crate::keyexpr::DeclaredKeyexpr>(),
+        );
+        // What a config is made of, the largest object: its entries' rows and text, and the
+        // statements of wz's own doors beside them.
+        let config = crate::config::ConfigState::default();
+        std::println!(
+            "config-part: whole={} entries={} policies={} config_entries={} config_text_bytes={}",
+            core::mem::size_of_val(&config),
+            core::mem::size_of_val(&config.entries),
+            core::mem::size_of_val(&config.policies),
+            caps::CONFIG_ENTRIES,
+            caps::CONFIG_TEXT_BYTES,
+        );
+        let marks = Blocks::marks_bytes(plan.area);
+        std::println!(
+            "slot-total: slots={laid} unused={left} unused_exact={left_exact} area={} marks={marks} \
+             reserved={:?}",
+            plan.area,
+            plan.bytes()
+        );
+    }
+
+    /// The build's default pools hold what a pico program holds when the largest channel zenoh-pico's
+    /// examples and API tests open for a kind is full: its sixteen elements
+    /// (`vendor/zenoh-pico/examples/unix/c11/z_querier.c` @
+    /// `z_fifo_channel_reply_new(&closure, &handler, 16);`), the one handed to it while it is full
+    /// and the one the program took. A build that states its own count is held to its own measure.
+    #[test]
+    fn the_default_pools_hold_a_full_channel_of_sixteen_and_two_more() {
+        const HELD_BY_A_FULL_CHANNEL: usize = 16 + 1 + 1;
+        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let mut pools = reserve_from_heap(&plan).expect("the test's heap has the memory");
+        let mut check = |kind: Kind, stated: Option<&str>| {
+            if stated.is_some() {
+                return;
+            }
+            let size = plan.sizes[kind as usize];
+            let taken: alloc::vec::Vec<Option<NonNull<u8>>> = (0..HELD_BY_A_FULL_CHANNEL)
+                .map(|_| pools.take(kind, size))
+                .collect();
+            let held = taken.iter().filter(|slot| slot.is_some()).count();
+            for slot in taken.into_iter().flatten() {
+                assert!(pools.give_back(slot), "{kind:?}: its slot goes back");
+            }
+            assert_eq!(
+                held, HELD_BY_A_FULL_CHANNEL,
+                "{kind:?}: a full channel of sixteen, one handed in and one taken"
+            );
+        };
+        check(Kind::Sample, option_env!("WZ_LIMIT_HELD_SAMPLES"));
+        #[cfg(feature = "query")]
+        check(Kind::Reply, option_env!("WZ_LIMIT_HELD_REPLIES"));
+        #[cfg(feature = "queryable")]
+        check(Kind::Query, option_env!("WZ_LIMIT_HELD_QUERIES"));
+    }
+
+    /// The plan the library was compiled with is the one the build's counts make when worked out
+    /// as a program runs: making the planning `const` changed where it is evaluated, not what.
+    #[test]
+    fn the_plan_worked_out_when_compiled_is_the_one_the_counts_make() {
+        assert_eq!(
+            BUILT_PLAN,
+            built_counts().and_then(|objects| Plan::of(&objects))
+        );
+        assert!(BUILT_PLAN.is_ok(), "the build's counts make pools");
     }
 
     /// The build's counts: its sessions, each holding as many of each entity as the session's
@@ -1412,13 +1783,15 @@ mod tests {
         };
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
         check(Kind::Session);
+        #[cfg(feature = "engine-tokio")]
         check(Kind::Publisher);
+        #[cfg(feature = "engine-tokio")]
         check(Kind::Subscriber);
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         check(Kind::Queryable);
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         check(Kind::LivelinessToken);
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         check(Kind::LivelinessSubscriber);
         check(Kind::Sample);
         #[cfg(feature = "query")]
@@ -1429,6 +1802,9 @@ mod tests {
         check(Kind::Config);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         check(Kind::Hello);
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
+        check(Kind::Querier);
+        check(Kind::Keyexpr);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1444,6 +1820,8 @@ mod tests {
             bounds.liveliness_subscribers,
             limits.max_liveliness_subscriptions().most()
         );
+        assert_eq!(bounds.queriers, limits.max_queriers().most());
+        assert_eq!(bounds.keyexprs, limits.max_declared_keyexprs().most());
     }
 
     /// The free blocks of `order`, by their offsets, first to last.

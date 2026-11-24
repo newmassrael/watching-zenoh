@@ -242,8 +242,8 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// synchronous entry point a deploy `main()` or a host test uses to run a
     /// local task to completion. Allocates nothing.
     ///
-    /// Panics if the handle is Pending while nothing can possibly wake it: no
-    /// ready task, no live task and no pending timer.
+    /// Answers `Err(RuntimeError::Stalled)` if the handle is Pending while nothing can possibly
+    /// wake it: no ready task, no live task and no pending timer.
     pub fn block_on_local<T>(&self, handle: CoopLocalJoinHandle<T>) -> Result<T, RuntimeError> {
         // The handle's wake flag is a local of this call, which a waker may point at only while
         // the call lasts. The handle is consumed here and stores the waker only while it is
@@ -267,11 +267,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
                 && self.live_local_task_count() == 0
                 && self.runtime.timers().pending_count() == 0
             {
-                panic!(
-                    "CoopLocalSet::block_on_local: handle Pending with no \
-                     live tasks, no wakers, and no pending timers — \
-                     deadlocked future?"
-                );
+                return Err(RuntimeError::Stalled);
             }
         }
     }

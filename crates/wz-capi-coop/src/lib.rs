@@ -121,10 +121,8 @@ mod engine;
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.
 pub mod open_source;
-// What the session hands its subscribers' callbacks after its lock, in a ring of its arena.
-// Totality debt TD-154 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-pub mod lane;
+// What the session hands its callbacks after its lock: one table a round, read where the records lie.
+pub mod round;
 #[cfg(feature = "scout")]
 pub mod scout;
 #[cfg(feature = "scout-datagram")]
@@ -151,7 +149,4 @@ pub use engine::ClockMoves;
 /// The clock a session of this engine runs on, which every timer of the session reads: an ABI
 /// opens the engine with its host's, or with one of its own (a time base the program supplies).
 pub use wz_runtime_coop::ClockSource;
-/// A wait a read of this engine makes, which an ABI gives for the word that a clock it moves has
-/// moved on (`ClockMoves`, `time-base`).
-pub use wz_runtime_coop::session_drive::LinkReadiness;
 }

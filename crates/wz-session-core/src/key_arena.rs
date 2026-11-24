@@ -213,7 +213,7 @@ impl KeyStore {
             if let Some(rest) = size.checked_sub(need) {
                 if rest >= MIN_BLOCK {
                     // The block ends inside the blocks, so its first `need` bytes do too.
-                    let tail = at.checked_add(need)?;
+                    let tail = at.wrapping_add(need);
                     self.set_word(tail, SIZE, rest);
                     self.set_word(tail, LINK, next);
                     self.link(prev, tail);
@@ -228,10 +228,10 @@ impl KeyStore {
         }
         let top = self.top.get();
         // `top` is never past `bytes`, so the difference is exact and the sum fits.
-        if self.bytes.saturating_sub(top) < need {
+        if self.bytes.wrapping_sub(top) < need {
             return None;
         }
-        self.top.set(top.checked_add(need)?);
+        self.top.set(top.wrapping_add(need));
         self.set_word(top, SIZE, need);
         Some(top)
     }
@@ -248,18 +248,17 @@ impl KeyStore {
             after = self.word(after, LINK);
         }
         let (mut start, mut prev) = (at, before);
-        // Every sum below is of a block and the bytes after it inside the blocks, so none wraps;
-        // a checked one that did would only keep two neighbours apart.
-        if after != NIL && at.checked_add(size) == Some(after) {
-            size = size.saturating_add(self.word(after, SIZE));
+        // Every sum below is of a block and the bytes after it inside the blocks, so none wraps.
+        if after != NIL && at.wrapping_add(size) == after {
+            size = size.wrapping_add(self.word(after, SIZE));
             after = self.word(after, LINK);
         }
-        if before != NIL && before.checked_add(self.word(before, SIZE)) == Some(at) {
+        if before != NIL && before.wrapping_add(self.word(before, SIZE)) == at {
             start = before;
-            size = size.saturating_add(self.word(before, SIZE));
+            size = size.wrapping_add(self.word(before, SIZE));
             prev = before_prev;
         }
-        if start.checked_add(size) == Some(self.top.get()) {
+        if start.wrapping_add(size) == self.top.get() {
             // No free block lies above one that ends where the bump area starts.
             debug_assert_eq!(after, NIL, "a free block above the bump area's start");
             self.top.set(start);
@@ -409,11 +408,11 @@ impl KeySpace {
             return Err(refused(Some(need)));
         };
         let size = store.word(at, SIZE);
-        // `take` gave a block of at least `need` bytes.
+        // `take` gave a block of at least `need` bytes, so the slack does not wrap.
         store.set_word(
             at,
             SIZE,
-            held_word(text.len() as u32, size.saturating_sub(need as u32)),
+            held_word(text.len() as u32, size.wrapping_sub(need as u32)),
         );
         store.set_word(at, LINK, 1);
         // SAFETY: the block at `at` holds its header and at least `text.len()` bytes after it,
@@ -425,8 +424,8 @@ impl KeySpace {
                 text.len(),
             );
         }
-        // `used` counts held blocks, which lie inside the `u32` bytes of blocks.
-        let used = store.used.get().saturating_add(size);
+        // `used` counts held blocks, which lie inside the `u32` bytes of blocks: it does not wrap.
+        let used = store.used.get().wrapping_add(size);
         store.used.set(used);
         store.peak.set(store.peak.get().max(used));
         Ok(KeyRef {
@@ -446,24 +445,22 @@ impl KeySpace {
         let (mut at, mut free) = (0, store.free.get());
         while at < store.top.get() {
             let word = store.word(at, SIZE);
-            let next = if at == free {
+            // Every block lies inside the blocks, whose bytes are a `u32`, so the step to the next
+            // one does not wrap.
+            if at == free {
                 free = store.word(at, LINK);
-                at.checked_add(word)
-            } else {
-                if (word >> 2) as usize == text.len()
-                    && store.text(at, word >> 2) == text.as_bytes()
-                {
-                    store.set_word(at, LINK, store.word(at, LINK).saturating_add(1));
-                    return Some(KeyRef {
-                        store: self.store,
-                        at,
-                        len: word >> 2,
-                    });
-                }
-                at.checked_add(held_bytes(word))
-            };
-            // A block past the `u32` offsets is no block of the arena: the walk ends.
-            at = next?;
+                at = at.wrapping_add(word);
+                continue;
+            }
+            if (word >> 2) as usize == text.len() && store.text(at, word >> 2) == text.as_bytes() {
+                store.set_word(at, LINK, store.word(at, LINK).saturating_add(1));
+                return Some(KeyRef {
+                    store: self.store,
+                    at,
+                    len: word >> 2,
+                });
+            }
+            at = at.wrapping_add(held_bytes(word));
         }
         None
     }
@@ -557,6 +554,21 @@ impl KeyMaker<KeyRef> for LentKeys {
         }
         keys.key(text).map_err(|_| KeyUnkept::NoRoom)
     }
+
+    /// The block the arena keeps `text` in already, one holder more, whoever holds it
+    /// ([`KeySpace::kept`]); a new block otherwise, as [`Self::key`].
+    fn shared(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
+        let Some(keys) = &self.0 else {
+            return Err(KeyUnkept::NoRoom);
+        };
+        if !keys.holds_key(text.len()) {
+            return Err(KeyUnkept::TooLong);
+        }
+        match keys.kept(text) {
+            Some(kept) => Ok(kept),
+            None => keys.key(text).map_err(|_| KeyUnkept::NoRoom),
+        }
+    }
 }
 
 /// A key a row holds: where its block lies in its session's key arena and how long it is. It reads
@@ -635,13 +647,15 @@ impl Drop for KeyRef {
         // SAFETY: as `as_str`.
         let store = unsafe { self.store.as_ref() };
         store.assert_owner_lock();
-        let holders = store.word(self.at, LINK).saturating_sub(1);
+        // This key is one of the block's holders, so the count is one or more.
+        let holders = store.word(self.at, LINK).wrapping_sub(1);
         if holders > 0 {
             store.set_word(self.at, LINK, holders);
             return;
         }
         let size = held_bytes(store.word(self.at, SIZE));
-        store.used.set(store.used.get().saturating_sub(size));
+        // The block is one `used` counts.
+        store.used.set(store.used.get().wrapping_sub(size));
         store.give_back(self.at, size);
     }
 }

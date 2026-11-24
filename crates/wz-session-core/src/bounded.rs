@@ -176,6 +176,16 @@ pub trait Storage {
     ) -> crate::wireexpr_resolve::PeerSpace<'_>
     where
         Self: Sized;
+
+    /// The session's table of the key expressions it declared, of this policy, as the own id
+    /// space a [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads: what an `M=0`
+    /// key of a peer's message names, read where the table keeps it.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_>
+    where
+        Self: Sized;
 }
 
 /// The counter of a table's changes; see [`Storage::Epoch`].
@@ -336,6 +346,13 @@ pub enum KeyUnkept {
 pub trait KeyMaker<K>: Clone + Default + fmt::Debug {
     /// `text` as a row keeps it, or why it is not kept: a key is never cut short.
     fn key(&self, text: &str) -> Result<K, KeyUnkept>;
+
+    /// [`Self::key`], sharing the key a holder of the same text keeps already where the policy's
+    /// keys are shared ones: a row of the session's own declarations takes no second block for a
+    /// text its session holds. The policies whose key is its own text keep it again.
+    fn shared(&self, text: &str) -> Result<K, KeyUnkept> {
+        self.key(text)
+    }
 }
 
 /// The keys of the policies whose key is its own text ([`Heap`], [`Static`]): nothing to hand a
@@ -398,6 +415,13 @@ impl Storage for Heap {
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_map(aliases.as_map())
     }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_heap_keyexprs(keyexprs)
+    }
 }
 
 /// The static policy: a capacity fixed in the type and no allocator. A push past
@@ -422,6 +446,13 @@ impl Storage for Static {
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_table(aliases)
+    }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_static_keyexprs(keyexprs)
     }
 }
 
@@ -471,6 +502,13 @@ impl Storage for Lent {
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_lent_table(aliases)
+    }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_lent_keyexprs(keyexprs)
     }
 }
 
@@ -565,7 +603,8 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
     }
 
     fn free_slots(&self) -> usize {
-        N.saturating_sub(self.len())
+        // A `heapless::Vec` never holds more than `N`.
+        N.wrapping_sub(self.len())
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -581,7 +620,7 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
         // written whole before the length covers it, and `make` panicking leaves both as they were.
         unsafe {
             self.as_mut_ptr().add(len).write(make());
-            self.set_len(len.saturating_add(1));
+            self.set_len(len.wrapping_add(1));
         }
         true
     }
@@ -680,6 +719,39 @@ impl<const N: usize> TextBacking for heapless::String<N> {
 /// [`Heap`] vs [`Static`] policy contract.
 pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
     inner: P::Seq<T, N>,
+}
+
+impl<T, const N: usize> BoundedVec<T, N, Lent> {
+    /// The next row, for `write` to build a value in where the table keeps it, counted as held
+    /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
+    /// every row it was lent. For a value too large to be one of its own in a frame, which
+    /// [`Self::push_with`] does not promise.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `T` in the row it is handed, and does not unwind.
+    pub unsafe fn push_in_place(
+        &mut self,
+        write: impl FnOnce(&mut core::mem::MaybeUninit<T>),
+    ) -> Option<&mut T> {
+        let seq = &mut self.inner;
+        seq.refuse_unlent();
+        if seq.len == seq.room {
+            return None;
+        }
+        // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no
+        // value; a `MaybeUninit<T>` has the layout of `T`.
+        let row = unsafe {
+            &mut *seq
+                .base
+                .as_ptr()
+                .add(seq.len())
+                .cast::<core::mem::MaybeUninit<T>>()
+        };
+        write(&mut *row);
+        seq.len = seq.len.saturating_add(1);
+        // SAFETY: the caller's contract: `write` left a whole value in the row.
+        Some(unsafe { row.assume_init_mut() })
+    }
 }
 
 // The `const` constructors are written per concrete policy, because a `const fn`
@@ -811,7 +883,7 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
                 return Some(self.inner.remove(*at));
             }
             // Below the table's length, so the next place does not wrap.
-            *at = at.saturating_add(1);
+            *at = at.wrapping_add(1);
         }
         None
     }
@@ -932,13 +1004,14 @@ impl<T, const N: usize, P: Storage> DerefMut for BoundedVec<T, N, P> {
 /// It owns its values and not its memory: dropped, it drops what it holds and gives no memory
 /// back, the memory being the arena's owner's to release whole.
 pub struct LentSeq<T> {
+    /// The first row, or for a table made by `Default`, which was lent none and is no table to
+    /// put a value in (`refuse_unlent`), `NonNull::dangling`: no arena lends there.
     base: NonNull<T>,
-    len: usize,
-    /// The rows the arena lent: the most the table holds.
-    room: usize,
-    /// Whether an arena lent the rows. A table made by `Default` was lent none and is no table
-    /// to put a value in (`refuse_unlent`).
-    lent: bool,
+    /// The rows that hold values, and the rows the arena lent, the most the table holds: each
+    /// under `u32::MAX`, which [`Arena::lend`] holds a table to, so a table is a pointer and two
+    /// words of 32 bits on every target.
+    len: u32,
+    room: u32,
     _owns: PhantomData<T>,
 }
 
@@ -955,14 +1028,25 @@ impl<T> LentSeq<T> {
     /// # Safety
     /// `base` is aligned for `T`, and the `room` rows of `T` from it are valid for reads and
     /// writes, hold no value and are used by nothing else for as long as the table lives.
-    const unsafe fn lent(base: NonNull<T>, room: usize) -> Self {
+    const unsafe fn lent(base: NonNull<T>, room: u32) -> Self {
         Self {
             base,
             len: 0,
             room,
-            lent: true,
             _owns: PhantomData,
         }
+    }
+
+    /// The rows that hold values.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// The rows the arena lent.
+    #[inline(always)]
+    fn room(&self) -> usize {
+        self.room as usize
     }
 
     /// Stop a debug build at a value put in a table no arena lent rows to. Such a table refuses
@@ -972,7 +1056,7 @@ impl<T> LentSeq<T> {
     #[inline(always)]
     fn refuse_unlent(&self) {
         debug_assert!(
-            self.lent,
+            self.base != NonNull::dangling(),
             "a value was put in a lent table no arena lent rows to: a table of this policy is \
              made by `Arena::lend`, and a working buffer takes the policy's `Storage::Scratch`"
         );
@@ -981,12 +1065,13 @@ impl<T> LentSeq<T> {
     /// Drop the values from `len` on. The length is shortened first, so a value whose drop
     /// panics leaks the ones after it rather than letting them be dropped twice.
     fn drop_from(&mut self, len: usize) {
-        if len >= self.len {
+        if len >= self.len() {
             return;
         }
         // `len < self.len`, checked above.
-        let tail = self.len.saturating_sub(len);
-        self.len = len;
+        let tail = self.len().wrapping_sub(len);
+        // Below the length, which is a `u32`.
+        self.len = len as u32;
         // SAFETY: the `tail` rows from `len` held values, which the length no longer covers, so
         // each is dropped here once.
         unsafe {
@@ -1011,7 +1096,6 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             base: NonNull::dangling(),
             len: 0,
             room: 0,
-            lent: false,
             _owns: PhantomData,
         }
     }
@@ -1019,17 +1103,17 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     fn as_slice(&self) -> &[T] {
         // SAFETY: the first `len` rows hold values, and `base` is aligned and non-null even for a
         // table lent nothing.
-        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len()) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: as `as_slice`, and `&mut self` makes this the only borrow of them.
-        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len()) }
     }
 
     // `len` never passes `room`, so the counts below are exact.
     fn free_slots(&self) -> usize {
-        self.room.saturating_sub(self.len)
+        self.room().wrapping_sub(self.len())
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1038,8 +1122,8 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return Err(CapacityFull(value));
         }
         // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no value.
-        unsafe { self.base.as_ptr().add(self.len).write(value) };
-        self.len = self.len.saturating_add(1);
+        unsafe { self.base.as_ptr().add(self.len()).write(value) };
+        self.len = self.len.wrapping_add(1);
         Ok(())
     }
 
@@ -1049,8 +1133,8 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return false;
         }
         // SAFETY: as `push`; `make` panicking leaves the row and the length as they were.
-        unsafe { self.base.as_ptr().add(self.len).write(make()) };
-        self.len = self.len.saturating_add(1);
+        unsafe { self.base.as_ptr().add(self.len()).write(make()) };
+        self.len = self.len.wrapping_add(1);
         true
     }
 
@@ -1058,15 +1142,15 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         if self.len == 0 {
             return None;
         }
-        self.len = self.len.saturating_sub(1);
+        self.len = self.len.wrapping_sub(1);
         // SAFETY: the row at the old last index held a value, which the length no longer covers,
         // so it is read out once.
-        Some(unsafe { self.base.as_ptr().add(self.len).read() })
+        Some(unsafe { self.base.as_ptr().add(self.len()).read() })
     }
 
     fn remove(&mut self, index: usize) -> T {
         assert!(
-            index < self.len,
+            index < self.len(),
             "removal index {index} is past a lent table of {} values",
             self.len
         );
@@ -1078,9 +1162,9 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             core::ptr::copy(
                 at.add(1),
                 at,
-                self.len.saturating_sub(index).saturating_sub(1),
+                self.len().wrapping_sub(index).wrapping_sub(1),
             );
-            self.len = self.len.saturating_sub(1);
+            self.len = self.len.wrapping_sub(1);
             value
         }
     }
@@ -1090,7 +1174,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         let mut index = 0usize;
         while let Some(value) = self.as_slice().get(index) {
             if keep(value) {
-                index = index.saturating_add(1);
+                index = index.wrapping_add(1);
             } else {
                 self.remove(index);
             }
@@ -1110,11 +1194,11 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         T: Clone,
     {
         self.refuse_unlent();
-        if len > self.room {
+        if len > self.room() {
             return Err(CapacityFull(()));
         }
         self.drop_from(len);
-        while self.len < len {
+        while self.len() < len {
             // Within the rows checked above, so every push is taken.
             if self.push(fill.clone()).is_err() {
                 break;
@@ -1128,7 +1212,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         T: Clone,
     {
         self.refuse_unlent();
-        if src.len() > self.room.saturating_sub(self.len) {
+        if src.len() > self.room().wrapping_sub(self.len()) {
             return Err(CapacityFull(()));
         }
         for value in src {
@@ -1151,7 +1235,7 @@ impl<T> IntoIterator for LentSeq<T> {
         LentIntoIter {
             base: seq.base,
             next: 0,
-            end: seq.len,
+            end: seq.len(),
             _owns: PhantomData,
         }
     }
@@ -1179,14 +1263,14 @@ impl<T> Iterator for LentIntoIter<T> {
         }
         let index = self.next;
         // Below `end`, checked above.
-        self.next = self.next.saturating_add(1);
+        self.next = self.next.wrapping_add(1);
         // SAFETY: the rows `next..end` hold values this iterator owns; this one is read out once
         // and the cursor has passed it.
         Some(unsafe { self.base.as_ptr().add(index).read() })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.end.saturating_sub(self.next);
+        let left = self.end.wrapping_sub(self.next);
         (left, Some(left))
     }
 }
@@ -1195,7 +1279,7 @@ impl<T> ExactSizeIterator for LentIntoIter<T> {}
 
 impl<T> Drop for LentIntoIter<T> {
     fn drop(&mut self) {
-        let (from, left) = (self.next, self.end.saturating_sub(self.next));
+        let (from, left) = (self.next, self.end.wrapping_sub(self.next));
         self.next = self.end;
         // SAFETY: the rows `from..end` hold values no call handed out; each is dropped here once.
         unsafe {
@@ -1354,24 +1438,48 @@ impl Arena {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        if rows > N {
-            return Err(LendRefused::OverCeiling { rows, ceiling: N });
+        let (at, room) = self.lend_rows(rows, N, Self::table_bytes::<T>(rows))?;
+        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
+        // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        // (asserted above).
+        let inner = unsafe { LentSeq::lent(at.cast::<T>(), room) };
+        Ok(BoundedVec { inner })
+    }
+
+    /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
+    /// rows taking `bytes` (`None` past the address space), at most `ceiling`, and the rows
+    /// counted in 32 bits. Refused, taking nothing, past the ceiling, past what is left or past a
+    /// 32-bit count.
+    #[inline(never)]
+    fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> Result<(NonNull<u8>, u32), LendRefused> {
+        if rows > ceiling {
+            return Err(LendRefused::OverCeiling { rows, ceiling });
         }
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
-        let span = match Self::table_bytes::<T>(rows) {
+        let left = self.bytes.wrapping_sub(self.lent);
+        let span = match bytes {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
         };
-        // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
-        // base aligned to it, so it is aligned for `T` (asserted above); it lies inside the
-        // arena, and no table was lent it before, as `lent` only grows.
-        let inner = unsafe {
-            let at = NonNull::new_unchecked(self.base.as_ptr().add(self.lent)).cast::<T>();
-            LentSeq::lent(at, rows)
+        // A table counts its rows in 32 bits (`LentSeq`): only rows of no bytes, or an arena
+        // past 4 GiB, reach a count past them.
+        let Ok(room) = u32::try_from(rows) else {
+            return Err(LendRefused::OverCeiling {
+                rows,
+                ceiling: u32::MAX as usize,
+            });
         };
-        self.lent = self.lent.saturating_add(span);
-        Ok(BoundedVec { inner })
+        // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
+        // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
+        // only grows.
+        let at = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) };
+        self.lent = self.lent.wrapping_add(span);
+        Ok((at, room))
     }
 
     /// Lend a key arena of `bytes` bytes of blocks: the next span of the arena, its state first,
@@ -1388,7 +1496,7 @@ impl Arena {
         longest: crate::limits::MaxKeyexprBytesHeld,
     ) -> Result<crate::key_arena::KeySpace, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let span = match crate::key_arena::KeySpace::span_bytes(bytes) {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
@@ -1403,7 +1511,7 @@ impl Arena {
                 longest,
             )
         };
-        self.lent = self.lent.saturating_add(span);
+        self.lent = self.lent.wrapping_add(span);
         Ok(keys)
     }
 
@@ -1436,7 +1544,7 @@ impl Arena {
     /// (past the address space).
     pub(crate) fn lend_span(&mut self, bytes: Option<usize>) -> Result<NonNull<u8>, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let span = match bytes.and_then(Self::span) {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
@@ -1445,7 +1553,7 @@ impl Arena {
         // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
         // only grows.
         let at = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) };
-        self.lent = self.lent.saturating_add(span);
+        self.lent = self.lent.wrapping_add(span);
         Ok(at)
     }
 
@@ -1488,7 +1596,7 @@ impl Arena {
         count: usize,
     ) -> Result<LentByteCells, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let (flags, bytes) = match Self::byte_cells_spans(size, count) {
             Some((flags, bytes)) if flags.checked_add(bytes).is_some_and(|all| all <= left) => {
                 (flags, bytes)
@@ -1512,7 +1620,7 @@ impl Arena {
             }
             let data = at.add(flags);
             // `byte_cells_spans` answered, so the product does not overflow.
-            core::ptr::write_bytes(data, 0, count.saturating_mul(size));
+            core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
             LentByteCells::over(
                 NonNull::new_unchecked(taken),
                 NonNull::new_unchecked(data),
@@ -1520,7 +1628,7 @@ impl Arena {
                 count,
             )
         };
-        self.lent = self.lent.saturating_add(flags).saturating_add(bytes);
+        self.lent = self.lent.wrapping_add(flags).wrapping_add(bytes);
         Ok(table)
     }
 }
@@ -2140,6 +2248,68 @@ mod tests {
             .lend(0)
             .expect("no rows fit any arena");
         assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
+    }
+
+    /// A lent table is a pointer and two 32-bit counts, whatever its rows: a set of a session's
+    /// tables holds many. A table of more rows than a 32-bit count names is refused at the lend,
+    /// taking nothing, by that count; the CONTROL is the table of as many rows as it names.
+    #[test]
+    fn a_lent_table_is_a_pointer_and_two_32_bit_counts() {
+        assert_eq!(
+            core::mem::size_of::<BoundedVec<u64, 8, Lent>>(),
+            core::mem::size_of::<usize>() + 8
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let mut arena = arena_of(0);
+            let most = u32::MAX as usize;
+            let past: Result<BoundedVec<(), { usize::MAX }, Lent>, _> = arena.lend(most + 1);
+            assert_eq!(
+                past.err(),
+                Some(LendRefused::OverCeiling {
+                    rows: most + 1,
+                    ceiling: most
+                })
+            );
+            assert_eq!(arena.high_water(), 0, "nothing was taken");
+            let at_most: Result<BoundedVec<(), { usize::MAX }, Lent>, _> = arena.lend(most);
+            assert_eq!(
+                at_most.map(|table| table.free_slots()).ok(),
+                Some(most),
+                "CONTROL: as many rows as the count names"
+            );
+        }
+    }
+
+    /// A value pushed in place is built in the next row the table was lent and is held from then
+    /// on, handed back to write; once the rows lent are held, the push is refused and `write` is
+    /// not called. The CONTROL is the table's contents, the values in the order built.
+    #[test]
+    fn a_push_in_place_builds_in_the_next_lent_row_and_refuses_past_them() {
+        let mut arena = arena_of(64);
+        let mut v: BoundedVec<u32, 8, Lent> = arena.lend(2).expect("two rows fit");
+        for value in [5_u32, 6] {
+            // SAFETY: the closure writes a whole `u32` and does not unwind.
+            let held = unsafe {
+                v.push_in_place(|row| {
+                    row.write(value);
+                })
+            };
+            let held = held.expect("within the lent rows");
+            assert_eq!(*held, value, "the value built is handed back");
+            *held += 10;
+        }
+        let mut called = false;
+        // SAFETY: as above; this closure is never called.
+        let refused = unsafe {
+            v.push_in_place(|row| {
+                called = true;
+                row.write(0);
+            })
+        };
+        assert!(refused.is_none(), "past the lent rows");
+        assert!(!called, "and nothing was written");
+        assert_eq!(v.as_ref(), &[15, 16], "CONTROL: in the order built");
     }
 
     /// A lent table holds the rows its open lent it, under the ceiling `N` its type names: the

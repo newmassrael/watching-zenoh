@@ -21,7 +21,7 @@ pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
 // What the drive functions below name. `run_session` is absent under
 // `session-slot` with `reassembly`, and with it every one of these.
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
-use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 #[cfg(not(feature = "session-slot"))]
@@ -144,6 +144,7 @@ pub fn run_session<C, F>(
     link: &LwipLink,
     driver: &DriverHandle,
     actions: &SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: &CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -156,6 +157,7 @@ where
         runtime,
         LwipSessionLink::new(link, driver.clone()),
         actions,
+        entropy,
         clock,
         config,
         on_event,
@@ -176,6 +178,7 @@ pub async fn session_task<C, F>(
     link: Rc<LwipLink>,
     driver: DriverHandle,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -188,6 +191,7 @@ where
         runtime,
         LwipSessionLink::new(link, driver),
         actions,
+        entropy,
         clock,
         config,
         on_event,
@@ -204,6 +208,7 @@ pub fn spawn_session<C, F>(
     link: Rc<LwipLink>,
     driver: DriverHandle,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -216,6 +221,7 @@ where
         local,
         LwipSessionLink::new(link, driver),
         actions,
+        entropy,
         clock,
         config,
         on_event,
@@ -243,6 +249,19 @@ mod tests {
     use wz_session_core::WhatAmI;
 
     use crate::driver::{LwipUdpDriver, SharedSessionSocket};
+
+    /// The source of sessions these tests never let finish a handshake as acceptor: it has no
+    /// bytes, so an InitAck it drew for would mint no cookie.
+    struct Dry;
+
+    impl wz_session_core::entropy::EntropySource for Dry {
+        fn try_fill_bytes(
+            &mut self,
+            _buf: &mut [u8],
+        ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+            Err(wz_session_core::entropy::EntropyUnavailable)
+        }
+    }
 
     /// Frozen host clock — `now_us` is constant, so no handshake / lease
     /// deadline ever elapses (`now_ms >= deadline_ms` stays false). Keeps
@@ -348,6 +367,7 @@ mod tests {
                 &link,
                 &driver,
                 &actions,
+                SessionEntropy::new(Dry),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -489,6 +509,7 @@ mod tests {
                 &link,
                 &driver,
                 &actions,
+                SessionEntropy::new(Dry),
                 &clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -521,6 +542,7 @@ mod tests {
             link.clone(),
             driver.clone(),
             actions,
+            SessionEntropy::new(Dry),
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),

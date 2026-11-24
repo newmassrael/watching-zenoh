@@ -47,12 +47,20 @@ fn release(engine: &Engine, key: HeldKey) {
     assert!(matches!(keys(engine).key(KeyAsk::Release(key)), Ok(None)));
 }
 
-/// A subscriber's sink that counts the callbacks it mints.
-fn sink(minted: &Arc<AtomicUsize>) -> SubscriberSink {
-    let minted = minted.clone();
-    Arc::new(move || {
-        minted.fetch_add(1, Ordering::SeqCst);
-        Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
+/// Counts its own drop.
+struct Dropped(Arc<AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A subscriber's callback that counts its drop in `dropped`.
+fn sink(dropped: &Arc<AtomicUsize>) -> SubscriberSink {
+    let guard = Dropped(dropped.clone());
+    SubscriberSink::shared(move |_sample: &dyn SampleView| {
+        let _held = &guard;
     })
 }
 
@@ -161,7 +169,7 @@ fn holds_and_declarations_past_the_arena_leave_it_as_they_found_it() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, lowered(|l| l.select_key_arena_bytes(2 * block)));
     let before = engine.key_counts();
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     for round in 0..10 {
         let key = format!("demo/c/{round}");
         let held = hold(&engine, &key).expect("the room given back");
@@ -172,7 +180,7 @@ fn holds_and_declarations_past_the_arena_leave_it_as_they_found_it() {
                 WireKey::literal(),
                 Locality::Any,
                 None,
-                sink(&minted),
+                sink(&dropped),
             )
             .expect("the room given back takes the subscriber");
         engine.undeclare_subscriber(id);
@@ -180,7 +188,11 @@ fn holds_and_declarations_past_the_arena_leave_it_as_they_found_it() {
     let after = engine.key_counts();
     assert_eq!(after.used, before.used, "every block went back");
     assert_eq!(after.refused, before.refused, "none was refused");
-    assert_eq!(minted.load(Ordering::SeqCst), 10);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        10,
+        "each callback let go of with its undeclaration"
+    );
 }
 
 /// After the session closed, a held key still reads, a share of it reads, and letting go of either

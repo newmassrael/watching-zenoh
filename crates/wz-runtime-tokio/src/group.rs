@@ -204,7 +204,7 @@ impl GroupOptions {
 /// `AdvancedPublisherOptions` applies, and for the same measured reason: writing
 /// the default explicitly is not a no-op on the wire, it adds an extension every
 /// default publisher would suddenly emit.
-pub fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptions {
+pub fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptions<'static> {
     let opts = PublishOptions::put().with_locality(locality);
     #[cfg(feature = "pubsub-qos")]
     let opts = if priority != Priority::DEFAULT {

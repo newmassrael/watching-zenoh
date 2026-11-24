@@ -42,7 +42,7 @@
 
 use alloc::vec::Vec;
 
-use crate::e2e_frame::{logical_value, open, BuildError, OpenedFrame, Values};
+use crate::e2e_frame::{logical_value, open_view, BuildError, OpenedView, Values};
 use crate::e2e_judge::{CounterReason, CounterWidthError, Judge, JudgeConfig, Judgment};
 use crate::e2e_profile::{CounterErrors, Profile};
 
@@ -386,7 +386,7 @@ impl Receiver {
         if stream >= addressable {
             return None;
         }
-        let opened = open(&self.profile, frame).ok()?;
+        let opened = open_view(&self.profile, frame).ok()?;
         if self.integrity(&opened) != 0 {
             return None;
         }
@@ -431,7 +431,7 @@ impl Receiver {
                 streams: addressable,
             });
         }
-        let Ok(opened) = open(&self.profile, frame) else {
+        let Ok(opened) = open_view(&self.profile, frame) else {
             return self.short(stream, frame.len(), now_ms);
         };
         let failed = self.integrity(&opened);
@@ -522,7 +522,7 @@ impl Receiver {
     }
 
     /// The `FAILED_*` bits of an opened frame.
-    fn integrity(&self, opened: &OpenedFrame) -> u8 {
+    fn integrity(&self, opened: &OpenedView<'_>) -> u8 {
         let rules = self.profile.rules();
         let mut failed = 0;
         if !opened.crc_ok {
@@ -531,7 +531,7 @@ impl Receiver {
         if let (Some(index), Some(expected)) = (rules.ident, self.expected_ident) {
             // The expected value is made as a sender makes it, so it has no bit outside these.
             let owned = self.profile.fields()[index].owned_bits();
-            if opened.fields[index].value & owned != expected {
+            if opened.value(&self.profile, index) & owned != expected {
                 failed |= FAILED_IDENT;
             }
         }
@@ -542,12 +542,11 @@ impl Receiver {
     }
 
     /// The kind, result and sender of the frame's message cell.
-    fn cell_values(&self, opened: &OpenedFrame) -> (Option<u64>, Option<u64>, Option<u64>) {
+    fn cell_values(&self, opened: &OpenedView<'_>) -> (Option<u64>, Option<u64>, Option<u64>) {
         let Some(cell) = self.profile.cell() else {
             return (None, None, None);
         };
-        let parts = &opened.fields[cell.field].parts;
-        let read = |part: Option<usize>| part.map(|p| parts[p]);
+        let read = |part: Option<usize>| part.map(|p| opened.part(&self.profile, cell.field, p));
         (read(cell.kind), read(cell.result), read(cell.sender))
     }
 

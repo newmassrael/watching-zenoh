@@ -131,7 +131,11 @@ and its feature is measured by a sibling program; it is never retried until it p
   pending queries and replies, interests. Routing/matching is a function over these tables. The
   callback of a local entity is stored in the entity's row (a C function pointer and context, or
   a Rust closure in a pool row); delivery calls it from the row, holding the row pinned, with no
-  intermediate lane and no copy.
+  intermediate lane and no copy. A callback is a `Fn`, called through a shared borrow: a C
+  closure's function, context and drop held as they are, a Rust closure an `Arc<dyn Fn + Send +
+  Sync>` as upstream zenoh's. So it is called with no lock held, from any thread and from inside
+  itself, as zenoh-pico calls it (a put a callback makes on its own subscriber's key reaches it
+  again at once; `wz_ext.h`, "callbacks"), and it is let go of once, after its last call.
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the
@@ -188,7 +192,7 @@ family; every cell of the host performance matrix WIN, on Linux and on pc3-win.
 
 ## 7. Totality debt register
 
-The four crates deny the totality lints outside a test build, at their roots:
+The six crates deny the totality lints outside a test build, at their roots:
 
 ```rust
 #![cfg_attr(
@@ -211,10 +215,12 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-206) and holds the register's lint cells (379) to its ratchet, which a paid row
-lowers in its own commit. For the lints a text read decides (`unwrap_used`, `expect_used` and the
-panicking macros) it also holds each row to its module's sites, both ways; indexing and arithmetic
-are held by the build's clippy alone.
+given (TD-229) and holds the register's lint cells (131) to its ratchet, which a paid row
+lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
+commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
+TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
+it also holds each row to its module's sites, both ways; indexing and arithmetic are held by the
+build's clippy alone.
 
 A module leaves the register when its sites are total functions: `get`, iterators and views of a
 known length for indexing; checked or saturating arithmetic where the operands are not bounded by
@@ -226,9 +232,12 @@ scout. A module the text read found no site in is not in the register.
 
 The classes: **open**, hand-written code not converted yet; **in flight**, a module another branch
 is restructuring now (the cooperative engine of step 4, the session core's entity modules, the pico
-doors of step 5), converted as it lands; **generated**, SCE output, whose totality is the
-generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
-orders the payment (largest first) and is not a measurement of what clippy reports.
+doors of step 5, the group drive's stage in `wz-session-mcu`), converted as it lands;
+**generated**, SCE output, whose totality is the generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
+orders the payment (largest first) and is not a measurement of what clippy reports. The rows of
+`wz-session-mcu` count clippy's own reports instead, over the crate's default build, its build
+with every feature, and its build with every feature but `session-slot`, which takes three modules
+out; those of `wz-capi-port` over its default build and its build with every feature.
 
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
@@ -270,15 +279,11 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
-| TD-154 | `wz-capi-coop` | `lane` | `indexing_slicing`, `arithmetic_side_effects` | 76 | open |
-| TD-155 | `wz-capi-pico` | `os` | `indexing_slicing`, `arithmetic_side_effects` | 59 | in flight |
 | TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
 | TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |
 | TD-158 | `wz-capi-pico` | `config` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |
-| TD-159 | `wz-capi-pico` | `replay_publisher` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |
 | TD-160 | `wz-capi-pico` | `serde` | `indexing_slicing`, `arithmetic_side_effects` | 15 | in flight |
 | TD-161 | `wz-capi-pico` | `zid` | `indexing_slicing`, `arithmetic_side_effects` | 14 | in flight |
-| TD-162 | `wz-capi-pico` | `advanced` | `indexing_slicing`, `arithmetic_side_effects` | 12 | in flight |
 | TD-163 | `wz-capi-pico` | `config_policy` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 10 | in flight |
 | TD-164 | `wz-capi-pico` | `keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 10 | in flight |
 | TD-165 | `wz-capi-pico` | `pubsub` | `arithmetic_side_effects` | 10 | in flight |
@@ -288,46 +293,43 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-169 | `wz-capi-pico` | `get` | `arithmetic_side_effects` | 8 | in flight |
 | TD-170 | `wz-capi-pico` | `querier` | `arithmetic_side_effects` | 8 | in flight |
 | TD-171 | `wz-capi-pico` | `session_memory` | `expect_used`, `arithmetic_side_effects` | 8 | in flight |
-| TD-172 | `wz-capi-pico` | `encoding` | `indexing_slicing`, `arithmetic_side_effects` | 7 | in flight |
-| TD-173 | `wz-capi-pico` | `reply_keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 7 | in flight |
-| TD-174 | `wz-capi-pico` | `instance_key` | `arithmetic_side_effects` | 6 | in flight |
-| TD-175 | `wz-capi-pico` | `replay_subscriber` | `indexing_slicing`, `arithmetic_side_effects` | 6 | in flight |
 | TD-176 | `wz-capi-pico` | `handlers` | `unreachable`, `arithmetic_side_effects` | 5 | in flight |
-| TD-177 | `wz-capi-pico` | `message_catalog` | `arithmetic_side_effects` | 5 | in flight |
-| TD-178 | `wz-capi-pico` | `abi` | `indexing_slicing`, `arithmetic_side_effects` | 4 | in flight |
-| TD-179 | `wz-capi-pico` | `cancellation` | `arithmetic_side_effects` | 3 | in flight |
-| TD-180 | `wz-capi-pico` | `ffi` | `arithmetic_side_effects` | 3 | in flight |
 | TD-181 | `wz-capi-pico` | `matching` | `arithmetic_side_effects` | 3 | in flight |
-| TD-182 | `wz-capi-pico` | `message_payload` | `arithmetic_side_effects` | 3 | in flight |
-| TD-183 | `wz-capi-pico` | `query` | `arithmetic_side_effects` | 3 | in flight |
-| TD-184 | `wz-capi-pico` | `advanced_forms` | `indexing_slicing` | 2 | in flight |
 | TD-185 | `wz-capi-pico` | `app_transport` | `arithmetic_side_effects` | 2 | in flight |
-| TD-186 | `wz-capi-pico` | `ext_interface` | `arithmetic_side_effects` | 2 | in flight |
-| TD-187 | `wz-capi-pico` | `get_to_peer` | `indexing_slicing`, `arithmetic_side_effects` | 2 | in flight |
 | TD-188 | `wz-capi-pico` | `object_pool` | `arithmetic_side_effects` | 2 | in flight |
-| TD-189 | `wz-capi-pico` | `segment_sender` | `arithmetic_side_effects` | 2 | in flight |
-| TD-190 | `wz-capi-pico` | `string_array` | `arithmetic_side_effects` | 2 | in flight |
-| TD-191 | `wz-capi-pico` | `sync` | `arithmetic_side_effects` | 2 | in flight |
-| TD-192 | `wz-capi-pico` | `whatami` | `indexing_slicing` | 2 | in flight |
-| TD-193 | `wz-capi-pico` | `admin_space` | `indexing_slicing` | 1 | in flight |
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
-| TD-195 | `wz-capi-pico` | `e2e_receiver` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
-| TD-197 | `wz-capi-pico` | `platform` | `indexing_slicing` | 1 | in flight |
-| TD-198 | `wz-capi-pico` | `stream_supervision` | `arithmetic_side_effects` | 1 | in flight |
-| TD-199 | `wz-capi-pico` | `time_base` | `arithmetic_side_effects` | 1 | in flight |
 | TD-200 | `wz-runtime-coop` | `stream_link` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
 | TD-202 | `wz-runtime-coop` | `app_link` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
 | TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
-| TD-204 | `wz-runtime-coop` | `local` | `panic` | 1 | open |
 | TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
 | TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
+| TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing` | 1 | open |
+| TD-208 | `wz-session-mcu` | `dial` | `indexing_slicing`, `arithmetic_side_effects` | 32 | open |
+| TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
+| TD-216 | `wz-session-mcu` | `admin_host` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-219 | `wz-session-mcu` | `admin_fixed` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
+| TD-220 | `wz-session-mcu` | `slot_group` | `indexing_slicing` | 4 | open |
+| TD-221 | `wz-session-mcu` | `client_node` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-223 | `wz-session-mcu` | `memory` | `arithmetic_side_effects` | 2 | open |
+| TD-224 | `wz-session-mcu` | `app_layer` | `arithmetic_side_effects` | 1 | open |
+| TD-225 | `wz-session-mcu` | `slot_client` | `indexing_slicing` | 1 | open |
+| TD-228 | `wz-capi-port` | `cancellation` | `arithmetic_side_effects` | 5 | open |
+| TD-229 | `wz-capi-port` | `listeners` | `arithmetic_side_effects` | 1 | open |
 
-Three rows of `wz-runtime-coop` are one panic each, held for a contract outside the module:
-TD-204 and TD-205 are the stall of a `block_on` (a future nothing can wake),
-whose refusal is a `RuntimeError` of its own and `block_on` answering a `Result`, which moves its
-callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
+TD-207 (`connect_manager`) keeps `indexing_slicing` for `CommanderList::parse`, a `const fn` that
+fills a list of `N` zids from the text a build states: on Rust 1.81 a `const fn` takes no `&mut`,
+so a row of an array whose length is a generic is written by index, as in TD-049.
+
+TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
+(`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid
+once that lands, in the same module.
+
+Two rows of `wz-runtime-coop` are one panic each, held for a contract outside the module:
+TD-205 is the stall of `CoopRuntime::block_on` (a future nothing can wake), whose refusal is
+`RuntimeError::Stalled`, as `CoopLocalSet::block_on_local` answers it, once `block_on` answers a
+`Result`, which moves its callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
 to give, and whose refusal belongs in that trait of `wz-session-core`.
 
 TD-023 keeps `panic` for a check that runs while the build evaluates a constant, where the panic

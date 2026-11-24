@@ -51,8 +51,15 @@ impl RowCallbacks for Latched {
     type Reply = CClosure<u32>;
 }
 
-/// The tables of the static policy, whose rows never move, with latched callbacks.
-type LatchedTables = SessionTables<Latched, Static>;
+/// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
+type LatchedTables = SessionTables<Latched, Lent>;
+
+/// Latched tables lent every table at the build's bound.
+fn latched_tables() -> LatchedTables {
+    let rows = rows();
+    let mut arena = arena(LatchedTables::arena_bytes(&rows).unwrap());
+    LatchedTables::lent(&mut arena, keys(4096), &rows).unwrap()
+}
 
 /// End `call`, begun on a row of `R`'s that has not moved since.
 fn ended<R: RowCallback>(call: R::Call) -> bool {
@@ -215,7 +222,7 @@ fn an_undeclared_entity_hands_its_row_back_and_its_handle_goes_stale() {
 
 #[test]
 fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let sub = tables
         .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
         .unwrap();
@@ -236,7 +243,7 @@ fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() 
 
 #[test]
 fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let sub = tables
         .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
         .unwrap();
@@ -255,7 +262,7 @@ fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
 
 #[test]
 fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let qbl = tables
         .declare_queryable("q", Locality::Any, false, KeyForm::default(), latched(1))
         .unwrap();
@@ -327,6 +334,22 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), Some(1));
     assert!(tables.keyexprs().is_empty());
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
+}
+
+/// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
+/// that names no row takes none.
+#[test]
+fn a_retained_key_expression_is_retracted_by_its_last_holder() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert!(tables.retain_keyexpr(declared.handle));
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "a retracted one takes none"
+    );
+    assert!(tables.keyexprs().is_empty());
 }
 
 #[test]
@@ -516,7 +539,7 @@ fn a_listener_on_no_filter_is_refused_with_its_callback() {
 
 #[test]
 fn a_filter_undeclared_while_its_listener_is_called_leaves_it_to_the_last_call() {
-    let mut tables = LatchedTables::new();
+    let mut tables = latched_tables();
     let filter = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
         .unwrap()
@@ -892,6 +915,34 @@ fn a_key_the_key_arena_has_no_room_for_is_refused_as_a_full_table() {
     );
 }
 
+/// Rows of one text take one block of the key arena between them, whoever made the first: a
+/// subscriber on a key the session declared shares the declaration's block. The CONTROL is a
+/// subscriber on another text, which takes a block of its own.
+#[test]
+fn rows_of_one_text_share_its_block() {
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let space = keys(256);
+    let mut tables = SessionTables::<Calls, Lent>::lent(&mut arena, space, &rows).unwrap();
+    tables.declare_keyexpr("a/shared").unwrap();
+    let one = space.counts().used;
+    tables
+        .declare_subscriber("a/shared", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert_eq!(
+        space.counts().used,
+        one,
+        "the subscriber shares the declaration's block"
+    );
+    tables
+        .declare_subscriber("a/other", Locality::Any, KeyForm::default(), 2)
+        .unwrap();
+    assert!(
+        space.counts().used > one,
+        "CONTROL: another text takes a block of its own"
+    );
+}
+
 #[test]
 fn lent_tables_past_a_build_bound_are_refused() {
     let rows = TableRows {
@@ -940,6 +991,45 @@ fn a_retracted_declaration_goes_whatever_holds_it() {
     assert_eq!(tables.retract_keyexpr(declared.handle), None);
     // The token's retraction finds no declaration left to let go of.
     assert_eq!(tables.undeclare_token(token.handle).unwrap().keyexpr, None);
+}
+
+#[test]
+fn a_key_is_named_as_the_session_sends_it_by_the_declaration_that_stands() {
+    use crate::named_key::NamedKey;
+    use crate::wire_key::{KeyText, MappedId, WireKey};
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    let id = MappedId::new(declared.id).unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        names_key: false,
+    };
+    let token = tables.declare_token("demo/x", form).unwrap();
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    let named = tables.named(key).unwrap();
+    assert_eq!(named.text(), "demo/x");
+    assert_eq!(named.wire(), WireKey::mapped(id, KeyText::new("x")));
+    // A key the program names by a declaration's id is named by it while the key starts with
+    // the declared literal, and whole otherwise.
+    assert_eq!(
+        tables.named_by("demo/y", declared.id).unwrap().wire(),
+        WireKey::mapped(id, KeyText::new("y"))
+    );
+    assert_eq!(
+        tables.named_by("away/y", declared.id),
+        NamedKey::literal("away/y")
+    );
+    assert_eq!(tables.named_by("demo/y", 0), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("demo/y", 99), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("", declared.id), None);
+    // A retracted declaration names no key any more, the token's included.
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(tables.named(key), NamedKey::literal("demo/x"));
+    assert_eq!(
+        tables.named_by("demo/y", declared.id),
+        NamedKey::literal("demo/y")
+    );
 }
 
 #[test]
@@ -1050,6 +1140,107 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
 }
 
+/// The table set is the session's own id space: a peer's `M=0` key that names a key expression
+/// the session declared is read from the set's own table and reaches the subscriber on that key,
+/// with no space installed on the peer's side, and one that names an id the session never declared
+/// reaches nothing; a space a host installs there is read before the tables. The CONTROL is the
+/// peer's side alone, which holds no own space.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    target_has_atomic = "ptr",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[test]
+fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
+    use crate::network_message::NetworkMessage;
+    use crate::pubsub::SubscriberPeer;
+    use crate::reliability::Reliability;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    let push_naming_ours = |id: ExprId| {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap()
+    };
+    let mut tables = SessionTables::<Sinks>::new();
+    let declared = tables.declare_keyexpr("ours/temp").unwrap();
+    let subscriber = tables
+        .declare_subscriber(
+            "ours/temp",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut peer = SubscriberPeer::<crate::bounded::Heap>::default();
+    assert!(
+        !peer.mapping_spaces().has_own(),
+        "CONTROL: the peer's side holds no own space"
+    );
+    peer.dispatch(
+        &mut tables,
+        &mut Handed::default(),
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "read from the set's own table"
+    );
+    peer.dispatch(
+        &mut tables,
+        &mut Handed::default(),
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id + 1))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "an id never declared reaches nothing"
+    );
+    // A space a host installs on the peer's side is read before the tables: the same id names
+    // the key the host holds for it.
+    let elsewhere = tables
+        .declare_subscriber(
+            "installed/key",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut installed = hashbrown::HashMap::new();
+    installed.insert(declared.id, std::string::String::from("installed/key"));
+    let installed: crate::wireexpr_resolve::SharedOwnMappingSpace =
+        alloc::sync::Arc::new(installed);
+    peer.set_own_mapping_space(installed);
+    peer.dispatch(
+        &mut tables,
+        &mut Handed::default(),
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        (
+            heard(&tables, elsewhere.handle),
+            heard(&tables, subscriber.handle)
+        ),
+        (1, 1),
+        "the installed space is read first"
+    );
+}
+
 /// How many samples the subscriber `handle` names was handed.
 fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
     tables.subscribers().get(handle).unwrap().callback().0.get()
@@ -1122,7 +1313,10 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
 fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     use crate::pubsub::LocalSubscribers;
     let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
-    let mut tables = SessionTables::<Sinks, Static>::new();
+    // A row read in place lies in the arena.
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Sinks, Lent>::arena_bytes(&rows).unwrap());
+    let mut tables = SessionTables::<Sinks, Lent>::lent(&mut arena, keys(256), &rows).unwrap();
     let sub = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
@@ -1421,12 +1615,12 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     }
     let fire = |tables: &mut Tables, remote: bool, target: Option<QueryTarget>| {
         let mut asked = Vec::new();
-        let fired = tables.fire_matching_queryables(
+        let fired = tables.queryables.fire_matching_queryables(
             "q/a",
             KeyFacts::of("q/a"),
             remote,
             target,
-            |callback: &mut u32| asked.push(*callback),
+            |_, callback: RowAccess<'_, u32>| asked.push(*callback.row()),
         );
         assert_eq!(fired, asked.len());
         asked
@@ -1436,7 +1630,7 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     assert_eq!(fire(&mut tables, false, None), [1, 3]);
     #[cfg(feature = "storage-profile")]
     {
-        assert!(tables.has_local_queryable("q/a", false));
-        assert!(!tables.has_local_queryable("elsewhere", false));
+        assert!(tables.queryables.has_local_queryable("q/a", false));
+        assert!(!tables.queryables.has_local_queryable("elsewhere", false));
     }
 }

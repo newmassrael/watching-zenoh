@@ -13,11 +13,12 @@ use std::time::Duration;
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link::RxBytes;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -66,8 +67,8 @@ struct Script {
     legs: Mutex<usize>,
     /// What was declared and retracted, in order.
     events: Mutex<Vec<String>>,
-    subscriptions: Mutex<Vec<(SubId, String, WireKey, SubscriberSink)>>,
-    liveliness: Mutex<Vec<(SubId, String, bool, LivelinessSink)>>,
+    subscriptions: Mutex<Vec<(SubId, String, WireKey, Arc<SubscriberSink>)>>,
+    liveliness: Mutex<Vec<(SubId, String, bool, Arc<LivelinessSink>)>>,
     gets: Mutex<Vec<GetRecord>>,
     tickers: Mutex<Vec<(TickerId, u64, Tick)>>,
 }
@@ -93,10 +94,10 @@ impl Script {
         self.events.lock().unwrap().clone()
     }
 
-    /// The `n`th subscription's callback, minted as the engine would for a face.
+    /// The `n`th subscription's callback, called as an engine calls it.
     fn callback(&self, n: usize) -> SampleFn {
         let sink = Arc::clone(&self.subscriptions.lock().unwrap()[n].3);
-        sink()
+        Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample))
     }
 
     fn get_count(&self) -> usize {
@@ -106,9 +107,9 @@ impl Script {
     /// Feed a reply to leg `leg` of get `get`, if it is still there.
     fn reply(&self, get: usize, leg: usize, reply: &InboundReply) {
         let slot = Arc::clone(&self.gets.lock().unwrap()[get].legs[leg]);
-        let mut guard = slot.lock().unwrap();
-        if let Some(callback) = guard.as_mut() {
-            callback(reply);
+        let guard = slot.lock().unwrap();
+        if let Some(callback) = guard.as_ref() {
+            callback.call(reply);
         }
     }
 
@@ -164,7 +165,7 @@ impl SessionEngine for Script {
         self.subscriptions
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), wire, sink));
+            .push((id, keyexpr.to_owned(), wire, Arc::new(sink)));
         Ok(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
@@ -189,9 +190,9 @@ impl SessionEngine for Script {
         Err(Refusal::NotBuilt)
     }
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
-    fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
-        Vec::new()
-    }
+
+    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         _plane: FilterPlane,
@@ -207,7 +208,7 @@ impl SessionEngine for Script {
         _plane: FilterPlane,
         _keyexpr: &str,
         _wire: &WireKey,
-        _ask: Option<InterestForm>,
+        _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         Ok(0)
@@ -229,13 +230,26 @@ impl SessionEngine for Script {
     ) -> FilteredPut {
         FilteredPut::NotPlain
     }
-    fn batch_start_all(&self) -> usize {
-        0
+    fn keep_write_filter_plain(
+        &self,
+        _filter: FilterId,
+        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
     }
-    fn batch_flush_all(&self) -> usize {
-        0
+    fn publish_filtered(
+        &self,
+        _filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        match opts {
+            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
+            None => FilteredPut::NotPlain,
+        }
     }
-    fn batch_stop_all(&self) -> usize {
+    fn batch_all(&self, _step: BatchStep) -> usize {
         0
     }
     fn declare_liveliness_token_on_wire(
@@ -263,7 +277,7 @@ impl SessionEngine for Script {
         self.liveliness
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), history, sink));
+            .push((id, keyexpr.to_owned(), history, Arc::new(sink)));
         Ok(id)
     }
     fn get_on_wire(
@@ -669,8 +683,7 @@ fn a_late_publisher_has_its_cache_recovered() {
     script.end_leg(0, 0);
     let token = format!("demo/data/@adv/pub/{}/7/_", publisher_hex());
     let sink = Arc::clone(&script.liveliness.lock().unwrap()[0].3);
-    let mut on_token = sink();
-    on_token(LivelinessSample {
+    sink.call(LivelinessSample {
         kind: LivelinessSampleKind::Put,
         keyexpr: &token,
         token_id: 1,
@@ -686,7 +699,7 @@ fn a_late_publisher_has_its_cache_recovered() {
     assert_eq!(*delivered.lock().unwrap(), [10, 11]);
 
     // The same token again while it is in no get asks again; a departure asks nothing.
-    on_token(LivelinessSample {
+    sink.call(LivelinessSample {
         kind: LivelinessSampleKind::Delete,
         keyexpr: &token,
         token_id: 1,

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::bounded::{Static, ARENA_ALIGN};
+use core::cell::Cell;
 use core::ptr::NonNull;
 
 /// The marker of the tables these tests make.
@@ -228,4 +229,50 @@ fn a_growable_table_takes_its_bound_from_its_limit_not_from_the_build() {
     map.insert(3).unwrap();
     assert!(map.is_full());
     assert!(map.insert(4).is_err());
+}
+
+/// A row that counts its drops in `drops`.
+struct Counted<'a>(&'a Cell<u32>);
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_add(1));
+    }
+}
+
+/// Fill `map` with a live row, a row removed at once and a row removed while pinned, and drop
+/// it: each of the three is dropped once, the removed one when it is handed back, the other two
+/// with the table.
+fn drops_each_row_once<'a, const N: usize, P: Storage>(
+    mut map: SlotMap<Test, Counted<'a>, N, P>,
+    drops: &'a Cell<u32>,
+) {
+    let (Ok(_live), Ok(removed), Ok(pinned)) = (
+        map.insert(Counted(drops)),
+        map.insert(Counted(drops)),
+        map.insert(Counted(drops)),
+    ) else {
+        panic!("a table of four rows refused one of three");
+    };
+    let _pin = map.pin(pinned).expect("a live row is pinned");
+    assert!(matches!(map.remove(pinned), Some(Removal::AfterCalls)));
+    drop(map.remove(removed));
+    assert_eq!(drops.get(), 1);
+    drop(map);
+    assert_eq!(drops.get(), 3);
+}
+
+#[test]
+fn dropping_a_lent_table_drops_its_live_and_retired_rows_once() {
+    let drops = Cell::new(0);
+    let bytes = SlotMap::<Test, Counted<'_>, 4, Lent>::arena_bytes(4).unwrap();
+    let mut arena = arena(bytes);
+    let map = SlotMap::<Test, Counted<'_>, 4, Lent>::lent(&mut arena, 4).unwrap();
+    drops_each_row_once(map, &drops);
+}
+
+#[test]
+fn dropping_a_fixed_table_drops_its_live_and_retired_rows_once() {
+    let drops = Cell::new(0);
+    drops_each_row_once(SlotMap::<Test, Counted<'_>, 4, Static>::new(), &drops);
 }

@@ -400,14 +400,16 @@ pub fn report_inbound<'s, M, C, D, I, const N: usize>(
     I: Iterator<Item = &'s SlotSession<C, D>>,
 {
     let mut proven: [DirectoryZid; N] = [[0; CREDENTIAL_ZID_BYTES]; N];
-    let mut count = 0;
-    for zid in accepted.filter_map(|session| session.proven_peer()) {
-        if count < N {
-            proven[count] = zid;
-            count += 1;
-        }
+    // The first `N` proven peers, each in the next free row; the count stays at most `N`.
+    let mut count = 0usize;
+    for (row, zid) in proven
+        .iter_mut()
+        .zip(accepted.filter_map(|session| session.proven_peer()))
+    {
+        *row = zid;
+        count = count.wrapping_add(1);
     }
-    manager.inbound_sessions(&proven[..count], now_ms);
+    manager.inbound_sessions(proven.get(..count).unwrap_or_default(), now_ms);
 }
 
 /// End the sessions peers opened to this node (`accepted`) that `manager`'s machines let go of

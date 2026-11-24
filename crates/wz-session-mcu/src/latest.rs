@@ -121,8 +121,13 @@ impl<const N: usize> LatestCell<N> {
         // no reference into either array exists while this writes.
         unsafe {
             let (cell_payload, cell_key) = (&mut *self.payload.get(), &mut *self.key.get());
-            cell_payload[..keep].copy_from_slice(&payload[..keep]);
-            cell_key[..key_len].copy_from_slice(key.as_bytes());
+            // `keep` is within both and `key_len` within the key's array, checked above.
+            if let (Some(into), Some(from)) = (cell_payload.get_mut(..keep), payload.get(..keep)) {
+                into.copy_from_slice(from);
+            }
+            if let Some(into) = cell_key.get_mut(..key_len) {
+                into.copy_from_slice(key.as_bytes());
+            }
         }
         self.stored.set(keep);
         self.key_len.set(key_len);
@@ -142,8 +147,11 @@ impl<const N: usize> LatestCell<N> {
         read(Some(Latest {
             // `put` stored a whole `&str`, so this is text; an empty key stands in for the
             // impossible case rather than panicking in the node's loop.
-            key: core::str::from_utf8(&key[..self.key_len.get()]).unwrap_or(""),
-            payload: &payload[..self.stored.get()],
+            key: key
+                .get(..self.key_len.get())
+                .and_then(|key| core::str::from_utf8(key).ok())
+                .unwrap_or(""),
+            payload: payload.get(..self.stored.get()).unwrap_or_default(),
             received_len: self.received.get(),
             kind: if self.deleted.get() {
                 SampleKind::Del
@@ -296,12 +304,12 @@ impl<const K: usize> LatestWatch<K> {
         end: usize,
         mut say: impl FnMut(usize, Latest<'_>),
     ) {
-        for index in first..end.min(K) {
+        for (index, seen) in self.seen.iter_mut().enumerate().take(end).skip(first) {
             let now = slots.sequence(index);
-            if now == self.seen[index] {
+            if now == *seen {
                 continue;
             }
-            self.seen[index] = now;
+            *seen = now;
             slots.with(index, &mut |latest| {
                 if let Some(latest) = latest {
                     say(index, latest);

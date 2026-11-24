@@ -66,6 +66,7 @@ fn observer() -> (SlotObserver, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let into = seen.clone();
     observer
+        .tables
         .subscribers
         .register_sink(
             "**",
@@ -87,7 +88,7 @@ fn dispatch(
     messages: Vec<NetworkMessage>,
 ) {
     let outcome = frame(messages);
-    observer.dispatch_event(peers, requesters, IterationEvent::Poll(&outcome));
+    observer.dispatch_event(&mut (), peers, requesters, IterationEvent::Poll(&outcome));
 }
 
 #[test]

@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{SessionEngine, WireKey};
+use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
@@ -54,23 +54,17 @@ fn a_subscriber_sees_the_timestamp_as_the_sessions_policy_says() {
         let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
         let into = seen.clone();
         engine
-            .declare_subscriber_on_wire(
-                "demo/ts/**",
-                WireKey::literal(),
-                Locality::Any,
-                None,
-                Arc::new(move || {
-                    let into = into.clone();
-                    Box::new(move |sample: &dyn SampleView| {
-                        // Read as the pico ABI reads it (`wz-capi-pico`'s `with_metadata`): where the
-                        // view holds it first, since a sample of the delivery lane carries its
-                        // timestamp as parts and no hint.
-                        let stamped =
-                            sample.timestamp_parts().is_some() || sample.timestamp().is_some();
-                        into.lock().unwrap().push(stamped);
-                    })
-                }),
-            )
+            .declare_subscriber_on_wire("demo/ts/**", WireKey::literal(), Locality::Any, None, {
+                let into = into.clone();
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    // Read as the pico ABI reads it (`wz-capi-pico`'s `with_metadata`): where the
+                    // view holds it first, since a sample of the delivery lane carries its
+                    // timestamp as parts and no hint.
+                    let stamped =
+                        sample.timestamp_parts().is_some() || sample.timestamp().is_some();
+                    into.lock().unwrap().push(stamped);
+                })
+            })
             .expect("the session declares the subscriber");
         until(&engine, "the router to see the subscriber", || {
             router.seen(|s| s.declares) >= 1
@@ -112,14 +106,14 @@ fn a_get_sees_the_reply_timestamp_as_the_policy_says_unless_it_chooses() {
             let issued =
                 engine.get_on_wire("demo/ts/a", &WireKey::literal(), &opts, None, &mut || {
                     let into = into.clone();
-                    Box::new(move |reply: &dyn ReplyView| {
+                    ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         // Read as the pico ABI reads it (`wz-capi-pico`'s `get.rs`): where the
                         // view holds it first, since a reply of the delivery lane carries its
                         // timestamp as parts and no hint.
                         let stamped =
                             reply.timestamp_parts().is_some() || reply.timestamp().is_some();
                         into.lock().unwrap().push(stamped);
-                    }) as ReplyCallback
+                    })
                 });
             assert_eq!(issued, Ok(1), "one leg, to the router");
             until(&engine, "the stamped reply", || {

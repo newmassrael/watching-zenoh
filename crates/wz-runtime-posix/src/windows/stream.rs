@@ -14,12 +14,9 @@
 //! which Winsock has no per-call flag for. The write that waits ([`StreamSocket::send_parts`])
 //! waits in `WSAPoll` for room and writes on, so it returns once Winsock has taken every byte (a
 //! length and its batch go out in one `WSASend`), as the POSIX half's does; a read is one `recv`
-//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`]. The
-//! owner is given no read that waits in itself (`StreamSocket::reader`, which the POSIX half
-//! gives): the blocking mode is the socket's and not one call's, so a `recv` that waited would
-//! make the write tried first wait as well, and the owner waits in `WSAPoll` before the step's
-//! read instead. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
-//! TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
+//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`], and
+//! the owner's the same poll before the step's read. `TCP_NODELAY` is set, as zenoh and
+//! zenoh-pico set it on every TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
 //! `IPPROTO_TCP, TCP_NODELAY`).
 
 use core::ffi::c_int;
@@ -29,11 +26,6 @@ use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
-
-wz_runtime_coop::with_heap_link_seams! {
-    #[cfg(feature = "alloc")]
-    use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
-}
 
 use super::{
     close, keep_from_children, last_error, name_of, open_socket, poll_readable, poll_writable,
@@ -52,12 +44,13 @@ pub struct WindowsTcpSocket {
 
 /// A failed open of a stream socket as the stack's refusal of the link: a family the system has
 /// no socket of is permanent for the locator, no socket to give (or no Winsock yet) is worth a
-/// later try, and anything else is the other end's or the port's answer, as a retry would meet
-/// it.
+/// later try, a port another socket holds is that, and anything else is the other end's or the
+/// port's answer, as a retry would meet it.
 fn open_refused(error: WindowsNetError) -> LinkOpenError {
     match error {
         WindowsNetError::Socket(ws::WSAEAFNOSUPPORT) => LinkOpenError::Unsupported,
         WindowsNetError::Socket(_) | WindowsNetError::Startup(_) => LinkOpenError::Exhausted,
+        WindowsNetError::Bind(ws::WSAEADDRINUSE) => LinkOpenError::AddressInUse,
         _ => LinkOpenError::Refused,
     }
 }
@@ -243,11 +236,11 @@ impl StreamListen for WindowsTcpListener {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            // A listening socket polls readable while a connection is queued on it.
-            super::SocketReadiness::of(self.socket)
+        // A listening socket polls readable while a connection is queued on it.
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
+
     }
 
     fn accept(&self) -> Result<Option<WindowsTcpSocket>, LinkOpenError> {
@@ -491,15 +484,14 @@ impl StreamSocket for WindowsTcpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        #[cfg(feature = "alloc")]
-        fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-            super::SocketReadiness::of(self.socket)
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
 
-        #[cfg(feature = "alloc")]
-        fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-            super::SocketReadiness::writable_of(self.socket)
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
+
     }
 }
 
@@ -907,14 +899,15 @@ mod tests {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
-        /// The wait for room handed to another thread answers as the socket's own wait does: it
-        /// has room while the stream takes bytes, and none once the peer has stopped reading.
-        #[cfg(feature = "alloc")]
+        /// A wait for room on the handle the stream names answers as the socket's own wait does:
+        /// it has room while the stream takes bytes, and none once the peer has stopped reading.
         #[test]
-        fn the_wait_for_room_handed_out_answers_as_the_socket_does() {
+        fn a_wait_for_room_on_the_streams_handle_answers_as_the_socket_does() {
+            use wz_runtime_coop::session_drive::LinkWaits;
             let (near, _far) = pair();
-            let wait = near.writability().expect("a duplicate of the socket");
-            assert!(wait.wait_writable(1_000), "an empty stream takes bytes");
+            let on = near.room_wait().expect("the stream's handle");
+            let waits = super::super::WindowsWaits;
+            assert!(waits.wait_room(on, 1_000), "an empty stream takes bytes");
             let chunk = [0x5au8; 1024];
             let mut written = 0usize;
             while near.wait_writable(1_000) {
@@ -927,20 +920,9 @@ mod tests {
                 );
             }
             assert!(
-                !wait.wait_writable(1_000),
-                "the wait handed out sees the stream full as the socket does"
+                !waits.wait_room(on, 1_000),
+                "a wait on the handle sees the stream full as the socket does"
             );
-        }
-
-        /// The owner of a Windows stream waits on its readiness and is given no read that waits in
-        /// itself: the socket does not block, for the write that is tried first. CONTROL: the
-        /// readiness it waits on is given.
-        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-        #[test]
-        fn a_windows_stream_gives_its_owner_no_read_that_waits_in_itself() {
-            let (near, _far) = pair();
-            assert!(near.reader().is_none());
-            assert!(near.readiness().is_some(), "CONTROL: the wait on its readiness");
         }
     }
 }

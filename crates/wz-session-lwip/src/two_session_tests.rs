@@ -238,7 +238,9 @@ struct RouterLog {
     puts: RefCell<Vec<Vec<u8>>>,
 }
 
-type Actions = Rc<SessionLinkActions<CoopRuntime<StepClock>, CoopTime<StepClock>>>;
+type Actions = wz_runtime_coop::link_cells::CellRc<
+    SessionLinkActions<CoopRuntime<StepClock>, CoopTime<StepClock>>,
+>;
 
 /// The two sessions under test and the router fixture, all on one local set.
 struct TwoSessions {
@@ -282,12 +284,7 @@ impl TwoSessions {
         let links = test_links(link.clone());
 
         let OpenedLink { sink, pump } = links.open_acceptor(router_port).expect("bind router");
-        let router = new_session_actions(
-            sink,
-            unicast_params(0xa1),
-            CoopTime::new(&runtime),
-            Counting(1),
-        );
+        let router = new_session_actions(sink, unicast_params(0xa1), CoopTime::new(&runtime));
         let router_log = Rc::new(RouterLog::default());
         let log = router_log.clone();
         // The fixture runs for the whole test; its handle is never awaited.
@@ -295,6 +292,7 @@ impl TwoSessions {
             &local,
             pump,
             router.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::spec_defaults(),
@@ -319,6 +317,7 @@ impl TwoSessions {
             &local,
             pump,
             client.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::spec_defaults(),

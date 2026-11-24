@@ -34,6 +34,7 @@ use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{BoxedLinkDriver, LinkDropCause};
 use wz_session_core::locality::Locality;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
@@ -44,7 +45,7 @@ use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::send_declare_error::SendDeclareError;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::slot_observer::{NoSink, ObserverSinks};
+use wz_session_core::slot_observer::{NoSink, ObserverSinks, RegistryTables};
 use wz_session_core::wire_id::{listed_entity_id, EntityId};
 
 use crate::connect_manager::{
@@ -941,15 +942,12 @@ fn declare<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     id: EntityId,
     declaration: &Declaration,
 ) -> Result<(), SendDeclareError> {
+    let key = NamedKey::literal(declaration.key).ok_or(SendDeclareError::MissingKeyexpr)?;
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
     match declaration.kind {
-        DeclarationKind::Queryable => {
-            actions.send_declare_queryable(id, 0, Some(declaration.key), false)
-        }
-        DeclarationKind::Subscriber => {
-            actions.send_declare_subscriber(id, 0, Some(declaration.key))
-        }
-        DeclarationKind::Token => actions.send_declare_token(id, 0, Some(declaration.key)),
+        DeclarationKind::Queryable => actions.send_declare_queryable(id, key, false),
+        DeclarationKind::Subscriber => actions.send_declare_subscriber(id, key),
+        DeclarationKind::Token => actions.send_declare_token(id, key),
     }
 }
 
@@ -984,8 +982,9 @@ pub struct DocumentSinks;
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
     type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type QueryableId = wz_session_core::query::QueryableId;
     type Delivery = ();
-    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;

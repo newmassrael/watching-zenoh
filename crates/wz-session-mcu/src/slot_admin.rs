@@ -38,6 +38,7 @@ use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::FixedText;
 
@@ -301,12 +302,15 @@ fn declare_admin<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static
     config_key: &str,
 ) -> bool {
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
-    actions
-        .send_declare_queryable(ADMIN_QUERYABLE_ID, 0, Some(admin_key), false)
-        .is_ok()
-        && actions
-            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, 0, Some(config_key))
+    NamedKey::literal(admin_key).is_some_and(|key| {
+        actions
+            .send_declare_queryable(ADMIN_QUERYABLE_ID, key, false)
             .is_ok()
+    }) && NamedKey::literal(config_key).is_some_and(|key| {
+        actions
+            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, key)
+            .is_ok()
+    })
 }
 
 /// An admin node whose stack hands it the links of the sessions a peer opened ([`Accept`]): a

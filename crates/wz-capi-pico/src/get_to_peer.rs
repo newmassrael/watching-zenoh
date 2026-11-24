@@ -36,8 +36,11 @@ use crate::zid::{z_id_t, Z_ID_SIZE};
 /// carries it and a face records it, so a padded `z_id_t` and a short wire id match. An id of no
 /// non-zero byte has none.
 fn wire_bytes(id: &[u8; Z_ID_SIZE]) -> Vec<u8> {
-    let len = id.iter().rposition(|b| *b != 0).map_or(0, |last| last + 1);
-    id[..len].to_vec()
+    let mut bytes = id.as_slice();
+    while let [kept @ .., 0] = bytes {
+        bytes = kept;
+    }
+    bytes.to_vec()
 }
 
 /// Whether the build's domain allows the `targeted-query` policy on: whether any session's

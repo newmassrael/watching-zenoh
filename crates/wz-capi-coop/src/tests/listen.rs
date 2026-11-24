@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    BatchStep, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -115,18 +116,12 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener
-        .declare_subscriber_on_wire(
-            "demo/l/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/l/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
@@ -185,10 +180,10 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock().unwrap().push(view.payload().to_vec());
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
@@ -286,11 +281,8 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
         WireKey::literal(),
         Locality::Any,
         None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
         }),
     )
     .expect("the session declares the subscriber");
@@ -414,18 +406,12 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener
-        .declare_subscriber_on_wire(
-            "demo/u/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/u/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("the session declares the subscriber");
 
     let first = client(&endpoint, 0xc1);
@@ -515,18 +501,12 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/s/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     // The client's open waits for the listener's answer, and this thread is what steps the
     // listener: the client opens on a thread of its own meanwhile.
@@ -541,7 +521,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 
     const PUTS: usize = 32;
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
@@ -555,22 +535,22 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         .expect("a put the window holds");
     }
     assert_eq!(
-        peer.batch_stop_all(),
+        peer.batch_all(BatchStep::Stop),
         1,
         "the window is written as it closes"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let (handed, lent) = (engine.lane_handed(), engine.lane_lent());
+    let (handed, lent) = (engine.rounds_handed(), engine.samples_lent());
     let reads = reads_until(&engine, "the puts", || {
         received.load(Ordering::SeqCst) == PUTS
     });
     assert_eq!(
-        engine.lane_lent() - lent,
+        engine.samples_lent() - lent,
         PUTS,
         "each put handed where it lies in the stream link's buffer, none copied into the lane"
     );
     assert_eq!(
-        engine.lane_handed() - handed,
+        engine.rounds_handed() - handed,
         1,
         "one record of the lane for the batch's puts"
     );
@@ -596,18 +576,12 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
-        .declare_subscriber_on_wire(
-            "demo/s/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let count = count.clone();
-                Box::new(move |_sample: &dyn SampleView| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+            let count = count.clone();
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("the session declares the subscriber");
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
@@ -628,18 +602,26 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
         .expect("a put the window holds");
     };
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_flush_all(), 1, "the first batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Flush),
+        1,
+        "the first batch is written"
+    );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_stop_all(), 1, "the second batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Stop),
+        1,
+        "the second batch is written"
+    );
     std::thread::sleep(Duration::from_millis(100));
     let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
     let before = takes(&engine);
@@ -658,35 +640,27 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     );
 }
 
-/// A session whose one link is a stream waits for that link's input in the read of it, as
-/// zenoh-pico's read task waits in its socket's `recv`: none of its reads waits on the link's
-/// readiness first, and what a listener puts reaches it read by those waits. The CONTROL is the
-/// listener, whose port is waited on beside its link: every wait it makes is a wait on both, and
-/// none is made in a read.
+/// A session whose one link is a stream waits on that link's input with nothing of the session
+/// held, and the step after the wait reads what came: each put a listener makes reaches it after
+/// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.
+/// Turned red by a lone link whose read waits some other way, which these waits would not count.
 #[test]
-fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
+fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
     let (listener, endpoint) = listening(|_| {});
     let peer = client(&endpoint, 0xc1);
     let heard = Arc::new(AtomicUsize::new(0));
     let count = heard.clone();
-    peer.declare_subscriber_on_wire(
-        "demo/rt/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    )
+    peer.declare_subscriber_on_wire("demo/rt/**", WireKey::literal(), Locality::Any, None, {
+        let count = count.clone();
+        SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    })
     .expect("the session declares the subscriber");
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1
     });
     let polls = peer.takes.polls.load(Ordering::SeqCst);
-    let reads = peer.takes.owner_reads.load(Ordering::SeqCst);
     const PUTS: usize = 4;
     for n in 1..=PUTS {
         listener
@@ -701,22 +675,12 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
             heard.load(Ordering::SeqCst) == n
         });
     }
-    assert_eq!(
-        peer.takes.polls.load(Ordering::SeqCst) - polls,
-        0,
-        "the client's reads made no wait on its link's readiness"
-    );
     assert!(
-        peer.takes.owner_reads.load(Ordering::SeqCst) - reads >= PUTS,
-        "each put was read by a wait made in the read of the link"
-    );
-    assert_eq!(
-        listener.takes.owner_reads.load(Ordering::SeqCst),
-        0,
-        "CONTROL: a session that listens makes no wait in a read"
+        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS,
+        "each put was read after a wait on the link's input"
     );
     assert!(
         listener.takes.polls.load(Ordering::SeqCst) > 0,
-        "CONTROL: it waits on its port and its link together"
+        "CONTROL: the listener waits on its port and its link together"
     );
 }

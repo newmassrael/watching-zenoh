@@ -102,9 +102,6 @@ use crate::bounded::{
     Arena, BoundedString, BoundedVec, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
 };
 use crate::key_arena::{KeySpace, LentKeys};
-// The fixed own-zid row of a peer's naming is its one reader.
-#[cfg(feature = "storage-profile")]
-use crate::bounded::Static;
 // Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
 #[cfg(feature = "storage-profile")]
@@ -138,12 +135,12 @@ use crate::row_pool::RowList;
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
-use crate::wireexpr_resolve::resolve_wireexpr_into;
+use crate::wireexpr_resolve::resolve_wireexpr_into_over;
 // R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
 // header has no mapping bit), and `absorb_declare` is its only caller here, so
 // this import carries that arm's gate rather than the wider `any(..)` above.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-use crate::wireexpr_resolve::resolve_declared_keyexpr_into;
+use crate::wireexpr_resolve::resolve_declared_keyexpr_into_over;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::wireexpr_resolve::KeyexprBuf;
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
@@ -500,7 +497,37 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<BoundedVec<u8, 16, Static>>,
+    own_zid: Option<OwnZid>,
+}
+
+/// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
+/// count, in no more than the bytes themselves and one.
+#[cfg(feature = "storage-profile")]
+#[derive(Clone, Copy)]
+struct OwnZid {
+    bytes: [u8; 16],
+    len: u8,
+}
+
+#[cfg(feature = "storage-profile")]
+impl OwnZid {
+    /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
+    fn of(zid: &[u8]) -> Option<Self> {
+        if !(1..=16).contains(&zid.len()) {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        bytes.get_mut(..zid.len())?.copy_from_slice(zid);
+        Some(Self {
+            bytes,
+            len: u8::try_from(zid.len()).ok()?,
+        })
+    }
+
+    /// The zid's bytes.
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
+    }
 }
 
 /// What a session's peer asked to be told about our subscriptions, and what is
@@ -1500,8 +1527,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // WE declared and is answered out of the installed own space, never out
         // of the peer's (both sides number from 1, so the wrong space would very
         // likely FIND an entry and fire the wrong subscriber).
-        let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, self.mapping_spaces())
-        {
+        let resolved: String = match resolve_wireexpr_in(
+            &push.keyexpr.body,
+            self.mapping_spaces_over(subs.own_space()),
+        ) {
             Some(r) => r,
             None => {
                 // R3041 -- a Put that cannot be routed has still ARRIVED, and
@@ -1867,7 +1896,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(feature = "codec-declare")]
         if let Some(declare) = record.declare() {
-            self.absorb_declare_view(&declare.body);
+            self.absorb_declare_view(&declare.body, subs.own_space());
         }
         #[cfg(feature = "declare-subscriber")]
         if let Some(interest) = record.interest() {
@@ -1928,7 +1957,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
             NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true),
             #[cfg(feature = "codec-declare")]
-            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
+            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
             // from this session's OWN subscriptions; see
             // [`Self::respond_to_subscriber_interest`].
@@ -1955,7 +1984,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// firing).
     ///
     /// S9a — the keyexpr is resolved into a bounded buffer
-    /// ([`resolve_wireexpr_into`]), not a `String`, so on the fixed backing the
+    /// ([`resolve_wireexpr_into_over`]), not a `String`, so on the fixed backing the
     /// whole absorb of an interest allocates nothing; one longer than
     /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
     /// terminating `Final` alone, as an over-long one always was.
@@ -1987,7 +2016,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         let mut composed = KeyexprBuf::new();
         let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match resolve_wireexpr_into(&w.body, naming.spaces(), &mut composed) {
+            Some(w) => match resolve_wireexpr_into_over(
+                &w.body,
+                naming.spaces(),
+                subs.own_space(),
+                &mut composed,
+            ) {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
@@ -2033,9 +2067,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         let mut composed = KeyexprBuf::new();
         let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view_over(
                 &w.body,
                 naming.spaces(),
+                subs.own_space(),
                 &mut composed,
             ) {
                 Ok(Some(p)) => Some(p),
@@ -3013,6 +3048,21 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.spaces()
     }
 
+    /// [`Self::mapping_spaces`] with `own`, when given, as our own space where none is installed
+    /// here: the session's table set of the subscriptions the peer's messages are delivered to
+    /// ([`LocalSubscribers::own_space`]). A space a host installs is read first.
+    #[cfg(feature = "storage-profile")]
+    pub fn mapping_spaces_over<'a>(
+        &'a self,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'a>>,
+    ) -> MappingSpaces<'a> {
+        let spaces = self.naming.spaces();
+        match own {
+            Some(own) if !spaces.has_own() => spaces.over_own(own),
+            _ => spaces,
+        }
+    }
+
     /// R237 — single-id resolver mirroring R234
     /// `SessionLinkActions::resolve_outbound_mapping` (wz-runtime-tokio).
     /// Returns the literal keyexpr the peer declared for `id`, or
@@ -3125,16 +3175,9 @@ impl<P: Storage> SubscriberPeer<P> {
     /// the session-FSM completion event is an R232+ carry.
     #[cfg(feature = "storage-profile")]
     pub fn set_own_zid_bytes(&mut self, zid: &[u8]) -> bool {
-        if !(1..=16).contains(&zid.len()) {
+        let Some(own) = OwnZid::of(zid) else {
             return false;
-        }
-        let mut own: BoundedVec<u8, 16, Static> = BoundedVec::default();
-        for byte in zid {
-            // At most 16 were admitted above, so the fixed backing has room.
-            if own.push(*byte).is_err() {
-                return false;
-            }
-        }
+        };
         self.naming.own_zid = Some(own);
         true
     }
@@ -3154,7 +3197,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_deref()
+        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -3183,7 +3226,11 @@ impl<P: Storage> SubscriberPeer<P> {
     /// has always been. A peer that re-declares an id it holds is replacing, and
     /// needs no room.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub(crate) fn absorb_declare(&mut self, body: &DeclareOwnedVariant) {
+    pub(crate) fn absorb_declare(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+    ) {
         match body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // Resolve the declared keyexpr to a literal string,
@@ -3209,9 +3256,10 @@ impl<P: Storage> SubscriberPeer<P> {
                 // S9a — resolved into a bounded buffer and bound from it, so
                 // the fixed backing does the whole absorb without the heap.
                 let mut composed = KeyexprBuf::new();
-                let literal = match resolve_declared_keyexpr_into(
+                let literal = match resolve_declared_keyexpr_into_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
+                    own,
                     &mut composed,
                 ) {
                     Ok(Some(literal)) => literal,
@@ -3290,14 +3338,19 @@ impl<P: Storage> SubscriberPeer<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::lent::DeclareVariant<'_>) {
+    pub(crate) fn absorb_declare_view(
+        &mut self,
+        body: &wz_codecs::lent::DeclareVariant<'_>,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+    ) {
         use wz_codecs::lent::DeclareVariant;
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
                 let mut composed = KeyexprBuf::new();
-                let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view(
+                let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
+                    own,
                     &mut composed,
                 ) {
                     Ok(Some(literal)) => literal,
@@ -4058,6 +4111,15 @@ pub trait LocalSubscribers {
     /// The id the table gives a subscription's row, which a delivery names it by.
     type RowId: Copy;
 
+    /// Our own id space, when the subscriptions are kept in the session's one table set, which
+    /// holds the key expressions the session declared: what an `M=0` key of a peer's message is
+    /// read against where no space is installed on the peer's side. `None` for a table of
+    /// subscriptions alone.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+        None
+    }
+
     /// A count that moves after every registration and retirement: an answer read off the
     /// subscriptions while this read the same still holds.
     fn epoch(&self) -> u64;
@@ -4808,11 +4870,13 @@ mod tests {
         let mut peer: SubscriberPeer = SubscriberPeer::default();
         peer.dispatch(
             &mut tables,
+            &mut (),
             &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a"))),
             Reliability::Reliable,
         );
         peer.dispatch(
             &mut tables,
+            &mut (),
             &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/b"))),
             Reliability::Reliable,
         );
@@ -6831,7 +6895,7 @@ mod tests {
             let body = body
                 .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                 .unwrap();
-            registry.peer.absorb_declare(&body);
+            registry.peer.absorb_declare(&body, None);
             assert!(
                 registry.mapping_spaces().peer().is_empty(),
                 "{name} arm must not mutate the peer keyexpr table"
@@ -8974,31 +9038,36 @@ mod fixed_backing_interest_staging_tests {
         fn deliver(&mut self, _sample: &dyn SampleView) {}
     }
 
-    const PATTERNS: [&str; 16] = [
-        "t/0", "t/1", "t/2", "t/3", "t/4", "t/5", "t/6", "t/7", "t/8", "t/9", "t/10", "t/11",
-        "t/12", "t/13", "t/14", "t/15",
-    ];
-
+    /// A registry of `subscriptions` subscriptions, each on a key of its own.
     fn registry_with(subscriptions: usize) -> SubscriberRegistry<Noop> {
         let mut reg = SubscriberRegistry::with_sink_backing();
-        for pattern in PATTERNS.iter().take(subscriptions) {
-            reg.register_sink(pattern, crate::locality::Locality::Any, Noop)
+        for id in 0..subscriptions {
+            let mut pattern: crate::bounded::BoundedString<16> =
+                crate::bounded::BoundedString::new();
+            core::fmt::Write::write_fmt(&mut pattern, format_args!("t/{id}")).unwrap();
+            reg.register_sink(pattern.as_str(), crate::locality::Locality::Any, Noop)
                 .expect("below MAX_SUBSCRIPTIONS");
         }
         reg
     }
 
-    /// Two CURRENT dumps of 16 replies each need 2 x 17 slots against 32. The
-    /// code this replaced pushed the second best-effort: 15 of its replies and
-    /// no `Final`, so that peer was answered half and never terminated. Now the
-    /// second is refused whole and counted, and the first is intact.
+    /// Two CURRENT dumps of `n` replies each need 2 x (`n` + 1) slots, where the
+    /// buffer holds one dump and not two: `n` is the most subscriptions whose dump
+    /// and `Final` fit, under the build's own bounds. The code this replaced
+    /// pushed the second best-effort: part of its replies and no `Final`, so that
+    /// peer was answered half and never terminated. Now the second is refused
+    /// whole and counted, and the first is intact.
     #[test]
     fn a_current_chain_that_does_not_fit_whole_is_refused_and_counted() {
-        assert_eq!(PATTERNS.len(), caps::MAX_SUBSCRIPTIONS);
-        let mut reg = registry_with(caps::MAX_SUBSCRIPTIONS);
+        let n = caps::MAX_SUBSCRIPTIONS.min(caps::MAX_PENDING_DECLARES - 1);
+        assert!(
+            2 * (n + 1) > caps::MAX_PENDING_DECLARES,
+            "the build's bounds leave room for two dumps; this case is not reachable"
+        );
+        let mut reg = registry_with(n);
         assert_eq!(
             reg.respond_to_subscriber_interest_borrowed(1, None, false, true, false),
-            caps::MAX_SUBSCRIPTIONS
+            n
         );
         assert_eq!(
             reg.respond_to_subscriber_interest_borrowed(2, None, false, true, false),
@@ -9012,7 +9081,7 @@ mod fixed_backing_interest_staging_tests {
             }
         );
         let staged = reg.take_staged_sub_interest_replies();
-        assert_eq!(staged.len(), caps::MAX_SUBSCRIPTIONS + 1);
+        assert_eq!(staged.len(), n + 1);
         assert!(staged.iter().all(|item| matches!(
             item,
             SubInterestReply::Concrete { interest_id: 1, .. }

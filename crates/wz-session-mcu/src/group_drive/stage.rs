@@ -48,7 +48,6 @@ use core::cell::{Cell, Ref, RefCell};
 use core::net::SocketAddr;
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
-use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_session_core::frame_encode::BodyEncoder;
 use wz_session_core::limits::{MaxMulticastRepliesHeld, SessionLimits};
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
@@ -1246,12 +1245,12 @@ impl<T: GroupTransport> GroupTransport for GroupLink<T> {
         self.0.transport.borrow().wait_for_room(timeout_us)
     }
 
-    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
-        self.0.transport.borrow().writability()
+    fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+        self.0.transport.borrow().room_wait()
     }
 
-    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
-        self.0.transport.borrow().readiness()
+    fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+        self.0.transport.borrow().input_wait()
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
