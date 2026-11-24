@@ -199,17 +199,85 @@ fn qos_entry(value: &wz_codecs::ext_zint::ExtZintParts) -> wz_codecs::ext_entry:
 /// (a pool slot's storage) returns [`CodecError::BufferOverflow`] if even the
 /// prefix, at most 13 bytes, does not fit.
 // The union of its callers: see [`frame_flags`].
-#[cfg(any(
-    feature = "alloc",
-    all(
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "codec-declare",
+// Its readers: [`encode_frame_envelope_into`], the unicast batching stage on the heap, and the
+// fragment and QoS tests.
+#[cfg(all(
+    any(
+        feature = "alloc",
+        all(
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "codec-declare",
+            ),
+            any(feature = "session-unicast", feature = "session-multicast")
+        )
+    ),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                all(test, feature = "transport-qos"),
+                all(
+                    feature = "storage-profile",
+                    feature = "session-unicast",
+                    not(feature = "tx-lend-only"),
+                    any(
+                        feature = "codec-push",
+                        feature = "codec-request",
+                        feature = "codec-response",
+                        feature = "codec-response-final",
+                        feature = "declare-keyexpr",
+                        feature = "declare-subscriber",
+                        feature = "declare-queryable",
+                        feature = "declare-token",
+                        feature = "declare-interest",
+                        feature = "liveliness-token"
+                    )
+                ),
+                all(
+                    feature = "session-multicast",
+                    feature = "codec-frame",
+                    feature = "storage-profile",
+                    any(
+                        feature = "codec-push",
+                        feature = "codec-response",
+                        feature = "codec-response-final",
+                        feature = "liveliness-token",
+                        feature = "declare-subscriber"
+                    )
+                )
+            )
         ),
-        any(feature = "session-unicast", feature = "session-multicast")
+        all(
+            feature = "storage-profile",
+            feature = "session-unicast",
+            feature = "transport-tx-lend",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token"
+            )
+        ),
+        all(
+            feature = "session-multicast",
+            feature = "codec-frame",
+            feature = "storage-profile",
+            feature = "codec-push",
+            feature = "transport-tx-lend"
+        ),
+        all(test, feature = "codec-push"),
+        all(test, feature = "transport-fragmentation"),
+        all(test, feature = "transport-qos")
     )
 ))]
 pub(crate) fn begin_frame(
@@ -306,7 +374,42 @@ pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliab
 /// ceiling.
 /// R311jq lifts the prefix write into [`begin_frame`] so the batching
 /// open-frame writer shares the same bytes-producing code.
-#[cfg(feature = "alloc")]
+// Its readers: the unicast send's heap frame, the group's heap frame, and the QoS wire tests.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        all(test, feature = "transport-qos"),
+        all(
+            feature = "storage-profile",
+            feature = "session-unicast",
+            not(feature = "tx-lend-only"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token"
+            )
+        ),
+        all(
+            feature = "session-multicast",
+            feature = "codec-frame",
+            feature = "storage-profile",
+            any(
+                feature = "codec-push",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "liveliness-token",
+                feature = "declare-subscriber"
+            )
+        )
+    )
+))]
 ///
 /// # Errors
 ///
@@ -363,17 +466,83 @@ fn owned_frame(
 /// already written stay in the buffer, so the caller rolls back with
 /// [`TxBuf::truncate`] to the length it saw before the call.
 // The union of its callers: see [`frame_flags`].
-#[cfg(any(
-    feature = "alloc",
-    all(
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "codec-declare",
+// Its readers: [`encode_frame_envelope`], a lent unicast frame, a group's frame in a lent slot or
+// its window, and the fixed-buffer tests.
+#[cfg(all(
+    any(
+        feature = "alloc",
+        all(
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "codec-declare",
+            ),
+            any(feature = "session-unicast", feature = "session-multicast")
+        )
+    ),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                all(test, feature = "transport-qos"),
+                all(
+                    feature = "storage-profile",
+                    feature = "session-unicast",
+                    not(feature = "tx-lend-only"),
+                    any(
+                        feature = "codec-push",
+                        feature = "codec-request",
+                        feature = "codec-response",
+                        feature = "codec-response-final",
+                        feature = "declare-keyexpr",
+                        feature = "declare-subscriber",
+                        feature = "declare-queryable",
+                        feature = "declare-token",
+                        feature = "declare-interest",
+                        feature = "liveliness-token"
+                    )
+                ),
+                all(
+                    feature = "session-multicast",
+                    feature = "codec-frame",
+                    feature = "storage-profile",
+                    any(
+                        feature = "codec-push",
+                        feature = "codec-response",
+                        feature = "codec-response-final",
+                        feature = "liveliness-token",
+                        feature = "declare-subscriber"
+                    )
+                )
+            )
         ),
-        any(feature = "session-unicast", feature = "session-multicast")
+        all(
+            feature = "storage-profile",
+            feature = "session-unicast",
+            feature = "transport-tx-lend",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token"
+            )
+        ),
+        all(
+            feature = "session-multicast",
+            feature = "codec-frame",
+            feature = "storage-profile",
+            feature = "codec-push",
+            feature = "transport-tx-lend"
+        ),
+        all(test, feature = "codec-push")
     )
 ))]
 pub(crate) fn encode_frame_envelope_into<P>(
