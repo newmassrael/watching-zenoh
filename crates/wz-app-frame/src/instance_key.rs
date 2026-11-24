@@ -82,8 +82,8 @@ use crate::e2e_profile::{
     array, at, check_keys, child, describe, object, optional, read_json, required, DocError,
 };
 use crate::e2e_receiver::{ReceiveError, Receiver, Status, Verdict};
-use crate::e2e_stream_sender::{Protected, SendError, StreamSender};
-use crate::proto_decode::{DecodedField, SchemaMessage, SchemaSet, Value, MAX_DECODE_DEPTH};
+use crate::e2e_stream_sender::{Protected, SendError, StreamSender, Written};
+use crate::proto_decode::{AtPath, Item, SchemaMessage, SchemaSet, MAX_DECODE_DEPTH};
 use crate::proto_parse::{Label, ScalarKind, Syntax};
 use crate::proto_schema::{FieldKind, Msg, ProtoDiagnostic, ProtoFile};
 
@@ -141,13 +141,13 @@ struct KeyField {
 }
 
 impl KeyField {
-    /// The position of a decoded value in the list.
-    fn position(&self, value: &Value) -> Option<usize> {
+    /// The position of a value read from the wire in the list.
+    fn position(&self, value: Item<'_>) -> Option<usize> {
         let wanted = match value {
-            Value::Signed(v) => Wanted::Integer(i128::from(*v)),
-            Value::Unsigned(v) => Wanted::Integer(i128::from(*v)),
-            Value::Enum { number, .. } => Wanted::Integer(i128::from(*number)),
-            Value::Text(s) => Wanted::Text(s),
+            Item::Signed(v) => Wanted::Integer(i128::from(v)),
+            Item::Unsigned(v) => Wanted::Integer(i128::from(v)),
+            Item::Enum(number) => Wanted::Integer(i128::from(number)),
+            Item::Text(s) => Wanted::Text(s),
             _ => return None,
         };
         self.find(wanted)
@@ -412,16 +412,19 @@ impl Keyer {
     ///
     /// Why it is none.
     pub fn instance_of(&self, payload: &[u8]) -> Result<usize, Refusal> {
-        let decoded = self
-            .schema
-            .decode(self.message, payload)
-            .map_err(|_| Refusal::Undecodable)?;
         let mut index = 0usize;
         for (i, field) in self.fields.iter().enumerate() {
-            let position = match lookup(&decoded, &field.numbers) {
-                Lookup::Found(value) => field.position(value),
-                Lookup::LeafMissing if !field.presence => field.default_position(),
-                Lookup::LeafMissing | Lookup::HolderMissing => {
+            // Each read walks the whole payload and refuses it as a listing of it would, so the
+            // first refuses a payload that is no message before any field is judged, and a key is
+            // read where it lies, with nothing allocated.
+            let at = self
+                .schema
+                .read_path(self.message, payload, &field.numbers)
+                .map_err(|_| Refusal::Undecodable)?;
+            let position = match at {
+                AtPath::Found(value) => field.position(value),
+                AtPath::LeafMissing if !field.presence => field.default_position(),
+                AtPath::LeafMissing | AtPath::HolderMissing => {
                     return Err(Refusal::Absent { field: i })
                 }
             };
@@ -785,47 +788,6 @@ fn resolve(
     Err(refused(format!("`{path}` names no field")))
 }
 
-/// Where a field of a decoding is.
-enum Lookup<'d> {
-    Found(&'d Value),
-    /// Its holder is there and the field is not.
-    LeafMissing,
-    /// A message field along the path is not there.
-    HolderMissing,
-}
-
-/// The value at `numbers` in a decoding, as a protobuf reader merges it: the
-/// last occurrence of a field wins, and the occurrences of a message field are
-/// one message.
-fn lookup<'d>(fields: &'d [DecodedField], numbers: &[u64]) -> Lookup<'d> {
-    let Some((&first, rest)) = numbers.split_first() else {
-        return Lookup::LeafMissing;
-    };
-    if rest.is_empty() {
-        return fields
-            .iter()
-            .rev()
-            .find(|f| f.number == first && !matches!(f.value, Value::Unknown(_)))
-            .map_or(Lookup::LeafMissing, |f| Lookup::Found(&f.value));
-    }
-    let mut found = None;
-    let mut leaf_missing = false;
-    for f in fields.iter().filter(|f| f.number == first) {
-        if let Value::Message(inner) = &f.value {
-            match lookup(inner, rest) {
-                Lookup::Found(value) => found = Some(value),
-                Lookup::LeafMissing => leaf_missing = true,
-                Lookup::HolderMissing => {}
-            }
-        }
-    }
-    match found {
-        Some(value) => Lookup::Found(value),
-        None if leaf_missing => Lookup::LeafMissing,
-        None => Lookup::HolderMissing,
-    }
-}
-
 /// Why the last values were not given their storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageTooSmall {
@@ -1139,7 +1101,7 @@ impl fmt::Display for ProtectError {
 }
 
 /// Protect `payload`, about to be sent at `now_ms`, on the counter stream of
-/// the instance it is.
+/// the instance it is: [`protect_into`] into a buffer made here.
 ///
 /// # Errors
 ///
@@ -1151,6 +1113,56 @@ pub fn protect(
     payload: &[u8],
     now_ms: u64,
 ) -> Result<KeyedFrame, ProtectError> {
+    let mut bytes = alloc::vec![0u8; sender.frame_bytes(payload.len())];
+    Ok(
+        match protect_into(keyer, sender, payload, now_ms, &mut bytes)? {
+            KeyedWritten::Dropped(dropped) => KeyedFrame::Dropped(dropped),
+            KeyedWritten::Built { instance, written } => {
+                bytes.truncate(written.len);
+                KeyedFrame::Built {
+                    instance,
+                    frame: Protected {
+                        bytes,
+                        counter: written.counter,
+                        from_cache: written.from_cache,
+                    },
+                }
+            }
+        },
+    )
+}
+
+/// A payload protected into the caller's buffer on its instance's counter stream, or dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyedWritten {
+    /// The payload is an instance, and its stream's sender wrote the frame at the start of the
+    /// buffer.
+    Built {
+        /// The instance, which is the stream.
+        instance: usize,
+        /// What was written.
+        written: Written,
+    },
+    /// The payload is no instance this node sends: nothing was written, and no
+    /// counter value was consumed.
+    Dropped(Dropped),
+}
+
+/// Protect `payload`, about to be sent at `now_ms`, on the counter stream of the instance it is,
+/// into `out` from its start ([`StreamSender::protect_into`]). Nothing is allocated, and a call
+/// that does not build the frame writes nothing to `out`.
+///
+/// # Errors
+///
+/// A sender with fewer streams than the keyer has instances; the sender's
+/// refusal of the frame, a buffer shorter than it among them.
+pub fn protect_into(
+    keyer: &mut Keyer,
+    sender: &mut StreamSender,
+    payload: &[u8],
+    now_ms: u64,
+    out: &mut [u8],
+) -> Result<KeyedWritten, ProtectError> {
     if sender.streams() < keyer.instances() {
         return Err(ProtectError::TooFewStreams {
             streams: sender.streams(),
@@ -1158,10 +1170,10 @@ pub fn protect(
         });
     }
     match keyer.index(payload, now_ms) {
-        Err(dropped) => Ok(KeyedFrame::Dropped(dropped)),
+        Err(dropped) => Ok(KeyedWritten::Dropped(dropped)),
         Ok(instance) => sender
-            .protect(instance, payload)
-            .map(|frame| KeyedFrame::Built { instance, frame })
+            .protect_into(instance, payload, out)
+            .map(|written| KeyedWritten::Built { instance, written })
             .map_err(ProtectError::Send),
     }
 }
