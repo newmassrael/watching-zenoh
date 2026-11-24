@@ -7375,6 +7375,29 @@
       "carry_forward_bullets": [
         "Open: the size areas above zenoh-pico are transport 3.04, sessions 2.91, doors 2.33 and driver 1.62. Structural reads per area found the causes: in sessions a face's existence held by three tables and a declaration's life written per kind in two layers; in doors three ways to place an owned object; in driver two seam forms for one send. Lanes are on each. The codec generator's shared extension walk and parts writer, the parent-tag flag of a gated body and an event context for actions wait with the runtime size branch, TD-063, TD-109 and TD-003 for one SCE pin move. The pico ABI performance matrix was started and not yet read."
       ]
+    },
+    "Round 4632": {
+      "decision_summary": "A sixth integration of the pico C ABI release toward docs/c-abi-architecture.md. Structural reads of each size area against zenoh-pico named the causes; this round takes the first steps on three of them.\n\nSessions: a face's existence was held by three tables (the transport's links, the registry's held sets, the link rooms) and each was walked by FaceId on every frame. The registry now keeps one row per set, indexed by its place, and a dispatched face is found at its place with its id checked; a lost link's replay is dropped at that place. A declaration's life was written per kind in two layers: one table of kinds and one tell body now serve the replay's sequence, place and announce, and a plane's count of write filters is judged by the session tables beside their own bound, so the engine keeps no copy of the entity rows for it.\n\nTransport: a read chain's readers (refusal, admission, an Init's patch and region, an Open's bound) are answered in one walk; a handshake cookie is kept with one copy and judged by one rule; a reassembly slot's machine is driven through one door.\n\nDoors: an encoding's schema is a start and a length whoever holds it, so reading it has no branch. A placing of every heap value through one body was measured to grow the doors by 790 bytes and is reverted.\n\nRepairs: a set's holders are bound only where the others read them (a build of one face failed on the unused binding), and an encoding's block is named as held for its drop alone.\n\nThe size ledger reads 1.6286 times zenoh-pico in total (from 1.6330): sessions 2.8985, doors 2.3071, transport 3.0134, driver 1.6179.",
+      "changes_bullets": [
+        "crates/wz-capi-coop: engine/registry.rs and registry/adding.rs (holders per set, HeldFace), engine.rs, engine/group.rs, engine/replay.rs (DeclaredTable, tell), arena.rs.",
+        "crates/wz-session-core: slot_map.rs (Slots), session_tables.rs (DeclaredTable, DeclaredKind, PlaneBounds), inbound.rs and ext_chain.rs (read_handshake_chain), bounded.rs (push_bytes, append_end), session_init_params.rs (keeps_cookie), reassembly_dispatch.rs (turn_slot_engine).",
+        "crates/wz-capi-pico: encoding.rs (schema start and length, _block); bytes.rs (Block::kept_copy).",
+        "crates/wz-runtime-tokio: session_glue.rs (a comment).",
+        "deploy/size_ledger.json rows tightened; docs/reason-review-pins.md three session-close-ingress rows re-read."
+      ],
+      "verification_bullets": [
+        "Run through bx from the integration worktree on bca9878ac: the integration verify sweep passed every lane (26: clippy of each changed crate with -D warnings, the changed crates' tests, the coop, pico and lwIP feature combinations, Layer C1nh). The size ledger --measure on bca9878ac: sessions 91,877 / doors 48,479 / transport 44,423 / driver 30,357 / keyexpr 11,776 / codec 33,130 / language 17,640 bytes against zenoh-pico, total 1.6286. The same measure on 3dcb20509, before the revert, read doors at 49,269. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate, upstream_citation_anchor_gate, prose_named_identifier_gate, logic_census_coverage_gate, totality_debt_gate, wz_config.py --check."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: transport 3.01, sessions 2.90, doors 2.31 and driver 1.62 times zenoh-pico. A face's slot made stable for its life and its room held at its place are on a branch and not yet measured; one send form over the link's slots is held back because, as written, a heap session with batching and QoS can refuse another conduit's reliable frame after its sequence number is issued, and a link with no send storage took a slot the length of its receive buffer. The codec generator's shared extension walk, the parent-tag flag of a gated body and an event context for actions are in the SCE queue behind the runtime size branch, TD-063, TD-109 and TD-003. The pico ABI performance matrix was started and not yet read."
+      ]
     }
   },
   "inventory_entries": {
