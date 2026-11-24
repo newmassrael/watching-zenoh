@@ -4,7 +4,8 @@
 //! An endpoint's text read into the [`Locator`] a link is opened towards, and why a text names
 //! none.
 //!
-//! UDP, TCP and TLS over IPv4 or IPv6, by address: a host name is refused as
+//! UDP, TCP and TLS over IPv4 or IPv6, by address (and `ws/`, at the same address, in a build with
+//! WebSocket links, `ws`): a host name is refused as
 //! [`DialRefused::BadAddress`], since a node of this runtime has no resolver, and another scheme,
 //! or upstream's `?metadata` / `#config` parts, as [`DialRefused::Unsupported`]: no link here
 //! honours them, and opening one anyway would quietly drop what the writer asked for. Both are
@@ -87,6 +88,17 @@ fn parse_endpoint<const IPV6: bool>(
     if let Some(serial) = serial_endpoint(endpoint) {
         return serial;
     }
+    // A WebSocket link is reached at a socket address as a TCP one is
+    // (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`), so its text is
+    // read by the same reader. Upstream's link reads no config key and no metadata, so a `#` or
+    // `?` part (zenoh-pico's `tout` among them) is refused below as on every IP scheme.
+    #[cfg(feature = "ws")]
+    if let Some(rest) = endpoint
+        .strip_prefix(wz_session_core::link::LinkKind::Ws.scheme())
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        return socket_addr::<IPV6>(rest, any_port).map(Locator::ws);
+    }
     let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
         .into_iter()
         .find_map(|proto| {
@@ -96,6 +108,14 @@ fn parse_endpoint<const IPV6: bool>(
     else {
         return Err(DialRefused::Unsupported);
     };
+    socket_addr::<IPV6>(rest, any_port).map(|at| Locator::ip(proto, at))
+}
+
+/// The socket address an IP scheme's text names after its `<scheme>/`, read for a stack that
+/// opens IPv6 links when `IPV6` is true. A port of 0 is taken only where `any_port` says the
+/// stack chooses one.
+#[inline(always)]
+fn socket_addr<const IPV6: bool>(rest: &str, any_port: bool) -> Result<SocketAddr, DialRefused> {
     if rest.bytes().any(|b| b == b'?' || b == b'#') {
         return Err(DialRefused::Unsupported);
     }
@@ -119,7 +139,7 @@ fn parse_endpoint<const IPV6: bool>(
     if at.port() == 0 && !any_port {
         return Err(DialRefused::BadAddress);
     }
-    Ok(Locator::ip(proto, at))
+    Ok(at)
 }
 
 /// A `serial/` endpoint's text read into its locator, or `None` for a text of another scheme. A
@@ -724,6 +744,67 @@ mod tests {
             let ip = read.as_ip().expect("an IP locator");
             std::assert_eq!(Locator::ip(ip.proto, ip.at), read);
         }
+    }
+
+    /// A WebSocket locator is read at the address a TCP one is, written back under its own scheme
+    /// by either writer, and is no IP locator; a port of 0 is a listener's alone, and a stack
+    /// without IPv6 refuses a bracketed address. Turned red by a `ws/` text read as another kind,
+    /// or by a writer that drifts from the reader.
+    #[cfg(feature = "ws")]
+    #[test]
+    fn a_ws_locator_is_read_at_a_socket_address_and_written_back() {
+        for text in ["ws/127.0.0.1:7447", "ws/[::1]:8080"] {
+            let read = parse_locator(text).expect("a dialable ws locator");
+            std::assert_eq!(read.text().finish(), Ok(text), "{text}");
+            std::assert_eq!(std::format!("{read}"), text);
+            std::assert_eq!(read.as_ip(), None, "{text}");
+            std::assert_eq!(parse_listen_locator(text), Ok(read), "{text}");
+        }
+        std::assert_eq!(
+            parse_locator("ws/10.0.0.1:7447").map(Locator::as_ws),
+            Ok(Some(crate::session_drive::WsLocator {
+                at: SocketAddr::from(([10, 0, 0, 1], 7447))
+            }))
+        );
+        std::assert_eq!(
+            parse_listen_locator("ws/0.0.0.0:0"),
+            Ok(Locator::ws(SocketAddr::from(([0, 0, 0, 0], 0))))
+        );
+        std::assert_eq!(
+            parse_locator_for("ws/[::1]:7447", false),
+            Err(DialRefused::Unsupported)
+        );
+    }
+
+    /// What upstream's WebSocket link does not read is refused, never dropped: a config part
+    /// (zenoh-pico's `tout`), a metadata part, a host name, a port of 0 to dial, another scheme
+    /// that starts with the same letters. Turned red by a reader that opens the link and loses
+    /// what the text asked for.
+    #[cfg(feature = "ws")]
+    #[test]
+    fn a_ws_text_upstream_would_not_read_is_refused() {
+        for (text, why) in [
+            ("ws/127.0.0.1:7447#tout=1000", DialRefused::Unsupported),
+            ("ws/127.0.0.1:7447?rel=1", DialRefused::Unsupported),
+            ("ws/router.local:7447", DialRefused::BadAddress),
+            ("ws/127.0.0.1:0", DialRefused::BadAddress),
+            ("ws/", DialRefused::BadAddress),
+            ("wss/127.0.0.1:7447", DialRefused::Unsupported),
+            ("ws127.0.0.1:7447", DialRefused::Unsupported),
+        ] {
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
+        }
+    }
+
+    /// A build without WebSocket links carries no `ws/` scheme: the text is refused as one it
+    /// does not carry, not read as another. Turned red by a `ws` reader that escapes its feature.
+    #[cfg(not(feature = "ws"))]
+    #[test]
+    fn a_build_without_ws_links_refuses_the_scheme() {
+        std::assert_eq!(
+            parse_locator("ws/127.0.0.1:7447"),
+            Err(DialRefused::Unsupported)
+        );
     }
 
     /// A serial locator read from its text writes that text back by either writer, to dial and to

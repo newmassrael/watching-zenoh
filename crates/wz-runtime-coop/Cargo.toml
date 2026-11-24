@@ -189,6 +189,12 @@ udp-listen = ["alloc", "session-unicast"]
 # endpoint is a scheme the build does not carry.
 serial = ["alloc", "session-unicast", "wz-session-core/transport-link-serial"]
 
+# WebSocket links (`ws/` locators): the locator of one, read at the socket address a TCP link is
+# reached at and written under its own scheme. The link itself is the heap profile's, as the serial
+# link is, so this takes `alloc` and the unicast session. Without it a `ws/` endpoint is a scheme
+# the build does not carry.
+ws = ["alloc", "session-unicast"]
+
 # The high-water mark of the pump cells (`wz-session-core`'s `pool-monitor`).
 # Without it the table keeps no mark and is the size it was.
 pool-monitor = ["wz-session-core?/pool-monitor"]

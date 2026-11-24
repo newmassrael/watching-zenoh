@@ -882,7 +882,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-batching,\
         transport-keepalive,\
         transport-qos,\
-        udp-listen\
+        udp-listen,\
+        ws\
         |"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
