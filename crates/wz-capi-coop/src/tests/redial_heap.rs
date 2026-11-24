@@ -79,8 +79,9 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The allocations this thread makes while `f` runs.
-fn counted(f: impl FnOnce()) -> u64 {
+/// The allocations this thread makes while `f` runs: what every test of this crate that holds a
+/// path to allocate nothing after the open counts with, over this one allocator.
+pub(super) fn counted(f: impl FnOnce()) -> u64 {
     ALLOCATIONS.with(|count| count.set(0));
     COUNTING.with(|on| on.set(true));
     f();

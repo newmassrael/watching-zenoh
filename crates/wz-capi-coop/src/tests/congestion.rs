@@ -461,6 +461,70 @@ mod stalled_link {
         );
     }
 
+    /// Under zenoh's profile, a droppable publish that finds the session held by a blocking one
+    /// waiting for room on the full link asks the link for room and is dropped, and allocates
+    /// nothing of the heap doing so: what a session does after its open takes no memory. CONTROL:
+    /// the publish was dropped, the ask made. Turned red by an ask that copies the faces it asks
+    /// out of their table, or a drop that lists the faces it was dropped on on the heap.
+    #[test]
+    fn a_droppable_publish_behind_a_held_session_allocates_nothing() {
+        let peer = open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: Some(vec![0xa8; 4]),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        });
+        let endpoint = peer.listening().pop().expect("one port is bound");
+        SessionDrive::start_read_task(&*peer).expect("the peer's read task starts");
+        let publisher = open_with(CoopConfig {
+            endpoints: vec![endpoint],
+            zid: Some(vec![0xb8; 4]),
+            tx_queue: stalling(TxQueueConf {
+                wait_before_drop_us: DROP_WAIT_US,
+                held_drop: HeldDrop::WaitForRoom,
+                ..client_config().tx_queue
+            }),
+            ..client_config()
+        });
+        let started = Instant::now();
+        while peer.faces_up() == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the peer never held the publisher's face"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        SessionDrive::stop_read_task(&*peer).expect("the peer's read task stops");
+        let blocking = hold_with_a_blocking_publish(&publisher);
+
+        let (key, options) = (WireKey::literal(), publish(CongestionControl::Drop));
+        let mut dropped = None;
+        let allocations = super::super::redial_heap::counted(|| {
+            dropped = Some(publisher.publish_on_wire_all("demo/stall", &key, b"dropped", &options));
+        });
+        assert_eq!(
+            dropped,
+            Some(Ok(0)),
+            "CONTROL: the publish found the session held and was dropped"
+        );
+        assert!(
+            !blocking.is_finished(),
+            "CONTROL: the blocking publish still held the session"
+        );
+        assert_eq!(
+            allocations, 0,
+            "a droppable publish behind a held session allocated"
+        );
+
+        let _ = blocking.join();
+        until(
+            &publisher,
+            "the session to close after the blocking publish's wait",
+            || SessionDrive::is_closed(&*publisher),
+        );
+        SessionDrive::close(&*peer);
+    }
+
     /// Under the pico profile, read when the session was opened, a droppable publish that finds
     /// the session held is dropped at once and its caller is told, as pico's put fails when its
     /// held transmit lock drops the message. It asks the link nothing: the profile's own
