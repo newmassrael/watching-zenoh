@@ -344,6 +344,9 @@ tx-lend-only = ["wz-session-core/tx-lend-only"]
 time-base = []
 
 [dev-dependencies]
+# The stand-in names the subscriber of each declaration it is told, in both forms its session reads
+# one in (owned and where its frame lies), so a test of the replay reads what was told in order.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # The `tls/` provider's tests (`tests/tls_provider.rs`) make a certificate authority and its end
 # certificates, as `wz-tls-mbedtls`'s own tests do, and share that crate's helper for it.
 rcgen = "0.13"

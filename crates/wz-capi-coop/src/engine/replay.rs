@@ -20,6 +20,11 @@
 //! it a turn is a burst of declarations and the next turn is an interval away, which the read's
 //! idle wait is shortened to.
 //!
+//! A build whose domain of the policy leaves `on` out (`ReplayPacing::REACHABLE`) reaches no
+//! pace, so it holds that one turn alone, as one lap over the sequence when the link comes up,
+//! and nothing of the turns: no cursor moves, no place in the order is read, every face that is
+//! up is told a declaration or a retraction as it is made, and no turn is ever due.
+//!
 //! A refused send is answered by the replay's pace. Without one, it ends the link, as zenoh-pico's
 //! reopen task clears a transport it could not send a declaration over and opens again
 //! (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`): this engine builds
@@ -181,20 +186,25 @@ impl Replay {
         self.cursor = ReplayCursor::idle();
     }
 
-    /// Whether the peer has been told everything the session owes it.
+    /// Whether the peer has been told everything the session owes it: always, in a build that
+    /// reaches no pace, whose replay is one lap made when the link comes up.
     pub(super) fn finished(&self) -> bool {
-        self.cursor.finished()
+        !ReplayPacing::REACHABLE || self.cursor.finished()
     }
 
-    /// When the next turn is due, while a replay is owed.
+    /// When the next turn is due, while a replay is owed: never, in a build that reaches no pace.
     pub(super) fn next_turn_ms(&self) -> Option<u64> {
-        (!self.cursor.finished()).then_some(self.next_turn_ms)
+        (ReplayPacing::REACHABLE && !self.cursor.finished()).then_some(self.next_turn_ms)
     }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The place of the declaration at `rank` of `table`'s slot order in the replay's order.
+    /// Only a replay's cursor reads a place, so a build that reaches no pace reads none.
     pub(super) fn place(&self, table: DeclaredTable, rank: usize) -> usize {
+        if !ReplayPacing::REACHABLE {
+            return 0;
+        }
         held_before(&super::tables(&self.session.registry), Some(table)).saturating_add(rank)
     }
 
@@ -204,6 +214,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     // Out of line: every kind's declaration, and the retraction of a key expression, read it.
     #[inline(never)]
     pub(super) fn place_of(&self, declared: DeclaredRow) -> usize {
+        if !ReplayPacing::REACHABLE {
+            return 0;
+        }
         let tables = super::tables(&self.session.registry);
         let slots = tables.slots_of(declared.table);
         let rank = slots.rank_of(declared.row).unwrap_or(slots.len());
@@ -233,7 +246,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The link of the face at `at` has been established: begin to tell its peer what the session
-    /// holds, and send the first turn of it; what that turn leaves of the link.
+    /// holds, and send the first turn of it; what that turn leaves of the link. In a build that
+    /// reaches no pace the first turn is the whole of it ([`Self::tell_in_one_lap`]).
     /// Out of line: a link brought up and a redeclare each begin a replay.
     #[inline(never)]
     pub(super) fn begin_replay(
@@ -242,11 +256,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         actions: &McuActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
+        if !ReplayPacing::REACHABLE {
+            return self.tell_in_one_lap(actions);
+        }
         let owed = self.sequence_len();
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.begin(owed, now_ms);
         }
         self.replay_turn(at, actions, now_ms)
+    }
+
+    /// Tell the peer over `actions` every declaration the session holds, in the replay's order,
+    /// in one lap, as upstream's reopen sends its whole cache of declarations (see the module's
+    /// note): what the lap leaves of the link, [`TurnEnd::EndsLink`] at the first send the link
+    /// refuses, as the reopen clears a transport it could not send one over. The replay of a
+    /// build that reaches no pace, which keeps no cursor: the lap ends before the session does
+    /// anything else, so nothing is owed past it.
+    fn tell_in_one_lap(&self, actions: &McuActions<C>) -> TurnEnd {
+        if (0..self.sequence_len()).all(|place| self.emit(actions, place)) {
+            TurnEnd::Kept
+        } else {
+            TurnEnd::EndsLink
+        }
     }
 
     /// One turn of the replay of the face at `at`, if one is owed and due: the burst of the pace,
@@ -374,7 +405,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
-            if matches!(face.replay.cursor.removed(place), Removal::Retract) {
+            // A build that reaches no pace told the peer everything when its link came up.
+            if !ReplayPacing::REACHABLE
+                || matches!(face.replay.cursor.removed(place), Removal::Retract)
+            {
                 send.tell_to(&wire.actions);
             }
         }
@@ -483,8 +517,12 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
     send: &dyn SendTo<C>,
     undo: &dyn TellTo<C>,
 ) -> bool {
-    // Whether the replay of `face` is past the declaration, so its link is told it now.
+    // Whether the replay of `face` is past the declaration, so its link is told it now: always,
+    // in a build that reaches no pace, whose replay ended with the lap its link came up with.
     let emits_now = |face: &Face<C, L>| {
+        if !ReplayPacing::REACHABLE {
+            return true;
+        }
         let mut cursor = face.replay.cursor;
         cursor.inserted(place) == Insertion::EmitNow
     };
@@ -511,10 +549,12 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         }
         return false;
     }
-    for face in faces.iter_mut().flatten() {
-        if matches!(face.link, Link::Up(_)) {
-            // The face was told it above, or its replay tells it in its turn.
-            let _ = face.replay.cursor.inserted(place);
+    if ReplayPacing::REACHABLE {
+        for face in faces.iter_mut().flatten() {
+            if matches!(face.link, Link::Up(_)) {
+                // The face was told it above, or its replay tells it in its turn.
+                let _ = face.replay.cursor.inserted(place);
+            }
         }
     }
     true
@@ -547,6 +587,10 @@ mod tests {
     /// nothing more is owed over that link.
     #[test]
     fn a_refused_turn_ends_the_link_when_the_pace_retries_nothing() {
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            return;
+        }
         let pace = pace_answering(0, 0);
         let mut replay = Replay::idle();
         replay.begin(5, 100);
@@ -564,6 +608,10 @@ mod tests {
     /// start of the replay when none has.
     #[test]
     fn a_refused_turn_is_retried_at_the_retry_wait_until_no_progress_ends_the_link() {
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            return;
+        }
         let pace = pace_answering(3, 50);
         let mut replay = Replay::idle();
         replay.begin(5, 100);
@@ -589,6 +637,10 @@ mod tests {
     /// then cut short; and a no-progress bound of 0 never gives up.
     #[test]
     fn a_declaration_told_starts_the_no_progress_stretch_again() {
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            return;
+        }
         let pace = pace_answering(3, 50);
         let mut replay = Replay::idle();
         replay.begin(5, 100);
@@ -618,6 +670,10 @@ mod tests {
     /// told.
     #[test]
     fn a_turn_not_refused_waits_the_interval_until_all_is_told() {
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            return;
+        }
         let pace = ReplayPacing::new(2, 10);
         let mut paced = Replay::idle();
         paced.begin(5, 100);
