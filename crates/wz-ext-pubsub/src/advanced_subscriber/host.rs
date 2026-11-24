@@ -237,7 +237,7 @@ struct GetSlot<E: SessionEngine + ?Sized> {
     holders: AtomicUsize,
     /// The subscriber whose table the slot is in, as a leg reaches it: its lodging, which a leg
     /// holds a count of.
-    owner: UnsafeCell<*const c_void>,
+    owner: UnsafeCell<*const Lodging<Shared<E>>>,
     /// What ends the get; taken by its end.
     finish: UnsafeCell<Option<Finish>>,
     /// The get's legs as one thing to cancel, and its registration on the teardown's token: held
@@ -273,7 +273,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     unsafe fn open(&self, owner: &Strong<Shared<E>>, finish: Finish) -> &CancellableFan {
         // SAFETY: the caller's: nothing else reaches the slot yet.
         unsafe {
-            *self.owner.get() = Strong::as_raw(owner);
+            *self.owner.get() = Strong::as_raw(owner).cast::<Lodging<Shared<E>>>();
             *self.finish.get() = Some(finish);
             self.holders.store(1, Ordering::Release);
             (*self.fan.get()).insert(CancellableFan::new())
@@ -287,7 +287,7 @@ impl<E: SessionEngine + ?Sized> GetSlot<E> {
     unsafe fn owner(&self) -> &Shared<E> {
         // SAFETY: the caller's: `owner` was written before the get had a holder but its issuer,
         // and the subscriber stands while the get does.
-        unsafe { Strong::<Shared<E>>::value_of(*self.owner.get()) }
+        unsafe { Strong::<Shared<E>>::value_of((*self.owner.get()).cast::<c_void>()) }
     }
 
     /// One leg's callback, holding the get and the subscriber until the engine lets it go
@@ -366,7 +366,9 @@ unsafe fn end_leg<E: SessionEngine + ?Sized>(context: *mut c_void) {
         let slot = &*context.cast_const().cast::<GetSlot<E>>();
         let owner = *slot.owner.get();
         slot.release();
-        drop(Strong::<Shared<E>>::from_raw(owner.cast_mut()));
+        drop(Strong::<Shared<E>>::from_raw(
+            owner.cast_mut().cast::<c_void>(),
+        ));
     }
 }
 
