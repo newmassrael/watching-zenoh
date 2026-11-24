@@ -57,7 +57,9 @@ use crate::arena::{
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, Lent, TableLender};
 use wz_session_core::caps;
-use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
+#[cfg(feature = "liveliness")]
+use wz_session_core::key_arena::KeyRef;
+use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
