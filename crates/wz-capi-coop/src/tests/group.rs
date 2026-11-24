@@ -332,6 +332,39 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     );
 }
 
+/// A group whose endpoint is one byte past `MAX_GROUP_ENDPOINT_LEN` is refused by that name before
+/// the stack is asked to join it: a member's link is reported by the endpoint in a row of that
+/// length, and this engine holds no row on the heap. The CONTROL is an endpoint of the bound, which
+/// reaches the stack (this one joins only [`GROUP`], so it refuses it for its own reason). Turned
+/// red by a join that asks the stack before it measures the endpoint.
+#[test]
+fn a_group_endpoint_past_its_row_is_refused_before_the_stack_is_asked() {
+    use crate::Refusal;
+    use wz_session_core::caps::MAX_GROUP_ENDPOINT_LEN;
+
+    let network = Arc::new(Network::default());
+    let padded = |len: usize| format!("{GROUP};ttl={}", "1".repeat(len - GROUP.len() - 5));
+    let past = padded(MAX_GROUP_ENDPOINT_LEN + 1);
+    assert_eq!(past.len(), MAX_GROUP_ENDPOINT_LEN + 1);
+    match open_member(&network, 1, member_config(1, &past)) {
+        Err(OpenError::Group(why)) => assert_eq!(why.why, Refusal::GroupEndpointTooLong, "{why}"),
+        Err(other) => panic!("refused as {other:?}"),
+        Ok(_) => panic!("opened"),
+    }
+    assert!(
+        network.joins.lock().unwrap().is_empty(),
+        "the stack was not asked"
+    );
+
+    let at_bound = padded(MAX_GROUP_ENDPOINT_LEN);
+    assert_eq!(at_bound.len(), MAX_GROUP_ENDPOINT_LEN);
+    match open_member(&network, 1, member_config(1, &at_bound)) {
+        Err(OpenError::Group(why)) => assert_ne!(why.why, Refusal::GroupEndpointTooLong, "{why}"),
+        Err(other) => panic!("refused as {other:?}"),
+        Ok(_) => panic!("opened over a stack that joins only GROUP"),
+    }
+}
+
 /// A session told to join a group past its task cells is refused for want of a task cell, as its
 /// spawn would be, whether a face set is left for the group or not: `max_faces` of none leaves
 /// none past the groups the cells hold, one leaves a set and the spawn refuses. The CONTROL is the

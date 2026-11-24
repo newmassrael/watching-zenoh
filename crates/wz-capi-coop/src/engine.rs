@@ -503,6 +503,9 @@ pub enum Refusal {
     /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
     /// bytes.
     TextTooLong,
+    /// The group's endpoint is longer than the row a member's link is reported in,
+    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
+    GroupEndpointTooLong,
 }
 
 impl core::fmt::Display for EndpointRefusal {
@@ -525,6 +528,9 @@ impl core::fmt::Display for EndpointRefusal {
                 f.write_str("the session holds as many faces as max_faces admits")
             }
             Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
+            Refusal::GroupEndpointTooLong => {
+                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
+            }
         }
     }
 }
@@ -3547,6 +3553,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         id: FaceId,
         join: GroupJoin,
     ) -> Result<GroupFace<L::Waits>, OpenError> {
+        // A member's link is reported by the endpoint the group was joined by, in a row of
+        // `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one is refused before the group is joined, so
+        // no row of this engine is held on the heap.
+        if join.endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
+            return Err(OpenError::Group(EndpointRefusal::new(
+                &join.endpoint,
+                Refusal::GroupEndpointTooLong,
+            )));
+        }
         let transport = self
             .transport
             .links

@@ -24,7 +24,6 @@
 //! way to send, so an end that lent nothing could not carry a handshake for it.
 
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
@@ -203,10 +202,12 @@ impl MemoryEnd {
         let Some(peer) = self.binding.peer() else {
             return;
         };
-        let _ = self.endpoints.set(LinkEndpoints::new(
-            format!("{}", Locator::udp(self.local)),
-            format!("{}", Locator::udp(peer)),
-        ));
+        // The cooperative engine's text of each end, as its own links write it.
+        if let Ok(ends) =
+            wz_runtime_coop::udp_link::link_endpoints(LinkProto::Udp, self.local, peer)
+        {
+            let _ = self.endpoints.set(ends);
+        }
     }
 
     /// Where this end sends, once it has a peer.
