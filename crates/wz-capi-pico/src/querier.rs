@@ -323,7 +323,8 @@ impl z_owned_querier_t {
 unsafe fn free_querier(h: *mut c_void) {
     let state = h as *mut QuerierState;
     (*state).cancel.cancel();
-    crate::object_slot::retire_entity(state);
+    crate::object_slot::closures_of::<_, ()>(state).wait_none();
+    crate::object_slot::retire_entity::<_, ()>(state);
 }
 
 impl_handle_ownership7!(
@@ -555,7 +556,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             None => return Z_ERR_NULL,
         };
         // Undeclaring the querier waits for this get's closure, and its place stands until then.
-        crate::object_slot::count_in_entity(core::ptr::from_ref(state), &mut closure);
+        crate::object_slot::count_in_entity::<_, (), _>(core::ptr::from_ref(state), &mut closure);
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
