@@ -33,7 +33,7 @@
 
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, TableLender};
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
@@ -474,45 +474,86 @@ impl Registry {
         peers: FacePeers,
         delivery: RoundDelivery,
     ) -> Result<Self, LendRefused> {
-        let app = App::lent(arena, keys, rows, limits)?;
-        let mut pools = PeerPools::lent(arena, peers.pools)?;
+        let mut lend = TableLender::new(arena);
+        let registry = Self::lent_from(
+            &mut lend,
+            limits,
+            LentKeys::from(keys),
+            rows,
+            gets,
+            peers,
+            delivery,
+        );
+        lend.finish().map(|()| registry)
+    }
+
+    /// [`Self::new`] by `lend`, which keeps the first refusal of the tables it lends, the keys kept
+    /// in the key arena `keys` holds: a registry of tables of no rows once one is refused, which
+    /// whoever asked for it gives up whole with the rest of what `lend` lent. Nothing is given up
+    /// here, table by table, behind each refusal.
+    pub(super) fn lent_from(
+        lend: &mut TableLender<'_>,
+        limits: &SessionLimits,
+        keys: LentKeys,
+        rows: ObserverRows<wz_session_core::session_tables::TableRows>,
+        gets: GetTables,
+        peers: FacePeers,
+        delivery: RoundDelivery,
+    ) -> Self {
+        let app = App::lent_from(lend, keys, rows, limits);
+        let mut pools = lend.lend_with(|arena| {
+            let pools = PeerPools::lent(arena, peers.pools)?;
+            // One face's own spans are handed to that face's tables alone, so a plan that lends
+            // them lends one set; a build without pools keeps each set's rows inline.
+            debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
+            Ok(pools)
+        });
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        let owed = arena.lend(peers.owed_tokens())?;
-        // One face's own spans are handed to that face's tables alone, so a plan that lends them
-        // lends one set; a build without pools keeps each set's rows inline.
-        debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
+        let owed = lend.table(peers.owed_tokens());
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come. A session that dials nothing lent its dial face no set:
         // that face holds one of no rows, first, and every lent set is for the faces to come.
         let dial = usize::from(peers.dial);
-        let mut sets = arena.lend(peers.sets())?;
-        let mut held: BoundedVec<HeldSet, MAX_FACE_SETS, Lent> = arena.lend(peers.sets())?;
+        let mut sets = lend.table(peers.sets());
+        let mut held: BoundedVec<HeldSet, MAX_FACE_SETS, Lent> = lend.table(peers.sets());
         if peers.dial {
-            lend_set(
-                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-            )?;
+            lend.lend_keyed(keys, |arena, keys| {
+                lend_set(
+                    &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+                )
+            });
         } else {
-            push_unpeered(&mut sets, keys, limits).ok_or(LendRefused::OverCeiling {
+            lend.lend_with(|_| {
+                push_unpeered(&mut sets, keys, limits)
+                    .map(|_| ())
+                    .ok_or(LendRefused::OverCeiling {
+                        rows: 1,
+                        ceiling: 0,
+                    })
+            });
+        }
+        lend.lend_with(|_| {
+            held.push(HeldSet {
+                at: 0,
+                id: DIAL_FACE,
+            })
+            .map_err(|_| LendRefused::OverCeiling {
                 rows: 1,
                 ceiling: 0,
-            })?;
-        }
-        held.push(HeldSet {
-            at: 0,
-            id: DIAL_FACE,
-        })
-        .map_err(|_| LendRefused::OverCeiling {
-            rows: 1,
-            ceiling: 0,
-        })?;
+            })
+        });
         #[cfg(feature = "local-queryable")]
-        let local = Gets::lent(arena, keys, gets.rows, limits)?;
+        let local = lend.lend_keyed(keys, |arena, keys| {
+            Gets::lent(arena, keys, gets.rows, limits)
+        });
         for _ in dial..peers.tables {
-            lend_set(
-                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-            )?;
+            lend.lend_keyed(keys, |arena, keys| {
+                lend_set(
+                    &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+                )
+            });
         }
-        Ok(Self {
+        Self {
             app,
             delivery,
             sets,
@@ -535,7 +576,7 @@ impl Registry {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
-        })
+        }
     }
 
     /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the
@@ -1212,7 +1253,7 @@ fn push_rowless<'s>(
     pools: &mut PeerPools,
     limits: &SessionLimits,
 ) -> Option<&'s mut FaceTables> {
-    let set = push_unpeered(sets, keys, limits)?;
+    let set = push_unpeered(sets, LentKeys::from(keys), limits)?;
     set.peer.keep_rows_in(pools);
     Some(set)
 }
@@ -1223,7 +1264,7 @@ fn push_rowless<'s>(
 /// `sets` holds every row it was lent.
 fn push_unpeered<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
-    keys: KeySpace,
+    keys: LentKeys,
     limits: &SessionLimits,
 ) -> Option<&'s mut FaceTables> {
     // SAFETY: `rowless_in` writes a whole set into the row it is handed and cannot unwind.
@@ -1232,7 +1273,7 @@ fn push_unpeered<'s>(
             FaceTables::rowless_in(place, limits);
         })
     }?;
-    set.peer.keep_keys_in(LentKeys::from(keys));
+    set.peer.keep_keys_in(keys);
     Some(set)
 }
 

@@ -3508,6 +3508,18 @@ type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
 #[derive(Debug)]
 pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
 
+/// The interests' rows a lend refused leaves: none.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
+impl Default for InterestRows {
+    fn default() -> Self {
+        Self(crate::row_pool::RowSource::default())
+    }
+}
+
 #[cfg(all(
     feature = "declare-subscriber",
     feature = "interest-answer",
