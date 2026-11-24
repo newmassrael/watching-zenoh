@@ -424,8 +424,6 @@ pub use wz_session_core::switchboard::EventInjector;
 #[allow(unused_variables)]
 #[allow(unused_mut)]
 #[allow(clippy::all)]
-// Totality debt TD-201 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reassembly_pool_mcu {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

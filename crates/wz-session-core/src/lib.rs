@@ -2606,8 +2606,6 @@ pub mod peer_planner;
 #[allow(unreachable_patterns)]
 #[allow(unreachable_code)]
 #[allow(clippy::all)]
-// Totality debt TD-050 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session_slot_pool_mcu {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
