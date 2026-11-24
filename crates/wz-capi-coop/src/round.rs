@@ -41,6 +41,7 @@
 
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
+use core::convert::Infallible;
 use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -52,8 +53,9 @@ use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::byte_cells::KeptBytes;
 use wz_session_core::caps;
+use wz_session_core::declare::liveliness_sample::LivelinessSample;
 #[cfg(feature = "liveliness")]
-use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
@@ -82,6 +84,74 @@ use {
     wz_capi_port::sync::Lock, wz_session_core::query_sink::QueryView,
     wz_session_core::sample::EncodingHint,
 };
+
+/// A call a record of the round owes, begun on a row of the session's tables under its lock and
+/// ended once, with no lock held, after the record was handed to it or refused.
+pub trait RoundCall: Sized {
+    /// End the call: `true` when it was the last call of a row undeclared while it ran, which
+    /// the session's walk of its tables then lets go of.
+    fn end(self) -> bool;
+}
+
+/// A call of a subscriber's callback, which a sample is handed to.
+pub trait SampleCall: RoundCall {
+    /// Whether `other` is a call of the same row.
+    fn same_row(&self, other: &Self) -> bool;
+
+    /// Hand `sample` to the row's callback.
+    fn hand(&self, sample: &dyn SampleView);
+}
+
+/// A call of a liveliness subscriber's callback, which a token's appearance or retraction is
+/// handed to.
+pub trait TokenCall: RoundCall {
+    /// Whether `other` is a call of the same row.
+    fn same_row(&self, other: &Self) -> bool;
+
+    /// Hand `sample` to the row's callback.
+    fn hand(&self, sample: LivelinessSample<'_>);
+}
+
+/// The calls a round owes, each of the engine's own type, as the rows of its tables begin them. A
+/// kind of row the engine's build keeps none of is [`Infallible`]: no call of it is ever made.
+pub trait RoundCalls: 'static {
+    /// A call of a subscriber's callback.
+    type Subscriber: SampleCall;
+    /// A call of a liveliness subscriber's callback.
+    type Liveliness: TokenCall;
+    /// A call of a queryable's callback.
+    type Queryable: RoundCall;
+    /// The leg of a get a reply is held for: the place of the row its callback lies in.
+    type Leg: Copy;
+    /// A leg's callback, as its holders hand it back once its row's last count is given back.
+    type ReplyCallback;
+}
+
+impl RoundCall for Infallible {
+    fn end(self) -> bool {
+        match self {}
+    }
+}
+
+impl SampleCall for Infallible {
+    fn same_row(&self, _other: &Self) -> bool {
+        match *self {}
+    }
+
+    fn hand(&self, _sample: &dyn SampleView) {
+        match *self {}
+    }
+}
+
+impl TokenCall for Infallible {
+    fn same_row(&self, _other: &Self) -> bool {
+        match *self {}
+    }
+
+    fn hand(&self, _sample: LivelinessSample<'_>) {
+        match *self {}
+    }
+}
 
 /// The most subscribers one record of a session reaches: a sample's, of the `subscribers` it
 /// holds, or a token's, of the `liveliness` subscribers it holds (none in a build without
@@ -432,23 +502,23 @@ impl Entry {
 /// the session's lock and ended as the round is emptied ([`Released::settle`]), or another
 /// callback copied out of the row that matched it and let go of, with no lock held, as the round is
 /// emptied.
-enum Owed {
+enum Owed<C: RoundCalls> {
     /// A subscriber's.
-    Subscriber(SubscriberCall),
+    Subscriber(C::Subscriber),
     /// A liveliness subscriber's.
     #[cfg(feature = "liveliness")]
-    Liveliness(LivelinessCall),
+    Liveliness(C::Liveliness),
     /// A get's leg's: a count of the row of its callback ([`LegHolders`]).
     #[cfg(feature = "query")]
-    Reply(LegId),
+    Reply(C::Leg),
     /// A queryable's: the call begun on its row as the query reached it.
     #[cfg(feature = "queryable")]
-    Query(QueryableCall),
+    Query(C::Queryable),
 }
 
-impl Owed {
+impl<C: RoundCalls> Owed<C> {
     /// The call, when it is of a subscriber's callback.
-    fn subscriber(&self) -> Option<&SubscriberCall> {
+    fn subscriber(&self) -> Option<&C::Subscriber> {
         match self {
             Self::Subscriber(callback) => Some(callback),
             #[cfg(feature = "liveliness")]
@@ -462,7 +532,7 @@ impl Owed {
 
     /// The call, when it is of a queryable's callback.
     #[cfg(feature = "queryable")]
-    fn query(&self) -> Option<&QueryableCall> {
+    fn query(&self) -> Option<&C::Queryable> {
         match self {
             Self::Query(call) => Some(call),
             _ => None,
@@ -471,7 +541,7 @@ impl Owed {
 
     /// The call, when it is of a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
-    fn liveliness(&self) -> Option<&LivelinessCall> {
+    fn liveliness(&self) -> Option<&C::Liveliness> {
         match self {
             Self::Liveliness(callback) => Some(callback),
             _ => None,
@@ -480,7 +550,7 @@ impl Owed {
 
     /// The leg, when it is a leg's callback.
     #[cfg(feature = "query")]
-    fn reply(&self) -> Option<LegId> {
+    fn reply(&self) -> Option<C::Leg> {
         match self {
             Self::Reply(leg) => Some(*leg),
             _ => None,
@@ -519,21 +589,21 @@ impl RoundRowCounts {
 pub(crate) const RECORD_BYTES: usize = core::mem::size_of::<Entry>();
 
 /// The bytes of one callback a record of a round owes.
-pub(crate) const CALLBACK_BYTES: usize = core::mem::size_of::<Owed>();
+pub(crate) const CALLBACK_BYTES: usize = core::mem::size_of::<Owed<CoopCalls>>();
 
 // Each call a record owes is a row's address alone, so a callback row is that and its tag; the
 // round's arena rows are sized by it.
 const _: () = assert!(CALLBACK_BYTES <= 2 * core::mem::size_of::<usize>());
 
 /// The tables of a round, lent from its session's arena ([`RoundRows::lent`]).
-pub(crate) struct RoundRows {
+pub(crate) struct RoundRows<C: RoundCalls> {
     records: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
-    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
+    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
     keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
     longest_key: usize,
 }
 
-impl RoundRows {
+impl<C: RoundCalls> RoundRows<C> {
     /// The tables of a round of `counts`, lent from `arena` in the order the plan counts them:
     /// the records, the callbacks, the keys. Refused past the build's bound of a table or past what
     /// the arena has left.
@@ -557,7 +627,7 @@ const SEALED: u8 = 2;
 const DELIVERING: u8 = 3;
 
 /// What the round holds: its records, the callbacks they owe, in order, and where their parts lie.
-struct Table {
+struct Table<C: RoundCalls> {
     /// The datagram a record's part lies in, its first byte and its length: its link is held back
     /// from its next receive.
     datagram: Option<(*const u8, usize)>,
@@ -574,7 +644,7 @@ struct Table {
     entries: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
     /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows its arena lent.
-    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
+    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
     /// The keys written, two of the session's longest, bytes its arena lent.
     keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
     /// The session's longest key: the room a record's key may take of `keys`.
@@ -586,7 +656,7 @@ struct Table {
     fan: bool,
 }
 
-impl Table {
+impl<C: RoundCalls> Table<C> {
     /// The part at `span`.
     fn bytes(&self, span: Span) -> &[u8] {
         let (at, len) = (span.at as usize, span.len as usize);
@@ -750,7 +820,7 @@ impl Table {
     }
 
     /// The callbacks `entry` owes.
-    fn owed(&self, entry: &Entry) -> &[Owed] {
+    fn owed(&self, entry: &Entry) -> &[Owed<C>] {
         self.callbacks.get(entry.callbacks()).unwrap_or(&[])
     }
 
@@ -758,7 +828,7 @@ impl Table {
     /// the session held. What the records hold besides is let go of by the lock holder before it
     /// writes the next record ([`Self::clear`]): a key of the session's key arena is let go of
     /// under that lock alone.
-    fn end_calls(&mut self, released: &Released) {
+    fn end_calls(&mut self, released: &Released<C>) {
         while let Some(owed) = self.callbacks.pop() {
             released.settle(owed);
         }
@@ -798,7 +868,7 @@ impl Table {
 }
 
 /// The calls of the subscribers a put of the session's own reaches, in the order the session's
-/// table reached them, each begun on its row ([`Round::captured`]).
+/// table reached them, each begun on its row ([`RoundOf::captured`]).
 ///
 /// A fixed array the put takes out of the round whole and holds in its own frame while it hands
 /// the calls out with no lock held, so it takes no heap after the open; its cost is stack. One is
@@ -812,7 +882,8 @@ impl Table {
 /// the round when they overflow, which reorders the calls zenoh-pico makes inline, so the frame
 /// keeps its own.
 #[cfg(feature = "local-subscriber")]
-pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
+pub(crate) type Captured<C> =
+    BoundedVec<<C as RoundCalls>::Subscriber, { caps::MAX_SUBSCRIPTIONS }, Static>;
 
 // A call is a row's address alone; the stack cost stated on `Captured` holds while it stays so.
 #[cfg(feature = "local-subscriber")]
@@ -822,27 +893,27 @@ const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= core::mem::size_
 /// query's replies go out through on the link it came in on, and lets go of its Final's hold once
 /// the callback returned.
 #[cfg(feature = "queryable")]
-pub(crate) trait AnswersQueries {
+pub(crate) trait AnswersQueries<C: RoundCalls> {
     /// Hand `query`, which arrived on the link of `generation`, to the callback `call` was
     /// begun for, and send what it answers. The call is ended by the round.
-    fn answer_query(&self, call: &QueryableCall, query: &dyn QueryView, generation: u64);
+    fn answer_query(&self, call: &C::Queryable, query: &dyn QueryView, generation: u64);
 }
 
 /// What holds the callbacks of the legs of the session's gets, each in a row held by count: a
 /// record of the round that owes a leg a reply holds one count of its row from when it is written
 /// to when its call is ended, so the callback outlives every reply held for it.
 #[cfg(feature = "query")]
-pub(crate) trait LegHolders: Send + Sync {
+pub(crate) trait LegHolders<C: RoundCalls>: Send + Sync {
     /// Take one more count of `leg`'s row: `false` when it names none.
-    fn hold(&self, leg: LegId) -> bool;
+    fn hold(&self, leg: C::Leg) -> bool;
 
     /// Hand `reply` to `leg`'s callback, which a count the caller holds keeps; the callback is
     /// called with none of the holders' locks held.
-    fn call(&self, leg: LegId, reply: &dyn ReplyView);
+    fn call(&self, leg: C::Leg, reply: &dyn ReplyView);
 
     /// Give back one count of `leg`'s row: its callback, taken out of the row, when that was the
     /// last count, for the caller to drop with no lock held.
-    fn release(&self, leg: LegId) -> Option<ReplyCallback>;
+    fn release(&self, leg: C::Leg) -> Option<C::ReplyCallback>;
 }
 
 /// What the round's ends of calls leave the session to let go of: whether a row may wait, and the
@@ -852,7 +923,7 @@ pub(crate) trait LegHolders: Send + Sync {
 /// and none can overflow. Written by whoever ends a call: a delivery emptying the round with no
 /// lock of the session held, the session's own put after its calls, the session refusing a record
 /// under its lock.
-struct Released {
+struct Released<C: RoundCalls> {
     /// Set by a call that was the last of a row undeclared while it ran, after its latch said so;
     /// cleared by the session as it starts a walk. The session walks only while it is set, so the
     /// ends of the calls of live rows cost it no walk.
@@ -863,10 +934,10 @@ struct Released {
     /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
     /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
     #[cfg(feature = "query")]
-    legs: Option<Arc<dyn LegHolders>>,
+    legs: Option<Arc<dyn LegHolders<C>>>,
 }
 
-impl Released {
+impl<C: RoundCalls> Released<C> {
     fn new() -> Self {
         Self {
             marked: AtomicBool::new(false),
@@ -877,7 +948,7 @@ impl Released {
     }
 
     /// End `call`, marked for the session to let its row go when it was the row's last call.
-    fn end(&self, call: SubscriberCall) {
+    fn end(&self, call: C::Subscriber) {
         if call.end() {
             self.mark();
         }
@@ -885,7 +956,7 @@ impl Released {
 
     /// [`Self::end`] for a call of a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
-    fn end_liveliness(&self, call: LivelinessCall) {
+    fn end_liveliness(&self, call: C::Liveliness) {
         if call.end() {
             self.mark();
         }
@@ -893,7 +964,7 @@ impl Released {
 
     /// [`Self::end`] for a call of a queryable's callback.
     #[cfg(feature = "queryable")]
-    fn end_query(&self, call: QueryableCall) {
+    fn end_query(&self, call: C::Queryable) {
         if call.end() {
             self.mark();
         }
@@ -906,7 +977,7 @@ impl Released {
     }
 
     /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
-    fn settle(&self, owed: Owed) {
+    fn settle(&self, owed: Owed<C>) {
         match owed {
             Owed::Subscriber(call) => self.end(call),
             #[cfg(feature = "liveliness")]
@@ -927,20 +998,23 @@ impl Released {
 
 /// The drop of a row the session took out of its tables, under way until this is dropped, which
 /// its taker does once the row was dropped ([`Round::releasing`]).
-pub(crate) struct Releasing<'r> {
-    released: &'r Released,
+pub(crate) struct Releasing<'r, C: RoundCalls> {
+    released: &'r Released<C>,
 }
 
-impl Drop for Releasing<'_> {
+impl<C: RoundCalls> Drop for Releasing<'_, C> {
     fn drop(&mut self) {
         self.released.dropping.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-/// The session's round of deliveries (see the module).
-pub(crate) struct Round {
+/// The engine's round of deliveries.
+pub(crate) type Round = RoundOf<CoopCalls>;
+
+/// The session's round of deliveries (see the module), owing the calls `C` names.
+pub(crate) struct RoundOf<C: RoundCalls> {
     state: AtomicU8,
-    table: UnsafeCell<Table>,
+    table: UnsafeCell<Table<C>>,
     /// Whether a record lies in the datagram a link lent or a rejoined message the round keeps
     /// ([`Self::lends_a_datagram`]): set by the session's writes, cleared as a delivery empties
     /// the table.
@@ -974,14 +1048,14 @@ pub(crate) struct Round {
     /// to the session's own put instead of held, while it asks for them ([`Self::capture`]).
     /// Written under the session's lock.
     #[cfg(feature = "local-subscriber")]
-    capturing: UnsafeCell<Option<Captured>>,
+    capturing: UnsafeCell<Option<Captured<C>>>,
     /// What the ends of the calls leave the session to let go of ([`Released`]).
-    released: Released,
+    released: Released<C>,
     /// What answers the queries the round hands their queryables, once the engine that sends the
     /// answers is made ([`Self::answer_queries_with`]): the queries' replies go out on their links
     /// and their Finals' holds are let go of there.
     #[cfg(feature = "queryable")]
-    answering: Lock<Option<Weak<dyn AnswersQueries>>>,
+    answering: Lock<Option<Weak<dyn AnswersQueries<C>>>>,
     /// What was not handed a callback ([`RoundCounts`]).
     dropped: AtomicU64,
     held_over: AtomicU64,
@@ -1010,16 +1084,16 @@ pub(crate) struct Round {
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
 // them.
-unsafe impl Send for Round {}
+unsafe impl<C: RoundCalls> Send for RoundOf<C> {}
 // SAFETY: as `Send`.
-unsafe impl Sync for Round {}
+unsafe impl<C: RoundCalls> Sync for RoundOf<C> {}
 
-impl Round {
+impl<C: RoundCalls> RoundOf<C> {
     /// The session's round over `rows`, built where the allocation that shares it keeps it: its
     /// table's rows are kilobytes, which a value of the whole would lay in the frame of the
     /// session's open once for each move.
     #[inline(never)]
-    pub(crate) fn shared_over(rows: RoundRows) -> Arc<Self> {
+    pub(crate) fn shared_over(rows: RoundRows<C>) -> Arc<Self> {
         // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
         // an `Arc` is the same allocation, and the optimiser writes nothing into it.
         let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
@@ -1036,7 +1110,7 @@ impl Round {
     /// # Safety
     /// `at` is valid for writes of a `Self`, and what it held is overwritten without a drop.
     #[inline(never)]
-    unsafe fn write_in(at: *mut Self, rows: RoundRows) {
+    unsafe fn write_in(at: *mut Self, rows: RoundRows<C>) {
         // A field added to the round or its table and not written below would be read
         // uninitialised. These name every field of both with no `..`, so adding one without naming
         // it here (and so without writing it below) does not compile.
@@ -1071,7 +1145,7 @@ impl Round {
                     lent_samples: _,
             } = round;
         };
-        let _every_table_field_is_written = |table: &Table| {
+        let _every_table_field_is_written = |table: &Table<C>| {
             let Table {
                 datagram: _,
                 rejoined: _,
@@ -1090,7 +1164,7 @@ impl Round {
         // the round is whole when it is shared.
         unsafe {
             ptr::write(addr_of_mut!((*at).state), AtomicU8::new(EMPTY));
-            let table = addr_of_mut!((*at).table).cast::<Table>();
+            let table = addr_of_mut!((*at).table).cast::<Table<C>>();
             ptr::write(addr_of_mut!((*table).datagram), None);
             ptr::write(addr_of_mut!((*table).rejoined), None);
             ptr::write(addr_of_mut!((*table).key_space), None);
@@ -1140,7 +1214,7 @@ impl Round {
     /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
     /// leg's row. Told once, before the round is shared.
     #[cfg(feature = "query")]
-    pub(crate) fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders>) {
+    pub(crate) fn calls_legs_of(&mut self, legs: Arc<dyn LegHolders<C>>) {
         self.released.legs = Some(legs);
     }
 
@@ -1151,7 +1225,7 @@ impl Round {
     /// # Safety
     /// The caller holds the session's lock, and holds no other borrow of the table.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn writable(&self) -> Option<&mut Table> {
+    unsafe fn writable(&self) -> Option<&mut Table<C>> {
         match self.state.load(Ordering::Acquire) {
             EMPTY => {
                 // SAFETY: an empty table is the lock holder's, and the caller holds the lock and
@@ -1181,7 +1255,7 @@ impl Round {
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    unsafe fn filled(&self, table: &Table) {
+    unsafe fn filled(&self, table: &Table<C>) {
         if table.lends() {
             self.lends.store(true, Ordering::Release);
         }
@@ -1214,12 +1288,12 @@ impl Round {
     }
 
     /// Whether `table` takes one more record, owing `callbacks` callbacks.
-    fn takes(table: &Table, callbacks: usize) -> bool {
+    fn takes(table: &Table<C>, callbacks: usize) -> bool {
         table.entries.free_slots() > 0 && table.callbacks.free_slots() >= callbacks
     }
 
     /// Whether `table` takes one more callback of the record it holds last.
-    fn joins(table: &Table) -> bool {
+    fn joins(table: &Table<C>) -> bool {
         table.callbacks.free_slots() > 0
     }
 
@@ -1267,7 +1341,7 @@ impl Round {
     /// # Safety
     /// The caller holds the session's lock.
     #[cfg(feature = "local-subscriber")]
-    pub(crate) unsafe fn captured(&self) -> Captured {
+    pub(crate) unsafe fn captured(&self) -> Captured<C> {
         // SAFETY: the caller's contract: written under the session's lock alone.
         unsafe { (*self.capturing.get()).take() }.unwrap_or_else(BoundedVec::new_static)
     }
@@ -1282,7 +1356,7 @@ impl Round {
     /// The caller holds the session's lock.
     pub(crate) unsafe fn offer_sample(
         &self,
-        call: SubscriberCall,
+        call: C::Subscriber,
         sample: &dyn SampleView,
         first: bool,
     ) {
@@ -1369,7 +1443,7 @@ impl Round {
 
     /// Owe `call` in `table`, which has the room for it: `false`, the call ended, when it had
     /// not after all.
-    fn owe_call(&self, table: &mut Table, call: SubscriberCall) -> bool {
+    fn owe_call(&self, table: &mut Table<C>, call: C::Subscriber) -> bool {
         match table.callbacks.push(Owed::Subscriber(call)) {
             Ok(()) => true,
             Err(full) => {
@@ -1382,7 +1456,7 @@ impl Round {
     /// `sample`'s key, payload and other parts placed in `table`; `None` when a part finds no
     /// room.
     fn place_sample(
-        table: &mut Table,
+        table: &mut Table<C>,
         sample: &Offered<'_>,
         lending: Option<Lending>,
     ) -> Option<(Span, Span, Option<Rest>)> {
@@ -1398,7 +1472,7 @@ impl Round {
     /// Join `call` to the record `table` holds last when that is the record of the fan-out `call`
     /// is a later row of and no call of the same row is owed it yet; the call back when it does not
     /// join.
-    fn join_sample(&self, table: &mut Table, call: SubscriberCall) -> Result<(), SubscriberCall> {
+    fn join_sample(&self, table: &mut Table<C>, call: C::Subscriber) -> Result<(), C::Subscriber> {
         let Some(
             entry @ Entry {
                 what: Held::Sample { .. },
@@ -1436,7 +1510,7 @@ impl Round {
     #[cfg(feature = "liveliness")]
     pub(crate) unsafe fn offer_liveliness(
         &self,
-        call: LivelinessCall,
+        call: C::Liveliness,
         sample: &LivelinessSample<'_>,
         held: Option<&KeyRef>,
     ) {
@@ -1535,7 +1609,7 @@ impl Round {
     /// # Safety
     /// The caller holds the session's lock.
     #[cfg(feature = "query")]
-    pub(crate) unsafe fn offer_reply(&self, leg: LegId, view: &dyn ReplyView) {
+    pub(crate) unsafe fn offer_reply(&self, leg: C::Leg, view: &dyn ReplyView) {
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
@@ -1583,7 +1657,7 @@ impl Round {
     /// `view` placed in `table`; `None` when a part finds no room.
     #[cfg(feature = "query")]
     fn place_reply(
-        table: &mut Table,
+        table: &mut Table<C>,
         view: &dyn ReplyView,
         held: Option<&KeyRef>,
         lending: Option<Lending>,
@@ -1670,7 +1744,7 @@ impl Round {
     /// Answer the queries the round hands their queryables through `answering`, the engine the
     /// round is the session's of: told once, when the engine is made.
     #[cfg(feature = "queryable")]
-    pub(crate) fn answer_queries_with(&self, answering: Weak<dyn AnswersQueries>) {
+    pub(crate) fn answer_queries_with(&self, answering: Weak<dyn AnswersQueries<C>>) {
         self.answering.with(|held| *held = Some(answering));
     }
 
@@ -1684,7 +1758,7 @@ impl Round {
     #[cfg(feature = "queryable")]
     pub(crate) unsafe fn offer_query(
         &self,
-        call: QueryableCall,
+        call: C::Queryable,
         view: &dyn QueryView,
         generation: u64,
     ) -> bool {
@@ -1732,7 +1806,7 @@ impl Round {
     /// `view` placed in `table`; `None` when a part finds no place.
     #[cfg(feature = "queryable")]
     fn place_query(
-        table: &mut Table,
+        table: &mut Table<C>,
         view: &dyn QueryView,
         generation: u64,
         lending: Option<Lending>,
@@ -1926,7 +2000,7 @@ impl Round {
     /// End `call`, which the session's own put made ([`Self::captured`]): its row is marked to be
     /// let go of ([`Self::take_marked`]) when it was the row's last call.
     #[cfg(feature = "local-subscriber")]
-    pub(crate) fn end_call(&self, call: SubscriberCall) {
+    pub(crate) fn end_call(&self, call: C::Subscriber) {
         self.released.end(call);
     }
 
@@ -1934,14 +2008,14 @@ impl Round {
     /// lock held: its row is marked to be let go of ([`Self::take_marked`]) when it was the
     /// row's last call.
     #[cfg(feature = "local-queryable")]
-    pub(crate) fn end_query_call(&self, call: QueryableCall) {
+    pub(crate) fn end_query_call(&self, call: C::Queryable) {
         self.released.end_query(call);
     }
 
     /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
     /// row is marked to be let go of ([`Self::take_marked`]) when it was the row's last call.
     #[cfg(feature = "liveliness")]
-    pub(crate) fn end_liveliness_call(&self, call: LivelinessCall) {
+    pub(crate) fn end_liveliness_call(&self, call: C::Liveliness) {
         self.released.end_liveliness(call);
     }
 
@@ -1957,7 +2031,7 @@ impl Round {
 
     /// Count the drop of a row the session took out of its tables, under its lock, as under way
     /// until what this hands back is dropped, after the row was.
-    pub(crate) fn releasing(&self) -> Releasing<'_> {
+    pub(crate) fn releasing(&self) -> Releasing<'_, C> {
         self.released.dropping.fetch_add(1, Ordering::AcqRel);
         Releasing {
             released: &self.released,
@@ -2063,7 +2137,7 @@ impl Round {
 
     /// Count a round handed out, its samples, and of those the ones read where they lie.
     #[cfg(all(test, feature = "std"))]
-    fn count_round(&self, table: &Table) {
+    fn count_round(&self, table: &Table<C>) {
         let samples = table
             .entries
             .iter()
@@ -2107,14 +2181,14 @@ impl Round {
 /// The round as the session's state asks it (`SessionState::retract_owed`). Named by its path
 /// alone: in scope, its methods would be found first on an `Arc<Round>`, before the round's own.
 #[cfg(feature = "liveliness")]
-impl wz_session_core::session_state::DeliveryRound for Round {
+impl<C: RoundCalls> wz_session_core::session_state::DeliveryRound for RoundOf<C> {
     unsafe fn has_room(&self, callbacks: usize) -> bool {
         // SAFETY: the caller's contract, which is the round's own.
-        unsafe { Round::has_room(self, ReadRoom { callbacks }) }
+        unsafe { Self::has_room(self, ReadRoom { callbacks }) }
     }
 
     fn owe(&self, owed: bool) {
-        Round::owe(self, owed);
+        Self::owe(self, owed);
     }
 }
 
@@ -2122,7 +2196,7 @@ impl wz_session_core::session_state::DeliveryRound for Round {
 impl Round {
     /// The tables of a round holding `events` records at once, lent from an arena the test leaks,
     /// so it outlives the round.
-    fn leaked_rows(events: usize) -> RoundRows {
+    fn leaked_rows(events: usize) -> RoundRows<CoopCalls> {
         use crate::arena::{AllocatorMemory, SessionArena};
         use wz_session_core::bounded::ARENA_ALIGN;
 
@@ -2151,16 +2225,16 @@ impl Round {
 
 /// A query of the round, read where its parts lie: what each queryable it reached is handed.
 #[cfg(feature = "queryable")]
-struct RoundQuery<'t> {
+struct RoundQuery<'t, C: RoundCalls> {
     query: &'t HeldQuery,
-    table: &'t Table,
+    table: &'t Table<C>,
     /// The encoding as the hint a queryable reads it by, made from the table's parts the first
     /// time one asks for it.
     encoding: OnceCell<EncodingHint>,
 }
 
 #[cfg(feature = "queryable")]
-impl QueryView for RoundQuery<'_> {
+impl<C: RoundCalls> QueryView for RoundQuery<'_, C> {
     fn keyexpr(&self) -> &str {
         self.table.text(self.query.key)
     }
@@ -2207,9 +2281,9 @@ impl QueryView for RoundQuery<'_> {
 /// A delivery of the round ends, a callback's unwinding included: the table is emptied, its calls
 /// ended and its other callbacks let go of with no lock of the session held, and given back to the
 /// session.
-struct Emptied<'r>(&'r Round);
+struct Emptied<'r, C: RoundCalls>(&'r RoundOf<C>);
 
-impl Drop for Emptied<'_> {
+impl<C: RoundCalls> Drop for Emptied<'_, C> {
     fn drop(&mut self) {
         // SAFETY: the table is this delivery's until the store below gives it back.
         unsafe { (*self.0.table.get()).end_calls(&self.0.released) };
@@ -2220,13 +2294,13 @@ impl Drop for Emptied<'_> {
 
 /// A sample of the round, read where its parts lie: what each of its subscribers' callbacks is
 /// handed.
-struct RoundSample<'t> {
+struct RoundSample<'t, C: RoundCalls> {
     head: Head,
     rest: Option<&'t Rest>,
-    table: &'t Table,
+    table: &'t Table<C>,
 }
 
-impl SampleView for RoundSample<'_> {
+impl<C: RoundCalls> SampleView for RoundSample<'_, C> {
     fn keyexpr(&self) -> &str {
         self.table.text(self.head.key)
     }
@@ -2269,13 +2343,13 @@ impl SampleView for RoundSample<'_> {
 
 /// A reply of the round, read where its parts lie: what its leg's callback is handed.
 #[cfg(feature = "query")]
-struct RoundReply<'t> {
+struct RoundReply<'t, C: RoundCalls> {
     reply: &'t HeldReply,
-    table: &'t Table,
+    table: &'t Table<C>,
 }
 
 #[cfg(feature = "query")]
-impl RoundReply<'_> {
+impl<C: RoundCalls> RoundReply<'_, C> {
     /// Its encoding, when it is of the kind `kind`.
     fn encoding_of(&self, kind: ReplyKind) -> Option<(u32, Option<&[u8]>)> {
         if self.reply.kind != kind {
@@ -2288,7 +2362,7 @@ impl RoundReply<'_> {
 }
 
 #[cfg(feature = "query")]
-impl ReplyView for RoundReply<'_> {
+impl<C: RoundCalls> ReplyView for RoundReply<'_, C> {
     fn rid(&self) -> wz_session_core::wire_id::RequestId {
         self.reply.rid
     }
@@ -2497,5 +2571,70 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     // The gate holds back input only: what the session sends goes out while the round is full.
     fn room_wait(&self) -> Option<WaitOn> {
         self.pump.room_wait()
+    }
+}
+
+/// The calls the engine's round owes: each kind of row the engine's build keeps none of is
+/// [`Infallible`].
+pub(crate) enum CoopCalls {}
+
+impl RoundCalls for CoopCalls {
+    type Subscriber = SubscriberCall;
+    #[cfg(feature = "liveliness")]
+    type Liveliness = LivelinessCall;
+    #[cfg(not(feature = "liveliness"))]
+    type Liveliness = Infallible;
+    #[cfg(feature = "queryable")]
+    type Queryable = QueryableCall;
+    #[cfg(not(feature = "queryable"))]
+    type Queryable = Infallible;
+    #[cfg(feature = "query")]
+    type Leg = LegId;
+    #[cfg(not(feature = "query"))]
+    type Leg = Infallible;
+    #[cfg(feature = "query")]
+    type ReplyCallback = ReplyCallback;
+    #[cfg(not(feature = "query"))]
+    type ReplyCallback = Infallible;
+}
+
+impl RoundCall for SubscriberCall {
+    fn end(self) -> bool {
+        SubscriberCall::end(self)
+    }
+}
+
+impl SampleCall for SubscriberCall {
+    fn same_row(&self, other: &Self) -> bool {
+        SubscriberCall::same_row(self, other)
+    }
+
+    fn hand(&self, sample: &dyn SampleView) {
+        SubscriberCall::hand(self, sample);
+    }
+}
+
+#[cfg(feature = "liveliness")]
+impl RoundCall for LivelinessCall {
+    fn end(self) -> bool {
+        LivelinessCall::end(self)
+    }
+}
+
+#[cfg(feature = "liveliness")]
+impl TokenCall for LivelinessCall {
+    fn same_row(&self, other: &Self) -> bool {
+        LivelinessCall::same_row(self, other)
+    }
+
+    fn hand(&self, sample: LivelinessSample<'_>) {
+        LivelinessCall::hand(self, sample);
+    }
+}
+
+#[cfg(feature = "queryable")]
+impl RoundCall for QueryableCall {
+    fn end(self) -> bool {
+        QueryableCall::end(self)
     }
 }

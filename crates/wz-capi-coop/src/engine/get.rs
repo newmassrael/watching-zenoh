@@ -52,7 +52,7 @@ use wz_session_core::reply_sink::{ReplySink, ReplyView};
 use wz_session_core::timestamp_visibility::HiddenReplyTimestamp;
 use wz_session_core::wire_id::RequestId;
 
-use crate::round::{LegHolders, Round};
+use crate::round::{CoopCalls, LegHolders, Round};
 
 use super::queued::{Pending, Queued};
 
@@ -340,7 +340,7 @@ impl GetPlane {
     }
 }
 
-impl LegHolders for GetPlane {
+impl LegHolders<CoopCalls> for GetPlane {
     fn hold(&self, leg: LegId) -> bool {
         self.legs.with(|legs| legs.hold(leg))
     }
