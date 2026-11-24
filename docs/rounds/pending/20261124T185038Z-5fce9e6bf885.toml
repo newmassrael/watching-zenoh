@@ -1,0 +1,24 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport", "watching-zenoh/local-ci-gates"]
+decision = '''
+A seventh integration of the pico C ABI release toward docs/c-abi-architecture.md, and three repairs of builds the standard gates do not cover.
+
+Size: the doors reach a session's engine by the session's own hold for the length of a call, and a declaring door borrows the view its session's open made, so neither clones and lets go of the engine on each way out; a caller's text is read as UTF-8 through one body. A session's rows of each kind are an array indexed by the kind rather than fourteen named fields behind a match. A reassembly slot ends through one door, and a frame's send slot is lent at one site for the window and the whole frame.
+
+One door to the engine: after the doors borrowed it, engine_of was left with only a session's tail and the tests as readers, and a build of the tokio engine read none of it. The doors now have one door, engine_held, and whatever keeps the engine clones the borrow where it keeps it.
+
+Repairs found by clippy of wz-capi-pico's feature combinations beyond the standard lanes (engine-tokio with peer, query and queryable; engine-coop with peer, with query, with advanced), present on main before this round: a place's keep (CountIn::keep, KeptIn, keep_entity) is compiled where advanced or its one test reads it, and a session's tail no longer drops a value with no Drop.
+
+The size ledger reads 1.6174 times zenoh-pico in total (from 1.6286): sessions 2.8886, doors 2.2771, transport 2.9476, driver 1.6179.
+'''
+changes = '''
+crates/wz-capi-pico: session.rs (engine_held the one door, SessionTail drop), abi.rs (text_of), keyexpr.rs, config, write_filter.rs, ffi.rs and object_slot.rs (keep cfg), pubsub.rs, querier.rs, queryable and liveliness doors, and the tests that took engine_of.
+crates/wz-capi-coop: engine.rs (CoopDrive::engine_hold), arena.rs (EntityRows.kinds); crates/wz-capi-core: engine_port.rs (CoreDrive::engine_hold).
+crates/wz-session-core: reassembly_dispatch.rs (Slot::end), session_actions.rs (lend_frame).
+deploy/size_ledger.json rows tightened; docs/reason-review-pins.md a session-close-ingress row re-read.
+'''
+verification = '''
+Run through bx from the integration worktree on 861b1ede9: the integration verify sweep passed every lane (24: clippy of each changed crate with -D warnings, the changed crates' tests, the coop, pico and lwIP feature combinations, Layer C1nh), and cargo clippy --all-targets -D warnings of wz-capi-pico with engine-tokio,peer,query,queryable; engine-coop,peer; engine-coop,peer,query; and engine-coop,peer,advanced passed. On origin/main 4a451dd88 the engine-tokio combination failed with the three unread keep items. The size ledger --measure on 861b1ede9: sessions 91,564 / doors 47,848 / transport 43,453 / driver 30,357 / keyexpr 11,776 / codec 33,130 / language 17,640 bytes against zenoh-pico, total 1.6174. Locally: mnemosyne-cli validate-workspace (T1 orphan new +0), reason_review_pin_gate, reason_citation_gate, store_reason_citation_gate, upstream_citation_anchor_gate, prose_named_identifier_gate, logic_census_coverage_gate, totality_debt_gate, wz_config.py --check.
+'''
+carry = '''
+Open: transport 2.95, sessions 2.89, doors 2.28 and driver 1.62 times zenoh-pico. On branches, not yet measured: a face's slot kept for its life and its room at its place (merged with the kinds table), one send form over a link's slots with the slots a session needs reserved and an open batch sent before none is lent (it also repairs an SN a refused lent frame had spent), a sample's lent marshal let go without drop and a kept one copied whole, the multicast window held in storage of its own. The SCE items (shared extension walk, parent-tag flag, event context) wait behind the runtime size branch. The pico ABI performance matrix run exceeded its script's two hours and was not read.
+'''
