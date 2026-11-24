@@ -2402,10 +2402,10 @@ impl<C: RoundCalls> QueryView for RoundQuery<'_, C> {
 
     fn encoding(&self) -> Option<&EncodingHint> {
         let (packed_id, schema) = self.query.encoding?;
-        Some(self.encoding.get_or_init(|| EncodingHint {
+        crate::once_built::get_or_build(&self.encoding, || EncodingHint {
             packed_id,
             schema: schema.map(|span| self.table.bytes(span).to_vec()),
-        }))
+        })
     }
 
     fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
