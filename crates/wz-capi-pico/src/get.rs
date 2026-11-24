@@ -1011,7 +1011,7 @@ fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
     // carry both. A `#[cfg]` here would name a feature `wz-capi-pico` does not
     // declare, which the unexpected-cfg lint rejects outright.
     if let Some(encoding) = value_meta.encoding {
-        opts = opts.with_encoding_ref(encoding);
+        opts.set_encoding_ref(encoding);
     }
     if let Some(si) = &value_meta.source_info {
         opts = opts.with_source_info(si.clone());
@@ -1070,14 +1070,16 @@ fn get_options<'a>(ask: &GetAsk<'a>, anyke: bool) -> QueryOptionsOf<'a> {
         ));
     }
 
+    // The setters that apply on a condition set the options where they lie, so no branch moves
+    // the whole value through a setter and back.
     if !parameters.is_empty() || anyke {
-        opts = opts.with_parameters_lent_anyke(parameters, anyke);
+        opts.set_parameters_lent_anyke(parameters, anyke);
     }
     if let Some(payload) = payload {
-        opts = opts.with_payload_lent(payload.as_slice());
+        opts.set_payload_lent(payload.as_slice());
     }
     if let Some(attachment) = attachment {
-        opts = opts.with_attachment_lent(attachment.as_slice());
+        opts.set_attachment_lent(attachment.as_slice());
     }
     opts
 }
