@@ -3355,6 +3355,29 @@ value = 2
 reason = "zenoh-pico counts no held query; its examples answer each query in or right after its callback, and its queryable API test holds two queries at once."
 
 [[limit]]
+id = "HELD_QUERY_PARAMS_BYTES"
+kconfig = "WZ_LIMIT_HELD_QUERY_PARAMS_BYTES"
+kind = "bound"
+driven = "remote"
+default = 256
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes of the parameters of one query a program keeps past its
+queryable's callback, held beside the query's Final until the program lets
+the query go: a cell of this many bytes for each query the session holds
+at once (MAX_PENDING_FINALS). Keeping a query whose parameters are longer
+is refused; a query without parameters takes no cell.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds them: zenoh-pico moves the parameters a query arrives with into the query it hands the callback, which a kept query owns on the heap (`vendor/zenoh-pico/src/session/queryable.c` @ `_z_query_move_data(_Z_RC_IN_VAL(&query), &msgq->_ext_value, &qle_infos.ke, &msgq->_parameters,`). wz keeps them in a cell of the session's memory beside the query's Final; 256 is the longest key a session holds by default (MAX_KEYEXPR_BYTES), parameters as long as the key they select on."
+
+[[limit]]
 id = "MAX_REPLY_PAYLOAD_BYTES"
 kconfig = "WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"
 kind = "bound"

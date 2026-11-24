@@ -472,6 +472,13 @@ pub const MAX_PENDING_REPLIES: usize = generated::MAX_PENDING_REPLIES;
 /// after it leaves the peer's `get` open until its own timeout.
 pub const MAX_PENDING_FINALS: usize = generated::MAX_PENDING_FINALS;
 
+/// The bytes of the parameters of ONE query a program keeps past its queryable's
+/// callback (the deploy `HELD_QUERY_PARAMS_BYTES` limit): a cell of this many bytes
+/// for each of the session's [`MAX_PENDING_FINALS`] held queries, which the kept
+/// query's parameters are read from until the program lets it go. Keeping a query
+/// whose parameters are longer is refused; one without parameters takes no cell.
+pub const HELD_QUERY_PARAMS_BYTES: usize = generated::HELD_QUERY_PARAMS_BYTES;
+
 /// Maximum byte length of the payload of ONE staged reply, and the bytes of an
 /// attachment it carries beside it (the deploy `limits` key
 /// `reply_payload_bytes`). A reply that does not fit is refused with
