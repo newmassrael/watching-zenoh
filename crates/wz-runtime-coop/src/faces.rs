@@ -749,7 +749,15 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             .filter(|wire| wire.owes_write())
             .filter_map(|wire| wire.input);
         for on in owing {
-            if waits.push(LinkWait::input_or_room(on)).is_err() {
+            let pushed = waits.push(LinkWait::input_or_room(on));
+            // Each link that owes holds one of the pool's slots, so more never owe than
+            // `OWING_WAITS`: one past it is a link that owes with no slot, which a test build
+            // names rather than wait on fewer links than owe.
+            debug_assert!(
+                pushed.is_ok(),
+                "more links owe a write than the outbound slots they hold ({OWING_WAITS})"
+            );
+            if pushed.is_err() {
                 break;
             }
         }
@@ -1501,6 +1509,27 @@ mod tests {
             owe[..OWING_WAITS.min(owe.len())],
             "the links that owe, for their input and their room"
         );
+    }
+
+    /// More links owing a write than `OWING_WAITS` is a link that owes with no outbound slot of
+    /// the pool, which a test build names. Turned red by a gathering that cuts the waits short in
+    /// silence.
+    #[cfg(all(feature = "session-unicast-accept", debug_assertions))]
+    #[test]
+    #[should_panic(expected = "more links owe a write than the outbound slots they hold")]
+    fn more_links_owing_than_the_slots_they_hold_is_named_in_a_test_build() {
+        let runtime = CoopRuntime::new(Still);
+        let local = CoopLocalSet::new(&runtime);
+        let past = OWING_WAITS.saturating_add(1);
+        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), true)), past);
+        for id in 1..past {
+            let owing = TestFace {
+                id: FaceId::try_from(id).unwrap_or(FaceId::MAX),
+                link: Link::Up(waited_wire(&local, WaitOn::Socket(3 + id), true)),
+            };
+            assert!(faces.push_face(owing).is_ok(), "room for each face");
+        }
+        let _ = faces.owing_waits();
     }
 
     /// A wait on links is the stack's for the whole time, and leaves its buffer emptied.
