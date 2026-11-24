@@ -268,7 +268,10 @@ pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>)
 ))]
 #[derive(Debug, Default)]
 pub struct GroupKeyexprAnswers {
-    declared: alloc::collections::BTreeMap<crate::wire_id::ExprId, alloc::string::String>,
+    /// One entry an id, ordered by it, so the answers go out in the order of the ids. A list and
+    /// not a tree: a session declares a handful of keyexprs to its group, and a tree would carry
+    /// insertion and rebalancing code of its own for this one map.
+    declared: alloc::vec::Vec<(crate::wire_id::ExprId, alloc::string::String)>,
     owed: alloc::vec::Vec<OwedKeyexprs>,
 }
 
@@ -299,13 +302,29 @@ struct OwedKeyexprs {
 ))]
 impl GroupKeyexprAnswers {
     /// The session declared `keyexpr` to the group as `mapping_id`.
+    /// An id declared again names the keyexpr it is declared with now.
     pub fn declared(&mut self, mapping_id: crate::wire_id::ExprId, keyexpr: &str) {
-        self.declared.insert(mapping_id, keyexpr.into());
+        match self.place_of(mapping_id) {
+            Ok(at) => {
+                if let Some((_, held)) = self.declared.get_mut(at) {
+                    *held = keyexpr.into();
+                }
+            }
+            Err(at) => self.declared.insert(at, (mapping_id, keyexpr.into())),
+        }
     }
 
     /// The session retracted declaration `mapping_id`.
     pub fn retracted(&mut self, mapping_id: crate::wire_id::ExprId) {
-        self.declared.remove(&mapping_id);
+        if let Ok(at) = self.place_of(mapping_id) {
+            self.declared.remove(at);
+        }
+    }
+
+    /// Where `mapping_id` is held, or where it goes to keep the ids in order.
+    fn place_of(&self, mapping_id: crate::wire_id::ExprId) -> Result<usize, usize> {
+        self.declared
+            .binary_search_by_key(&mapping_id, |(id, _)| *id)
     }
 
     /// Note each interest in `event` that asks for keyexprs now, owned in a batch or lent where its
@@ -513,5 +532,56 @@ mod tests {
         let mut again = 0usize;
         answers.take_answers(|_| again += 1);
         assert_eq!(again, 0, "an answer is taken once");
+    }
+
+    /// The keys are answered in the order of their ids, whatever order they were declared in; an
+    /// id declared again is answered once, with the key it names now; a retraction of an id never
+    /// declared changes nothing.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-final",
+        feature = "storage-profile"
+    ))]
+    #[test]
+    fn keys_are_answered_in_id_order_and_a_redeclared_id_by_its_new_key() {
+        use crate::declare_build::{build_declare_final_reply, build_declare_kexpr_reply};
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::interest_build::{build_interest_exact, InterestKinds};
+        use crate::network_message::NetworkMessage;
+        let frame = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![NetworkMessage::Interest(
+                build_interest_exact(42, InterestKinds::KEYEXPRS, true, false, None)
+                    .expect("an interest"),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        let mut answers = GroupKeyexprAnswers::default();
+        answers.declared(9, "k/nine");
+        answers.declared(3, "k/three");
+        answers.declared(6, "k/six");
+        answers.declared(3, "k/three/again");
+        answers.retracted(6);
+        answers.retracted(77);
+        let mut owed = false;
+        crate::driver_loop::deliver_frame(&frame, |event| owed = answers.asked(&event));
+        assert!(owed);
+        let mut replies = Vec::new();
+        answers.take_answers(|reply| match reply {
+            MulticastTxReply::DeclareReply(declare) => replies.push(declare.clone()),
+            #[cfg(feature = "codec-response")]
+            _ => panic!("an answer is a declaration reply"),
+        });
+        assert_eq!(
+            replies,
+            [
+                build_declare_kexpr_reply(42, 3, "k/three/again").expect("a reply"),
+                build_declare_kexpr_reply(42, 9, "k/nine").expect("a reply"),
+                build_declare_final_reply(42),
+            ]
+        );
     }
 }
