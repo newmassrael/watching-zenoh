@@ -277,7 +277,9 @@ impl Drop for PosixTcpListener {
 }
 
 /// The iovecs of `parts`, empty ones left out, and how many there are; more than `MAX_PARTS` is
-/// refused as `EMSGSIZE`.
+/// refused as `EMSGSIZE`. Out of line: both stream writes build their iovecs here, and the loop,
+/// unrolled over `MAX_PARTS`, is one copy.
+#[inline(never)]
 fn iovecs(parts: &[&[u8]]) -> Result<([libc::iovec; MAX_PARTS], usize), PosixNetError> {
     let mut vecs = [libc::iovec {
         iov_base: core::ptr::null_mut(),
@@ -483,6 +485,23 @@ mod tests {
         let near = PosixTcpSocket::connect(at(port)).expect("a connection");
         let (far, _) = listener.accept().expect("the far end");
         (near, far)
+    }
+
+    /// The iovecs of a write are its parts in order, empty ones left out, at most `MAX_PARTS` of
+    /// them: one part more is refused as `EMSGSIZE`, however many empty ones lie among them.
+    #[test]
+    fn a_writes_iovecs_are_its_parts_less_the_empty_ones() {
+        let parts: [&[u8]; 6] = [b"a", b"", b"bc", b"def", b"", b"ghij"];
+        let (vecs, count) = iovecs(&parts).expect("four parts");
+        assert_eq!(count, 4);
+        let lens: [usize; 4] = core::array::from_fn(|at| vecs[at].iov_len);
+        assert_eq!(lens, [1, 2, 3, 4]);
+        assert_eq!(vecs[1].iov_base.cast_const(), parts[2].as_ptr().cast());
+        assert!(matches!(
+            iovecs(&[b"a", b"", b"b", b"c", b"d", b"e"]),
+            Err(PosixNetError::Write(libc::EMSGSIZE))
+        ));
+        assert!(matches!(iovecs(&[]), Ok((_, 0))));
     }
 
     /// Both stream writes go through one `sendmsg` body: a write and a write that does not wait
