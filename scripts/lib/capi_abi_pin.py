@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 64
+EXPECTED_VERSION = 65
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -556,6 +556,14 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # first packet written to a `uint64_t` the CALLER owns. The memory rule does
     # not move.
     "wz_dissect_live_follow_next": 63,
+    # (ABI 65) -- the same move over a next container the caller LENDS: the
+    # handle retains the caller's pointer, as the other lending doors do, until
+    # it is closed or says it reads that container no more. One symbol, and
+    # the memory rule moves with it.
+    "wz_dissect_live_follow_next_lent": 65,
+    # (ABI 65) -- which containers a handle still reads: two `uint64_t` the
+    # CALLER owns out, nothing retained. One symbol.
+    "wz_dissect_live_oldest_container": 65,
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census": 3,

@@ -4,6 +4,8 @@
 //! `wz_dissect_live_follow_next` across the boundary: one capture written as two
 //! containers, read by one handle, says what the capture read as one container
 //! says, and a handle that moved on reads the container it follows now again.
+//! The same capture lent as two containers reads as it does handed over, and
+//! the handle says which containers it still reads.
 //!
 //! The walk that numbers on and names sections apart is held in `wz-capture`
 //! (`CaptureCursor::next_container`); what this file holds is the door, and
@@ -81,6 +83,47 @@ fn follow_next(handle: *mut live::LiveDissection, bytes: &[u8]) -> (c_int, u64) 
         wz_dissect_live_follow_next(handle, bytes.as_ptr(), bytes.len(), &mut first_packet)
     };
     (rc, first_packet)
+}
+
+/// `wz_dissect_live_follow_lent` the way C calls it.
+fn follow_lent(handle: *mut live::LiveDissection, bytes: &[u8]) -> c_int {
+    unsafe { wz_dissect_live_follow_lent(handle, bytes.as_ptr(), bytes.len()) }
+}
+
+/// `wz_dissect_live_follow_next_lent` the way C calls it: the code and the
+/// number the next container's first packet took.
+fn follow_next_lent(handle: *mut live::LiveDissection, bytes: &[u8]) -> (c_int, u64) {
+    let mut first_packet = u64::MAX;
+    let rc = unsafe {
+        wz_dissect_live_follow_next_lent(handle, bytes.as_ptr(), bytes.len(), &mut first_packet)
+    };
+    (rc, first_packet)
+}
+
+/// `wz_dissect_live_oldest_container` the way C calls it: `(oldest, current)`.
+fn oldest_container(handle: *const live::LiveDissection) -> (u64, u64) {
+    let (mut oldest, mut current) = (u64::MAX, u64::MAX);
+    let rc = unsafe { wz_dissect_live_oldest_container(handle, &mut oldest, &mut current) };
+    assert_eq!(rc, WZ_DISSECT_OK, "the oldest container door");
+    (oldest, current)
+}
+
+/// Each record's bytes as the handle answers them, written out so two handles'
+/// answers compare whatever holds the bytes.
+fn bytes_of(handle: *const live::LiveDissection, records: &[WzDissectRecord]) -> Vec<String> {
+    records
+        .iter()
+        .map(|r| format!("{:?}", unsafe { (*handle).message_bytes(r) }))
+        .collect()
+}
+
+/// A classic pcap of `n` datagram keep-alives from one flow, each at the
+/// instant its place in a capture of them gives, numbered from `from`.
+fn keepalives(from: usize, n: usize) -> Vec<u8> {
+    let packets: Vec<Vec<u8>> = (0..from + n)
+        .map(|_| udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &KEEPALIVE))
+        .collect();
+    container(&packets, from, from + n)
 }
 
 /// The datagram flows of a field document: from its `datagram_flows` key to
@@ -165,13 +208,13 @@ fn a_capture_read_as_two_containers_says_what_it_says_read_as_one() {
     unsafe { wz_dissect_live_close(two) };
 }
 
-/// A HANDLE THAT MOVED ON READS THE CONTAINER IT FOLLOWS NOW AGAIN AND IS LENT
-/// NONE: its packet numbers count across containers, and the field document
-/// finds the next container's packets by them, so every datagram row of the
-/// capture, all of them in the second container, comes out as a handle that
-/// read the capture as one container writes it. Lending one is refused.
+/// A HANDLE THAT MOVED ON READS THE CONTAINER IT FOLLOWS NOW AGAIN: its packet
+/// numbers count across containers, and the field document finds the next
+/// container's packets by them, so every datagram row of the capture, all of
+/// them in the second container, comes out as a handle that read the capture as
+/// one container writes it. It may be lent the container it follows.
 #[test]
-fn a_moved_handle_rereads_the_container_it_follows_and_is_lent_none() {
+fn a_moved_handle_rereads_the_container_it_follows_and_may_be_lent_it() {
     let packets = session_packets();
     let whole = container(&packets, 0, packets.len());
     let first = container(&packets, 0, 4);
@@ -205,9 +248,9 @@ fn a_moved_handle_rereads_the_container_it_follows_and_is_lent_none() {
         "the datagram rows, packet numbers and frame offsets included"
     );
     assert_eq!(
-        unsafe { wz_dissect_live_follow_lent(two, second.as_ptr(), second.len()) },
-        WZ_DISSECT_ERR_INVALID_ARG,
-        "a moved handle is lent no container"
+        follow_lent(two, &second),
+        WZ_DISSECT_OK,
+        "a moved handle is lent the container it follows"
     );
     unsafe { wz_dissect_live_close(two) };
 }
@@ -244,5 +287,135 @@ fn a_handle_that_has_read_nothing_is_not_moved_and_nulls_are_refused() {
         },
         WZ_DISSECT_ERR_INVALID_ARG
     );
+    unsafe { wz_dissect_live_close(h) };
+}
+
+/// ONE CAPTURE LENT AS TWO CONTAINERS READS AS IT DOES HANDED OVER: the same
+/// records, the same bytes for every record (the session's handshake read from
+/// the first container after the handle moved on to the second), the same
+/// session table and census, and no copy of a stream's bytes kept. The handle
+/// still reads the first container, and one that copied both reads neither.
+#[test]
+fn a_capture_lent_as_two_containers_reads_as_it_does_handed_over() {
+    let packets = session_packets();
+    let first = container(&packets, 0, 4);
+    let second = container(&packets, 4, packets.len());
+
+    let copied = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+    assert_eq!(follow(copied, &first), WZ_DISSECT_OK);
+    assert_eq!(follow_next(copied, &second), (WZ_DISSECT_OK, 4));
+    unsafe { wz_dissect_live_end(copied) };
+
+    let lent = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+    assert_eq!(follow_lent(lent, &first), WZ_DISSECT_OK);
+    assert_eq!(oldest_container(lent), (0, 0), "one container, read");
+    assert_eq!(follow_next_lent(lent, &second), (WZ_DISSECT_OK, 4));
+    unsafe { wz_dissect_live_end(lent) };
+
+    let records = drain_all(lent);
+    assert_eq!(records, drain_all(copied), "the records");
+    assert!(
+        records.iter().any(|r| r.anchor_space == 1 && r.anchor == 0),
+        "the handshake's first stream message is a record: {records:?}"
+    );
+    assert_eq!(
+        bytes_of(lent, &records),
+        bytes_of(copied, &records),
+        "every record's bytes, the first container's among them"
+    );
+    assert_eq!(session_table_of(lent), session_table_of(copied));
+    assert_eq!(
+        call_live_census(lent, "").expect("the planes render"),
+        call_live_census(copied, "").expect("the planes render"),
+        "the census"
+    );
+    let kept = |h: *const live::LiveDissection| unsafe { (*h).memory() }.dissection.stream_kept;
+    assert_eq!(kept(lent), 0, "a lent stream keeps no copy of its bytes");
+    assert!(
+        kept(copied) > 0,
+        "anti-vacuity: the copying handle keeps them"
+    );
+    assert_eq!(
+        oldest_container(lent),
+        (0, 1),
+        "the handshake's bytes are still read from the first container"
+    );
+    assert_eq!(
+        oldest_container(copied),
+        (1, 1),
+        "a handle that copied reads no container"
+    );
+    unsafe { wz_dissect_live_close(lent) };
+    unsafe { wz_dissect_live_close(copied) };
+}
+
+/// THE OLDEST CONTAINER MOVES ON AS A CEILING LETS GO OF THE EARLIER ONE: with
+/// two messages held per flow, once the second container's datagrams are read
+/// the first container's are gone, the handle reads only the second, and what it
+/// holds is read there. With no ceiling the first container is still read.
+#[test]
+fn the_oldest_container_moves_on_as_a_ceiling_lets_go_of_the_first() {
+    let (first, second) = (keepalives(0, 3), keepalives(3, 3));
+
+    let mut bounded: *mut live::LiveDissection = core::ptr::null_mut();
+    assert_eq!(
+        unsafe { wz_dissect_live_open_bounded(2, 0, &mut bounded) },
+        WZ_DISSECT_OK
+    );
+    assert_eq!(follow_lent(bounded, &first), WZ_DISSECT_OK);
+    assert_eq!(follow_next_lent(bounded, &second), (WZ_DISSECT_OK, 3));
+    assert_eq!(
+        oldest_container(bounded),
+        (1, 1),
+        "the first container's datagrams were let go of"
+    );
+    let records = drain_all(bounded);
+    assert_eq!(records.len(), 2, "two held: {records:?}");
+    // The census decodes every message held again, each from the container
+    // its place names.
+    assert!(
+        call_live_census(bounded, "").is_ok(),
+        "what is held is read from the second container"
+    );
+
+    let whole = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+    assert_eq!(follow_lent(whole, &first), WZ_DISSECT_OK);
+    assert_eq!(follow_next_lent(whole, &second), (WZ_DISSECT_OK, 3));
+    assert_eq!(
+        oldest_container(whole),
+        (0, 1),
+        "control: with every datagram held the first container is still read"
+    );
+    unsafe { wz_dissect_live_close(bounded) };
+    unsafe { wz_dissect_live_close(whole) };
+}
+
+/// The two doors refuse a null argument, and a handle that has read nothing is
+/// not moved by the lending one.
+#[test]
+fn the_lending_next_door_and_the_oldest_door_refuse_nulls() {
+    let first = keepalives(0, 1);
+    let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+    let (mut n, mut m) = (0u64, 0u64);
+    assert_eq!(
+        unsafe {
+            wz_dissect_live_follow_next_lent(h, first.as_ptr(), first.len(), core::ptr::null_mut())
+        },
+        WZ_DISSECT_ERR_INVALID_ARG
+    );
+    assert_eq!(
+        unsafe { wz_dissect_live_follow_next_lent(h, core::ptr::null(), 0, &mut n) },
+        WZ_DISSECT_ERR_INVALID_ARG
+    );
+    assert_eq!(
+        unsafe { wz_dissect_live_oldest_container(core::ptr::null(), &mut n, &mut m) },
+        WZ_DISSECT_ERR_INVALID_ARG
+    );
+    assert_eq!(
+        unsafe { wz_dissect_live_oldest_container(h, core::ptr::null_mut(), &mut n) },
+        WZ_DISSECT_ERR_INVALID_ARG
+    );
+    assert_eq!(follow_next_lent(h, &first), (WZ_DISSECT_OK, 0), "not moved");
+    assert_eq!(oldest_container(h), (0, 0));
     unsafe { wz_dissect_live_close(h) };
 }

@@ -1289,6 +1289,8 @@ static int check_follow_next_door(void) {
     size_t first_len = pcap_of_frames(first, frame, frame_len, 3);
     size_t second_len = pcap_of_frames(second, frame, frame_len, 2);
     uint64_t first_packet = 0;
+    uint64_t oldest = 0;
+    uint64_t current = 0;
     size_t n = 0;
     int rc;
 
@@ -1308,7 +1310,32 @@ static int check_follow_next_door(void) {
           "the second container's packets are numbered on: %llu %llu",
           (unsigned long long)buf[3].anchor, (unsigned long long)buf[4].anchor);
     rc = wz_dissect_live_follow_lent(h, second, second_len);
-    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a moved handle lent rc=%d", rc);
+    CHECK(rc == WZ_DISSECT_OK, "a moved handle is lent rc=%d", rc);
+    rc = wz_dissect_live_oldest_container(h, &oldest, &current);
+    CHECK(rc == WZ_DISSECT_OK && oldest == 1 && current == 1,
+          "a handle that copied reads no container: rc=%d %llu %llu", rc,
+          (unsigned long long)oldest, (unsigned long long)current);
+    wz_dissect_live_close(h);
+
+    /* (ABI 65) -- the same capture lent as two containers: the handle goes on
+     * reading the first for the datagrams it keeps there. */
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "lent open rc=%d", rc);
+    rc = wz_dissect_live_follow_lent(h, first, first_len);
+    CHECK(rc == WZ_DISSECT_OK, "first lent container rc=%d", rc);
+    rc = wz_dissect_live_follow_next_lent(h, second, second_len, &first_packet);
+    CHECK(rc == WZ_DISSECT_OK && first_packet == 3,
+          "next lent container rc=%d first=%llu", rc,
+          (unsigned long long)first_packet);
+    rc = wz_dissect_live_drain(h, buf, 16, &n);
+    CHECK(rc == WZ_DISSECT_OK && n == 5, "five lent keep-alives, drained %zu", n);
+    rc = wz_dissect_live_oldest_container(h, &oldest, &current);
+    CHECK(rc == WZ_DISSECT_OK && oldest == 0 && current == 1,
+          "the first lent container is still read: rc=%d %llu %llu", rc,
+          (unsigned long long)oldest, (unsigned long long)current);
+    rc = wz_dissect_live_oldest_container(h, NULL, &current);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null oldest rc=%d", rc);
     wz_dissect_live_close(h);
     return 0;
 }

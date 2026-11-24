@@ -2239,7 +2239,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 64
+#define WZ_DISSECT_ABI_REVISION 65
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -7565,25 +7565,36 @@ int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
  * packet was there is left out: those bytes are not handed in again. Pass the
  * previous container no longer.
  *
- * WHY A MOVED HANDLE IS LENT NO CONTAINER. wz_dissect_live_follow_lent on a
- * moved handle is WZ_DISSECT_ERR_INVALID_ARG. A lent container is read by the
- * place each message's bytes were logged at, and that place is one byte offset
- * with no container beside it: a TCP run keeps the offset in the word that
- * otherwise names its own kept bytes, told apart by one flag bit, and a datagram
- * or scouting unit logs the offset alone. A flow holds one lent container, and
- * the places it keeps rise with the stream. Lending a second container would
- * need every one of those records to say which container it is in, which is a
- * wider record for every run of every capture, lent or not. A moved handle
- * copies what it keeps instead, as wz_dissect_live_follow does.
+ * LENDING EVERY CONTAINER OF THE CAPTURE (ABI 65). A moved handle may be LENT
+ * the container it follows, as the first one is: wz_dissect_live_follow_next_lent
+ * moves it on and lends it the next container in one call, and
+ * wz_dissect_live_follow_lent then goes on reading that container as it grows.
+ * The containers lent before stay lent. A kept message's bytes are read where
+ * they were logged, and that place is a byte offset counted across the
+ * capture's containers -- a container's first byte stands after the bytes the
+ * containers before it were read to -- so the one word every kept record had
+ * already says which container a message is in, and no record grew. Every
+ * answer is the one the copying doors give over the same bytes.
  *
- * WHEN THE PREVIOUS CONTAINER MAY BE RELEASED. A handle that copied its
- * containers (wz_dissect_live_open, wz_dissect_live_open_with,
- * wz_dissect_pcap_replay, wz_dissect_live_follow) holds nothing of a container
- * after the call that read it, so the previous one may be released as soon as
- * this door returns. A handle that was LENT a container (wz_dissect_pcap_replay_lent,
- * wz_dissect_live_follow_lent) keeps reading it for the flows it lent, and the
- * promise those doors ask still holds: keep it until the handle is closed. The
- * containers after it are copied.
+ * WHEN A CONTAINER MAY BE RELEASED. Number the containers as the handle does:
+ * the first it read is 0, and each move this door or
+ * wz_dissect_live_follow_next_lent makes adds one.
+ *
+ *   - A container the handle COPIED (wz_dissect_live_open,
+ *     wz_dissect_live_open_with, wz_dissect_pcap_replay, wz_dissect_live_follow,
+ *     this door) is held by nothing after the call that read it, and may be
+ *     released as soon as that call returns.
+ *   - A container the handle was LENT (wz_dissect_pcap_replay_lent,
+ *     wz_dissect_live_follow_lent, wz_dissect_live_follow_next_lent) is read
+ *     for as long as a message the handle keeps lies in it. Ask
+ *     wz_dissect_live_oldest_container: every lent container numbered below
+ *     the `oldest` it answers is never read again and may be released. The
+ *     container followed now is the caller's to keep while it is followed.
+ *
+ * `oldest` moves as the handle lets go of what it kept: a frame ceiling taking
+ * a flow's oldest messages, a byte ceiling trimming a stream, a flow evicted. A
+ * handle opened with no ceiling keeps every message, and every lent container
+ * stays needed until the handle is closed.
  *
  * A SEQUENCE OF CLOSED FILES is read the same way, as one capture: follow the
  * first, follow_next each one after it, then wz_dissect_live_end once the last
@@ -7602,6 +7613,44 @@ int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
  * wz_dissect_live_follow hand it the container as it grows. */
 int wz_dissect_live_follow_next(wz_dissect_live *h, const unsigned char *bytes,
                                 size_t len, uint64_t *first_packet);
+
+/* (ABI 65) -- wz_dissect_live_follow_next over a next container you LEND the
+ * handle, as wz_dissect_live_follow_lent lends one. The handle moves on as that
+ * door moves it and is lent `bytes` as the container it follows; later calls of
+ * wz_dissect_live_follow_lent with more of it go on reading it. What you
+ * promise is what the lending doors ask (see "A CAPTURE THE CALLER LENDS THE
+ * HANDLE"), and the paragraph "WHEN A CONTAINER MAY BE RELEASED" above says
+ * when it ends. Return codes as for wz_dissect_live_follow_next. */
+int wz_dissect_live_follow_next_lent(wz_dissect_live *h,
+                                     const unsigned char *bytes, size_t len,
+                                     uint64_t *first_packet);
+
+/* (ABI 65) -- WHICH CONTAINERS THE HANDLE STILL READS.
+ *
+ *     uint64_t oldest, current;
+ *     wz_dissect_live_oldest_container(h, &oldest, &current);
+ *     for (; released < oldest; released++)
+ *         munmap(piece[released], piece_len[released]);
+ *
+ * `*current` is the number of the container the handle follows now: 0 for
+ * the first it read, one more for each move wz_dissect_live_follow_next or
+ * wz_dissect_live_follow_next_lent made (a handle that had read nothing is not
+ * moved, and its number stays). `*oldest` is the number of the oldest
+ * container a message the handle keeps is still read from, and `*current`
+ * when it reads none from an earlier one: a handle that copied its containers
+ * answers `oldest` equal to `current` always.
+ *
+ * Every lent container numbered below `*oldest` is never read again, by any
+ * call on the handle: a message is kept where the container being followed
+ * holds it, so no later message can be kept in an earlier container. Release it.
+ *
+ * WHAT IT COSTS. A pass over the places the handle keeps: the runs of each TCP
+ * stream, the segments held behind a gap and the rows of each datagram and
+ * scouting list. Ask it once per container you hand in, not per packet.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null argument. */
+int wz_dissect_live_oldest_container(const wz_dissect_live *h, uint64_t *oldest,
+                                     uint64_t *current);
 
 /* Take the messages decoded since the last drain into `out`, which holds
  * `cap` records; `*written` receives how many were filled.
@@ -9720,8 +9769,9 @@ int wz_dissect_pcap_replay(const unsigned char *bytes, size_t len, int limits,
  *     munmap(file, len);      // only now
  *
  * WHAT YOU PROMISE. The `len` bytes at `bytes` stay readable and unchanged
- * until the handle is closed, or until a later wz_dissect_live_follow_lent
- * names the container where it then is. The handle keeps the pointer and reads
+ * until the handle is closed, until a later wz_dissect_live_follow_lent names
+ * the container where it then is, or until wz_dissect_live_oldest_container
+ * answers an `oldest` above this container's number. The handle keeps the pointer and reads
  * through it during ANY later call on it, so it is a promise about the life of
  * the handle, not of this call -- which is why these are doors of their own and
  * not a flag on the copying ones.
@@ -9741,11 +9791,10 @@ int wz_dissect_pcap_replay_lent(const unsigned char *bytes, size_t len,
                                 int limits, wz_dissect_live **out);
 
 /* `len` is how much of the lent container is readable and committed now, as
- * for wz_dissect_live_follow; see the paragraph above for what is promised.
- * WZ_DISSECT_ERR_INVALID_ARG on a handle wz_dissect_live_follow_next moved on
- * to a later container (ABI 63): a kept message's place is one offset with no
- * container beside it, so a handle is lent one container (see "WHY A MOVED
- * HANDLE IS LENT NO CONTAINER" there). */
+ * for wz_dissect_live_follow; see the paragraph above for what is promised. On
+ * a handle wz_dissect_live_follow_next moved on to a later container, the
+ * container lent is the one followed now, and the ones lent before stay lent
+ * (see "LENDING EVERY CONTAINER OF THE CAPTURE" at that door). */
 int wz_dissect_live_follow_lent(wz_dissect_live *h, const unsigned char *bytes,
                                 size_t len);
 

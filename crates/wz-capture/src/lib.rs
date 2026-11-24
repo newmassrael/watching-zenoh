@@ -382,6 +382,7 @@ pub mod field_path;
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
 pub mod frag;
+mod lent;
 pub mod link;
 /// The `matches` operator's pattern (`filter-regex`).
 mod pattern;
@@ -1144,7 +1145,7 @@ pub struct DatagramDissection {
     /// The capture container the dissection is lent, when it is: a datagram
     /// whose payload sits in it is logged by its place there and read from it
     /// (open-debt item 924, step 4c).
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
 }
 
 /// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
@@ -1919,8 +1920,8 @@ impl messages::UnitBytes for DatagramDissection {
         None
     }
 
-    fn container(&self) -> Option<&[u8]> {
-        self.lent.as_deref().map(LentCapture::bytes)
+    fn container(&self) -> Option<&dyn wz_session_core::byte_log::LentBytes> {
+        lent_bytes(&self.lent)
     }
 }
 
@@ -1942,15 +1943,14 @@ impl DatagramDissection {
     /// decoded again from its payload when it is read (open-debt item 924,
     /// step 4c).
     pub fn scouting(&self) -> Scoutings<'_> {
-        self.scouting
-            .read(self.lent.as_deref().map(LentCapture::bytes))
+        self.scouting.read(lent_bytes(&self.lent))
     }
 
     /// The source a list of this flow reads its datagrams from, as a borrow
     /// beside the lists, so a caller that changes a list can hand it in.
-    fn datagrams(lent: &Option<alloc::sync::Arc<dyn LentCapture>>) -> messages::Datagrams<'_> {
+    fn datagrams(lent: &Option<alloc::sync::Arc<lent::LentContainers>>) -> messages::Datagrams<'_> {
         messages::Datagrams {
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
         }
     }
 
@@ -1992,7 +1992,7 @@ impl DatagramDissection {
         flow: FlowKey,
         limits: DissectionLimits,
         keep: Keep,
-        lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+        lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     ) -> Self {
         Self {
             flow,
@@ -2420,6 +2420,15 @@ impl ScoutingList {
         self.rows.get(0).map(|row| row.packet_index as usize)
     }
 
+    /// The lowest capture offset among the payloads this list reads from the
+    /// capture the dissection is lent, or `None` when it reads none from there.
+    fn oldest_lent_place(&self) -> Option<usize> {
+        (0..self.rows.len())
+            .filter_map(|i| self.rows.get(i))
+            .filter_map(|row| wz_session_core::byte_log::LogPlace::of(row.locator).in_container())
+            .min()
+    }
+
     /// Bytes the list's log holds allocated for copies of payloads.
     #[cfg(test)]
     fn log_allocated(&self) -> usize {
@@ -2450,7 +2459,10 @@ impl ScoutingList {
     /// The list as a reader reads it, with `container` the capture container
     /// the dissection is lent, which a payload logged by its place there is
     /// read from.
-    pub fn read<'a>(&'a self, container: Option<&'a [u8]>) -> Scoutings<'a> {
+    pub fn read<'a>(
+        &'a self,
+        container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
+    ) -> Scoutings<'a> {
         Scoutings {
             list: self,
             container,
@@ -2463,7 +2475,7 @@ impl ScoutingList {
 #[derive(Debug, Clone, Copy)]
 pub struct Scoutings<'a> {
     list: &'a ScoutingList,
-    container: Option<&'a [u8]>,
+    container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
 }
 
 impl<'a> Scoutings<'a> {
@@ -3063,7 +3075,7 @@ pub struct FlowDissection {
     /// The capture container the dissection is lent, when it is: the stream
     /// bytes of a segment that sat in it are read from it and not kept
     /// (open-debt item 924, step 3).
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     /// The plaintext each direction of a TLS flow decrypted into, once a
     /// decryption pass opened it, from the first byte a held message is read
     /// from: the source the flow's messages are read again from, in place of
@@ -3123,6 +3135,15 @@ fn lent_place(in_container: Option<usize>, packet: &[u8], payload: &[u8]) -> Opt
     in_container.and_then(|at| link::offset_within(packet, payload).map(|offset| at + offset))
 }
 
+/// The capture a flow is lent, as a reader of its kept places takes it: every
+/// container the dissection was lent, read by capture offset.
+fn lent_bytes(
+    lent: &Option<alloc::sync::Arc<lent::LentContainers>>,
+) -> Option<&dyn wz_session_core::byte_log::LentBytes> {
+    lent.as_deref()
+        .map(|containers| containers as &dyn wz_session_core::byte_log::LentBytes)
+}
+
 /// A pair of borrows rather than the flow, so a caller that changes the list
 /// can hand it the streams beside it.
 struct Streams<'a> {
@@ -3130,7 +3151,7 @@ struct Streams<'a> {
     high_to_low: &'a StreamAssembler,
     /// The capture container the flow is lent, which runs located there are
     /// read from.
-    container: Option<&'a [u8]>,
+    container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
     /// The plaintext a decrypted flow's messages are read from instead
     /// ([`FlowDissection::plaintext`]).
     plaintext: Option<&'a [Plaintext; 2]>,
@@ -3173,11 +3194,9 @@ impl messages::UnitBytes for FlowDissection {
             Some(plaintext) => plaintext[dir_index(direction)]
                 .get(from, to)
                 .map(alloc::borrow::Cow::Borrowed),
-            None => self.assembler(direction).bytes(
-                from,
-                to,
-                self.lent.as_deref().map(LentCapture::bytes),
-            ),
+            None => self
+                .assembler(direction)
+                .bytes(from, to, lent_bytes(&self.lent)),
         }
     }
 }
@@ -3252,7 +3271,7 @@ impl FlowDissection {
         frames.discard_oldest(&Streams {
             low_to_high,
             high_to_low,
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
             plaintext: plaintext.as_deref(),
         })
     }
@@ -3287,7 +3306,7 @@ impl FlowDissection {
                 &Streams {
                     low_to_high,
                     high_to_low,
-                    container: lent.as_deref().map(LentCapture::bytes),
+                    container: lent_bytes(lent),
                     plaintext: None,
                 },
             );
@@ -3456,11 +3475,8 @@ impl FlowDissection {
         record: &tls::EncryptedRecord,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
         let from = record.stream_offset;
-        self.assembler(direction).bytes(
-            from,
-            from + record.len,
-            self.lent.as_deref().map(LentCapture::bytes),
-        )
+        self.assembler(direction)
+            .bytes(from, from + record.len, lent_bytes(&self.lent))
     }
 
     /// The assembler for one direction.
@@ -4145,11 +4161,7 @@ impl FlowDissection {
             "trimming must not outrun delivery: base {base} > before {before}"
         );
         let delivered: Vec<u8> = assembler
-            .bytes(
-                before,
-                assembler.len(),
-                self.lent.as_deref().map(LentCapture::bytes),
-            )
+            .bytes(before, assembler.len(), lent_bytes(&self.lent))
             .map(alloc::borrow::Cow::into_owned)
             .unwrap_or_default();
         self.advance_spliced(direction, before, &delivered, &splices);
@@ -4556,7 +4568,7 @@ impl FlowDissection {
         let streams = Streams {
             low_to_high,
             high_to_low,
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
             plaintext: None,
         };
         stream_into_session(
@@ -4745,7 +4757,7 @@ impl FlowDissection {
                 Direction::A => &self.low_to_high,
                 Direction::B => &self.high_to_low,
             };
-            let container = self.lent.as_deref().map(LentCapture::bytes);
+            let container = lent_bytes(&self.lent);
             for record in state.kept[index].iter().filter(|r| r.index >= next) {
                 // A direction this call continues must go on from the record
                 // after the last one opened; one the bound dropped in between
@@ -6704,9 +6716,10 @@ pub struct Dissection {
     /// stream or out of its own datagrams (the flows' `keep`): as index entries,
     /// except in the reference reading the redecode gate builds.
     keep: Keep,
-    /// The capture container this dissection is lent ([`Self::follow_lent`]),
-    /// which every TCP flow holds too and reads its stream's bytes from.
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    /// The capture containers this dissection is lent ([`Self::follow_lent`]),
+    /// which every flow holds too and reads the bytes of its kept places from,
+    /// one container or several of one capture.
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     /// R311y638 (§1.1r) — the earliest capture instant this dissection was
     /// shown, over every packet whatever it decoded to.
     ///
@@ -10446,8 +10459,11 @@ impl Dissection {
     /// `capture` is the whole container prefix on every call, as for
     /// [`Self::follow_container`], and is lent for the life of the dissection:
     /// see [`LentCapture`] for what its holder keeps. Every flow, the ones held
-    /// already and the ones to come, reads from the container lent last, which
-    /// must hold every byte an earlier one did at the same offset.
+    /// already and the ones to come, reads this container from the one lent
+    /// last under the same number ([`CaptureCursor::container`]), which must
+    /// hold every byte an earlier one did at the same offset. A container of
+    /// the capture lent under an earlier number stays lent: a place kept in it
+    /// is read there ([`Self::oldest_lent_container`] says until when).
     ///
     /// Every answer is the one [`Self::follow_container`] over the same bytes
     /// gives; what differs is what the dissection holds.
@@ -10479,23 +10495,62 @@ impl Dissection {
         self.follow_bytes(cursor, capture.bytes(), Some(&capture), tap)
     }
 
-    /// Lend this dissection `capture`, for every flow it holds and every flow
-    /// it makes.
-    fn lend(&mut self, capture: &alloc::sync::Arc<dyn LentCapture>) {
+    /// Lend this dissection `capture` as the container numbered `ordinal` of
+    /// its capture, whose first byte stands at capture offset `first_byte`, for
+    /// every flow it holds and every flow it makes. The containers lent before
+    /// it stay lent: a place kept in one of them is read from it.
+    fn lend(
+        &mut self,
+        capture: &alloc::sync::Arc<dyn LentCapture>,
+        first_byte: usize,
+        ordinal: usize,
+    ) {
         if self
             .lent
             .as_ref()
-            .is_some_and(|held| alloc::sync::Arc::ptr_eq(held, capture))
+            .is_some_and(|held| held.holds(capture, ordinal))
         {
             return;
         }
-        self.lent = Some(capture.clone());
+        let held = self.lent.as_deref().cloned().unwrap_or_default();
+        let lent = alloc::sync::Arc::new(held.with(capture.clone(), first_byte, ordinal));
         for flow in self.flows.iter_mut() {
-            flow.lent = Some(capture.clone());
+            flow.lent = Some(lent.clone());
         }
         for flow in self.datagram_flows.iter_mut() {
-            flow.lent = Some(capture.clone());
+            flow.lent = Some(lent.clone());
         }
+        self.lent = Some(lent);
+    }
+
+    /// The number ([`CaptureCursor::container`]) of the oldest container of
+    /// the capture this dissection still reads a kept place from, or `None`
+    /// when it reads none from any container it was lent.
+    ///
+    /// No later place can be kept in an earlier container, since a place is
+    /// kept in the container being read, so every container numbered below the
+    /// answer will not be read again. A pass over the places held: the runs of
+    /// every TCP stream, the segments held behind a gap, and the rows of every
+    /// datagram and scouting list.
+    pub fn oldest_lent_container(&self) -> Option<usize> {
+        let lent = self.lent.as_deref()?;
+        let mut oldest: Option<usize> = None;
+        let mut take = |at: Option<usize>| {
+            if let Some(at) = at {
+                oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            }
+        };
+        for flow in self.flows() {
+            take(flow.low_to_high.oldest_lent_place());
+            take(flow.high_to_low.oldest_lent_place());
+            take(flow.frames.oldest_lent_place());
+        }
+        for flow in self.datagram_flows() {
+            take(flow.frames.oldest_lent_place());
+            take(flow.quic_datagrams.oldest_lent_place());
+            take(flow.scouting.oldest_lent_place());
+        }
+        lent.ordinal_of(oldest?)
     }
 
     /// The walk both doors above share. `lent` is the container `bytes` are,
@@ -10515,8 +10570,19 @@ impl Dissection {
                 given: bytes.len(),
             });
         }
+        // A container after the first of a capture numbers its packets from where
+        // the one before it stopped, names its sections after that one's, and
+        // stands in the capture's bytes after the bytes the earlier ones were
+        // read to.
+        let CursorCarry {
+            first_packet,
+            first_section,
+            first_byte,
+            container,
+            ..
+        } = cursor.carried;
         if let Some(capture) = lent {
-            self.lend(capture);
+            self.lend(capture, first_byte, container);
         }
         let located = lent.is_some();
         let before = cursor.packets_produced();
@@ -10531,13 +10597,6 @@ impl Dissection {
             self.capture_reported_drops = Some(pcapng::DropLedger::new());
         }
         let dissection = &mut *self;
-        // A container after the first of a capture numbers its packets from where
-        // the one before it stopped, and names its sections after that one's.
-        let CursorCarry {
-            first_packet,
-            first_section,
-            ..
-        } = cursor.carried;
         // The walk is `CaptureCursor::walk`, the same function
         // `captured_frame` runs to hand a packet out by number, so the number a
         // message is anchored to here and the number a caller asks for there
@@ -10569,7 +10628,8 @@ impl Dissection {
                             f.data,
                             located
                                 .then(|| link::offset_within(bytes, f.data))
-                                .flatten(),
+                                .flatten()
+                                .map(|at| first_byte + at),
                         );
                         tap.on_packet(dissection, &f);
                     }
@@ -10681,6 +10741,12 @@ struct CursorCarry {
     first_section: usize,
     /// The Decryption Secrets bytes the earlier containers retained.
     secrets_spent: usize,
+    /// Where the container stands in the capture's bytes: the bytes the earlier
+    /// containers were read to, together. A place kept in a lent container is
+    /// this plus its offset in the container (see `lent`).
+    first_byte: usize,
+    /// The container's number among the capture's, counting from zero.
+    container: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10739,6 +10805,8 @@ impl CaptureCursor {
                 first_packet,
                 first_section: self.carried.first_section + sections,
                 secrets_spent,
+                first_byte: self.carried.first_byte + self.consumed(),
+                container: self.carried.container + 1,
             },
         }
     }
@@ -10747,6 +10815,12 @@ impl CaptureCursor {
     /// walk [`Self::next_container`] did not make.
     pub fn first_packet(&self) -> usize {
         self.carried.first_packet
+    }
+
+    /// This container's number among the capture's: `0` for the first, and one
+    /// more for each [`Self::next_container`] that led to it.
+    pub fn container(&self) -> usize {
+        self.carried.container
     }
 
     /// Settle the format if `bytes` is long enough to say, and report which it

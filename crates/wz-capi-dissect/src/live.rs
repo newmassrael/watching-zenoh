@@ -501,9 +501,6 @@ pub struct LiveDissection {
     /// [`Self::from_capture`] leaves it at the end of the file it read, which
     /// is what lets a replayed handle be followed as the writer appends more.
     cursor: CaptureCursor,
-    /// Which container of the capture [`Self::cursor`] walks: `0` for the first,
-    /// one more for each [`Self::follow_next`] that moved the handle on.
-    container: u64,
     /// The keys this handle decrypts TLS and QUIC with (the capture's own
     /// Decryption Secrets Blocks as the feed meets them, and every key log
     /// [`Self::add_keylog`] was handed) and one opener per flow it began. Shown
@@ -692,25 +689,54 @@ impl LiveDissection {
     /// then [`Self::follow`]. The move stands when `bytes` does not read, so a
     /// caller hands the next container to [`Self::follow`] as it grows.
     pub fn follow_next(&mut self, bytes: &[u8]) -> (usize, Result<usize, FollowError>) {
-        let first_packet = self.dissection.next_packet_index();
-        if self.cursor.consumed() > 0 {
-            self.cursor = self.cursor.next_container(first_packet);
-            self.container += 1;
-            self.fields_memory.forget_container();
-            self.facts_memory.forget_container();
-        }
+        let first_packet = self.move_on();
         (first_packet, self.follow(bytes))
     }
 
-    /// Whether this handle has gone on from the first container it read to a
-    /// later one ([`Self::follow_next`]).
+    /// [`Self::follow_next`] over a next container this handle is LENT, as
+    /// [`Self::follow_lent`] is lent one. The containers lent before it stay
+    /// lent: what the handle kept of them is read there until
+    /// [`Self::oldest_container`] says the handle reads them no more.
+    pub fn follow_next_lent(
+        &mut self,
+        capture: Arc<dyn LentCapture>,
+    ) -> (usize, Result<usize, FollowError>) {
+        let first_packet = self.move_on();
+        (first_packet, self.follow_lent(capture))
+    }
+
+    /// End the walk of the container followed now and begin the next one's,
+    /// unless nothing of any container has been read; the number the next
+    /// container's first packet takes.
+    fn move_on(&mut self) -> usize {
+        let first_packet = self.dissection.next_packet_index();
+        if self.cursor.consumed() > 0 {
+            self.cursor = self.cursor.next_container(first_packet);
+            self.fields_memory.forget_container();
+            self.facts_memory.forget_container();
+        }
+        first_packet
+    }
+
+    /// WHICH CONTAINERS THE HANDLE STILL NEEDS: `(oldest, current)`, where
+    /// `current` is the number of the container followed now (`0` for the
+    /// first, one more for each [`Self::follow_next`] that moved the handle on)
+    /// and `oldest` the number of the oldest container a kept message's bytes
+    /// are still read from, which is `current` when the handle reads none
+    /// from an earlier one.
     ///
-    /// A packet number then counts across containers. The field documents read
-    /// packets again from the container the caller hands them, which is the one
-    /// the handle follows now, by subtracting where it began; a container is not
-    /// lent to such a handle (see the lending doors for why).
-    pub fn moved_container(&self) -> bool {
-        self.container > 0
+    /// A container numbered below `oldest` is never read again: a message is
+    /// kept where the container being followed holds it, so no later message
+    /// can be kept in an earlier one. A handle that copied a container reads
+    /// nothing from it, and its number never holds `oldest` back. The answer
+    /// is a pass over the places the handle keeps.
+    pub fn oldest_container(&self) -> (usize, usize) {
+        let current = self.cursor.container();
+        let oldest = self
+            .dissection
+            .oldest_lent_container()
+            .map_or(current, |held| held.min(current));
+        (oldest, current)
     }
 
     /// How many bytes of the container [`Self::follow`] has consumed.
@@ -744,7 +770,6 @@ impl LiveDissection {
             progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
-            container: 0,
             keys: wz_tls_record::pass::LiveDecryptor::new(),
         }
     }

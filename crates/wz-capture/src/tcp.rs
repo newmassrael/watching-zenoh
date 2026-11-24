@@ -30,7 +30,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use wz_session_core::byte_log::ByteLog;
+use wz_session_core::byte_log::{ByteLog, LentBytes};
 use wz_session_core::column_log::{ColumnLog, Kind};
 
 use crate::link::{Integrity, Segment};
@@ -301,6 +301,16 @@ enum Place {
     Container(usize),
 }
 
+impl Place {
+    /// The capture offset of a place in a lent capture, `None` for kept bytes.
+    fn in_container(self) -> Option<usize> {
+        match self {
+            Place::Container(at) => Some(at),
+            Place::Kept(_) => None,
+        }
+    }
+}
+
 /// Where a segment's payload is, as the caller of
 /// [`StreamAssembler::push_located`] knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +351,14 @@ enum HeldBytes {
 }
 
 impl HeldBytes {
+    /// Where the lent capture holds it, `None` for a copy.
+    fn in_container(&self) -> Option<usize> {
+        match self {
+            HeldBytes::Container { at, .. } => Some(*at),
+            HeldBytes::Copy(_) => None,
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             HeldBytes::Copy(bytes) => bytes.len(),
@@ -690,8 +708,8 @@ impl StreamAssembler {
     /// The reassembled bytes from absolute offset `from` up to `to`, or `None`
     /// when any of them is not retained (trimmed, or not arrived).
     ///
-    /// `container` is the capture container the assembler's holder lends, which
-    /// a run pushed with [`PayloadAt::Container`] is read from; `None` answers
+    /// `container` is the capture the assembler's holder lends, which a run
+    /// pushed with [`PayloadAt::Container`] is read from; `None` answers
     /// `None` for a range touching such a run. A range held in one place is
     /// lent; one that spans places (it crosses packets) is gathered into a copy.
     ///
@@ -701,7 +719,7 @@ impl StreamAssembler {
         &'a self,
         from: usize,
         to: usize,
-        container: Option<&'a [u8]>,
+        container: Option<&'a dyn LentBytes>,
     ) -> Option<alloc::borrow::Cow<'a, [u8]>> {
         if from < self.discarded || to > self.end || from > to {
             return None;
@@ -743,14 +761,30 @@ impl StreamAssembler {
         run: &Run,
         start: usize,
         stop: usize,
-        container: Option<&'a [u8]>,
+        container: Option<&'a dyn LentBytes>,
     ) -> Option<&'a [u8]> {
         match run.place() {
             // The run that straddles a trim keeps its whole chunk, and one wholly
             // behind it has none: a read of released bytes answers `None`.
             Place::Kept(place) => self.kept.get((place + start) as u64, stop - start),
-            Place::Container(place) => container?.get(place + start..place + stop),
+            Place::Container(place) => container?.lent(place + start, stop - start),
         }
+    }
+
+    /// The lowest capture offset among the bytes this assembler reads from the
+    /// capture its holder lends, its runs and the segments it holds behind a
+    /// gap together, or `None` when it reads none from there. A pass over the
+    /// runs held.
+    pub fn oldest_lent_place(&self) -> Option<usize> {
+        let runs = self
+            .runs
+            .iter_from(0)
+            .filter_map(|run| run.place().in_container());
+        let held = self
+            .pending
+            .iter()
+            .filter_map(|held| held.payload.in_container());
+        runs.chain(held).min()
     }
 
     /// Whether the stream still holds the bytes `from..to`: they have arrived and

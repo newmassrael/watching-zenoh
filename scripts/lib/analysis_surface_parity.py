@@ -1074,6 +1074,25 @@ ONLY_CAPI = {
         "and has no handle to carry from one file to the next.",
         (),
     ),
+    # A moved handle lent the next container of its capture. Filed in the round
+    # that added the symbol.
+    "an OPEN handle LENT the next container of one capture": (
+        "wz_dissect_live_follow_next_lent",
+        "DELIBERATE, for the reason the row for a handle going on into the next "
+        "container gives, and the one for a container lent to a handle: a "
+        "linking consumer keeps the files mapped and the handle reads them in "
+        "place. The command line maps no file for a handle to keep reading.",
+        (),
+    ),
+    # Which containers a handle still reads. Filed in the round that added the
+    # symbol.
+    "which containers an OPEN handle still reads": (
+        "wz_dissect_live_oldest_container",
+        "DELIBERATE: the answer exists for a caller that lent a handle its "
+        "containers and must know when to release one. The command line lends "
+        "no container and has nothing to release.",
+        (),
+    ),
     # What an open handle holds now, beside its ceilings. Filed in the round
     # that added the symbol.
     "what an OPEN handle still HOLDS, beside its ceilings": (

@@ -137,6 +137,35 @@ impl ByteLog {
     }
 }
 
+/// The capture a holder lends, read where a [`LogPlace::Container`] or a run
+/// of a stream names it: a byte offset counted across every container of the
+/// capture, so one word says both which container a unit is in and where.
+///
+/// A capture written as several containers is lent one container at a time,
+/// and a unit read from an earlier one is still read from it: the holder's
+/// source finds the container by the offset. A unit never spans two
+/// containers, since it lies inside one packet.
+pub trait LentBytes: core::fmt::Debug {
+    /// The `len` bytes at capture offset `at`; `None` when no container the
+    /// holder still lends holds them.
+    fn lent(&self, at: usize, len: usize) -> Option<&[u8]>;
+}
+
+/// One container lent alone, from its first byte: an offset is a position in
+/// it.
+impl LentBytes for Vec<u8> {
+    fn lent(&self, at: usize, len: usize) -> Option<&[u8]> {
+        self.get(at..at.checked_add(len)?)
+    }
+}
+
+/// As for a `Vec`.
+impl<const N: usize> LentBytes for [u8; N] {
+    fn lent(&self, at: usize, len: usize) -> Option<&[u8]> {
+        self.get(at..at.checked_add(len)?)
+    }
+}
+
 /// The bit of a [`LogPlace`]'s locator that says the unit is in a container,
 /// at an offset there rather than a position of the log's copy. No container
 /// or log reaches 2^62 bytes.
@@ -159,8 +188,8 @@ const FRAMES: u64 = 1 << 60;
 pub enum LogPlace {
     /// At this position of the [`UnitLog`]'s own copy.
     Kept(u64),
-    /// At this offset of the capture container the log's holder lends, which
-    /// the log keeps no copy of.
+    /// At this offset of the capture the log's holder lends, counted across
+    /// its containers ([`LentBytes`]), which the log keeps no copy of.
     Container(usize),
     /// At this offset of a direction's reassembled stream, which the log's
     /// holder keeps (or lends) and the log keeps no copy of: a unit a layer below
@@ -199,6 +228,15 @@ impl LogPlace {
             LogPlace::Stream(offset) => offset as u64 | IN_STREAM,
             LogPlace::StreamMasked(offset) => offset as u64 | IN_STREAM | MASKED,
             LogPlace::Frames(offset) => offset as u64 | IN_STREAM | FRAMES,
+        }
+    }
+
+    /// The capture offset of a place in a lent capture ([`Self::Container`]),
+    /// `None` for any other.
+    pub fn in_container(self) -> Option<usize> {
+        match self {
+            LogPlace::Container(at) => Some(at),
+            _ => None,
         }
     }
 
@@ -252,11 +290,11 @@ impl UnitLog {
         &'a self,
         place: LogPlace,
         len: usize,
-        container: Option<&'a [u8]>,
+        container: Option<&'a dyn LentBytes>,
     ) -> Option<&'a [u8]> {
         match place {
             LogPlace::Kept(at) => self.copies.get(at, len),
-            LogPlace::Container(offset) => container?.get(offset..offset.checked_add(len)?),
+            LogPlace::Container(offset) => container?.lent(offset, len),
             LogPlace::Stream(_) | LogPlace::StreamMasked(_) | LogPlace::Frames(_) => None,
         }
     }

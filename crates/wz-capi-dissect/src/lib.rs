@@ -499,6 +499,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // bytes one fragment chain may join, which was a fixed 65,536. No symbol
     // moves. The `caps` group of every document that carries
     // `dropped_by_limits` gained `chain_bytes` on the same step.
+    // 65, for `wz_dissect_live_follow_next_lent` and
+    // `wz_dissect_live_oldest_container`: a handle that moved on to a later
+    // container of its capture is lent it, and says which containers it still
+    // reads, so the caller releases the ones before.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -516,7 +520,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 64;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 65;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4200,15 +4204,24 @@ fn follow_answer(walked: Result<usize, wz_capture::FollowError>) -> c_int {
 /// As for [`wz_dissect_live_follow`]. A container refused as
 /// [`WZ_DISSECT_ERR_CONTAINER_SHRANK`] is not lent: the handle keeps reading
 /// the one it was lent before, and the refused bytes are the caller's again
-/// when the call returns. [`WZ_DISSECT_ERR_INVALID_ARG`] on a handle
-/// [`wz_dissect_live_follow_next`] moved on to a later container: its packet
-/// numbers count across containers and no longer name positions in one.
+/// when the call returns.
+///
+/// # A handle that moved on
+///
+/// On a handle [`wz_dissect_live_follow_next`] or
+/// [`wz_dissect_live_follow_next_lent`] moved on, the container lent is the
+/// one followed now, and the containers lent before it stay lent: what the
+/// handle kept of each is read there, by a place counted across the capture's
+/// containers. [`wz_dissect_live_oldest_container`] says which of them it
+/// still reads.
 ///
 /// # Safety
 /// As for [`wz_dissect_live_follow`], and the `len` bytes at `bytes` must stay
-/// readable and unchanged until the handle is closed or a later call to this
-/// door names the container where it then is. The handle reads them during any
-/// call made on it, so no call may be made on it while the container is moving.
+/// readable and unchanged until the handle is closed, a later call to this
+/// door names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above this
+/// container's number. The handle reads them during any call made on it, so no
+/// call may be made on it while the container is moving.
 #[no_mangle]
 pub unsafe extern "C" fn wz_dissect_live_follow_lent(
     handle: *mut live::LiveDissection,
@@ -4220,12 +4233,6 @@ pub unsafe extern "C" fn wz_dissect_live_follow_lent(
     }
     // SAFETY: caller contract above.
     let handle = unsafe { &mut *handle };
-    // A lent container is read by the one byte offset each kept message logged,
-    // with no container beside it, so a handle holds one lent container; a
-    // handle that moved on copies what it keeps (the header says why).
-    if handle.moved_container() {
-        return WZ_DISSECT_ERR_INVALID_ARG;
-    }
     follow_answer(handle.follow_lent(lent(bytes, len)))
 }
 
@@ -4323,6 +4330,78 @@ pub unsafe extern "C" fn wz_dissect_live_follow_next(
     // SAFETY: null-checked above.
     unsafe { *first_packet = first as u64 };
     follow_answer(walked)
+}
+
+/// (ABI 65) — [`wz_dissect_live_follow_next`] over a next container the caller
+/// LENDS the handle, as [`wz_dissect_live_follow_lent`] lends one.
+///
+/// The handle moves on as the copying door moves it, and is then lent `bytes`
+/// as the container it follows: later calls of [`wz_dissect_live_follow_lent`]
+/// with more of the same container go on reading it. The containers lent before
+/// stay lent for what the handle kept of them;
+/// [`wz_dissect_live_oldest_container`] says when one may be released.
+///
+/// # Errors
+///
+/// As for [`wz_dissect_live_follow_next`].
+///
+/// # Safety
+/// As for [`wz_dissect_live_follow_next`], and the `len` bytes at `bytes` must
+/// stay readable and unchanged until the handle is closed, a later
+/// [`wz_dissect_live_follow_lent`] names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above this
+/// container's number.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow_next_lent(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    first_packet: *mut u64,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() || first_packet.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    let (first, walked) = handle.follow_next_lent(lent(bytes, len));
+    // SAFETY: null-checked above.
+    unsafe { *first_packet = first as u64 };
+    follow_answer(walked)
+}
+
+/// (ABI 65) — WHICH CONTAINERS A HANDLE STILL READS: `*current` is the number
+/// of the container it follows now (`0` for the first, one more for each move
+/// [`wz_dissect_live_follow_next`] or [`wz_dissect_live_follow_next_lent`]
+/// made), and `*oldest` the number of the oldest container a kept message's
+/// bytes are still read from, `*current` when none of an earlier one is.
+///
+/// A container lent with a number below `*oldest` is never read again and may
+/// be released. See [`live::LiveDissection::oldest_container`].
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null argument.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, and `oldest` and
+/// `current` writable `uint64_t`s. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_oldest_container(
+    handle: *const live::LiveDissection,
+    oldest: *mut u64,
+    current: *mut u64,
+) -> c_int {
+    if handle.is_null() || oldest.is_null() || current.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (held, now) = unsafe { (*handle).oldest_container() };
+    // SAFETY: null-checked above.
+    unsafe {
+        *oldest = held as u64;
+        *current = now as u64;
+    }
+    WZ_DISSECT_OK
 }
 
 /// R2102 — take the messages decoded since the last drain, into a buffer YOU
@@ -6914,8 +6993,9 @@ fn lent(bytes: *const u8, len: usize) -> std::sync::Arc<dyn wz_capture::LentCapt
 ///
 /// # Safety
 /// As for [`wz_dissect_pcap_replay`], and the `len` bytes at `bytes` must stay
-/// readable and unchanged until the handle is closed or a later
-/// [`wz_dissect_live_follow_lent`] names the container where it then is. The
+/// readable and unchanged until the handle is closed, a later
+/// [`wz_dissect_live_follow_lent`] names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above `0`. The
 /// handle reads them during any call made on it.
 #[no_mangle]
 pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
@@ -10948,7 +11028,11 @@ mod tests {
         // in and a `uint64_t` the caller owns out; nothing is retained of the
         // bytes and no struct is new.
         // 64, for that struct growing `chain_bytes`; no symbol moves.
-        assert_eq!(wz_dissect_abi_version(), 64);
+        // 65, for `wz_dissect_live_follow_next_lent` and
+        // `wz_dissect_live_oldest_container`: two symbols, the first retaining
+        // the caller's container pointer as the lending doors do, the second two
+        // `uint64_t` the caller owns out. No struct is new.
+        assert_eq!(wz_dissect_abi_version(), 65);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
