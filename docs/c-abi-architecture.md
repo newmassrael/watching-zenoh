@@ -177,6 +177,26 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
 5. **Thin façade (L4).** Doors call L3 directly; marshals lend views; the port trait leaves the
    release build.
 6. **Thin driver (L0).** The engine crate keeps only the wait set, timers and the read task.
+   Each fact the cooperative engine holds today goes to the layer that owns it:
+
+   | fact (today in `wz-capi-coop`) | owner |
+   |---|---|
+   | the session lock, the read task (`start_reader`), the wait set (`LinkWaits`, `IdleWait`, the waits of `LinkRooms`, the clock's wake), the task and timer tables, the reservation of the region | L0 |
+   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial_from`, `dial_answered`, `dial_or_wait`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
+   | the entity tables and their counters, the keys and the shared key ids, the query plane and pending gets, the round of deliveries, the declaration watches, the face reports, what a face that comes up is told again (`replay`), which faces a publish goes to | L3 |
+   | the places of the ABI's handle and objects | L4 |
+
+   Steps, each landing on its own:
+   - **6a region.** The arena's plan is the sum of each layer's rows (`TransportRows` for L2,
+     `SessionRows` for L3, `PlaceRows` for L4); L0 adds them up, reserves the region and opens
+     one `TableLender` over it, which each layer lends its own tables from, with one refusal asked
+     at the end.
+   - **6b face lifecycle.** L2 holds a sans-I/O transport value that answers each step with
+     effects (dial, a link opened, a face gone); L0 carries them out over the stack and the task
+     table.
+   - **6c sending.** L3's routing names the faces; L2's face sends, drops or hands the publish off,
+     the hand-off kept in rows of the region.
+   - **6d session state and delivery.** With phase 4.
 7. **SCE codegen totality** (SCE change, reviewed by an SCE session, then a pin move).
 
 Targets: every area at or under zenoh-pico's ratio 1.0 locked; allocations after open 0 in every

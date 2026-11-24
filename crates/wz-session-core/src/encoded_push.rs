@@ -468,10 +468,7 @@ mod tests {
         // A build without `pubsub-timestamp` leaves the body as it is, and the case is the one before.
         let _ = set_push_timestamp(
             &mut stamped,
-            &crate::sample::TimestampHint {
-                time: 0x0123_4567,
-                zid: vec![0xAA, 0xBB],
-            },
+            &crate::sample::TimestampHint::new(0x0123_4567, &[0xAA, 0xBB]).unwrap(),
         )
         .expect("a timestamp fits");
         cases.push((String::from("alias, body timestamp"), stamped, KEY));

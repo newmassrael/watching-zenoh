@@ -318,7 +318,10 @@ mod tests {
     fn ended(rows: usize) -> Held {
         let mut arena =
             SessionArena::of_bytes(1 << 12, &AllocatorMemory).expect("the host has the memory");
-        let legs = arena.lend(rows).expect("the arena has the rows");
+        let legs = arena
+            .arena_mut()
+            .lend(rows)
+            .expect("the arena has the rows");
         Held {
             ends: EndedLegs::over(legs),
             _arena: arena,

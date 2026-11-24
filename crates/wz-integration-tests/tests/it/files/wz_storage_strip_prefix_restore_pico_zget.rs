@@ -169,10 +169,7 @@ async fn wz_storage_restores_the_mount_prefix_on_a_pico_zget() {
             Some(STRIPPED_KEY),
             STORED_VALUE.as_bytes().to_vec(),
             None,
-            TimestampHint {
-                time: 1,
-                zid: vec![0x02],
-            },
+            TimestampHint::new(1, &[0x02]).unwrap(),
         );
 
     let timeouts = SessionTimeouts::spec_defaults();

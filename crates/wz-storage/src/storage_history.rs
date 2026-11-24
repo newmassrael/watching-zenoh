@@ -319,10 +319,7 @@ mod tests {
     use alloc::vec;
 
     fn ts(time: u64, zid: u8) -> TimestampHint {
-        TimestampHint {
-            time,
-            zid: vec![zid],
-        }
+        TimestampHint::new(time, &[zid]).unwrap()
     }
 
     #[test]

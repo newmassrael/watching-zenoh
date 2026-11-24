@@ -205,10 +205,7 @@ async fn wz_storage_applies_a_pico_wildcard_update_over_the_wire() {
             Some(SEED_KEY),
             SEED_VALUE.to_vec(),
             None,
-            TimestampHint {
-                time: 1,
-                zid: vec![0x02],
-            },
+            TimestampHint::new(1, &[0x02]).unwrap(),
         );
 
     let timeouts = SessionTimeouts::spec_defaults();

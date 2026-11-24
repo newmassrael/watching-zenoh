@@ -3423,6 +3423,55 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen holds a heartbeat for each of sixteen publishers of a session."
 
 [[limit]]
+id = "ADVANCED_CACHE_SAMPLE_BYTES"
+kconfig = "WZ_LIMIT_ADVANCED_CACHE_SAMPLE_BYTES"
+kind = "bound"
+driven = "local"
+default = 4096
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes one sample an advanced publisher's cache keeps may carry, its
+payload and its attachment together: the room of each row of the session's
+cache table. A put whose sample does not fit is refused with
+_Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent, as a cache that could not keep the
+sample would leave a subscriber's recovery of it empty.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the sample an advanced cache keeps: zenoh and zenoh-pico keep each cached sample whole on the heap, of any size. wz keeps it in a row of fixed room, so that a put allocates nothing, and refuses at the put a sample past the room, which upstream would cache. 4096 is zenoh-pico's FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the largest message its default build rejoins."
+
+[[limit]]
+id = "ADVANCED_CACHE_ROWS"
+kconfig = "WZ_LIMIT_ADVANCED_CACHE_ROWS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The samples the caches of a session's advanced publishers keep together: the
+rows of the session's cache table, each of ADVANCED_CACHE_SAMPLE_BYTES, which
+the session reserves when it opens. An advanced publisher whose cache asks for
+more rows than are free is refused at its declaration.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the samples the caches of a session keep: each advanced publisher's cache keeps its max_samples on the heap. Sixteen holds the deepest cache zenoh-pico's tests declare, ten samples, and room besides."
+
+[limit.pico_preset]
+value = 10
+reason = "zenoh-pico bounds its caches by no count; the deepest cache its API tests declare keeps ten samples (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `pub_opts.cache.max_samples = 10;`), one advanced publisher at a time."
+
+[[limit]]
 id = "MAX_LOCATOR_LEN"
 kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
 kind = "bound"
