@@ -351,6 +351,58 @@ impl SerialLine {
     }
 }
 
+/// The link type [`line_capture`] writes its packets on: `LINKTYPE_USER0`, one
+/// this build does not decapsulate, as a capture of a tapped line commonly
+/// carries.
+#[cfg(any(test, feature = "fixtures"))]
+pub const FIXTURE_LINK_TYPE: u32 = 147;
+
+/// A pcapng of a tapped serial line whose zenoh session opens and carries one
+/// keep-alive, for the readers that are graded on one.
+///
+/// The dialler's frames are on interface 0. The acceptor's are on interface 1
+/// when `interfaces` is two, and on interface 0 too when it is one, which is a
+/// capture that cannot separate the wires. `handshake` puts the line's own
+/// `INIT` and `INIT|ACK` frames ahead of the zenoh messages, which is what
+/// settles which interface is the initiator's. The zenoh messages are an
+/// InitSyn naming `a1a1a1a1`, an InitAck naming `b2b2b2b2` with an empty
+/// cookie, an OpenSyn and an OpenAck, and a keep-alive from the dialler: five
+/// messages, one per frame, the `i`th packet at `i + 1` milliseconds.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn line_capture(interfaces: u32, handshake: bool) -> Vec<u8> {
+    use wz_session_core::serial_link::encode_frame;
+
+    let other = if interfaces > 1 { 1 } else { 0 };
+    let mut frames: Vec<(u32, Vec<u8>)> = Vec::new();
+    if handshake {
+        frames.push((0, encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes")));
+        frames.push((
+            other,
+            encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes"),
+        ));
+    }
+    // `[T_MID_INIT, version, zid length and whatami, zid]`, the InitAck with
+    // its A flag and an empty cookie; `[T_MID_OPEN, lease, initial sn,
+    // cookie length]` and the OpenAck with its A flag and no cookie.
+    let messages: [(u32, &[u8]); 5] = [
+        (0, &[0x01, 0x09, 0x32, 0xA1, 0xA1, 0xA1, 0xA1]),
+        (other, &[0x21, 0x09, 0x32, 0xB2, 0xB2, 0xB2, 0xB2, 0x00]),
+        (0, &[0x02, 10, 0, 0]),
+        (other, &[0x22, 10, 0]),
+        (0, &[wz_session_core::wire_const::T_MID_KEEP_ALIVE]),
+    ];
+    for (interface, wire) in messages {
+        frames.push((interface, encode_frame(0, wire).expect("encodes")));
+    }
+    let packets: Vec<(u32, u64, &[u8])> = frames
+        .iter()
+        .zip(1u64..)
+        .map(|((interface, bytes), at)| (*interface, 1_000 * at, bytes.as_slice()))
+        .collect();
+    let described: Vec<(u32, u8)> = (0..interfaces).map(|_| (FIXTURE_LINK_TYPE, 6)).collect();
+    crate::pcapng::write(&described, &packets)
+}
+
 /// The decoded frame type re-exported for a caller assembling its own reader.
 pub use wz_session_core::serial_link::DecodedFrame as SerialDecodedFrame;
 

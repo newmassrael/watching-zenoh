@@ -524,8 +524,19 @@ OPTIONS:
                       TYPES below for the spellings.
                       A topic whose own name carries `:` or `=` is written
                       with a backslash: `demo/temp\\:c=profile`.
+                      `<keyexpr>=encoding` reads a sample by the built-in
+                      its own declared encoding names (`application/json`
+                      as json, `text/plain` as text), and only where no
+                      other rule covers the topic, whatever their order;
+                      the line then says it was chosen by the encoding.
+                      `#@<package>/msg/<Type>.msg=\"...\"` declares a ROS
+                      message definition (`.srv`: a service's request and
+                      response; `.action`: an action's goal, result,
+                      feedback and the types derived from them), and
+                      `<keyexpr>=cdr@<package>/msg/<Type>` reads the
+                      topic's CDR payload by it.
                       Needs --fields.
-                      PAYLOAD FORMATS: cbor, json, protobuf
+                      PAYLOAD FORMATS: cbor, json, protobuf, text
                       PAYLOAD MISBOUND: rule, publisher
                       PAYLOAD REFUSED UNDER: corroborated, unclaimed, refuted
     --payload-name <keyexpr>:<path>=<name>
@@ -4673,6 +4684,16 @@ impl<'a> PayloadLens<'a> {
     }
 }
 
+/// What a payload line adds for how its format was chosen: nothing for a rule,
+/// which the line already names by its format, and a note when the sample's own
+/// declared encoding chose it under an encoding rule.
+fn chosen_text(chosen: wz_capture::payload_decode::ChosenBy) -> &'static str {
+    match chosen {
+        wz_capture::payload_decode::ChosenBy::Rule => "",
+        wz_capture::payload_decode::ChosenBy::Encoding => " (chosen by its declared encoding)",
+    }
+}
+
 /// Render the payload decoding beside the field tree, in whichever format.
 fn payload_block(
     field: &wz_session_core::dissect::Field,
@@ -4771,7 +4792,12 @@ fn payload_block(
             rule: _,
             format: name,
             why,
-        } => format!("    payload `{keyexpr}` as {name}: REFUSED -- {why}\n"),
+            chosen_by,
+            encoding_schema: _,
+        } => format!(
+            "    payload `{keyexpr}` as {name}{}: REFUSED -- {why}\n",
+            chosen_text(*chosen_by)
+        ),
         // R311y873 — this line names the FLAG, which is the whole reason the
         // state is separate from `Refused` above. That one sends a reader to
         // their capture; here the capture is right and the mapping is wrong,
@@ -4808,6 +4834,9 @@ fn payload_block(
             despite_encoding,
             typed,
             schema,
+            type_hash,
+            chosen_by,
+            encoding_schema,
         } => {
             // R311y874 — the override is said on its OWN line, above the
             // fields. A reader whose rule was right and whose publisher is
@@ -4826,14 +4855,28 @@ fn payload_block(
             // The body schema the rule names, and whether its files were
             // declared: a reader told `as protobuf` alone cannot tell a typed
             // reading from a walk of the wire.
+            // A computed type hash follows the type it hashes, so a reader
+            // compares it with the one the publisher's key carries.
             let schema = match (schema, *typed) {
-                (Some(message), true) => format!(" by {message}"),
+                (Some(message), true) => match type_hash {
+                    Some(hash) => format!(" by {message} ({hash})"),
+                    None => format!(" by {message}"),
+                },
                 (Some(message), false) => {
                     format!(" ({message} named, no schema file declared, so walked by the wire)")
                 }
                 (None, _) => String::new(),
             };
-            out.push_str(&format!("    payload `{keyexpr}` as {name}{schema}:\n"));
+            // How the format was chosen, and the message type a publisher's
+            // encoding named, beside the format for the same reason.
+            let named_type = match encoding_schema {
+                Some(message) => format!(" (encoding schema {message})"),
+                None => String::new(),
+            };
+            out.push_str(&format!(
+                "    payload `{keyexpr}` as {name}{schema}{}{named_type}:\n",
+                chosen_text(*chosen_by)
+            ));
             for f in fields {
                 // R311y720 (PF4) — the declared name follows the path rather
                 // than replacing it. Both, because they answer different
@@ -5991,7 +6034,9 @@ mod tests {
                 "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
                  \"flows\":1,\"scouting\":0,\"scout_askers\":0,\
                  \"caps\":{\"frames_per_flow\":10000,\"frames_total\":100000,\
-                 \"stream_bytes_per_direction\":4194304,\"skipped_packets\":10000,\
+                 \"stream_bytes_per_direction\":4194304,\"stream_bytes_total\":83886080,\
+                 \"chain_bytes\":65536,\
+                 \"skipped_packets\":10000,\
                  \"max_flows_per_table\":1024,\"max_scout_askers\":1024}}"
             ),
             "a reader who asked for a ceiling must be told it bit AND what it \
@@ -6855,14 +6900,14 @@ mod tests {
             "the rule must be INSTALLED and applied under its own name: {text}"
         );
         assert!(
-            text.contains("$ = object 1 member(s)"),
+            text.contains("$: object = object 1 member(s)"),
             "the document's own row must be there, so a reader sees the shape \
              before the leaves: {text}"
         );
         // The leaf, its declared rename, and its value -- one line, and the
         // path is the wire's own member name rather than an invented number.
         assert!(
-            text.contains("$.temp (celsius) = number 21.5"),
+            text.contains("$.temp (celsius): number = number 21.5"),
             "the wire's name is the path and the declaration renames it: {text}"
         );
         // And nothing on this capture reads as a mapping quarrel: the publisher
@@ -6947,18 +6992,18 @@ mod tests {
             "the rule must be INSTALLED and applied under its own name: {text}"
         );
         assert!(
-            text.contains("$ = map 2 pair(s)"),
+            text.contains("$: map = map 2 pair(s)"),
             "the document's own row must be there, so a reader sees the shape \
              before the leaves: {text}"
         );
         assert!(
-            text.contains("$.t (celsius) = unsigned 21"),
+            text.contains("$.t (celsius): number = unsigned 21"),
             "the wire's name is the path and the declaration renames it: {text}"
         );
         // ITEM 434, AT THE SURFACE: the integer key is not `$.5`, so a rename
         // written for a text key `\"5\"` cannot land on it.
         assert!(
-            text.contains("$.\\i5 = text \"a\""),
+            text.contains("$.\\i5: string = text \"a\""),
             "an integer map key must reach the terminal in the reserved \
              namespace: {text}"
         );

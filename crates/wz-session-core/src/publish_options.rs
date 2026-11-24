@@ -492,6 +492,9 @@ impl<'a> PublishOptions<'a> {
     /// `priority_band` deliberately still reads `self.qos` ungated — that is the independent
     /// `transport-qos` conduit axis (R311y307), whose real gate is the runtime-negotiated
     /// `is_qos()`, not a compile feature.
+    // Out of line: the publish, its hand-off and the plain-put check each ask it, and inlined it
+    // spread into every door that declares a publisher.
+    #[inline(never)]
     pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.as_ref()),

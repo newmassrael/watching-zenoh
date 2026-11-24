@@ -34,21 +34,37 @@
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-use wz_session_core::slot_observer::{
-    ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
-};
+#[cfg(not(any(feature = "listen", feature = "group", test)))]
+use wz_session_core::slot_observer::NoOtherPeers;
+#[cfg(not(feature = "query"))]
+use wz_session_core::slot_observer::NoRequesters;
+#[cfg(not(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+)))]
+use wz_session_core::slot_observer::NoSink;
+#[cfg(feature = "query")]
+use wz_session_core::slot_observer::Requesters;
+use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, OtherPeers, SlotObserverOf};
 
 use super::queued::{MatchFlips, Queued};
-use super::{LegSink, RoundDelivery, SubscriberRow};
+#[cfg(feature = "query")]
+use super::LegSink;
+use super::{RoundDelivery, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::{FilterPlane, MatchId};
 use wz_session_core::slot_observer::RequesterRows;
@@ -57,8 +73,6 @@ use wz_session_core::declare::matching::MatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
-#[cfg(feature = "liveliness")]
-use wz_session_core::registry_error::RegisterError;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -86,7 +100,12 @@ type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<Le
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
+#[cfg(feature = "query")]
 pub(super) type Gets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
+/// A session that asks no query has no pending get on any face: its requester side is none, and
+/// the observer's fan and drains keep no path for gets.
+#[cfg(not(feature = "query"))]
+pub(super) type Gets = NoRequesters;
 
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
@@ -251,6 +270,7 @@ impl<'a> Iterator for HeldMut<'a> {
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the entries of the index of held sets that
 /// name them.
+#[cfg(any(feature = "listen", feature = "group", test))]
 struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
@@ -260,6 +280,7 @@ struct Others<'a> {
     after_at: usize,
 }
 
+#[cfg(any(feature = "listen", feature = "group", test))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let (before, after, after_at) = (self.before, self.after, self.after_at);
@@ -274,6 +295,7 @@ impl Others<'_> {
     }
 }
 
+#[cfg(any(feature = "listen", feature = "group", test))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -307,12 +329,36 @@ impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
     type SubscriberId = wz_session_core::session_tables::SubscriberHandle;
     type QueryableId = wz_session_core::session_tables::QueryableHandle;
+    type LivelinessSubscriber =
+        <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::LivelinessSubscriber;
+    type LivelinessSubscriberId = wz_session_core::session_tables::LivelinessSubscriberHandle;
     type Delivery = RoundDelivery;
     type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::Queryable;
+    // The program's watches of what the peers declare are the only observers this engine installs
+    // (`decl_watch`), boxed closures; a build without them holds none, so its observer lists are
+    // of a sink that cannot be made and hold nothing to drop or free.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     type Declared = BoxedDeclSink;
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
     type Undeclared = BoxedUndeclSink;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    type Declared = NoSink;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    type Undeclared = NoSink;
 }
 
 /// Where a matching listener's flips go on this engine: the session's queue of them, by the
@@ -392,13 +438,21 @@ pub(super) struct Registry {
     pushes: (usize, usize, usize),
 }
 
+/// The faces other than the one a call acts on, as the build holds them. A build that adds no face
+/// beside its dial role's (`listen`, `group`) holds that one alone, so its calls count no other.
+#[cfg(any(feature = "listen", feature = "group", test))]
+type OtherFaces<'a> = Others<'a>;
+/// See the form of a build that adds faces.
+#[cfg(not(any(feature = "listen", feature = "group", test)))]
+type OtherFaces<'a> = NoOtherPeers;
+
 /// The application's part, one face's tables and the other faces', apart so each can be used as
 /// its call needs.
 struct Split<'a> {
     app: &'a mut App,
     delivery: &'a mut RoundDelivery,
     face: &'a mut FaceTables,
-    others: Others<'a>,
+    others: OtherFaces<'a>,
 }
 
 impl Registry {
@@ -685,19 +739,26 @@ impl Registry {
         let held: &[HeldSet] = &held[..];
         let place = held.iter().position(|face| face.id == id)?;
         let at = held[place].at;
-        let (before, rest) = sets.split_at_mut(at);
-        let (face, after) = rest.split_first_mut()?;
-        Some(Split {
-            app,
-            delivery,
-            face,
-            others: Others {
+        #[cfg(any(feature = "listen", feature = "group", test))]
+        let (face, others) = {
+            let (before, rest) = sets.split_at_mut(at);
+            let (face, after) = rest.split_first_mut()?;
+            let others = Others {
                 before: &*before,
                 after: &*after,
                 held_before: &held[..place],
                 held_after: &held[place + 1..],
                 after_at: at + 1,
-            },
+            };
+            (face, others)
+        };
+        #[cfg(not(any(feature = "listen", feature = "group", test)))]
+        let (face, others) = (sets.get_mut(at)?, NoOtherPeers);
+        Some(Split {
+            app,
+            delivery,
+            face,
+            others,
         })
     }
 
@@ -792,10 +853,14 @@ impl Registry {
     /// registered after the peer's interest is owed, and the retraction of an aggregate
     /// declaration the last matching subscription stood for. An observer that held the peer's
     /// side beside the table staged both as it was told; the table that serves one peer or many
-    /// leaves each peer to read the table's epoch, and nothing else reads it.
+    /// leaves each peer to read the table's epoch, and nothing else reads it. Only a build that
+    /// answers its peers' Interests keeps any to reconcile.
+    #[cfg(feature = "interest-answer")]
     fn reconcile_subscribers(&mut self, id: FaceId) {
-        if let Some(Split { app, face, .. }) = self.split(id) {
-            face.peer.subscribers.reconcile(&app.tables);
+        // Handed out to be written, as `Self::split` hands a face's tables out.
+        self.writing();
+        if let Some(at) = self.held_at(id) {
+            reconcile_face(&self.app, &mut self.sets[at]);
         }
     }
 
@@ -808,6 +873,7 @@ impl Registry {
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
+        #[cfg(feature = "interest-answer")]
         self.reconcile_subscribers(id);
         if let Some(Split { app, face, .. }) = self.split(id) {
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
@@ -853,7 +919,8 @@ impl Registry {
                 face.peer
                     .subscribers
                     .dispatch_iteration_event(&mut app.tables, delivery, event);
-                face.peer.subscribers.reconcile(&app.tables);
+                #[cfg(feature = "interest-answer")]
+                reconcile_face(app, face);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
             }
@@ -872,6 +939,7 @@ impl Registry {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         self.dispatch_event(id, event);
+        #[cfg(feature = "interest-answer")]
         self.reconcile_subscribers(id);
         if let Some(Split { app, face, .. }) = self.split(id) {
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
@@ -902,7 +970,8 @@ impl Registry {
             face.peer
                 .subscribers
                 .dispatch_iteration_event(&mut app.tables, delivery, event);
-            face.peer.subscribers.reconcile(&app.tables);
+            #[cfg(feature = "interest-answer")]
+            reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
         #[cfg(all(test, feature = "std"))]
@@ -940,6 +1009,7 @@ impl Registry {
         self.writing();
         let Self {
             app,
+            delivery,
             sets,
             held,
             #[cfg(any(feature = "listen", feature = "group"))]
@@ -951,7 +1021,8 @@ impl Registry {
                 continue;
             };
             if set.retracting {
-                set.retracting = !app.flush_liveliness_on_link_loss_while(&mut set.peer, room);
+                set.retracting =
+                    !app.flush_liveliness_on_link_loss_while(delivery, &mut set.peer, room);
                 if set.retracting {
                     return false;
                 }
@@ -960,7 +1031,7 @@ impl Registry {
         // The faces that went, in the order they went.
         #[cfg(any(feature = "listen", feature = "group"))]
         while let Some(tokens) = owed.first_mut() {
-            if !app.flush_tokens_on_link_loss_while(tokens, room) {
+            if !app.flush_tokens_on_link_loss_while(delivery, tokens, room) {
                 return false;
             }
             owed.remove(0);
@@ -1077,22 +1148,6 @@ impl Registry {
             });
     }
 
-    /// Register a liveliness subscriber, with `history` marked as one owed the tokens every face's
-    /// peer already holds, which its declaration hands it after this, with no lock of the session
-    /// held, one at a time ([`Self::next_history_token`]), before the peers are asked for the rest.
-    #[cfg(feature = "liveliness")]
-    pub(super) fn register_liveliness_subscriber(
-        &mut self,
-        id: u64,
-        keyexpr: &str,
-        history: bool,
-        sink: wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
-    ) -> Result<bool, RegisterError> {
-        self.app
-            .liveliness_subscribers
-            .register_unreplayed(id, keyexpr, history, sink)
-    }
-
     /// The token liveliness subscriber `id` is owed next by its history, from where `cursor`
     /// stands: the faces in ascending id, and on each the token of the lowest id above the last one
     /// handed that its peer holds and the subscriber's pattern matches. With it, the cursor to ask
@@ -1117,10 +1172,8 @@ impl Registry {
                 .and_then(|held| self.sets.get(held.at))
                 .map(|set| &set.peer.tokens);
             if let Some(tokens) = tokens {
-                if let Some((token, key)) = self
-                    .app
-                    .liveliness_subscribers
-                    .next_known_token(tokens, id, after)
+                if let Some((token, key)) =
+                    tokens.next_known_token(self.app.tables.liveliness_subscribers(), id, after)
                 {
                     let next = HistoryCursor {
                         face: Some(face),
@@ -1138,6 +1191,15 @@ impl Registry {
             after = None;
         }
     }
+}
+
+/// Stage for `face`'s peer what the application did to its subscriptions since the peer last looked
+/// ([`Registry::reconcile_subscribers`]): one body for every caller, not one for each that inlines
+/// it. Only a build that answers its peers' Interests keeps any to reconcile.
+#[cfg(feature = "interest-answer")]
+#[inline(never)]
+fn reconcile_face(app: &App, face: &mut FaceTables) {
+    face.peer.subscribers.reconcile(&app.tables);
 }
 
 /// Write a set of no rows in the next row of `sets`, held to `limits`, its peer's keys kept in
@@ -1205,6 +1267,32 @@ mod tests {
     use wz_session_core::peer_tables::PeerPoolRows;
     use wz_session_core::reply_stage::FinalStaging;
     use wz_session_core::sample::QosLevel;
+
+    /// Without the declaration watches the observers this engine may hold are none: the lists'
+    /// sink has no value, so a list holds nothing to drop and frees nothing. Turned red by boxed
+    /// sinks chosen for a build that installs none.
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    #[test]
+    fn without_the_watches_an_observer_list_holds_nothing_to_drop() {
+        assert!(!core::mem::needs_drop::<
+            <CoopSinks as ObserverSinks>::Declared,
+        >());
+        assert!(!core::mem::needs_drop::<
+            <CoopSinks as ObserverSinks>::Undeclared,
+        >());
+    }
+
+    /// A build that asks no query keeps no table of pending gets on a face: its requester side is
+    /// of no size and holds nothing to drop. Turned red by a table of gets chosen for such a build.
+    #[cfg(not(feature = "query"))]
+    #[test]
+    fn without_query_a_face_keeps_no_table_of_gets() {
+        assert_eq!(core::mem::size_of::<Gets>(), 0);
+        assert!(!core::mem::needs_drop::<Gets>());
+    }
 
     /// A flip reported for a listener waits in the session's queue under the listener's id, to be
     /// handed after the lock; a change back before it is handed takes it away.
@@ -1290,9 +1378,12 @@ mod tests {
             &SessionLimits::defaults(),
             arena.arena_mut(),
             keys,
-            // A row for a liveliness subscriber, which the tests of retractions register.
+            // A row for a liveliness subscriber, which the tests of retractions declare.
             ObserverRows {
-                liveliness_subscribers: 1,
+                tables: wz_session_core::session_tables::TableRows {
+                    liveliness_subscribers: 1,
+                    ..Default::default()
+                },
                 ..ObserverRows::default()
             },
             gets,
@@ -1489,6 +1580,7 @@ mod tests {
     /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
     /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
     /// after it was handed the key arena keeps it.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
         use wz_session_core::key_arena::block_bytes;
@@ -1611,28 +1703,37 @@ mod tests {
     #[test]
     fn a_face_that_goes_owing_retractions_gives_its_set_back_at_once() {
         use std::sync::{Arc, Mutex};
-        use wz_session_core::declare::liveliness_sample::{
-            BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind,
-        };
+        use wz_capi_port::{LivelinessSink, WireKey};
+        use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
         use wz_session_core::declare_build::build_declare_token;
+        use wz_session_core::session_tables::KeyForm;
 
         let mut held = held(3);
         let heard: Arc<Mutex<Vec<(String, u64)>>> = Arc::default();
         let into = Arc::clone(&heard);
         held.registry
-            .register_liveliness_subscriber(
-                1,
+            .app
+            .tables
+            .declare_liveliness_subscriber(
                 "demo/**",
                 false,
-                BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
-                    if sample.kind == LivelinessSampleKind::Delete {
-                        into.lock()
-                            .unwrap()
-                            .push((sample.keyexpr.to_owned(), sample.token_id));
-                    }
-                }),
+                KeyForm {
+                    prefix: None,
+                    names_key: false,
+                },
+                super::super::LivelinessRow::new(
+                    WireKey::literal(),
+                    LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                        if sample.kind == LivelinessSampleKind::Delete {
+                            into.lock()
+                                .unwrap()
+                                .push((sample.keyexpr.to_owned(), sample.token_id));
+                        }
+                    }),
+                ),
             )
-            .expect("the subscriber is registered");
+            .map_err(|refused| refused.why)
+            .expect("the subscriber is declared");
         held.registry
             .add_face(5)
             .expect("the open lent a set for the face");
@@ -1644,19 +1745,31 @@ mod tests {
                 .registry
                 .held_at(id)
                 .expect("the registry holds the face");
-            let Registry { app, sets, .. } = &mut held.registry;
+            let Registry {
+                app,
+                delivery,
+                sets,
+                ..
+            } = &mut held.registry;
             let peer = &mut sets[at].peer;
             for token in tokens {
                 let key = std::format!("demo/{id}/{token}");
                 let declare = build_declare_token(token, 0, Some(&key)).expect("a declaration");
-                app.liveliness_subscribers.dispatch_declare(
-                    &mut peer.tokens,
+                let (_, subscribers) = app.tables.liveliness_mut();
+                peer.tokens.dispatch_declare_historical(
+                    subscribers,
+                    delivery,
                     &declare.body,
                     peer.subscribers.mapping_spaces(),
+                    false,
                 );
             }
             assert_eq!(peer.tokens.count(), 2, "face {id} holds its peer's tokens");
         }
+        // The appearances are handed out, so the round has room for the retractions.
+        // SAFETY: this thread is the round's one writer.
+        unsafe { held.registry.delivery.round.seal() };
+        assert!(held.registry.delivery.round.deliver(), "the appearances");
         let lies_at: *const FaceTables = face(&mut held.registry, 5);
         held.registry.lose_tokens(5);
         held.registry.lose_tokens(6);
@@ -1691,6 +1804,9 @@ mod tests {
             held.registry.retract_owed(&mut || true),
             "every token retracted"
         );
+        // SAFETY: this thread is the round's one writer.
+        unsafe { held.registry.delivery.round.seal() };
+        assert!(held.registry.delivery.round.deliver(), "the retractions");
         assert_eq!(
             *heard.lock().unwrap(),
             [
@@ -1740,6 +1856,7 @@ mod tests {
         );
         for set in &held.registry.sets[1..] {
             assert!(set.peer.finals.has_room(), "each row of each set is free");
+            #[cfg(feature = "query")]
             assert!(set.gets.replies.has_room());
         }
         assert_eq!(
@@ -1825,9 +1942,15 @@ mod tests {
             "the same tables lent in the same order take the same bytes"
         );
         let set = &mut sets[0];
+        #[cfg(feature = "query")]
         assert_eq!(
             set.gets.replies.has_room(),
             by_value_gets.replies.has_room()
+        );
+        #[cfg(not(feature = "query"))]
+        assert_eq!(
+            set.gets, by_value_gets,
+            "a build that asks no query lends neither a table of gets"
         );
         set.peer.finals.owe(1, QosLevel::DEFAULT);
         by_value_peer.finals.owe(1, QosLevel::DEFAULT);
@@ -2179,7 +2302,7 @@ mod tests {
             ("peer.tokens", size_of_val(&peer.tokens)),
             ("peer.replies", size_of_val(&peer.replies)),
             ("peer.finals", size_of_val(&peer.finals)),
-            ("gets.replies", size_of_val(&set.gets.replies)),
+            ("gets", size_of_val(&set.gets)),
         ];
         std::println!("face set: {} B", size_of_val(&*set));
         for (table, bytes) in tables {

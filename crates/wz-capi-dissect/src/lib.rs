@@ -67,7 +67,7 @@
 //! Freezing the shape would reintroduce exactly the coupling this design
 //! exists to avoid.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_uint};
 use std::ffi::CString;
 
 use wz_capture::Dissection;
@@ -479,6 +479,37 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 59, for `wz_dissect_live_field_values_since_window`: the values document
     // for the records of at most `max_rows` sequence numbers, so the document
     // and its string are as large as a window. The document does not move.
+    // 60, for `wz_dissect_selector_bind_in_zone`: the binder with the offset a
+    // caller shows times in, written onto every `time` literal that has none.
+    // The `selector_bind` document does not move.
+    // 61, for `wz_dissect_live_open_with` and its `wz_dissect_live_options`: a
+    // live handle opened under a preset, the frame ceilings the caller chooses
+    // and the link types read as raw zenoh serial bytes, through a sized struct
+    // the caller owns. The session table moved to revision 15 on the same step
+    // (a flow's `direction_basis`), which moves no symbol.
+    // 62, for the same door's struct: it grows two fields at its end, the byte
+    // ceiling of each stream direction and the reassembly window, so a caller
+    // chooses them as it chooses the frame ceilings. No symbol moves; the
+    // memory rule of the struct does, and a caller compiled against revision 61
+    // reads the two as zero, which keeps the preset's figures.
+    // 63, for `wz_dissect_live_follow_next`: a handle told that the container it
+    // follows has ended goes on into the next container of the same capture,
+    // its dissection whole and its packet numbers running on.
+    // 64, for `wz_dissect_live_options` growing `chain_bytes` at its end: the
+    // bytes one fragment chain may join, which was a fixed 65,536. No symbol
+    // moves. The `caps` group of every document that carries
+    // `dropped_by_limits` gained `chain_bytes` on the same step.
+    // 65, for `wz_dissect_selector_bind_in_tz`: the binder with a POSIX TZ
+    // rule, writing the offset in force onto each date and the rule onto each
+    // clock time. The `selector_bind` document moves to 2 for its refusals.
+    // 66, for `wz_dissect_live_follow_next_lent` and
+    // `wz_dissect_live_oldest_container`: a handle that moved on to a later
+    // container of its capture is lent it, and says which containers it still
+    // reads, so the caller releases the ones before.
+    // 67, for `wz_dissect_live_options` growing `stream_bytes_total` at its end:
+    // the reassembled bytes every TCP flow keeps together. No symbol moves. The
+    // `caps` group of every document that carries `dropped_by_limits` gained
+    // `stream_bytes_total` on the same step.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -496,7 +527,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 59;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 67;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -584,7 +615,7 @@ pub unsafe extern "C" fn wz_dissect_record_layout(out: *mut usize, cap: usize) -
 /// ```json
 /// {"link_types":"0 NULL, 1 ETHERNET, …",
 ///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
-///  "payload_formats":["cbor","json","protobuf"]}
+///  "payload_formats":["cbor","json","protobuf","text"]}
 /// ```
 ///
 /// (The document also carries `payload_field_types`, `value_families` and
@@ -1117,7 +1148,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
         Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y748 — the same summary, read under the BOUNDED preset, so a C caller
@@ -1172,7 +1203,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
             Ok(d) => decrypted(d, input, None),
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// The summary with a preset AND a key log beside the capture: the document
@@ -1219,7 +1250,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_keyed(
         Ok(d) => decrypted(d, input, keys),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y851 — the ANALYSIS PLANES, which this ABI could not reach at all.
@@ -3503,6 +3534,99 @@ pub unsafe extern "C" fn wz_dissect_selector_bind(
     write_string(wz_capture::filter::bind_json(expr, names), out)
 }
 
+/// ABI 60 -- [`wz_dissect_selector_bind`], with the offset from UTC the caller
+/// shows times in written onto every `time` literal of the selector that has
+/// none.
+///
+/// A `time` literal with no offset is read in UTC by every door, because which
+/// zone a reader's clock shows is not a fact a capture carries. The document is
+/// the binder's own, `selector_bind`, written by
+/// `wz_capture::filter::bind_json_in_zone`: the bound selector with the offset
+/// after each such literal, or the same refusals at the same positions.
+/// `utc_offset_minutes` is minutes east of UTC; past 23:59 either way it is
+/// `WZ_DISSECT_ERR_INVALID_ARG` and no string, as a null `selector` or `out`
+/// is.
+///
+/// # Safety
+/// As for [`wz_dissect_selector_bind`]: `selector` must be a NUL-terminated C
+/// string, `names_json` null or one, and `out` a writable pointer to a
+/// `*mut c_char`. `selector` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_bind_in_zone(
+    selector: *const c_char,
+    names_json: *const c_char,
+    utc_offset_minutes: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let names = if names_json.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(names_json) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    match wz_capture::filter::bind_json_in_zone(expr, names, utc_offset_minutes) {
+        Some(document) => write_string(document, out),
+        None => WZ_DISSECT_ERR_INVALID_ARG,
+    }
+}
+
+/// ABI 65 -- [`wz_dissect_selector_bind`], with every `time` literal of the
+/// selector that has no offset zoned by a POSIX TZ rule, a zone whose clock
+/// goes forward and back (`CET-1CEST,M3.5.0,M10.5.0/3`).
+///
+/// The sibling of [`wz_dissect_selector_bind_in_zone`] for a zone one offset
+/// cannot state. A date gains the offset the rule puts in force at that local
+/// time; a clock time, whose day is the capture's, gains the rule in brackets
+/// and each door reads it on that day. The document is `selector_bind`,
+/// written by `wz_capture::filter::bind_json_in_tz`: a rule that does not read
+/// is the refusal `zone`, and a date its clock skips or shows twice is
+/// `skipped_time` or `repeated_time` with the date's span in the text passed,
+/// so a malformed rule is a verdict and not an error code, as a malformed
+/// `names_json` is.
+///
+/// # Safety
+/// As for [`wz_dissect_selector_bind`], and `tz` must be a NUL-terminated C
+/// string. `selector`, `tz` and `out` may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_bind_in_tz(
+    selector: *const c_char,
+    names_json: *const c_char,
+    tz: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || tz.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(expr), Ok(rule)) = (
+        unsafe { std::ffi::CStr::from_ptr(selector) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(tz) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let names = if names_json.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(names_json) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    write_string(wz_capture::filter::bind_json_in_tz(expr, names, rule), out)
+}
+
 /// ABI 52 -- the selector a field document's node offers.
 ///
 /// `node` is one field object of a field document (revision 56 or later, which
@@ -3684,6 +3808,257 @@ pub unsafe extern "C" fn wz_dissect_live_open_bounded(
         limits.frames_total = Some(n);
     }
     let handle = Box::new(live::LiveDissection::new(limits));
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
+}
+
+/// (ABI 61) — what [`wz_dissect_live_open_with`] opens a handle under: a
+/// preset, the ceilings a caller chooses over it, and the link types read as
+/// raw zenoh serial bytes.
+///
+/// Laid out as `wz_dissect_live_options` in `wz_dissect.h`. A SIZED struct:
+/// the caller writes `size` as the size of the struct it was compiled
+/// against, so a later revision appends fields and a caller compiled before
+/// them is read as having left them zero. That is what lets the caller-chosen
+/// axes cross as fields without freezing `DissectionLimits` into the ABI: a
+/// field is added only for an axis a caller is the one to choose, and the
+/// preset still carries every other.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WzDissectLiveOptions {
+    /// The size of the struct the caller was compiled against, in bytes.
+    pub size: usize,
+    /// A `WZ_DISSECT_LIMITS_*` preset, which the fields below adjust.
+    pub limits: c_int,
+    /// How many link types [`Self::serial_link_types`] points at.
+    pub serial_link_type_count: c_uint,
+    /// The pcap link types whose packets are raw zenoh serial bytes, or null
+    /// when [`Self::serial_link_type_count`] is zero.
+    pub serial_link_types: *const c_uint,
+    /// As [`wz_dissect_live_open_bounded`]'s argument: `0` keeps the preset's.
+    pub frames_per_flow: u64,
+    /// As [`wz_dissect_live_open_bounded`]'s argument: `0` keeps the preset's.
+    pub frames_total: u64,
+    /// (ABI 62) The reassembled bytes each direction of each TCP flow keeps:
+    /// `0` keeps the preset's.
+    pub stream_bytes_per_direction: u64,
+    /// (ABI 62) How long a fragment chain may stay open, in milliseconds of the
+    /// capture's own clock from its first fragment: `0` keeps the preset's.
+    pub reassembly_window_ms: u64,
+    /// (ABI 64) The bytes one fragment chain may join into a message: `0` keeps
+    /// the preset's, which is 65,536 under either preset.
+    pub chain_bytes: u64,
+    /// (ABI 67) The reassembled bytes every TCP flow keeps together, both
+    /// directions of each: `0` keeps the preset's, none under
+    /// `WZ_DISSECT_LIMITS_NONE`.
+    pub stream_bytes_total: u64,
+}
+
+impl WzDissectLiveOptions {
+    /// Every field zero: what a field past the size a caller wrote reads as.
+    const ZERO: Self = Self {
+        size: 0,
+        limits: 0,
+        serial_link_type_count: 0,
+        serial_link_types: core::ptr::null(),
+        frames_per_flow: 0,
+        frames_total: 0,
+        stream_bytes_per_direction: 0,
+        reassembly_window_ms: 0,
+        chain_bytes: 0,
+        stream_bytes_total: 0,
+    };
+}
+
+/// The smallest [`WzDissectLiveOptions::size`] a caller can have been compiled
+/// with: the struct as ABI 61 published it, which ends at `frames_total`. A
+/// caller compiled against it reads every field ABI 62 appended as zero.
+const LIVE_OPTIONS_FIRST_SIZE: usize =
+    core::mem::offset_of!(WzDissectLiveOptions, frames_total) + core::mem::size_of::<u64>();
+
+/// The options a caller handed [`wz_dissect_live_open_with`], read under the
+/// size it wrote, or `None` for options that cannot be read.
+///
+/// A size below the first published one is refused. A size above this
+/// library's struct is accepted only when every byte past it is zero: a
+/// nonzero byte there is a field a newer header set and this library cannot
+/// honour, and reading on without it would hand back a handle that ignores
+/// what the caller asked for. Fields past a smaller size read as zero.
+///
+/// # Safety
+/// `options` must be null, or point to a `size_t` followed by at least as many
+/// readable bytes as that `size_t` says the struct holds.
+unsafe fn read_live_options(options: *const WzDissectLiveOptions) -> Option<WzDissectLiveOptions> {
+    if options.is_null() {
+        return None;
+    }
+    // SAFETY: the first field is readable whatever size the caller wrote, by
+    // the contract above; no reference to the whole struct is made.
+    let size = unsafe { core::ptr::addr_of!((*options).size).read() };
+    if size < LIVE_OPTIONS_FIRST_SIZE {
+        return None;
+    }
+    let known = core::mem::size_of::<WzDissectLiveOptions>();
+    let base = options.cast::<u8>();
+    if size > known {
+        // SAFETY: `size` bytes from `base` are readable by the contract above,
+        // and `known` is below `size` here.
+        let tail = unsafe { core::slice::from_raw_parts(base.add(known), size - known) };
+        if tail.iter().any(|&b| b != 0) {
+            return None;
+        }
+    }
+    let mut read = WzDissectLiveOptions::ZERO;
+    // SAFETY: `size.min(known)` bytes are readable from `base` and writable in
+    // `read`, which is `known` bytes long, and the two do not overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            base,
+            core::ptr::addr_of_mut!(read).cast::<u8>(),
+            size.min(known),
+        );
+    }
+    Some(read)
+}
+
+/// A ceiling a caller chose, over the preset's `preset`: `0` keeps the
+/// preset's figure, and a value too large for this platform's `size_t` is
+/// `None`, never a quiet clamp.
+fn caller_ceiling(value: u64, preset: Option<usize>) -> Option<Option<usize>> {
+    if value == 0 {
+        return Some(preset);
+    }
+    usize::try_from(value).ok().map(Some)
+}
+
+/// (ABI 61) — open a live handle under a preset, the ceilings the caller
+/// chooses over it, and the link types it reads as raw zenoh serial bytes.
+///
+/// # Why a struct, when the preset is an integer
+///
+/// The preset is a closed enumeration so that `DissectionLimits` does not cross
+/// the boundary. The axes a caller is the one to choose (how many rows its list
+/// holds, which link types its capture tool wrote a serial line on) had to
+/// cross anyway, and a door per combination of them is what this replaces:
+/// [`wz_dissect_live_open`] takes the preset alone and
+/// [`wz_dissect_live_open_bounded`] two ceilings, and both are this door with
+/// the other fields zero. The struct is sized, so a later axis is a field a
+/// caller compiled before it reads as zero, not another door.
+///
+/// # A capture file
+///
+/// A capture read with these options is read through this handle:
+/// [`wz_dissect_live_follow`] or [`wz_dissect_live_follow_lent`] with the
+/// whole file, [`wz_dissect_live_followed`] to tell a cut file from a whole
+/// one, then [`wz_dissect_live_end`]. That is the walk
+/// [`wz_dissect_pcap_replay`] makes (`LiveDissection::from_capture` is
+/// `follow` and then `end`), so a declaration and a ceiling reach a file
+/// without a second replay door per option.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `options` or `out`, a `size`
+/// below the first published struct, a nonzero byte past this library's
+/// struct, an unknown preset, a frame or byte ceiling too large for `size_t`,
+/// and a nonzero `serial_link_type_count` with a null `serial_link_types`.
+///
+/// # The byte ceiling and the window (ABI 62)
+///
+/// `stream_bytes_per_direction` is what `DissectionLimits` calls by that name:
+/// the reassembled bytes one direction of one TCP flow keeps. It decides which
+/// bytes [`wz_dissect_live_message_bytes`] can still hand back and never which
+/// messages decode: a message is decoded from the session's own copy of its unit
+/// before the ceiling trims, and a held message whose bytes the ceiling takes is
+/// kept whole first. `reassembly_window_ms` is the deadline a fragment chain
+/// gets when it opens; it also bounds how long a half-assembled IP datagram
+/// waits.
+///
+/// # The chain ceiling (ABI 64)
+///
+/// `chain_bytes` is the bytes one fragment chain may join into a message, up to
+/// [`wz_capture::MAX_CHAIN_BYTES`] (a larger figure is
+/// [`WZ_DISSECT_ERR_INVALID_ARG`], never a quiet clamp). A message whose
+/// fragments come to more is not reassembled. A chain's buffer grows with what
+/// it stages, so the figure costs nothing until a message that large arrives;
+/// a direction holds at most four open chains, so the most chains can hold is
+/// four times it per direction of every flow.
+///
+/// # The total byte ceiling (ABI 67)
+///
+/// `stream_bytes_total` is what `DissectionLimits` calls by that name: the
+/// reassembled bytes every TCP flow keeps together. Past it the oldest bytes go,
+/// whichever flow and direction holds them, in the order they arrived; like the
+/// per-direction ceiling it takes bytes and never messages, and every byte it
+/// takes is counted in `dropped_by_limits.stream_bytes`.
+///
+/// # Safety
+/// `options` must point to a `wz_dissect_live_options` of at least the size
+/// its `size` field says, `serial_link_types` within it must point to
+/// `serial_link_type_count` readable values when that count is not zero, and
+/// `out` must be a writable pointer to a `*mut wz_dissect_live`. On success
+/// `*out` is a handle to be released exactly once with
+/// [`wz_dissect_live_close`]. The link types are copied; nothing the options
+/// point at is read after the call.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_open_with(
+    options: *const WzDissectLiveOptions,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let Some(options) = (unsafe { read_live_options(options) }) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let Some(mut limits) = preset_limits(options.limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let (Some(per_flow), Some(total)) = (
+        caller_ceiling(options.frames_per_flow, limits.frames_per_flow),
+        caller_ceiling(options.frames_total, limits.frames_total),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.frames_per_flow = per_flow;
+    limits.frames_total = total;
+    let Some(stream_bytes) = caller_ceiling(
+        options.stream_bytes_per_direction,
+        limits.stream_bytes_per_direction,
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.stream_bytes_per_direction = stream_bytes;
+    if options.reassembly_window_ms != 0 {
+        limits.reassembly_window_ms = Some(options.reassembly_window_ms);
+    }
+    let Some(chain_bytes) = caller_ceiling(options.chain_bytes, limits.chain_bytes) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    if chain_bytes.is_some_and(|n| n > wz_capture::MAX_CHAIN_BYTES) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    limits.chain_bytes = chain_bytes;
+    let Some(stream_bytes_total) =
+        caller_ceiling(options.stream_bytes_total, limits.stream_bytes_total)
+    else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.stream_bytes_total = stream_bytes_total;
+    let Ok(count) = usize::try_from(options.serial_link_type_count) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let serial: &[c_uint] = if count == 0 {
+        &[]
+    } else if options.serial_link_types.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    } else {
+        // SAFETY: caller contract above; the slice is copied by the handle
+        // before this call returns.
+        unsafe { core::slice::from_raw_parts(options.serial_link_types, count) }
+    };
+    let handle = Box::new(live::LiveDissection::new_declaring(limits, serial));
     // SAFETY: null-checked above.
     unsafe { *out = Box::into_raw(handle) };
     WZ_DISSECT_OK
@@ -3903,11 +4278,22 @@ fn follow_answer(walked: Result<usize, wz_capture::FollowError>) -> c_int {
 /// the one it was lent before, and the refused bytes are the caller's again
 /// when the call returns.
 ///
+/// # A handle that moved on
+///
+/// On a handle [`wz_dissect_live_follow_next`] or
+/// [`wz_dissect_live_follow_next_lent`] moved on, the container lent is the
+/// one followed now, and the containers lent before it stay lent: what the
+/// handle kept of each is read there, by a place counted across the capture's
+/// containers. [`wz_dissect_live_oldest_container`] says which of them it
+/// still reads.
+///
 /// # Safety
 /// As for [`wz_dissect_live_follow`], and the `len` bytes at `bytes` must stay
-/// readable and unchanged until the handle is closed or a later call to this
-/// door names the container where it then is. The handle reads them during any
-/// call made on it, so no call may be made on it while the container is moving.
+/// readable and unchanged until the handle is closed, a later call to this
+/// door names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above this
+/// container's number. The handle reads them during any call made on it, so no
+/// call may be made on it while the container is moving.
 #[no_mangle]
 pub unsafe extern "C" fn wz_dissect_live_follow_lent(
     handle: *mut live::LiveDissection,
@@ -3961,6 +4347,132 @@ pub unsafe extern "C" fn wz_dissect_live_followed(
     let consumed = unsafe { (*handle).followed() };
     // SAFETY: caller contract above.
     unsafe { *out = consumed };
+    WZ_DISSECT_OK
+}
+
+/// (ABI 63) — THE CONTAINER A HANDLE FOLLOWS HAS ENDED, and `bytes` is the next
+/// container of the same capture: a writer that splits one capture into
+/// several files hands each over whole, with its own headers.
+///
+/// # What goes on, and what begins again
+///
+/// The dissection goes on: the flows and their sessions (the negotiated
+/// values, the declared keys, a fragment chain still open), the lost count, the
+/// counts of what a ceiling took, the census's memory and the decryption keys.
+/// The walk of the container begins again, and packet numbers go on from the
+/// last number the handle gave, so a record never names one number twice;
+/// `*first_packet` is the number the next container's first packet takes,
+/// which a caller subtracts to find a packet in its own file. See
+/// [`live::LiveDissection::follow_next`].
+///
+/// # Which bytes are read
+///
+/// `bytes` is the next container from its first byte, as for
+/// [`wz_dissect_live_follow`], and may end inside a block: later calls of that
+/// door with more of the same container go on reading it. The bytes past the
+/// last whole block of the previous container are not read; call
+/// [`wz_dissect_live_followed`] before this door to learn whether there were
+/// any.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null argument.
+/// [`WZ_DISSECT_ERR_BAD_CAPTURE`] when the next container does not read; the
+/// handle has moved on to it all the same, and `*first_packet` is written.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, `bytes` must point
+/// to at least `len` readable bytes, and `first_packet` must be a writable
+/// `uint64_t`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow_next(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    first_packet: *mut u64,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() || first_packet.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    // SAFETY: caller contract above.
+    let container = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let (first, walked) = handle.follow_next(container);
+    // SAFETY: null-checked above.
+    unsafe { *first_packet = first as u64 };
+    follow_answer(walked)
+}
+
+/// (ABI 66) — [`wz_dissect_live_follow_next`] over a next container the caller
+/// LENDS the handle, as [`wz_dissect_live_follow_lent`] lends one.
+///
+/// The handle moves on as the copying door moves it, and is then lent `bytes`
+/// as the container it follows: later calls of [`wz_dissect_live_follow_lent`]
+/// with more of the same container go on reading it. The containers lent before
+/// stay lent for what the handle kept of them;
+/// [`wz_dissect_live_oldest_container`] says when one may be released.
+///
+/// # Errors
+///
+/// As for [`wz_dissect_live_follow_next`].
+///
+/// # Safety
+/// As for [`wz_dissect_live_follow_next`], and the `len` bytes at `bytes` must
+/// stay readable and unchanged until the handle is closed, a later
+/// [`wz_dissect_live_follow_lent`] names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above this
+/// container's number.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow_next_lent(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    first_packet: *mut u64,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() || first_packet.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    let (first, walked) = handle.follow_next_lent(lent(bytes, len));
+    // SAFETY: null-checked above.
+    unsafe { *first_packet = first as u64 };
+    follow_answer(walked)
+}
+
+/// (ABI 66) — WHICH CONTAINERS A HANDLE STILL READS: `*current` is the number
+/// of the container it follows now (`0` for the first, one more for each move
+/// [`wz_dissect_live_follow_next`] or [`wz_dissect_live_follow_next_lent`]
+/// made), and `*oldest` the number of the oldest container a kept message's
+/// bytes are still read from, `*current` when none of an earlier one is.
+///
+/// A container lent with a number below `*oldest` is never read again and may
+/// be released. See [`live::LiveDissection::oldest_container`].
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null argument.
+///
+/// # Safety
+/// `handle` must be a live handle that has not been closed, and `oldest` and
+/// `current` writable `uint64_t`s. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_oldest_container(
+    handle: *const live::LiveDissection,
+    oldest: *mut u64,
+    current: *mut u64,
+) -> c_int {
+    if handle.is_null() || oldest.is_null() || current.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (held, now) = unsafe { (*handle).oldest_container() };
+    // SAFETY: null-checked above.
+    unsafe {
+        *oldest = held as u64;
+        *current = now as u64;
+    }
     WZ_DISSECT_OK
 }
 
@@ -5010,7 +5522,9 @@ pub unsafe extern "C" fn wz_dissect_live_session_table(
 /// read of their packets, because this reader keeps no copy of a pushed packet,
 /// and that read needs the container. A handle fed by
 /// [`wz_dissect_live_push`] has no container; pass `NULL, 0`, and the document
-/// renders no datagram rows and says so with `"capture_reread":false`.
+/// renders no datagram rows and says so with `"capture_reread":false`. A handle
+/// moved on by [`wz_dissect_live_follow_next`] takes the container it follows
+/// now, and a row whose packet was in an earlier one is not read again.
 ///
 /// # `handle` is not `const`
 ///
@@ -6551,8 +7065,9 @@ fn lent(bytes: *const u8, len: usize) -> std::sync::Arc<dyn wz_capture::LentCapt
 ///
 /// # Safety
 /// As for [`wz_dissect_pcap_replay`], and the `len` bytes at `bytes` must stay
-/// readable and unchanged until the handle is closed or a later
-/// [`wz_dissect_live_follow_lent`] names the container where it then is. The
+/// readable and unchanged until the handle is closed, a later
+/// [`wz_dissect_live_follow_lent`] names the container where it then is, or
+/// [`wz_dissect_live_oldest_container`] answers an `oldest` above `0`. The
 /// handle reads them during any call made on it.
 #[no_mangle]
 pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
@@ -6579,7 +7094,10 @@ pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
 /// The summary shape. Hand-rolled rather than via serde for the same reason
 /// [`to_json`] is: this crate must not force a serde dependency on a
 /// consumer that only wants a decode out of the library.
-fn summary_json(d: &Dissection) -> String {
+///
+/// `capture` is the container `d` was read from: the `comments` member is a
+/// fact of the container's blocks and not of the dissection.
+fn summary_json(d: &Dissection, capture: &[u8]) -> String {
     // R2100 (open-debt item 509) — this document's own revision, first key.
     let mut s = String::from("{");
     wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::SUMMARY, &mut s);
@@ -6610,6 +7128,9 @@ fn summary_json(d: &Dissection) -> String {
     s.push_str(&format!("],\"skipped\":{},", d.skipped().len()));
     s.push_str("\"health\":");
     s.push_str(&wz_capture::report::health_json(d));
+    // Summary revision 9 — the container's comments.
+    s.push_str(",\"comments\":");
+    s.push_str(&wz_capture::report::capture_comments_json(capture));
     s.push('}');
     s
 }
@@ -6683,6 +7204,14 @@ mod tests {
     /// key byte in anything a door writes. The pass itself is held in
     /// `wz-tls-record` and `wz-capture`.
     mod decryption;
+
+    /// `wz_dissect_live_open_with`: the sized options a live handle is opened
+    /// under, their refusals, and a serial line declared through them.
+    mod live_options;
+
+    /// `wz_dissect_live_follow_next`: one capture written as two containers,
+    /// read by one handle, against the same capture read as one.
+    mod next_container;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -7176,7 +7705,8 @@ mod tests {
         // only be about the comparison.
         let sample = |field: &str| match field {
             "key" => "demo",
-            "zid" => "a1a1a1a1",
+            "zid" | "zids" => "a1a1a1a1",
+            "session" => "a1a1a1a1/b2b2b2b2",
             "dir" => "a",
             "kind" => "put",
             "closed" => "yes",
@@ -7537,6 +8067,45 @@ mod tests {
         assert!(
             json.contains("\"capture_reported_drops\":17"),
             "the capture tool's own admission must cross the boundary: {json}"
+        );
+    }
+
+    /// Summary revision 9 — a pcapng's comments cross the boundary: the packet
+    /// carrying two is counted once and its comments twice, by each summary
+    /// door alike, and a classic pcap says zero and none.
+    #[test]
+    fn a_pcapngs_commented_packets_are_counted_in_the_summary() {
+        use wz_capture::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let commented = PacketSpec {
+            interface: 0,
+            ticks: 1_000_000,
+            data: &[0u8; 4],
+            options: &[(OPT_COMMENT, b"first"), (OPT_COMMENT, b"second")],
+        };
+        let plain = PacketSpec {
+            interface: 0,
+            ticks: 2_000_000,
+            data: &[0u8; 4],
+            options: &[],
+        };
+        let file = write_with_options(ByteOrder::Little, &[(1, 6)], &[commented, plain]);
+        let counted = "\"comments\":{\"commented_packets\":1,\"packet_comments\":2,\
+                       \"not_utf8\":0,\"sections\":[]}";
+        for json in [
+            call_summary(&file).expect("the pcapng reads"),
+            call_summary_bounded(&file).expect("the pcapng reads"),
+            call_summary_keyed(&file, WZ_DISSECT_LIMITS_NONE, None).expect("the pcapng reads"),
+        ] {
+            assert!(json.contains(counted), "{json}");
+        }
+        let classic = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = call_summary(&classic).expect("a classic pcap still reads");
+        assert!(
+            json.contains(
+                "\"comments\":{\"commented_packets\":0,\"packet_comments\":0,\
+                 \"not_utf8\":0,\"sections\":[]}"
+            ),
+            "{json}"
         );
     }
 
@@ -8125,7 +8694,8 @@ mod tests {
     const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":null,\"frames_total\":null,\
-         \"stream_bytes_per_direction\":null,\
+         \"stream_bytes_per_direction\":null,\"stream_bytes_total\":null,\
+         \"chain_bytes\":65536,\
          \"skipped_packets\":null,\"max_flows_per_table\":null,\
          \"max_scout_askers\":null}}";
 
@@ -8138,7 +8708,8 @@ mod tests {
     const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":10000,\"frames_total\":100000,\
-         \"stream_bytes_per_direction\":4194304,\
+         \"stream_bytes_per_direction\":4194304,\"stream_bytes_total\":83886080,\
+         \"chain_bytes\":65536,\
          \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
          \"max_scout_askers\":1024}}";
 
@@ -9849,7 +10420,7 @@ mod tests {
         // revision 10 the four `e2e` fields joining.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
@@ -9869,7 +10440,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":10},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":13},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -9980,6 +10551,154 @@ mod tests {
             WZ_DISSECT_ERR_INVALID_ARG
         );
         assert!(out.is_null());
+    }
+
+    /// (ABI 60) A `time` LITERAL WITH NO OFFSET GAINS THE CALLER'S, and nothing
+    /// else of the text moves: the zone binder writes the offset after each such
+    /// literal, inside the quotes of a quoted one, leaves a literal that has one
+    /// and an integer as written, binds node names as the binder does with its
+    /// refusals at positions in the text typed, and refuses an offset no zone
+    /// has with no string.
+    #[test]
+    fn the_zone_binder_writes_the_callers_offset_onto_each_unzoned_time() {
+        let typed = "time > 12:04 and time < \"2026-11-23 13:00\" or time == 5 or time > 1:00Z";
+        let bound = call_selector_bind_in_zone(typed, None, 540).expect("a readable text");
+        assert!(
+            bound.contains(
+                "\"ok\":true,\"selector\":\"time > 12:04+09:00 and time < \
+                 \\\"2026-11-23 13:00+09:00\\\" or time == 5 or time > 1:00Z\""
+            ),
+            "{bound}"
+        );
+        let west = call_selector_bind_in_zone("time >= 2026-11-23", None, -330).expect("readable");
+        assert!(
+            west.contains("\"selector\":\"time >= 2026-11-23-05:30\""),
+            "{west}"
+        );
+        let listed =
+            call_selector_bind_in_zone("time in {12:00, 13:00}", None, 0).expect("readable");
+        assert!(
+            listed.contains("\"selector\":\"time in {12:00+00:00, 13:00+00:00}\""),
+            "{listed}"
+        );
+
+        // Names are bound as the binder binds them, and a refusal points into
+        // the text typed, not the text with offsets written.
+        const CAM: &str = "ff0eedd0c0b0a0908070605040302011";
+        let table = format!(r#"{{"front camera":"{CAM}"}}"#);
+        let both = call_selector_bind_in_zone(
+            r#"node == "front camera" and time > 9:30"#,
+            Some(&table),
+            60,
+        )
+        .expect("readable");
+        assert!(
+            both.contains(&format!(
+                "\"selector\":\"zid == {CAM} and time > 9:30+01:00\""
+            )),
+            "{both}"
+        );
+        let unknown =
+            call_selector_bind_in_zone(r#"time > 9:30 and node == "radar""#, Some(&table), 60)
+                .expect("readable");
+        assert!(
+            unknown.contains("\"refusal\":\"unknown_node\"")
+                && unknown.contains("\"start\":16,\"end\":31"),
+            "{unknown}"
+        );
+
+        // What the binder hands back is a selector the doors take.
+        let file = census_capture();
+        assert!(call_census_where(&file, "time > 12:04+09:00").is_ok());
+        assert!(call_census_where(&file, "time > 12:04").is_ok());
+
+        // An offset past 23:59 is no zone's, and a null is refused; neither
+        // hands back a string.
+        for minutes in [1440, -1440, c_int::MAX, c_int::MIN] {
+            assert_eq!(
+                call_selector_bind_in_zone("time > 9:30", None, minutes),
+                Err(WZ_DISSECT_ERR_INVALID_ARG),
+                "{minutes}"
+            );
+        }
+        assert!(call_selector_bind_in_zone("time > 9:30", None, 1439).is_ok());
+        assert!(call_selector_bind_in_zone("time > 9:30", None, -1439).is_ok());
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_zone(core::ptr::null(), core::ptr::null(), 0, &mut out)
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+        assert!(out.is_null());
+    }
+
+    /// (ABI 65) THE RULE BINDER writes onto a date the offset its rule puts in
+    /// force then, on each side of both changes, and onto a clock time the rule
+    /// itself, quoted; it refuses a date the clock skips or shows twice at the
+    /// date's span, a rule that does not read with no span, and a null with no
+    /// string. What it writes is a selector the doors take.
+    #[test]
+    fn the_rule_binder_writes_the_offset_in_force_and_refuses_what_it_cannot_place() {
+        const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+        let typed = "time > 2026-01-15T12:00 and time < 2026-07-15T12:00 or time > 12:04";
+        let bound = call_selector_bind_in_tz(typed, None, CET).expect("a readable text");
+        assert!(
+            bound.contains(
+                "\"ok\":true,\"selector\":\"time > 2026-01-15T12:00+01:00 and \
+                 time < 2026-07-15T12:00+02:00 or \
+                 time > \\\"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\\\"\""
+            ),
+            "{bound}"
+        );
+        let skipped =
+            call_selector_bind_in_tz("time > 2026-03-29T02:30", None, CET).expect("readable");
+        assert!(
+            skipped.contains("\"refusal\":\"skipped_time\"")
+                && skipped.contains("\"start\":7,\"end\":23"),
+            "{skipped}"
+        );
+        let repeated =
+            call_selector_bind_in_tz("time > 2026-10-25T02:30", None, CET).expect("readable");
+        assert!(
+            repeated.contains("\"refusal\":\"repeated_time\"")
+                && repeated.contains("\"start\":7,\"end\":23"),
+            "{repeated}"
+        );
+        let zone = call_selector_bind_in_tz("time > 12:04", None, "CET-1CEST").expect("readable");
+        assert!(
+            zone.contains("\"refusal\":\"zone\"") && !zone.contains("\"start\""),
+            "{zone}"
+        );
+
+        // The selector it hands back is one the doors take.
+        let file = census_capture();
+        let written = "time > \"12:04[CET-1CEST,M3.5.0,M10.5.0/3]\"";
+        let dated = "time > 2026-01-15T12:00+01:00";
+        assert!(call_census_where(&file, written).is_ok());
+        assert!(call_census_where(&file, dated).is_ok());
+
+        // A null is refused and hands back no string.
+        let sel = CString::new("time > 12:04").expect("no NUL");
+        let rule = CString::new(CET).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        for (selector, tz) in [
+            (core::ptr::null(), rule.as_ptr()),
+            (sel.as_ptr(), core::ptr::null()),
+        ] {
+            let rc = unsafe {
+                wz_dissect_selector_bind_in_tz(selector, core::ptr::null(), tz, &mut out)
+            };
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+            assert!(out.is_null());
+        }
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_tz(
+                sel.as_ptr(),
+                core::ptr::null(),
+                rule.as_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
     }
 
     /// The census door keeps the ABI's memory contract: a bad capture is a
@@ -10442,7 +11161,27 @@ mod tests {
         // 59, for `wz_dissect_live_field_values_since_window`: one symbol, the
         // values door with one more integer in, a `char*` released by
         // `wz_dissect_string_free` out; no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 59);
+        // 60, for `wz_dissect_selector_bind_in_zone`: one symbol, the binder
+        // with one integer more in, a `char*` released by
+        // `wz_dissect_string_free` out; no struct is new.
+        // 61, for `wz_dissect_live_open_with`: one symbol, a sized struct the
+        // caller owns in (read under the size it writes, nothing kept of it)
+        // and the handle out, released by `wz_dissect_live_close`.
+        // 62, for that struct growing two fields at its end; no symbol moves.
+        // 63, for `wz_dissect_live_follow_next`: one symbol, a container's bytes
+        // in and a `uint64_t` the caller owns out; nothing is retained of the
+        // bytes and no struct is new.
+        // 64, for that struct growing `chain_bytes`; no symbol moves.
+        // 65, for `wz_dissect_selector_bind_in_tz`: one symbol, the binder with
+        // one string more in, a `char*` released by `wz_dissect_string_free`
+        // out; no struct is new.
+        // 66, for `wz_dissect_live_follow_next_lent` and
+        // `wz_dissect_live_oldest_container`: two symbols, the first retaining
+        // the caller's container pointer as the lending doors do, the second two
+        // `uint64_t` the caller owns out. No struct is new.
+        // 67, for the options struct growing `stream_bytes_total`; no symbol
+        // moves.
+        assert_eq!(wz_dissect_abi_version(), 67);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10926,7 +11665,7 @@ mod tests {
             over.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":\"application/json\""
             ),
             "a label the bytes refute must not hide the data, and the override \
@@ -11174,9 +11913,12 @@ mod tests {
         // `rule_index`), a failure anywhere (`line`, `text`, `message`) and a
         // failure at a KEY (`pattern`, `chunk`, `offset`, `reason`). The empty
         // text is the success with no lines.
+        // A ROS definition file's line names its types and their hashes
+        // (`types`, `type_hash`), which no other line carries.
         let decl_ok = vec![
             call_declarations_diagnose(""),
             call_declarations_diagnose("demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8"),
+            call_declarations_diagnose("#@demo/srv/Add.srv=\"int64 a\\n---\\nint64 sum\""),
         ];
         let decl_bad = vec![
             call_declarations_diagnose("not a declaration"),
@@ -11197,6 +11939,10 @@ mod tests {
                 vec![
                     call_summary(&stream).expect("the summary door reads a pcap"),
                     call_summary(&unread_interface_capture())
+                        .expect("the summary door reads a pcapng"),
+                    // And a section that carries a comment, the only shape that
+                    // puts an entry under `comments.sections`.
+                    call_summary(&commented_section_capture())
                         .expect("the summary door reads a pcapng"),
                 ],
             ),
@@ -11873,6 +12619,67 @@ mod tests {
         s
     }
 
+    /// Drive the zone binder the way C does: the document on OK, the code on
+    /// anything else.
+    fn call_selector_bind_in_zone(
+        selector: &str,
+        names: Option<&str>,
+        minutes: c_int,
+    ) -> Result<String, c_int> {
+        let text = CString::new(selector).expect("no interior NUL");
+        let table = names.map(|n| CString::new(n).expect("no interior NUL"));
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_zone(
+                text.as_ptr(),
+                table.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                minutes,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refused call handed back a string");
+            return Err(rc);
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// Drive the rule binder the way C does: the document on OK, the code on
+    /// anything else.
+    fn call_selector_bind_in_tz(
+        selector: &str,
+        names: Option<&str>,
+        rule: &str,
+    ) -> Result<String, c_int> {
+        let text = CString::new(selector).expect("no interior NUL");
+        let table = names.map(|n| CString::new(n).expect("no interior NUL"));
+        let tz = CString::new(rule).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind_in_tz(
+                text.as_ptr(),
+                table.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                tz.as_ptr(),
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "a refused call handed back a string");
+            return Err(rc);
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
     /// Every shape the binder's verdict takes, success first.
     /// Drive the node sentence the way C does.
     fn call_selector_term(node: &str, verb: c_int, selector: Option<&str>) -> String {
@@ -11963,12 +12770,20 @@ mod tests {
 
     fn bind_documents() -> Vec<String> {
         const NAMES: &str = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        const CET: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
+        let in_tz = |selector: &str, rule: &str| {
+            call_selector_bind_in_tz(selector, None, rule).expect("a readable text")
+        };
         vec![
             call_selector_bind("kind == put and node == cam or node != lidar", Some(NAMES)),
             call_selector_bind("node == radar", Some(NAMES)),
             call_selector_bind("node == twin", Some(r#"{"twin":"a1b2","twin":"c3d4"}"#)),
             call_selector_bind("node ==", Some(NAMES)),
             call_selector_bind("node == cam", Some("[]")),
+            // The rule binder's three words, which only it writes.
+            in_tz("time > 12:04", "CET-1CEST"),
+            in_tz("time > 2026-03-29T02:30", CET),
+            in_tz("time > 2026-10-25T02:30", CET),
         ]
     }
 
@@ -12634,8 +13449,9 @@ mod tests {
         let doc = call(0);
         assert!(
             doc.contains(
-                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"values\":[\
-                 {\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\"enum_number\":null}]}"
+                "\"state\":\"decoded\",\"typed\":true,\"schema\":\"Reading\",\"type_hash\":null,\
+                 \"values\":[{\"path\":\"1\",\"type\":\"int32\",\"typed_value\":150,\
+                 \"enum_number\":null}],\"chosen_by\":\"rule\",\"encoding_schema\":null}"
             ),
             "{doc}"
         );
@@ -14658,7 +15474,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":false,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"protobuf\""
             ),
             "the covering rule must fire: {decoded}"
@@ -14678,6 +15494,85 @@ mod tests {
             "and the DECLARED name must ride the decoded field -- protobuf's \
              wire format carries none, so this is the only place one can come \
              from: {decoded}"
+        );
+    }
+
+    /// Field document 82 — A JSON PUBLISHER IS READ WITH NO KEY RULE: one
+    /// encoding rule, and a sample declaring `application/json` comes back
+    /// decoded as json, chosen by its encoding, its number leaf carrying a
+    /// typed value. With no encoding rule the same capture asks for nothing.
+    #[test]
+    fn a_json_publisher_is_read_by_its_encoding_with_no_key_rule() {
+        const JSON: u32 = 5;
+        let file = capture_declaring(JSON, br#"{"t":21.5}"#);
+        let decoded =
+            call_fields_with_payloads(&file, 0, "demo/**=encoding").expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":null,\"type_hash\":null,\
+                 \"despite_encoding\":null,\"format\":\"json\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.t\",\"name\":null,\"value\":\"number 21.5\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains(
+                "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
+                 \"chosen_by\":\"encoding\",\"encoding_schema\":null}"
+            ),
+            "{decoded}"
+        );
+        let unasked = call_fields_with_payloads(&file, 0, "").expect("the capture reads");
+        assert!(!unasked.contains("\"chosen_by\""), "{unasked}");
+    }
+
+    /// A ROS 2 publisher's CDR payload is read into its fields through the
+    /// ABI by the definition the text declares and the rule that names it,
+    /// and the same capture under a rule whose type no file defines is refused
+    /// as a declaration.
+    #[test]
+    fn a_cdr_payload_is_read_by_its_declared_ros_definition() {
+        const CDR: u32 = 7;
+        // std_msgs/msg/String "hello": the little-endian header, the length
+        // counting the NUL, the bytes, the NUL and the padding to four.
+        let hello = [
+            0u8, 1, 0, 0, 6, 0, 0, 0, b'h', b'e', b'l', b'l', b'o', 0, 0, 0,
+        ];
+        let file = capture_declaring(CDR, &hello);
+        let declarations = "#@std_msgs/msg/String.msg=\"string data\"\n\
+                            demo/**=cdr@std_msgs/msg/String";
+        let decoded = call_fields_with_payloads(&file, 0, declarations).expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":\"std_msgs/msg/String\",\
+                 \"type_hash\":\"RIHS01_df668c740482bbd48fb39d76a70dfd4b\
+                 d59db1288021743503259e948f6b1a18\",\
+                 \"despite_encoding\":null,\"format\":\"cdr\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.data\",\"name\":\"data\",\"value\":\"\\\"hello\\\"\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"type\":\"string\",\"typed_value\":\"hello\""),
+            "{decoded}"
+        );
+        assert_eq!(
+            call_fields_with_payloads(
+                &file,
+                0,
+                "#@std_msgs/msg/String.msg=\"string data\"\ndemo/**=cdr@std_msgs/msg/Nope",
+            ),
+            Err(WZ_DISSECT_ERR_DECLARATION)
         );
     }
 
@@ -14710,7 +15605,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":true,\"schema\":null,\"type_hash\":null,\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \
@@ -14783,7 +15678,7 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":5}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":6}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
             format!(
@@ -15912,7 +16807,10 @@ mod tests {
             3,
             "the three requests are open: {first}"
         );
-        assert!(first.contains("\"revision\":5"), "{first}");
+        assert!(
+            first.contains("\"name\":\"selection_since\",\"revision\":7}"),
+            "{first}"
+        );
         let cursor = through_seq_of(&first);
         assert!(cursor > 3, "{first}");
 
@@ -16746,6 +17644,39 @@ mod tests {
     /// A pcapng with an Ethernet interface and an interface on `LINKTYPE_USER0`
     /// (147), which this build does not decapsulate: two packets on the first
     /// and three on the second, interleaved.
+    fn commented_section_capture() -> Vec<u8> {
+        let file = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 1_000, &[0u8; 4])]);
+        // The writer's Section Header Block is its first 28 bytes; this one is
+        // laid out from the format with one `opt_comment` in its option list.
+        let comment = b"bench A";
+        let mut body = 0x1A2B_3C4Du32.to_le_bytes().to_vec();
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&u64::MAX.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        body.extend_from_slice(comment);
+        body.push(0);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        let total = (12 + body.len()) as u32;
+        let mut out = 0x0A0D_0D0Au32.to_le_bytes().to_vec();
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&file[28..]);
+        out
+    }
+
+    /// The summary carries a section's comment beside the section it heads.
+    #[test]
+    fn a_section_comment_is_carried_in_the_summary() {
+        let json = call_summary(&commented_section_capture()).expect("the pcapng reads");
+        assert!(
+            json.contains("\"sections\":[{\"section\":0,\"text\":\"bench A\",\"utf8\":true}]"),
+            "{json}"
+        );
+    }
+
     fn unread_interface_capture() -> Vec<u8> {
         let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
         let own_record = [0xA5u8; 12];
@@ -20967,6 +21898,10 @@ mod tests {
                     "/payload_decode/matched_rule",
                     "/payload_decode/state",
                     "/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/payload_decode/chosen_by",
+                    "/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21090,6 +22025,10 @@ mod tests {
                     "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/state",
                     "/above_transport/carried[]/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/above_transport/carried[]/payload_decode/chosen_by",
+                    "/above_transport/carried[]/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21113,6 +22052,10 @@ mod tests {
                     "/payload_decode/matched_rule",
                     "/payload_decode/state",
                     "/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/payload_decode/chosen_by",
+                    "/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21134,6 +22077,10 @@ mod tests {
                     "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/state",
                     "/above_transport/carried[]/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/above_transport/carried[]/payload_decode/chosen_by",
+                    "/above_transport/carried[]/payload_decode/encoding_schema",
                 ]),
             ),
             (

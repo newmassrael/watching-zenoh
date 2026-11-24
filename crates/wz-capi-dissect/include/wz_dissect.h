@@ -1413,7 +1413,46 @@
  *     Each tag is four bytes that follow the span, the EtherType field then
  *     reads the tag's protocol id, and this object does not place the tags.
  *
+ *   "packet_comments":[{"text":"slow reply","utf8":true}]|null
+ *
+ *     (field-document revision 81, row_facts 21) Every comment the pcapng
+ *     block of that same packet carries (`opt_comment`, what a capture tool
+ *     stores when a person comments a packet), in the block's order, repeats
+ *     included. `text` is the comment as stored when it is UTF-8; when it is
+ *     not, `utf8` is `false` and `text` is its decoding with each invalid
+ *     sequence replaced by U+FFFD. Nothing is trimmed or interpreted. `[]` for
+ *     a packet with none, which every classic pcap record is. `null` when the
+ *     packet is not in hand: `first_byte` is `null`, or the packet could not be
+ *     re-read from the bytes this call was given, which includes a stream row
+ *     whose bytes the byte ceiling has since discarded. Only the packet holding the
+ *     row's FIRST byte is read, so every row of a packet carries its comments
+ *     and a packet that holds no row's first byte (a bare acknowledgement, a
+ *     message's middle segment) is on no row: the summary's `comments` counts
+ *     every commented packet, so a reader can tell the capture has comments
+ *     without walking the rows. Such a packet's comments are its flow's
+ *     `unrowed_comments` (below).
+ *
  * Per FLOW, beside `flow`:
+ *
+ *   "unrowed_comments":[{"packet":N,"comments":[{"text":..,"utf8":bool}]}]|null
+ *
+ *     (field-document revision 85, row_facts 25) The comments of every packet
+ *     of the flow whose pcapng block carries one and which carries the first
+ *     byte of none of the flow's messages this library holds: a bare
+ *     acknowledgement, a segment holding the middle or only the length prefix
+ *     of a message, a datagram that decoded to nothing, the packet of an lz4
+ *     batch (its messages name no packet). In packet order; `packet` is the
+ *     number a row's `first_byte.packet` uses, and each comment is as in
+ *     `packet_comments`. With the rows' `packet_comments` every comment on a
+ *     packet of the flow is carried exactly once. Which packets carry a first
+ *     byte is read off the messages held, not off the rows a cap or a window
+ *     writes, so every document of one capture lists the same; a message a
+ *     retention ceiling gave up no longer holds its packet. A packet is the
+ *     flow's when it decapsulates to the flow's addresses and ports; a piece of
+ *     a fragmented IP datagram is no flow's and is in no list (the summary
+ *     counts it). `[]` when there is none; `null` when the bytes this call was
+ *     given could not be read again (`capture_reread` false). Written last in
+ *     the flow's object.
  *
  *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
  *              "compression":bool|null,"qos":bool|null,"patch":N|null,
@@ -1739,7 +1778,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":27,
+ *     {"document":{"name":"census","revision":30,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1785,13 +1824,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":80,"key":"kind","values":[...],
+ *     {"name":"fields","revision":86,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":27,"key":"mode","values":[...],
+ *     {"name":"census","revision":30,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1824,6 +1863,7 @@
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields check passenger
+ * @carries fields chosen_by passenger
  * @carries fields client passenger
  * @carries fields completed passenger
  * @carries fields control passenger
@@ -2220,7 +2260,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 59
+#define WZ_DISSECT_ABI_REVISION 67
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2400,6 +2440,25 @@ int wz_dissect_transport_message_in(const char *context_json,
  * `frames` count the zenoh messages inside. See wz_dissect_pcap_session_table
  * for the pass and what it does not reach.
  *
+ * (summary revision 9) THE CAPTURE'S COMMENTS, after `health`:
+ *
+ *     "comments":{"commented_packets":2,"packet_comments":3,"not_utf8":0,
+ *                 "sections":[{"section":0,"text":"lab bench","utf8":true}]}
+ *
+ * `commented_packets` counts the pcapng packet blocks (Enhanced and the
+ * obsolete Packet Block) carrying at least one `opt_comment`, and
+ * `packet_comments` the comments over them, repeats included: whether the file
+ * holds comments is answered here without walking a row. Each packet's own
+ * comments are its rows' `packet_comments` in the field document.
+ * `not_utf8` counts the packet comments whose bytes were not UTF-8.
+ * `sections` carries every Section Header Block comment in file order, with
+ * the section it heads counted from 0 as `capture_interfaces` counts it; such
+ * a comment describes the whole capture, and no row or interface holds it. An
+ * interface's comments are its `capture_interfaces` entry's. Read from the
+ * container's blocks by their length rules, so a block cut short at the end of
+ * the bytes and everything after a block that breaks them is not counted. All
+ * zeros and `[]` for a classic pcap, which has no options.
+ *
  * SUBSUMED BY wz_dissect_pcap_summary_keyed -- that door takes the limits
  * preset and a key log as ARGUMENTS, and with WZ_DISSECT_LIMITS_NONE and no key
  * log it writes this document byte for byte. Kept and still linkable. */
@@ -2426,6 +2485,23 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * about whether a cap existed to bite, which is the whole distinction this
  * bounded door was added to make. Reading a loss beside its ceiling is also
  * how you tell which cap is NEAREST without waiting for one to bite.
+ *
+ * (ABI 64) -- and `caps` names `chain_bytes`, after
+ * `stream_bytes_per_direction`: the bytes one fragment chain may join into a
+ * message. Never `null`, because a chain always has a ceiling: 65,536 unless
+ * a live handle was opened with another (wz_dissect_live_open_with). A message
+ * whose fragments come to more is not reassembled, and its chain is counted
+ * under the census's `fragment_chains.aborted_capacity_overflow`. Census 28,
+ * fields 83, summary 10, session_table 16, selection 8, retention 5, health 6,
+ * selection_since 6 and row_facts 23 carry it.
+ *
+ * (ABI 67) -- and `caps` names `stream_bytes_total`, between
+ * `stream_bytes_per_direction` and `chain_bytes`: the reassembled bytes
+ * every TCP flow keeps together, or `null` for none. The bytes it takes are
+ * counted in `dropped_by_limits.stream_bytes` with the per-direction
+ * ceiling's, so read that against both. Census 30, fields 86, summary 11,
+ * session_table 17, selection 9, retention 6, health 7, selection_since 7 and
+ * row_facts 26 carry it.
  *
  * R2630 -- and the group counts `scouting`: the SCOUT and HELLO datagrams a
  * `frames_per_flow` ceiling evicted from a flow's scouting list. It shares
@@ -2552,15 +2628,15 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   dir          a or b, either case                         == !=
  *   kind         put del query reply err                     == !=
  *   bytes        an integer                                  == != < <= > >=
- *   time         an integer, ms                              == != < <= > >=
- *   elapsed      an integer, ms since the capture began      == != < <= > >=
+ *   time         ms, a date or a clock time (see below)      == != < <= > >=
+ *   elapsed      ms or 1.5s (see below), since the start     == != < <= > >=
  *   offset       an integer, bytes into the framing unit     == != < <= > >=
- *   delay        an integer, ms from the source's stamp      == != < <= > >=
+ *   delay        ms or 1.5s, from the source's stamp         == != < <= > >=
  *   zid          the sender's zid, or a prefix of it         == !=
  *   replies      an integer                                  == != < <= > >=
  *   errs         an integer                                  == != < <= > >=
- *   first_reply  an integer, ms                              == != < <= > >=
- *   completion   an integer, ms                              == != < <= > >=
+ *   first_reply  ms or 1.5s                                  == != < <= > >=
+ *   completion   ms or 1.5s                                  == != < <= > >=
  *   closed       yes or no (y or n)                          == !=
  *   value        the payload's bytes: "text" or 0x and bytes contains == !=
  *   node         the sender's name, bound before the doors   == !=
@@ -2579,6 +2655,9 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   e2e.crc      ok error                                    == !=
  *   e2e.counter  none repeat out_of_range unjudged           == !=
  *   e2e.timeout  ok error unjudged                           == !=
+ *   row          an integer, the row's place, from 0         == != < <= > >=
+ *   zids         either end's zid, or a prefix of it         == !=
+ *   session      the two ends' zids, a/b, either order       == !=
  *
  * THE END-TO-END JUDGE'S VERDICT. A Push carrying a put under a key a profile
  * rule covers is a FRAME, and so (since field-document revision 66, selection
@@ -2637,6 +2716,77 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * numbering; a file's flows are numbered by position, stream flows first).
  * `packet` is the packet the document numbers the row by: a datagram row's
  * `packet`, a stream row's `first_byte.packet`, from 0.
+ *
+ * (selector_fields revision 7) `row` is the ROW'S OWN NUMBER, where `packet` is its packet's and
+ * the rows of one packet share it: the row's place, from 0, in the order the
+ * selection document writes its rows, which is the field document's rows flow
+ * after flow (THE ORDER OF ROWS, at the field document, gives it). Every row a
+ * list ever produced holds its place, so a ceiling that takes the front of a
+ * list moves no row's number, and a max_messages_shown_per_flow moves none
+ * either; where no ceiling has taken a row, a row's number is its index in the
+ * selection document's `rows`. A row's number moves when a flow written before
+ * it gains a row; a live handle's `seq` is the number that never moves. Every
+ * door that takes a selector reads a `row` term against the capture as it is
+ * when the door is called, once and before any row is judged: the field
+ * documents, wz_dissect_live_selection and its siblings,
+ * wz_dissect_live_selected_packets, and (census revision 29, values-document
+ * revision 4) the census doors and the values doors, which write no rows of
+ * their own and judge each record by the place of the row that carried it. A
+ * door that keeps a memory between calls (wz_dissect_live_selection_since,
+ * wz_dissect_live_census, the values doors) begins it again when the rows a
+ * `row` term picks have changed, which a selector like `row > 5` does at
+ * every call that brought a row, so such a selector costs a whole walk a call.
+ * A row of a list no document writes (a recovered QUIC stream, a serial line)
+ * has no place and is UNDECIDED.
+ *
+ * (ABI 60, selector_fields revision 8) TIME AS A PERSON WRITES IT. `time` takes
+ * milliseconds since the Unix epoch, and also:
+ *
+ *     - an ISO 8601 date and clock time, `2026-11-23T12:04:00`, with `T` (or
+ *       `t`, or a space inside quotes) between them, the seconds and up to three
+ *       digits of a fraction optional, and an offset optional: `Z`, `+09:00`,
+ *       `+0900` or `+09`. A date alone is its midnight.
+ *     - a clock time alone, `12:04`, `12:04:00` or `12:04:00.250` (the hour in
+ *       one digit or two), with an offset optional. Its day is THE CAPTURE'S: the
+ *       day a clock at the offset reads the capture's first instant in, so
+ *       `time > 12:04` over a capture that began at 12:04:30 is every row after
+ *       12:04 of that day. One day and not the nearest: a time past a midnight
+ *       the capture crossed is written with its date. It is UNDECIDED wherever
+ *       `elapsed` is.
+ *     - A LITERAL WITH NO OFFSET IS READ IN UTC, by every door. The zone a list
+ *       shows times in is the reader's and not the capture's: to have such
+ *       literals read in yours, pass the selector through
+ *       wz_dissect_selector_bind_in_zone, which writes your offset onto each,
+ *       or, for a zone that goes forward and back, wz_dissect_selector_bind_in_tz.
+ *     - (ABI 65, selector_diagnose revision 13) A ZONE RULE in brackets after
+ *       the time, inside quotes: `time > "12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`.
+ *       The rule is a POSIX TZ string (wz_dissect_selector_bind_in_tz gives
+ *       its grammar). A date is read at the offset the rule puts in force at
+ *       that local time, and one the clock skips where it goes forward or
+ *       shows twice where it goes back is refused at the value, as is a rule
+ *       that does not read and a time that also carries an offset. A clock
+ *       time is read on the capture's day at the offset in force on that day,
+ *       and is UNDECIDED on a day that skips or repeats it.
+ *
+ * More than three digits of a fraction name an instant the field cannot
+ * compare, and are refused, as are a date before 1970 and a day the month does
+ * not have; a value that opens with a digit and is no integer, no date and no
+ * clock time is refused at the value as one `time` does not admit. `elapsed`,
+ * `delay`, `first_reply` and `completion` take a number and a unit besides an
+ * integer of milliseconds: `250ms`, `1.5s`, `2min`, `1h`, `2000us`,
+ * `3000000ns`. The value must come to a whole number of milliseconds: `0.5ms`
+ * and `1.0005s` are refused, never rounded.
+ *
+ * BOTH ENDS. `zid` is the sender's zid. `zids` is EITHER end's: `zids == X` is
+ * every message node X sent and every message sent to it. `session == X/Y` is
+ * every message between X and Y, either way and on every link of theirs: two
+ * zids joined by a slash, in either order, naming two nodes. Each is read as a
+ * `zid` value is, a prefix included, and an ambiguous one is reported under
+ * `ambiguous_zid_prefixes` with the span of its own digits. The receiver's zid
+ * is known where the sender's is, from a handshake the capture saw. With an end
+ * unknown the answer is UNDECIDED unless the other end settles it (`zids == X`
+ * is `yes` when the known end is X, `session == X/Y` is `no` when the known
+ * end is neither), and `!=` and `not` are undecided with it, as for `zid`.
  *
  * `value` compares the application payload of a Put, a Reply or an Err as the
  * publisher put it: after the transport has decompressed and reassembled the
@@ -2848,7 +2998,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":14},"ok":true,
+ *     {"document":{"name":"session_table","revision":17},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -2881,6 +3031,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                             "zenoh":"yes","announced_version":"own",
  *                             "zenoh_evidence":{...},
  *                             "unit_readings":{...},
+ *                             "direction_basis":"endpoints",
  *                             "stream_anomalies":{
  *                               "low_to_high":{"retransmits":0,
  *                                 "out_of_order":0,"partial_overlaps":0},
@@ -2964,10 +3115,34 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                finding, its `decryption` and `key_source` (session_table
  *                revision 13; see WHAT THE PASS MADE OF A FLOW below), its
  *                own `bytes`, its own three zenoh keys, its own
- *                `unit_readings`, its `stream_anomalies` (session_table
- *                revision 11; see STREAM ANOMALIES below) and its own
- *                `unstated`, which names a null cell of the flow as the row's
- *                names one of the row.
+ *                `unit_readings`, its `direction_basis` (session_table
+ *                revision 15; see DIRECTION BASIS below), its
+ *                `stream_anomalies` (session_table revision 11; see STREAM
+ *                ANOMALIES below) and its own `unstated`, which names a null
+ *                cell of the flow as the row's names one of the row.
+ *
+ * DIRECTION BASIS (session_table revision 15). Every flow object carries
+ * `direction_basis`, how the flow's two halves `a` and `b` were told apart:
+ *
+ *   `endpoints`        the flow's two endpoints, as WHICH HALF IS `a` above
+ *                      says: every `tcp`, `udp`, `raweth` and `vsock` flow.
+ *   `handshake`        the serial line, whose capture held a wire per
+ *                      interface, and a serial handshake frame named the
+ *                      interface the initiator sent on: its frames are `a`.
+ *   `interface_order`  the serial line, a wire per interface, and no
+ *                      handshake frame settled which is which: the first
+ *                      interface the capture holds is `a`, a convention and not
+ *                      a measurement.
+ *   `unknown`          the serial line, both wires in one interface (a classic
+ *                      pcap, or a pcapng with one): nothing separates the
+ *                      directions, every message reads `a`, and the initiator
+ *                      and acceptor cells read as a session whose Inits went
+ *                      one way.
+ *
+ * A word this header does not list means the library is newer than your
+ * header; show the flow's direction as unattributed. See
+ * wz_dissect_live_open_with for how a serial line is declared and where else
+ * it appears.
  *
  * STREAM ANOMALIES. A TCP flow's `stream_anomalies` holds, for each direction
  * of its flow key, what that direction's reassembler counted:
@@ -3374,7 +3549,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * ingest. The document carries, after `membership`,
  *
  *   "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
- *                          "ts_resolution":6,"ts_offset_s":0}]
+ *                          "ts_resolution":6,"ts_offset_s":0,"comments":[]}]
  *
  * every interface a pcapng capture's IDBs describe, in file order: `section`
  * counts Section Header Blocks from 0 and `id` restarts in each; `name` is
@@ -3382,7 +3557,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * ten, or of two with the high bit set; 6 is microseconds); `ts_offset_s` the
  * `if_tsoffset` seconds. Empty for a classic pcap. A frame snapped shorter than
  * it was sent is counted capture-wide only, in `health.skips.truncated` when it
- * could not be read at all.
+ * could not be read at all. Since field-document revision 81 (row_facts 21)
+ * each entry carries `comments`, the IDB's own `opt_comment` values in order,
+ * each `{"text":..,"utf8":..}` as a row's `packet_comments` writes one; `[]`
+ * when it has none.
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -3672,10 +3850,12 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values session_table strength
  * @values session_table q_basis
  * @values session_table eps_basis
+ * @values session_table direction_basis
  * @carries session_table announced_version passenger
  * @carries session_table cell passenger
  * @carries session_table check passenger
  * @carries session_table decryption passenger
+ * @carries session_table direction_basis passenger
  * @carries session_table encrypted passenger
  * @carries session_table eps_basis passenger
  * @carries session_table family passenger
@@ -3752,6 +3932,11 @@ int wz_dissect_pcap_session_table_keyed(const unsigned char *bytes, size_t len,
  * on the term's first byte: only a selector a name table has resolved
  * (wz_dissect_selector_bind) is one the doors take. The `tokens` classes did
  * not move: `contains` is a `word`, an operator only where one stands.
+ *
+ * From verdict revision 13 a `time` value may carry a zone rule in brackets
+ * (THE SELECTOR LANGUAGE), and a date with one that its clock skips or shows
+ * twice, or a rule that does not read, is refused at the value with a
+ * `message` saying which.
  *
  * The useful moment to ask "is this valid, and if not where" is while the
  * expression is being typed -- before there is a capture to run it against,
@@ -3837,7 +4022,7 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * rule is untouched: OK means a string you own, an error means none. It opens
  * with its own revision:
  *
- *     {"document":{"name":"selector_bind","revision":1},"ok":true,
+ *     {"document":{"name":"selector_bind","revision":2},"ok":true,
  *      "selector":"kind == put and zid == ff0e..."}
  *
  * `selector` is the text to hand every other door. Each `node` term is replaced
@@ -3865,6 +4050,16 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  *                       and `candidates`: the zids, in the spelling the
  *                       documents print, in the order the table gave them.
  *
+ * (revision 2) Three more, which only wz_dissect_selector_bind_in_tz writes:
+ *
+ *     `zone`            the zone rule does not read. `message` names the byte
+ *                       of the rule and why. No position, as for `table`.
+ *     `skipped_time`    a date the rule's clock skips where it goes forward,
+ *                       which no instant shows. `start` and `end`: the BYTE
+ *                       span of the value, quotes included.
+ *     `repeated_time`   a date the rule's clock shows twice where it goes
+ *                       back, so two instants. `start` and `end` as above.
+ *
  * The first refusing term is the one reported. The table is judged before the
  * selector, so a bad table is reported whatever the selector says.
  *
@@ -3878,6 +4073,93 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * @carries selector_bind refusal discriminant */
 int wz_dissect_selector_bind(const char *selector, const char *names_json,
                              char **out);
+
+/* (ABI 60) -- wz_dissect_selector_bind, AND THE ZONE YOUR LIST SHOWS TIMES IN.
+ *
+ * A `time` literal that carries no offset (`time > 12:04`,
+ * `time >= 2026-11-23T09:00`) is read in UTC by every door (THE SELECTOR
+ * LANGUAGE), because the zone a reader's clock shows is not a fact a capture
+ * carries. A list that shows times in another zone hands its offset here, and
+ * the selector it gets back carries the offset in its text: each such literal
+ * gains it right after its last character (inside the quotes of a quoted one),
+ * as `+09:00`, `-05:30` or `+00:00`. No door takes a zone, and the text means
+ * the same instant wherever it is read again.
+ *
+ * `utc_offset_minutes` is the offset east of UTC in minutes: 540 for +09:00,
+ * -330 for -05:30, 0 for UTC. Past 23:59 either way (1439) is
+ * WZ_DISSECT_ERR_INVALID_ARG and no string. An offset and not a zone name: it
+ * is the offset the list shows that is written, and this library ships no
+ * table of zones; a capture that crosses a change of summer time is read at
+ * the one offset given.
+ *
+ * Everything else is wz_dissect_selector_bind's: `names_json`, the document
+ * (`selector_bind`, the same revision, the same refusals, with every position
+ * in the text you passed and not in the text with offsets written), and the
+ * memory rule. A literal that carries an offset, and an integer of
+ * milliseconds, are left as written. A zone that goes forward and back is
+ * wz_dissect_selector_bind_in_tz's. */
+int wz_dissect_selector_bind_in_zone(const char *selector,
+                                     const char *names_json,
+                                     int utc_offset_minutes, char **out);
+
+/* (ABI 65) -- wz_dissect_selector_bind, AND A ZONE THAT GOES FORWARD AND BACK.
+ *
+ * The sibling of wz_dissect_selector_bind_in_zone for a zone one offset
+ * cannot state. `tz` is a POSIX TZ rule, the string a `TZ` environment
+ * variable holds, read by this library with no zone database:
+ *
+ *     std offset [dst [offset] [,start[/time],end[/time]]]
+ *
+ *     CET-1CEST,M3.5.0,M10.5.0/3       Central Europe
+ *     AEST-10AEDT,M10.1.0,M4.1.0/3     Eastern Australia (summer across the new year)
+ *     <+0530>-5:30                     a zone that never changes
+ *
+ *   - a NAME is three or more letters, or three or more letters, digits, `+`
+ *     or `-` between `<` and `>`;
+ *   - an OFFSET is [+|-]hh[:mm[:ss]] and counts WEST of UTC (`CET-1` is an
+ *     hour ahead); the summer offset defaults to an hour ahead of the
+ *     standard one;
+ *   - a DATE is Jn (1 to 365, February 29 never counted), n (0 to 365,
+ *     counting it) or Mm.w.d (weekday d of week w of month m, Sunday 0, week
+ *     5 the last); a TIME is the local time of the change in the clock in
+ *     force before it, [+|-]hh[:mm[:ss]] with the hours from -167 to 167,
+ *     02:00:00 when it is left out.
+ *
+ * Two things POSIX leaves to an implementation are refused rather than
+ * guessed: a rule that names a summer zone and gives no dates (an
+ * implementation's default dates are not text the selector can be read again
+ * by), and an offset that is not whole minutes or is past 23:59 (an offset a
+ * time literal cannot spell).
+ *
+ * WHAT IS WRITTEN. A date gains the offset the rule puts in force at that
+ * local time: `time > 2026-01-15T12:00` becomes `...12:00+01:00` and
+ * `time > 2026-07-15T12:00` becomes `...12:00+02:00` under the rule above. A
+ * clock time has no day until a capture gives it one, so it gains the rule in
+ * brackets, quoted: `time > 12:04` becomes
+ * `time > "12:04[CET-1CEST,M3.5.0,M10.5.0/3]"`, which every door reads on the
+ * capture's day at the offset in force there (THE SELECTOR LANGUAGE). A rule
+ * that never changes its clock writes its one offset instead, as
+ * wz_dissect_selector_bind_in_zone does. A literal that carries an offset or
+ * a rule, and an integer of milliseconds, are left as written.
+ *
+ * A TIME THE CLOCK SKIPS OR REPEATS IS REFUSED, NOT RESOLVED. On the day the
+ * clock goes forward the skipped hour is shown by no instant, and on the day
+ * it goes back the repeated hour by two; a date in either names no single
+ * instant, and picking one would select rows the person who typed it did not
+ * mean. Such a date is the refusal `skipped_time` or `repeated_time` with
+ * the value's span in the text you passed; write its offset to say which. A
+ * clock time is judged per capture, so on a capture whose day skips or repeats
+ * it, it is UNDECIDED rather than refused.
+ *
+ * A rule that does not read is the refusal `zone`, judged after `names_json`
+ * and before the selector, a verdict and not an error code, as a table that
+ * does not read is `table`. Everything else is wz_dissect_selector_bind's:
+ * the document (`selector_bind`, revision 2 for these refusals), every
+ * position in the text you passed, and the memory rule. A null `selector`,
+ * `tz` or `out`, or text that is not UTF-8, is WZ_DISSECT_ERR_INVALID_ARG and
+ * no string. */
+int wz_dissect_selector_bind_in_tz(const char *selector, const char *names_json,
+                                   const char *tz, char **out);
 
 /* (ABI 52) -- THE SELECTOR A NODE OF THE FIELD DOCUMENT OFFERS: filter by the
  * field it shows, add it to the selector typed, or exclude it.
@@ -3967,7 +4249,7 @@ int wz_dissect_selector_term(const char *node, int verb, const char *selector,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":6},
+ *     {"document":{"name":"selector_fields","revision":8},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -4110,6 +4392,13 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *                                payload is an instance of: the payload is
  *                                READ by the types the declared files give
  *                                it instead of walked by the wire
+ *     #@std_msgs/msg/String.msg="string data"
+ *                                a ROS message DEFINITION, declared as a
+ *                                .proto file is; its name says what it
+ *                                defines (see READING CDR below)
+ *     demo/chatter=cdr@std_msgs/msg/String
+ *                                a CDR rule: the payload is READ as an
+ *                                instance of that ROS type
  *
  * READING BY THE SCHEMA, at field-document revision 57. The files are read
  * together, once per call, when the first rule naming a message is installed;
@@ -4123,13 +4412,137 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * names a message installs as a profile rule always has: the name is
  * carried, the payload is walked by the wire, and the row says so.
  *
+ * READING CDR BY A ROS DEFINITION. A ROS 2 publisher's payload is CDR, which
+ * says nothing about its own fields, so it is read only by the definition of
+ * its type. A definition is the type's `.msg` file, or a service's `.srv`
+ * file, as ROS installs them (`share/<package>/msg/<Type>.msg`): the source a
+ * person has at hand, where the generated `.idl` adds nothing the wire needs.
+ * Each is declared on one line, `#@<name>="<text>"`, the text one JSON
+ * string, and its NAME says what it defines: `<package>/msg/<Type>.msg` the
+ * type `<package>/msg/<Type>`, and `<package>/srv/<Type>.srv` the two types
+ * a service's samples carry, `<package>/srv/<Type>_Request` and
+ * `<package>/srv/<Type>_Response`, with the two types rosidl derives from them:
+ * `<package>/srv/<Type>_Event`, the message a service's introspection
+ * publishes (`info`, a `service_msgs/msg/ServiceEventInfo`, then `request`
+ * and `response`, each a sequence of at most one), read like any message, and
+ * `<package>/srv/<Type>` itself, which is never a payload and has a type hash.
+ * A field naming another type (`geometry_msgs/Point`, or `Point` within the
+ * file's own package) is found among every declared definition, wherever in
+ * the text it is. Constants, defaults and comments are passed over, as
+ * nothing of them is on the wire. `builtin_interfaces/msg/Time` and
+ * `service_msgs/msg/ServiceEventInfo`, which ROS fixes and every service's
+ * event names, are defined by this library: declare them or not, and a
+ * declared one that defines other fields is refused.
+ *
+ * An ACTION is declared by its `.action` file,
+ * `#@<package>/action/<Type>.action="..."` (its goal, a line `---`, its
+ * result, a line `---`, its feedback), and defines, every name under
+ * `<package>/action/`, what rosidl derives from it: `<Type>_Goal`,
+ * `<Type>_Result` and `<Type>_Feedback` as written; `<Type>_SendGoal_Request`
+ * (`goal_id`, a `unique_identifier_msgs/msg/UUID`, then `goal`) and
+ * `<Type>_SendGoal_Response` (`accepted`, a `bool`, then `stamp`, a
+ * `builtin_interfaces/msg/Time`); `<Type>_GetResult_Request` (`goal_id`) and
+ * `<Type>_GetResult_Response` (`status`, an `int8`, then `result`); the two
+ * services' `_Event` messages; `<Type>_FeedbackMessage` (`goal_id`, then
+ * `feedback`), what an action's feedback topic carries; and the types that
+ * are hashed and never a payload, `<Type>_SendGoal`, `<Type>_GetResult` and
+ * `<Type>`. `unique_identifier_msgs/msg/UUID` (`uint8[16] uuid`) is defined
+ * by this library as the two above are. So
+ * `demo/goal=cdr@<package>/action/<Type>_SendGoal_Request` reads a goal.
+ *
+ * (Declaration-verdict revision 6) A definition file is read when its line is
+ * declared, so one that cannot be read refuses the text at its own line
+ * (WZ_DISSECT_ERR_DECLARATION; wz_dissect_declarations_diagnose names the
+ * file and line), whether or not a rule names one of its types. It used to
+ * install until a rule did.
+ *
+ * `<keyexpr>=cdr@<package>/msg/<Type>` reads the key's payload as that type.
+ * The rule is REFUSED (WZ_DISSECT_ERR_DECLARATION) when the text declares no
+ * definition file, when a definition cannot be read (the message names the
+ * file and the line), when the type, or a type one of its fields names, is
+ * defined by none, when a type contains itself, and for a bare `cdr`. The
+ * `.proto` files of the same text are read by their own reader, unaffected.
+ *
+ * The bytes are plain CDR (XCDR version 1), what ROS 2 publishers send: the
+ * four-byte encapsulation header, `00 01` little-endian or `00 00`
+ * big-endian, then the fields in order, each primitive aligned to its size
+ * from the end of the header. A `decoded` block names `format` `cdr`,
+ * `schema` the type, `typed` true, and its `fields` start with the message
+ * itself at path `$` (its `type` the type's name), then a row per field
+ * under its parent's path by NAME (`$.pose.position.x`), its `name` the
+ * definition's, its `type` as the definition spells it (`float64`,
+ * `string<=8`, `geometry_msgs/msg/Point[3]`). An array or a sequence is a
+ * row, `typed_value` `null`, with each element a row under it by index
+ * (`$.points.0`), except a run of `uint8`, `byte` or `char`, which is one
+ * row whose `typed_value` is its bytes in base64. A message with no fields
+ * holds the one `uint8` rosidl gives it, `structure_needs_at_least_one_member`.
+ * `typed_value` follows the mapping above (an integer past 2^53 - 1 as its
+ * digits in a string). Spans count from the payload's first byte, the header
+ * included.
+ *
+ * Where the definition and the bytes disagree the block is `refused` and its
+ * `why` names the field's path and the byte: the payload ending inside a
+ * field, a string not NUL-terminated or not UTF-8, a string or a sequence
+ * longer than its bound, a count the bytes left cannot hold, a `bool` other
+ * than 0 or 1, more bytes after the message than the three of padding a
+ * serializer may append, and (at byte 0) an encapsulation identifier that is a
+ * parameter list of XCDR version 1 (`PL_CDR`, 0x0002 and 0x0003) or that no
+ * CDR representation has.
+ *
+ * PAST XCDR VERSION 1. The encapsulation identifier is read, and the three
+ * representations of XCDR version 2 (XTypes 1.3) are read as well:
+ * `PLAIN_CDR2` (0x0006 big-endian, 0x0007 little-endian), `DELIMITED_CDR2`
+ * (0x0008, 0x0009) and `PL_CDR2` (0x000a, 0x000b). In all three an 8-byte
+ * primitive aligns to 4, not 8, and an array or a sequence whose elements are
+ * not primitives (strings, wide strings, messages) is preceded by a DHEADER,
+ * a 4-byte count of its bytes, which must count them exactly. A ROS definition
+ * declares no extensibility, so the identifier is taken as the writer's
+ * statement of it and applied to EVERY structure of the payload, nested ones
+ * included: under `PLAIN_CDR2` a structure is its members (final); under
+ * `DELIMITED_CDR2` a DHEADER precedes each structure (appendable), members a
+ * newer definition appended are passed over to the end it counts, and members
+ * that run past it are refused; under `PL_CDR2` (mutable) a DHEADER precedes
+ * each structure and an EMHEADER each member, naming it by its member id, its
+ * place in the definition from 0. Members are then read in the order they
+ * arrive; an id the definition has no member for is passed over unless its
+ * must-understand flag is set, which is refused, as is a member that appears
+ * twice or one that reads a length other than its EMHEADER gives; a member
+ * that does not appear has no row. Rows and spans are as above in every
+ * representation; a structure's row spans from its first member's first byte,
+ * its headers not included.
+ *
+ * A `wstring` is read as rmw_zenoh's Fast-CDR type support writes it: a
+ * 4-byte count of UTF-16 code units, then each code unit as a 4-byte unsigned
+ * integer, with no terminator; its `typed_value` is the text. A bounded
+ * `wstring<=N` holds at most N code units. A code unit above 0xFFFF and a
+ * surrogate that is not half of a pair are refused, `why` naming the field
+ * and the code unit's byte, as is a wide string longer than its bound or one
+ * whose count the bytes left cannot hold.
+ *
+ * THE TYPE HASH (field-document revision 84, row_facts 24). A `cdr` rule's
+ * `decoded` block carries `type_hash`, the type's RIHS01 hash as rosidl
+ * computes it and a ROS 2 key carries it beside the type name
+ * (`RIHS01_` and 64 lowercase hex digits): SHA-256 over the type's canonical
+ * description, which holds every field's name, type number, capacities and
+ * nested type, of the type and of every type it reaches, defaults, constants
+ * and comments excluded. Compare it with the hash in a publisher's key: a
+ * different hash is a different definition, under the same name or not. It is
+ * computed for every type a declared file defines, a service's derived and
+ * own types included (wz_dissect_declarations_diagnose lists them per file).
+ *
  * A `decoded` block then carries
  *
  *     `typed`   true when the fields were read by a type: a body schema whose
- *               files are declared, or a described record (#name=layout)
+ *               files are declared, a described record (#name=layout), or
+ *               (field-document revision 82) a `json`, `cbor` or `text`
+ *               reading, whose wire says each value's type
  *     `schema`  the body schema the rule names, or `null`. With `typed` it
  *               tells three cases apart: none named; named and read; named
  *               and not read, because the text carries no schema file
+ *     `type_hash`  (field-document revision 84) the body schema's type hash
+ *               where one is computed: the RIHS01 hash of a `cdr` rule's ROS
+ *               type, written after `schema`; `null` for every other
+ *               reading
  *
  * and every entry of its `fields`
  *
@@ -4266,6 +4679,59 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * can prove false must not veto the rule. Always present, never omitted: a
  * consumer that had to test for the key would read its absence as "nothing
  * was overridden", which is the assumption the field exists to stop.
+ *
+ * READ BY THE SAMPLE'S OWN ENCODING (field-document revision 82, row_facts
+ * 22). A rule whose format is the word `encoding`,
+ *
+ *     demo/sensor=encoding       an ENCODING RULE
+ *
+ * reads a sample by the built-in its declared encoding names: `json` for
+ * `application/json` and `text/json`, `cbor` for `application/cbor`,
+ * `protobuf` (the walk of the wire) for `application/protobuf`, and `text`
+ * for `text/plain`, `zenoh/string` and every other entry of the encoding
+ * table whose bytes are UTF-8 text. It is consulted ONLY for a key no other
+ * rule covers, in whichever order the lines are written: your rule for a key
+ * is your statement about it and always wins, and a label that vetoes your
+ * rule is not overridden by it. A sample that declared no encoding, an id
+ * this build cannot name, or an encoding no built-in reads (`zenoh/bytes`,
+ * `application/octet-stream`, `application/cdr`) is `no_rule` under it.
+ * Nothing is read by its encoding without such a line, as nothing is decoded
+ * without a rule; one line whose pattern covers every key turns it on for a
+ * whole capture. The word is not a format: a definition may not take it, and
+ * wz_dissect_readable_surfaces does not list it.
+ *
+ * Every `decoded` and `refused` block carries, after its other keys,
+ *
+ *     `chosen_by`        `rule` when a rule covering the key named the
+ *                        format; `encoding` when an encoding rule read the
+ *                        sample by its declared encoding, `matched_rule`
+ *                        then naming the encoding rule
+ *     `encoding_schema`  the schema suffix of the sample's declared encoding
+ *                        (what follows its `;`, as `pkg.Reading` in
+ *                        `application/protobuf;pkg.Reading`), the name a
+ *                        publisher gives its message type; `null` when it
+ *                        declared none, or one that is not UTF-8 (the carried
+ *                        entry's `payload.schema_hex` holds that one)
+ *
+ * The `text` format reads a payload as one UTF-8 string: one field, path `$`,
+ * its `value` the text quoted, its `type` `string` and its `typed_value`
+ * the string. Bytes that are not UTF-8 are a `refused` block whose `why`
+ * names the first byte that is not; an empty payload is the empty string.
+ *
+ * TYPED JSON AND CBOR, at the same revision. A `json` or `cbor` decoding is
+ * `typed`, and every entry of its `fields` carries `type`: `object`,
+ * `array`, `string`, `number`, `bool` or `null` for JSON; for CBOR
+ * `number` (an integer or a float), `string`, `bytes`, `array`, `map`,
+ * `tag`, `bool`, `null`, `undefined` or `simple`. An entry holding one
+ * value carries it as `typed_value` in the mapping a schema's typed value
+ * uses: a number (its digits in a string past 2^53 - 1; "NaN", "Infinity" and
+ * "-Infinity" for a CBOR float that is one), a string, true or false, null,
+ * and standard base64 for CBOR bytes. A container, a tag, an indefinite-length
+ * CBOR string, `undefined` and an unassigned simple value have a `type` and
+ * a `null` `typed_value`. Plot a JSON or CBOR leaf from `typed_value` as
+ * you would a schema's, and never parse `value`.
+ *
+ * @values fields chosen_by
  *
  * WHICH RULE WON, at field-document revision 28. The states that asked your
  * rules (`decoded`, `refused`, `encoding_mismatch` and `no_rule`) carry
@@ -4642,6 +5108,17 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  *     `schema_file`        #@<file>="<text>"   (verdict revision 3)
  *     `segment_rule`       <keyexpr>=<segment profile>   (verdict revision 4)
  *     `key_binding`        #%<id>=<keyexpr>               (verdict revision 5)
+ *
+ * THE TYPES OF A ROS DEFINITION FILE, at verdict revision 6. A `schema_file`
+ * line whose file is a ROS definition (`.msg`, `.srv`) also carries
+ * `types`: every type the file defines, explicit and derived, in the order
+ * rosidl adds them (for a `.srv`: the service's own type, `_Request`,
+ * `_Response`, `_Event`), each `{"name":"<package>/srv/<Type>_Request",
+ * "type_hash":"RIHS01_..."}` with the hash a `decoded` block reports for it
+ * (see THE TYPE HASH above), `null` where the type reaches one no declared
+ * file defines. A `.proto` file's line carries no `types`. A definition file
+ * that cannot be read is refused at its own line, the `message` naming the
+ * file and line within it.
  *
  * A `key_binding` fixes the key id `<id>` (decimal) to `<keyexpr>` for a sender
  * that never declares its ids on the wire; it carries the key as its `pattern`
@@ -6491,7 +6968,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  * Writes {"link_types":"0 NULL, 1 ETHERNET, …",
  *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
  *         "payload_field_types":"u8, i8, u16le, …",
- *         "payload_formats":["cbor","json","protobuf"]}
+ *         "payload_formats":["cbor","json","protobuf","text"]}
  *
  * Revision 5 -- `payload_formats` is the list of payload formats this build
  * decodes without a declared layout, by name, in the order the build lists
@@ -6509,7 +6986,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":80,"key":"state",
+ *     "value_families":[{"name":"fields","revision":86,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -6840,6 +7317,241 @@ int wz_dissect_live_open(int limits, wz_dissect_live **out);
 int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total,
                                  wz_dissect_live **out);
 
+/* (ABI 61) -- OPEN A LIVE HANDLE UNDER OPTIONS: a limit preset, the ceilings
+ * you choose over it, and the link types to read as raw zenoh serial bytes.
+ *
+ * WHY A STRUCT WHEN THE PRESET IS AN INT. The preset is a closed enumeration
+ * so that this library's limits do not cross the boundary. The axes only you
+ * can choose had to cross anyway -- how many rows your list holds, which link
+ * type your capture tool wrote a serial line on -- and a door per combination
+ * of them is what this replaces: wz_dissect_live_open is this door with only
+ * `limits` set, and wz_dissect_live_open_bounded is it with the live-tap
+ * preset and the two frame ceilings. The struct is SIZED: a later revision
+ * appends a field for a later axis you choose, and a caller compiled before
+ * it is read as having left it zero. The preset still carries every axis no
+ * field names.
+ *
+ *     static const unsigned int serial[] = { 147 };   // LINKTYPE_USER0
+ *     wz_dissect_live_options o;
+ *     wz_dissect_live *h;
+ *     memset(&o, 0, sizeof o);
+ *     o.size = sizeof o;
+ *     o.limits = WZ_DISSECT_LIMITS_NONE;
+ *     o.serial_link_types = serial;
+ *     o.serial_link_type_count = 1;
+ *     if (wz_dissect_live_open_with(&o, &h)) { ... }
+ *     wz_dissect_live_follow_lent(h, file, file_len);  // the whole file
+ *     wz_dissect_live_end(h);                          // it has ended
+ *
+ * A CAPTURE FILE is read through the handle, with wz_dissect_live_follow or
+ * wz_dissect_live_follow_lent over the whole file, wz_dissect_live_followed to
+ * tell a cut file from a whole one, and wz_dissect_live_end once it is read.
+ * That is the walk wz_dissect_pcap_replay makes -- the replay door IS a
+ * follow and an end -- so every document a replayed handle answers, this one
+ * answers for the same bytes, with the options applied. There is no replay
+ * twin per option.
+ *
+ * `size` IS THE SIZE YOU COMPILED AGAINST. Write `sizeof` the struct and zero
+ * every field you do not set (the memset above). A size below the first
+ * published struct (its first six fields, 40 bytes on a 64-bit target) is
+ * WZ_DISSECT_ERR_INVALID_ARG. A size above this library's struct is read only
+ * when every byte past it is zero: a nonzero byte there is a field your newer
+ * header set and this library cannot honour, and that is
+ * WZ_DISSECT_ERR_INVALID_ARG rather than a handle that ignores what you asked.
+ * Nothing the options point at is read after the call: the link types are
+ * copied.
+ *
+ *   limits                  a WZ_DISSECT_LIMITS_* preset, which the fields below
+ *                           adjust. An unknown value is
+ *                           WZ_DISSECT_ERR_INVALID_ARG.
+ *   frames_per_flow,
+ *   frames_total            as wz_dissect_live_open_bounded's arguments, over
+ *                           whichever preset `limits` names. `0` keeps that
+ *                           preset's figure: none under
+ *                           WZ_DISSECT_LIMITS_NONE, 10,000 and 100,000 under
+ *                           WZ_DISSECT_LIMITS_LIVE_TAP. A value too large for
+ *                           size_t is WZ_DISSECT_ERR_INVALID_ARG.
+ *   serial_link_types,
+ *   serial_link_type_count  the pcap link types whose packets are raw zenoh
+ *                           serial bytes: a COBS envelope, a CRC32 and the
+ *                           handshake flags around each transport message, the
+ *                           framing zenoh-pico's serial link writes. NULL and 0
+ *                           declare none. A nonzero count with a NULL pointer is
+ *                           WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * WHICH LINK TYPES MAY BE DECLARED: any number. The ones a serial capture
+ * commonly carries are LINKTYPE_USER0 to LINKTYPE_USER15 (147 to 162), which a
+ * capture tool leaves to its user's meaning, and LINKTYPE_RTAC_SERIAL (250).
+ * This build decodes none of them otherwise, so declaring one takes nothing
+ * away. A declared link type WINS over decapsulation: declaring one this build
+ * reads (1, Ethernet) reads its packets as serial bytes and none of them as
+ * Ethernet. The packet must hold the line's bytes and nothing else: no
+ * pseudo-header is read, because the layout of LINKTYPE_RTAC_SERIAL's cannot
+ * be verified here, and a header's bytes reach the COBS reader, where the
+ * frame they land in fails its CRC. A link type NOT declared is what it always
+ * was: its packets are skipped and counted, per interface, under the health
+ * document's `skips.link_type_interfaces`.
+ *
+ * WHAT A SERIAL LINE IS IN EACH DOCUMENT. A handle holds at most one line,
+ * point to point and without addresses. Its flow object is
+ * `{"low":{"addr":"","port":0,"family":null},"high":{...},"link":"serial"}`.
+ * A pcapng holds one interface per wire, and the interfaces are the line's two
+ * halves: the one whose frames are `a` is the initiator's when a serial
+ * handshake frame named it, and otherwise the first interface the capture
+ * holds. A classic pcap, or a pcapng with one interface, holds both wires in
+ * one byte stream, and nothing separates them: every message reads `a`.
+ *
+ *   records            origin WZ_DISSECT_ORIGIN_SERIAL, on the line's own
+ *                      flow_id and list_id; anchor_space
+ *                      WZ_DISSECT_ANCHOR_PACKET, the anchor being the packet
+ *                      that completed the message's frame; `direction` as
+ *                      above. wz_dissect_live_message_bytes hands back the
+ *                      message out of its frame's payload, which the handle
+ *                      keeps while it keeps the message.
+ *   session table      a row like any flow's, after the datagram flows: link
+ *                      `serial`, `bytes` the line's bytes as captured,
+ *                      `stream_anomalies` null for `no_sequence`, and
+ *                      `direction_basis` saying how its halves were told apart
+ *                      (`handshake`, `interface_order`, or `unknown` when one
+ *                      interface carried both wires; see the session table).
+ *   census             the line's messages are folded into every plane like a
+ *                      flow's, under its flow object, their anchors in
+ *                      `offset_space` `packet`.
+ *   field documents    no row: the field, row-facts and selection documents
+ *                      render the stream and datagram flow tables, and the
+ *                      line stands in neither. Its messages are the records
+ *                      and the census.
+ *   retention          `held.serial_frames` counts what the line holds.
+ *                      Neither frame ceiling bounds it, so on a handle that
+ *                      reads a line for a long time the line's list grows
+ *                      with it.
+ *
+ * (ABI 62) THE BYTE CEILING AND THE WINDOW, appended to the struct; a caller
+ * compiled against revision 61 reads both as zero and keeps the preset's.
+ *
+ *   stream_bytes_per_direction
+ *                    the reassembled bytes ONE direction of ONE TCP flow keeps.
+ *                    `0` keeps the preset's: 4 MiB under
+ *                    WZ_DISSECT_LIMITS_LIVE_TAP, none under
+ *                    WZ_DISSECT_LIMITS_NONE. Memory is at most the ceiling times
+ *                    two directions times the TCP flows held (1,024 under the
+ *                    live-tap preset), and with a frame ceiling set a direction's
+ *                    stream follows the messages it holds: the bytes before its
+ *                    oldest held message are released, so this ceiling bites only
+ *                    where the held messages themselves span more. It is echoed
+ *                    as `dropped_by_limits.caps.stream_bytes_per_direction` in
+ *                    every document that carries that group. A value too large for
+ *                    size_t is WZ_DISSECT_ERR_INVALID_ARG.
+ *   reassembly_window_ms
+ *                    how long a fragment chain may stay open, in milliseconds of
+ *                    the capture's own clock (the instants you push, or the
+ *                    file's). `0` keeps the preset's: 30,000 under
+ *                    WZ_DISSECT_LIMITS_LIVE_TAP, none under
+ *                    WZ_DISSECT_LIMITS_NONE.
+ *
+ * WHAT THE BYTE CEILING TAKES, AND WHAT IT NEVER DOES. It decides which bytes
+ * the handle can still hand back, never which messages decode. A message is
+ * decoded from the reader's own copy of its unit as the unit completes, before
+ * the ceiling trims; a held message whose bytes the ceiling takes keeps its
+ * record and its rows; and from then wz_dissect_live_message_bytes answers
+ * WZ_DISSECT_ERR_BYTES_RETIRED for it. Every byte the ceiling takes is counted in
+ * `dropped_by_limits.stream_bytes`. So a message LARGER than the ceiling is
+ * decoded and has a record and rows like any other, and its bytes are retired
+ * from the moment it completes, because its first byte has already gone. To
+ * make the handle hold the bytes of every row your list holds, set
+ * `frames_total` to the list's row limit and this ceiling at least as large as
+ * the bytes those rows span in one direction: the stream then follows the rows.
+ *
+ * A FRAGMENT CHAIN HAS A CEILING OF ITS OWN, `chain_bytes` (ABI 64): the bytes
+ * one chain may join into a message. `0` keeps the preset's, 65,536 under
+ * either preset; the most it may be set to is 1,073,741,824 (2^30), and a larger
+ * figure is WZ_DISSECT_ERR_INVALID_ARG. A message whose fragments come to more
+ * is not reassembled. Its fragment rows say `outcome` `aborted` with `reason`
+ * `capacity_overflow`, the census counts it in
+ * `fragment_chains.aborted_capacity_overflow`, and the message has no record of
+ * its own. The byte ceiling above plays no part in it. It is echoed as
+ * `dropped_by_limits.caps.chain_bytes`, always a number.
+ *
+ * A TOTAL BYTE CEILING, `stream_bytes_total` (ABI 67): the reassembled bytes
+ * every TCP flow keeps TOGETHER, both directions of each. The per-direction
+ * ceiling bounds memory by twice the number of flows times itself (8 GiB at
+ * 1,024 flows of 4 MiB a direction); this is the figure you size memory by.
+ * Past it the OLDEST bytes held go, whichever flow and direction holds them:
+ * "oldest" is the order the bytes arrived in, the packet that carried the first
+ * byte each direction still holds, and within one packet the order of the
+ * flows. Like the per-direction ceiling it takes bytes and never messages: a
+ * held message whose bytes it takes keeps its record and rows, and from then
+ * wz_dissect_live_message_bytes answers WZ_DISSECT_ERR_BYTES_RETIRED for it.
+ * Every byte it takes is counted in `dropped_by_limits.stream_bytes`, beside
+ * what the per-direction ceiling took, and the figure is echoed as
+ * `dropped_by_limits.caps.stream_bytes_total`, `null` where none is in force.
+ * `0` keeps the preset's: none under WZ_DISSECT_LIMITS_NONE, and under
+ * WZ_DISSECT_LIMITS_LIVE_TAP 83,886,080 (80 MiB: ten flows of both directions'
+ * ceiling, as frames_total is ten flows of frames_per_flow). A value too large
+ * for size_t is WZ_DISSECT_ERR_INVALID_ARG. What it costs: a pass over the TCP
+ * flows per segment that adds bytes, and per run of bytes given up once the
+ * ceiling is reached, proportional to the flows held. The two byte ceilings
+ * apply together, and the bytes a held TLS record still covers are not taken
+ * before the record goes.
+ *
+ * WHAT THE CHAIN CEILING COSTS. A chain's buffer grows with the fragments it
+ * stages, so a ceiling of 16 MiB costs nothing until a message that large
+ * arrives, and then what that message's bytes are while it is being joined. A
+ * direction holds at most four open chains at once, so the most the chains of
+ * one direction can hold is four times the ceiling; a peer that opens chains it
+ * never finishes holds that until the window above expires them. Set it to the
+ * largest message your application sends.
+ *
+ * WHAT THE WINDOW DOES TO A SLOW CHAIN. A chain's deadline is armed by its
+ * FIRST fragment and is not moved by the ones after it, so a chain whose
+ * fragments take longer than the window to arrive expires though fragments are
+ * still arriving, and its message has no record. The field document counts it
+ * under `reassembly.expired_chains` and names it in the flow's `ended_chains`
+ * with `ending` `expired`. A packet pushed with WZ_DISSECT_NO_TIMESTAMP moves no
+ * clock, so nothing expires on its account. The same window bounds how long a
+ * half-assembled IP datagram waits for its other pieces. The serial line's
+ * chains are not timed.
+ *
+ * Frames that arrive before a serial handshake has settled which interface is
+ * which are held undecoded, and decoded once it has (the live-tap preset stops
+ * waiting after 256 frames and keeps the first-interface convention), so a
+ * message never changes direction after a record has carried it.
+ *
+ * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once with
+ * wz_dissect_live_close. WZ_DISSECT_ERR_INVALID_ARG for a NULL `options` or
+ * `out`, and for each refusal above. */
+typedef struct wz_dissect_live_options {
+    /* sizeof the struct as you compiled it. */
+    size_t size;
+    /* A WZ_DISSECT_LIMITS_* preset. */
+    int limits;
+    /* How many link types serial_link_types points at. */
+    unsigned int serial_link_type_count;
+    /* The pcap link types read as raw zenoh serial bytes, or NULL. */
+    const unsigned int *serial_link_types;
+    /* The most decoded messages one flow keeps; 0 keeps the preset's. */
+    uint64_t frames_per_flow;
+    /* The most decoded messages the handle keeps in all; 0 keeps the
+     * preset's. */
+    uint64_t frames_total;
+    /* (ABI 62) The reassembled bytes one direction of one TCP flow keeps; 0
+     * keeps the preset's. */
+    uint64_t stream_bytes_per_direction;
+    /* (ABI 62) How long a fragment chain may stay open, in milliseconds of
+     * the capture's clock from its first fragment; 0 keeps the preset's. */
+    uint64_t reassembly_window_ms;
+    /* (ABI 64) The bytes one fragment chain may join into a message; 0 keeps
+     * the preset's, 65,536. */
+    uint64_t chain_bytes;
+    /* (ABI 67) The reassembled bytes every TCP flow keeps together, both
+     * directions of each; 0 keeps the preset's, none under
+     * WZ_DISSECT_LIMITS_NONE. */
+    uint64_t stream_bytes_total;
+} wz_dissect_live_options;
+
+int wz_dissect_live_open_with(const wz_dissect_live_options *options,
+                              wz_dissect_live **out);
+
 /* Feed one captured packet. `link_type` is its pcap link type -- the same
  * numbering wz_dissect_readable_surfaces reports.
  *
@@ -7025,6 +7737,143 @@ int wz_dissect_live_follow(wz_dissect_live *h, const unsigned char *bytes,
  *
  * WZ_DISSECT_ERR_INVALID_ARG for a null handle or a null `out`. */
 int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
+
+/* (ABI 63) -- ONE CAPTURE WRITTEN AS SEVERAL CONTAINERS: tell a handle that the
+ * container it follows has ended, and hand it the next one.
+ *
+ * A capture helper that rotates its output writes one capture as a sequence of
+ * files, each a whole container with its own Section Header and Interface
+ * Descriptions, and switches files at a block boundary, so no packet spans two.
+ * Opening a new handle per file would begin the dissection again. This door
+ * keeps it:
+ *
+ *     wz_dissect_live *h;
+ *     uint64_t first;
+ *     wz_dissect_live_open(WZ_DISSECT_LIMITS_LIVE_TAP, &h);
+ *     wz_dissect_live_follow(h, piece0, piece0_len);         // as it grows
+ *     ...
+ *     wz_dissect_live_follow_next(h, piece1, piece1_len, &first);
+ *     wz_dissect_live_follow(h, piece1, piece1_len_now);     // piece1 grows
+ *
+ * WHAT GOES ON. The whole dissection: every flow and its session (the
+ * negotiated values, the keys declared, a fragment chain still open and a TCP
+ * stream waiting for its next segment, which the next container carries on),
+ * wz_dissect_live_lost, the counts under `dropped_by_limits`, the census's
+ * memory of its planes, the decryption keys, and the Decryption Secrets budget,
+ * which is the capture's and not one file's. The capture tool's own drop counts
+ * add across containers: each container's sections are counted apart.
+ *
+ * WHAT BEGINS AGAIN. The walk of the container: wz_dissect_live_followed counts
+ * the bytes of the container being followed, and wz_dissect_live_follow takes
+ * the whole prefix of THAT container from now on.
+ *
+ * PACKET NUMBERS RUN ON. The next container's first packet takes the number
+ * after the last one the handle gave (a pushed packet included), and
+ * `*first_packet` is that number. A record's packet anchor, a field row's
+ * `first_byte.packet` and every other packet number this handle writes count
+ * across containers, so no number is given twice; to find a packet in your own
+ * file, subtract the `*first_packet` of the container it came in. That is the
+ * number wz_dissect_pcap_frame_bytes takes for that file. A number restarted
+ * per container would have needed the container on every record, and the
+ * record's layout is fixed.
+ *
+ * WHAT THE FIELD DOCUMENTS READ AGAIN. The field documents of a moved handle
+ * (wz_dissect_live_fields_where, _fields_since, _fields_since_window,
+ * _row_facts_since) take the container the handle follows NOW, the one this door
+ * was last handed, and read its packets again by the numbers they took, so a row
+ * of that container carries `first_byte.frame_offset` and `l2` and a datagram
+ * row is walked, under `"capture_reread":true`, as on the first container. A
+ * row whose packet was in an EARLIER container is still written, from what the
+ * handle holds, with `frame_offset` and `l2` null, and a datagram row whose
+ * packet was there is left out: those bytes are not handed in again. Pass the
+ * previous container no longer.
+ *
+ * LENDING EVERY CONTAINER OF THE CAPTURE (ABI 66). A moved handle may be LENT
+ * the container it follows, as the first one is: wz_dissect_live_follow_next_lent
+ * moves it on and lends it the next container in one call, and
+ * wz_dissect_live_follow_lent then goes on reading that container as it grows.
+ * The containers lent before stay lent. A kept message's bytes are read where
+ * they were logged, and that place is a byte offset counted across the
+ * capture's containers -- a container's first byte stands after the bytes the
+ * containers before it were read to -- so the one word every kept record had
+ * already says which container a message is in, and no record grew. Every
+ * answer is the one the copying doors give over the same bytes.
+ *
+ * WHEN A CONTAINER MAY BE RELEASED. Number the containers as the handle does:
+ * the first it read is 0, and each move this door or
+ * wz_dissect_live_follow_next_lent makes adds one.
+ *
+ *   - A container the handle COPIED (wz_dissect_live_open,
+ *     wz_dissect_live_open_with, wz_dissect_pcap_replay, wz_dissect_live_follow,
+ *     this door) is held by nothing after the call that read it, and may be
+ *     released as soon as that call returns.
+ *   - A container the handle was LENT (wz_dissect_pcap_replay_lent,
+ *     wz_dissect_live_follow_lent, wz_dissect_live_follow_next_lent) is read
+ *     for as long as a message the handle keeps lies in it. Ask
+ *     wz_dissect_live_oldest_container: every lent container numbered below
+ *     the `oldest` it answers is never read again and may be released. The
+ *     container followed now is the caller's to keep while it is followed.
+ *
+ * `oldest` moves as the handle lets go of what it kept: a frame ceiling taking
+ * a flow's oldest messages, a byte ceiling trimming a stream, a flow evicted. A
+ * handle opened with no ceiling keeps every message, and every lent container
+ * stays needed until the handle is closed.
+ *
+ * A SEQUENCE OF CLOSED FILES is read the same way, as one capture: follow the
+ * first, follow_next each one after it, then wz_dissect_live_end once the last
+ * has been read. Do not open the first with wz_dissect_pcap_replay when more
+ * follow: that door ends the handle at the end of its file, which spends the
+ * patience a reassembly gap was waiting on before the next file could fill it.
+ *
+ * The bytes the previous container held past its last whole block are not
+ * read; call wz_dissect_live_followed before this door to learn whether there
+ * were any. A handle that has read nothing yet is not moved, and this door is
+ * then wz_dissect_live_follow.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a NULL argument. WZ_DISSECT_ERR_BAD_CAPTURE
+ * when the next container does not read; the handle has moved on to it all
+ * the same and `*first_packet` is written, so later calls of
+ * wz_dissect_live_follow hand it the container as it grows. */
+int wz_dissect_live_follow_next(wz_dissect_live *h, const unsigned char *bytes,
+                                size_t len, uint64_t *first_packet);
+
+/* (ABI 66) -- wz_dissect_live_follow_next over a next container you LEND the
+ * handle, as wz_dissect_live_follow_lent lends one. The handle moves on as that
+ * door moves it and is lent `bytes` as the container it follows; later calls of
+ * wz_dissect_live_follow_lent with more of it go on reading it. What you
+ * promise is what the lending doors ask (see "A CAPTURE THE CALLER LENDS THE
+ * HANDLE"), and the paragraph "WHEN A CONTAINER MAY BE RELEASED" above says
+ * when it ends. Return codes as for wz_dissect_live_follow_next. */
+int wz_dissect_live_follow_next_lent(wz_dissect_live *h,
+                                     const unsigned char *bytes, size_t len,
+                                     uint64_t *first_packet);
+
+/* (ABI 66) -- WHICH CONTAINERS THE HANDLE STILL READS.
+ *
+ *     uint64_t oldest, current;
+ *     wz_dissect_live_oldest_container(h, &oldest, &current);
+ *     for (; released < oldest; released++)
+ *         munmap(piece[released], piece_len[released]);
+ *
+ * `*current` is the number of the container the handle follows now: 0 for
+ * the first it read, one more for each move wz_dissect_live_follow_next or
+ * wz_dissect_live_follow_next_lent made (a handle that had read nothing is not
+ * moved, and its number stays). `*oldest` is the number of the oldest
+ * container a message the handle keeps is still read from, and `*current`
+ * when it reads none from an earlier one: a handle that copied its containers
+ * answers `oldest` equal to `current` always.
+ *
+ * Every lent container numbered below `*oldest` is never read again, by any
+ * call on the handle: a message is kept where the container being followed
+ * holds it, so no later message can be kept in an earlier container. Release it.
+ *
+ * WHAT IT COSTS. A pass over the places the handle keeps: the runs of each TCP
+ * stream, the segments held behind a gap and the rows of each datagram and
+ * scouting list. Ask it once per container you hand in, not per packet.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null argument. */
+int wz_dissect_live_oldest_container(const wz_dissect_live *h, uint64_t *oldest,
+                                     uint64_t *current);
 
 /* Take the messages decoded since the last drain into `out`, which holds
  * `cap` records; `*written` receives how many were filled.
@@ -7604,21 +8453,62 @@ int wz_dissect_pcap_local_options_of_link_type(
  * either calls more often or opens the handle with a larger ceiling; U counts
  * from the planes' last beginning, so it is 0 again after they begin.
  *
- * WHAT A CALL COSTS. The planes are kept between calls, for the selector of
- * the last call, so a census drawn again folds the messages that arrived,
- * whether or not a list was trimmed at its front since: a beat costs what
- * arrived in it. The planes begin again, over what is held (T back to 0), only
- * where a fold cannot go on at all: a flow that appeared in front of the
- * datagram flows or left a flow table, a message decoded after a packet that
- * followed it, a session grouping that changes (a message that names a node),
- * another selector, a call the progress callback stopped, and exchanges still
- * open that alone outgrow four times the messages held. The node plane begins
- * again with the others and they with it, so every plane of one document
- * covers the messages its "observed" names. What the planes keep
- * per row is given up for the rows no list holds as it doubles, so it stays
- * near what the lists hold. Two costs remain: the scouting lists are folded
- * on every call, and every exchange still open is judged on every call, so a
- * capture whose queries never close pays for each.
+ * WHAT A CALL COSTS. The planes are kept between calls for every selector the
+ * handle keeps a memory for: one unless wz_dissect_live_set_selector_memories
+ * says more, and at most 64. A census drawn again under a selector folds the
+ * messages that arrived since that selector was last asked, whether or not a
+ * list was trimmed at its front since: a beat costs what arrived in it, and a
+ * caller that asks in turn under no more selectors than the handle keeps
+ * memories for pays that for each of them from its second call on. The planes
+ * begin again, over what is held (T back to 0), only where a fold cannot go on
+ * at all: a flow that appeared in front of the datagram flows or left a flow
+ * table, a message decoded after a packet that followed it, a handshake that
+ * changes who owns a message already folded (see below), a selector whose
+ * memory was given up to make room for another (with the default of one
+ * memory, every change of selector), a call the progress callback stopped,
+ * and exchanges still open that alone outgrow four times the messages held.
+ * The node plane begins again with the others and they with it, so every plane
+ * of one document covers the messages its "observed" names. What the planes
+ * keep per row is given up for the rows no list holds as it doubles, so it
+ * stays near what the lists hold.
+ *
+ * A HANDSHAKE IS FOLDED ACROSS, NOT AGAIN. An INIT or a JOIN that names a node
+ * costs what it costs as a message, so a capture whose sessions open one after
+ * another pays for each opening what arrived with it. The census the container
+ * doors write for the same bytes settles three things by the handshake, and the
+ * handle settles each without folding again:
+ *
+ *   - the bytes a direction carried before its handshake are credited to the
+ *     node it names: the handle keeps each flow's bytes per direction and
+ *     credits them when it writes the document;
+ *   - a node is numbered by the place of its list among the lists, so a node a
+ *     late INIT names on an earlier list comes before nodes later lists named:
+ *     the handle keeps the nodes of each list apart and numbers them in list
+ *     order when it writes the document, which renumbers nodes already
+ *     numbered and folds nothing;
+ *   - the planes key what they fold (whose request ids, whose declared keys) by
+ *     the session grouping: a handshake that gives a session to a flow whose
+ *     messages folded so far carry no network message (its INITs, its OPENs,
+ *     keep-alives) changes nothing folded, and the planes go on.
+ *
+ * WHAT STILL FOLDS AGAIN, AND WHY. The planes begin again where a handshake
+ * changes the owner of a message already folded: one that arrives after its
+ * flow's traffic (a capture that began mid-session and sees the handshake
+ * again), one on a list before lists already given a session (which renumbers
+ * their sessions), a flow whose front a ceiling trimmed before its session was
+ * known, and, for a selector with a `zid`, `zids` or `session` term, every
+ * handshake that names a node, since the term is read against the nodes the
+ * capture names.
+ *
+ * What no longer folds again. Each scouting list is read once as it grows, and
+ * again only when the ceiling trims its front; what it named is applied to the
+ * census at every call. Each exchange still open is judged once, when the walk
+ * that took it ends, and keeps its verdict until a response to it arrives, so a
+ * capture whose queries never close pays for each of them once; a call still
+ * passes over the exchanges open to count them, without judging them again.
+ *
+ * None of this changes a document: each is the cost of the answer the
+ * container doors give for the same bytes.
  *
  * The document is the one the census doors emit, so a consumer keeps one
  * reader and one schema across both halves. A selector that does not compile
@@ -7875,8 +8765,9 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *
  * A row whose message bytes the per-direction byte ceiling has since discarded
  * reads, if it is asked for again, as `declined` in place of its walk: /name,
- * /fields, /carried, /above_transport, /first_byte, /l2, /declined and, since
- * field-document revision 64, /transport_header and /unnamed_extensions swap. The
+ * /fields, /carried, /above_transport, /first_byte, /l2, /declined, since
+ * field-document revision 64 /transport_header and /unnamed_extensions, and since
+ * revision 81 /packet_comments (`null`: the packet is no longer in hand) swap. The
  * row you hold stays true -- the bytes were the message's when it was written --
  * so do not treat that `declined` as a correction. `seq`, the four coordinates,
  * `direction`, `offset_space`, `message_at`, `packet`, `sn` and the rest of
@@ -8034,13 +8925,15 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * writes them (`1`, `4.1`, `$.x`), at most 64. `after_seq` is the cursor, as
  * for wz_dissect_live_fields_since.
  *
- *     {"document":{"name":"field_values","revision":3},
+ *     {"document":{"name":"field_values","revision":5},
  *      "window":{"after_seq":0,"through_seq":2},"paths":["1"],
  *      "records":[{"seq":1,"record":0,"time_ns":1000000,"keyexpr":"demo/pose",
  *                  "keyexpr_source":"wire","segment":null,
  *                  "state":"decoded","typed":true,"schema":"pkg.Pose",
+ *                  "type_hash":null,
  *                  "values":[{"path":"1","type":"sint32","typed_value":-3,
- *                             "enum_number":null}]}]}
+ *                             "enum_number":null}],
+ *                  "chosen_by":"rule","encoding_schema":null}]}
  *
  * ONE ENTRY PER RECORD, and a row may batch several: `seq` is the row's number,
  * the one every document of the handle gives it, and `record` the record's place
@@ -8052,6 +8945,19 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * carries `why`, `encoding_mismatch` the encoding the sample `declared`, and
  * `not_on_the_wire` and `keyexpr_unresolved` nothing more. A record no rule
  * covers is not written.
+ *
+ * HOW ITS FORMAT WAS CHOSEN, at values-document revision 5. A `decoded` and a
+ * `refused` record close, after their other keys, on the field document's
+ * `chosen_by` (`rule` when a rule covering the key named the format,
+ * `encoding` when an encoding rule read the sample by its declared encoding)
+ * and `encoding_schema` (the schema suffix of the sample's declared encoding,
+ * `null` when it declared none or one that is not UTF-8), from the same
+ * reading the field document's `payload_decode` block is written from. A
+ * `decoded` record also carries `type_hash` after `schema`: the RIHS01 hash
+ * of a `cdr` rule's ROS type, `null` for every other reading.
+ *
+ * @values field_values chosen_by
+ * @carries field_values chosen_by passenger
  *
  * WHICH KEY, at values-document revision 2. `keyexpr_source` is the field
  * document's word (revision 61): `wire`, `fixed_id` for a key the declarations
@@ -8100,6 +9006,14 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * revision 3 a reply's pieces joined whichever stream shared their key and
  * transfer number.
  *
+ * THE ROW'S NUMBERS, at values-document revision 4. The selector reads the
+ * numbers the handle's other documents print: a `flow` term compares the
+ * list's `list_id`, and a `row` term the place the selection document writes
+ * the row at (THE SELECTOR LANGUAGE has both). Before revision 4 a `flow` term
+ * compared the list's position among the handle's lists, which is its
+ * `list_id` only while the handle's numbering and the lists' order agree, and
+ * a `row` term was UNDECIDED and wrote no record.
+ *
  * @values field_values keyexpr_source
  * @values field_values place
  * @values field_values unjoined
@@ -8111,8 +9025,8 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
  * that asks again from the `through_seq` it was given pays for what arrived
  * since. The handle keeps the payloads the selector picked past the cursor until
  * a cursor passes them, so another declaration text or path list reads them
- * without walking again; another selector or a lower cursor walks from the first
- * message.
+ * without walking again; another selector, a lower cursor, or a `row` term
+ * whose rows moved walks from the first message.
  *
  * WZ_DISSECT_ERR_INVALID_ARG for a null pointer, text that is not UTF-8, or a
  * path list that names no path, more than 64, or a line with a control character
@@ -8254,6 +9168,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts body
  * @values row_facts carried_state
  * @values row_facts check
+ * @values row_facts chosen_by
  * @values row_facts client
  * @values row_facts completed
  * @values row_facts control
@@ -8306,6 +9221,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts body passenger
  * @carries row_facts carried_state discriminant
  * @carries row_facts check passenger
+ * @carries row_facts chosen_by passenger
  * @carries row_facts client passenger
  * @carries row_facts completed passenger
  * @carries row_facts control passenger
@@ -8552,7 +9468,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":5},
+ *     {"document":{"name":"selection_since","revision":7},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],
@@ -8793,8 +9709,14 @@ int wz_dissect_live_selected_packets(wz_dissect_live *h, const char *selector,
  * the walk is done again, not what it says.
  *
  * WHAT `n` COSTS. A memory is the folded tables of one selector, not a copy of
- * the capture. How large that is depends on the capture, and no figure is
- * claimed here.
+ * the capture: tables that grow with the distinct key expressions,
+ * declarations and exchanges still open that the capture holds under that
+ * selector, and a verdict per row the payload and exchange planes judged,
+ * which is given up for the rows no list holds as it doubles, so it stays near
+ * what the lists hold. Memory therefore grows with `n` times one selector's
+ * tables, and the per-row part is reported, summed over every selector, as the
+ * memory document's `census` group (wz_dissect_live_memory). The node census
+ * is one for every selector, since no selector narrows it.
  *
  * `n` is held to 1..=64 and the number in effect is written to `*out`, so a
  * caller that asked for 0 or 1000 reads what it got. Lowering it gives up the
@@ -9111,8 +10033,9 @@ int wz_dissect_pcap_replay(const unsigned char *bytes, size_t len, int limits,
  *     munmap(file, len);      // only now
  *
  * WHAT YOU PROMISE. The `len` bytes at `bytes` stay readable and unchanged
- * until the handle is closed, or until a later wz_dissect_live_follow_lent
- * names the container where it then is. The handle keeps the pointer and reads
+ * until the handle is closed, until a later wz_dissect_live_follow_lent names
+ * the container where it then is, or until wz_dissect_live_oldest_container
+ * answers an `oldest` above this container's number. The handle keeps the pointer and reads
  * through it during ANY later call on it, so it is a promise about the life of
  * the handle, not of this call -- which is why these are doors of their own and
  * not a flag on the copying ones.
@@ -9132,7 +10055,10 @@ int wz_dissect_pcap_replay_lent(const unsigned char *bytes, size_t len,
                                 int limits, wz_dissect_live **out);
 
 /* `len` is how much of the lent container is readable and committed now, as
- * for wz_dissect_live_follow; see the paragraph above for what is promised. */
+ * for wz_dissect_live_follow; see the paragraph above for what is promised. On
+ * a handle wz_dissect_live_follow_next moved on to a later container, the
+ * container lent is the one followed now, and the ones lent before stay lent
+ * (see "LENDING EVERY CONTAINER OF THE CAPTURE" at that door). */
 int wz_dissect_live_follow_lent(wz_dissect_live *h, const unsigned char *bytes,
                                 size_t len);
 

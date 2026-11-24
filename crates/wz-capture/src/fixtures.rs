@@ -455,6 +455,42 @@ pub fn stream_chain_sequence_capture(chains: usize) -> Vec<u8> {
     crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
 }
 
+/// One TCP session whose one message is joined from two fragments of 40,000
+/// bytes each: 80,000 bytes, past the passive observer's default chain ceiling
+/// of 65,536 and well inside a raised one. The joined bytes are no message a
+/// decoder reads; what the capture answers is whether the chain completes.
+pub fn oversized_chain_stream_capture() -> Vec<u8> {
+    const ISN: u32 = 1000;
+    const PORT: u16 = 43210;
+    let piece = alloc::vec![0x5Au8; 40_000];
+    let mut units: Vec<(bool, Vec<u8>)> = full_handshake()
+        .into_iter()
+        .map(|(from_low, wire)| (from_low, stream_unit(&wire)))
+        .collect();
+    units.push((true, stream_unit(&fragment_wire(0, true, &piece))));
+    units.push((true, stream_unit(&fragment_wire(1, false, &piece))));
+    let (mut low, mut high) = (ISN, ISN);
+    let packets: Vec<Vec<u8>> = units
+        .iter()
+        .map(|(from_low, unit)| {
+            let next = if *from_low { &mut low } else { &mut high };
+            let seq = *next;
+            *next += unit.len() as u32;
+            if *from_low {
+                tcp_segment(LOW, PORT, HIGH, 7447, seq, unit)
+            } else {
+                tcp_segment(HIGH, 7447, LOW, PORT, seq, unit)
+            }
+        })
+        .collect();
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
 /// When the segment that fills a gap arrives, in
 /// [`multilink_declaration_behind_a_gap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

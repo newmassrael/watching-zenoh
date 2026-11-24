@@ -430,6 +430,8 @@ impl ExchangeScope {
 struct RowPlace {
     names: crate::filter::MessageNames,
     place: Option<(crate::link::FlowKey, Option<usize>)>,
+    /// The row's produced-index in its list, for a `row` term.
+    produced: Option<u64>,
     list: usize,
     direction: Direction,
     /// The flow's word for whether its bytes are zenoh, as the walk's census
@@ -446,6 +448,7 @@ impl RowPlace {
         Self {
             names: crate::filter::MessageNames::of(frame, Some(message.name())),
             place: ctx.place(),
+            produced: ctx.produced(),
             list: ctx.list(),
             direction: frame.direction,
             zenoh: ctx.zenoh(),
@@ -457,6 +460,7 @@ impl RowPlace {
         Some(crate::filter::RowFacts::of(
             self.names.as_slice(),
             packet,
+            self.produced,
             self.list,
             &flow,
             self.direction,
@@ -490,6 +494,9 @@ pub struct OpenExchange {
     /// request. A `zid` that meant the replier on a row whose `dir` meant the
     /// requester would be two ends of one exchange wearing one row.
     zid: Option<alloc::vec::Vec<u8>>,
+    /// The ZID of the end the request went TO, the replier's, owned for the
+    /// reason `zid` is: what the `zids` and `session` terms read beside it.
+    receiver_zid: Option<alloc::vec::Vec<u8>>,
     /// The request's kind and payload size, from the throughput plane's
     /// classifier, for `kind` and `bytes` terms at close.
     kind: crate::filter::RecordKind,
@@ -533,6 +540,11 @@ pub struct OpenExchange {
     first_reply_at_ns: Option<u64>,
     replies: usize,
     errs: usize,
+    /// The verdict it takes judged as unclosed, once a table read with it still
+    /// open judged it ([`ExchangeTable::unclosed_truth`]), kept until a response
+    /// to it arrives, so a table read at every call judges only the exchanges
+    /// that opened or moved since the last.
+    unclosed: Option<Truth>,
 }
 
 /// How an exchange ended, as [`ExchangeTable::finish`] needs to know it.
@@ -878,6 +890,7 @@ impl ExchangeTable {
                     keyexpr: resolved.ok(),
                     direction,
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
+                    receiver_zid: ctx.zid(direction.peer()).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
                     value: match crate::agg::payload_content(message) {
@@ -899,6 +912,7 @@ impl ExchangeTable {
                     first_reply_at_ns: None,
                     replies: 0,
                     errs: 0,
+                    unclosed: None,
                 };
                 // A repeated rid inside one flow means the first exchange was
                 // never closed — the same loss `unclosed` counts at the end of
@@ -922,6 +936,8 @@ impl ExchangeTable {
                 // response does not stand in for it. Its row and the census
                 // then name the same response.
                 let first_reply = entry.replies + entry.errs == 0;
+                // A response moves what the exchange would be judged by.
+                entry.unclosed = None;
                 match &r.body {
                     ResponseOwnedVariant::CodecZenohErr(_) => entry.errs += 1,
                     _ => entry.replies += 1,
@@ -1001,10 +1017,17 @@ impl ExchangeTable {
     fn finish(&mut self, entry: OpenExchange, ending: Ending, filter: &Filter) {
         let closed_at = match ending {
             Ending::Closed { at, .. } => at,
-            Ending::Unclosed => None,
+            // One rule for an exchange the capture never saw closed, wherever it
+            // is met, so a verdict an exchange still open was given when a table
+            // was read is the one it keeps when a later request displaces it.
+            Ending::Unclosed => {
+                let truth = entry
+                    .unclosed
+                    .unwrap_or_else(|| self.unclosed_truth(&entry, filter));
+                self.commit_unclosed(&entry, truth);
+                return;
+            }
         };
-        let closed = matches!(ending, Ending::Closed { .. });
-        let requested_at_ms = entry.requested_at_ns.map(|ns| ns / NANOS_PER_MILLI);
 
         let mut unstamped = false;
         let mut backwards = false;
@@ -1029,55 +1052,9 @@ impl ExchangeTable {
         } else {
             None
         };
-        let total = if closed {
-            measure(entry.requested_at_ns, closed_at)
-        } else {
-            None
-        };
+        let total = measure(entry.requested_at_ns, closed_at);
 
-        let view = RecordView {
-            // The REQUEST's row: the exchange's own verdict, and its row's.
-            row: entry.place.facts(),
-            direction: entry.direction,
-            // R2757 (open debt 790) — the requester's, kept since the rid was
-            // minted; see `OpenExchange::zid` for why it is that end.
-            zid: entry.zid.as_deref(),
-            keyexpr: entry.keyexpr.as_deref(),
-            kind: crate::filter::Record::Is(entry.kind),
-            payload_bytes: entry.payload_bytes,
-            value: entry.value.as_deref().map_or(
-                crate::filter::Content::Unavailable,
-                crate::filter::Content::Whole,
-            ),
-            // The REQUEST's instant, so `time` keeps meaning what it meant when
-            // R311y618 asked at the request. A `time` term that silently became
-            // "when it closed" would move every reader's window by the latency
-            // they were trying to measure.
-            unit_offset: entry.requested_unit_offset,
-            // The REQUEST's delay, at the same instant `time` is taken. A
-            // `Query` carries no source stamp, so this is `None` for the shape
-            // this plane most often holds -- and that is the honest answer
-            // rather than the close's delay standing in for the request's.
-            source_delay_ms: entry.requested_delay_ms,
-            observed_at_ms: requested_at_ms,
-            // A request and its close are an exchange, never a published
-            // sample: no frame, whatever the declarations say.
-            e2e: Some(crate::e2e_words::E2eWords::NONE),
-            tree: entry.tree.as_ref(),
-            // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
-            // instant `time` is, so the two fields cannot name different
-            // moments of one exchange.
-            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, requested_at_ms),
-            outcome: Some(OutcomeView {
-                replies: entry.replies as u64,
-                errs: entry.errs as u64,
-                // The selector terms are millisecond terms, so they are judged
-                // on the millisecond reading of each interval.
-                first_reply_ms: first.map(|i| i.ms),
-                completion_ms: total.map(|i| i.ms),
-                closed,
-            }),
-        };
+        let view = self.view(&entry, first, total, true);
         let truth = filter.matches(&view);
         self.selection.record(truth);
         // The exchange's one verdict is also the verdict of the two message rows
@@ -1129,24 +1106,7 @@ impl ExchangeTable {
             return;
         }
 
-        self.requests += 1;
-        match entry.keyexpr {
-            None => self.gaps.unattributed_requests += 1,
-            Some(ref k) => {
-                self.rows
-                    .entry(k.clone())
-                    .or_insert_with(|| ExchangeRow::new(k.clone()))
-                    .requests += 1;
-            }
-        }
-        if !closed {
-            self.unclosed += 1;
-            if !entry.in_session {
-                self.without_session.unclosed += 1;
-            }
-            return;
-        }
-
+        self.count_request(entry.keyexpr.as_deref());
         self.completed += 1;
         self.replies += entry.replies;
         self.errs += entry.errs;
@@ -1178,6 +1138,109 @@ impl ExchangeTable {
         }
         if let Some(interval) = total {
             row.completion.add(interval);
+        }
+    }
+
+    /// The view an exchange is judged by: the REQUEST's fields and the outcome
+    /// so far, with `first` and `total` its intervals where they were taken.
+    fn view<'e>(
+        &self,
+        entry: &'e OpenExchange,
+        first: Option<Interval>,
+        total: Option<Interval>,
+        closed: bool,
+    ) -> RecordView<'e> {
+        let requested_at_ms = entry.requested_at_ns.map(|ns| ns / NANOS_PER_MILLI);
+        RecordView {
+            // The REQUEST's row: the exchange's own verdict, and its row's.
+            row: entry.place.facts(),
+            direction: entry.direction,
+            // R2757 (open debt 790) — the requester's, kept since the rid was
+            // minted; see `OpenExchange::zid` for why it is that end.
+            zid: entry.zid.as_deref(),
+            receiver_zid: entry.receiver_zid.as_deref(),
+            keyexpr: entry.keyexpr.as_deref(),
+            kind: crate::filter::Record::Is(entry.kind),
+            payload_bytes: entry.payload_bytes,
+            value: entry.value.as_deref().map_or(
+                crate::filter::Content::Unavailable,
+                crate::filter::Content::Whole,
+            ),
+            // The REQUEST's instant, so `time` keeps meaning what it meant when
+            // R311y618 asked at the request. A `time` term that silently became
+            // "when it closed" would move every reader's window by the latency
+            // they were trying to measure.
+            unit_offset: entry.requested_unit_offset,
+            // The REQUEST's delay, at the same instant `time` is taken. A
+            // `Query` carries no source stamp, so this is `None` for the shape
+            // this plane most often holds -- and that is the honest answer
+            // rather than the close's delay standing in for the request's.
+            source_delay_ms: entry.requested_delay_ms,
+            observed_at_ms: requested_at_ms,
+            // A request and its close are an exchange, never a published
+            // sample: no frame, whatever the declarations say.
+            e2e: Some(crate::e2e_words::E2eWords::NONE),
+            tree: entry.tree.as_ref(),
+            // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
+            // instant `time` is, so the two fields cannot name different
+            // moments of one exchange.
+            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, requested_at_ms),
+            outcome: Some(OutcomeView {
+                replies: entry.replies as u64,
+                errs: entry.errs as u64,
+                // The selector terms are millisecond terms, so they are judged
+                // on the millisecond reading of each interval.
+                first_reply_ms: first.map(|i| i.ms),
+                completion_ms: total.map(|i| i.ms),
+                closed,
+            }),
+        }
+    }
+
+    /// The verdict an exchange still open takes when it is judged as one the
+    /// capture never saw closed: what [`Self::finish`] gives it under
+    /// [`Ending::Unclosed`], taken without committing it. It depends only on the
+    /// exchange as it stands and on the table's origin, so it holds until a
+    /// response to the exchange arrives.
+    fn unclosed_truth(&self, entry: &OpenExchange, filter: &Filter) -> Truth {
+        // A first reply that never arrived is no interval, as in `finish`.
+        let first = if entry.replies + entry.errs > 0 {
+            Measured::between(entry.requested_at_ns, entry.first_reply_at_ns).interval()
+        } else {
+            None
+        };
+        filter.matches(&self.view(entry, first, None, false))
+    }
+
+    /// Commit an exchange the capture never saw closed under `truth`: its
+    /// verdict, the request's row's, and the counters an admitted one moves.
+    /// Counted, never completed: a query whose reply the capture missed is not a
+    /// query that answered instantly, and an unclosed exchange is not missing a
+    /// timestamp, it is missing a close.
+    fn commit_unclosed(&mut self, entry: &OpenExchange, truth: Truth) {
+        self.selection.record(truth);
+        self.row_verdicts.record(entry.row, truth);
+        if truth != Truth::Yes {
+            return;
+        }
+        self.count_request(entry.keyexpr.as_deref());
+        self.unclosed += 1;
+        if !entry.in_session {
+            self.without_session.unclosed += 1;
+        }
+    }
+
+    /// Count an admitted request, under its keyexpr's row when it has one.
+    fn count_request(&mut self, keyexpr: Option<&str>) {
+        self.requests += 1;
+        match keyexpr {
+            None => self.gaps.unattributed_requests += 1,
+            Some(k) => {
+                self.rows
+                    .entry(String::from(k))
+                    .or_insert_with(|| ExchangeRow::new(String::from(k)))
+                    .requests += 1;
+            }
         }
     }
 
@@ -1407,8 +1470,10 @@ pub fn exchanges_grouped(
 ///
 /// The open exchanges are hoisted with the walk and drained once at the end,
 /// which is the same set of verdicts in the same sequence: the key leads with the
-/// list, so `pop_first` still walks list by list. [`Self::table`] drains a COPY,
-/// so the fold itself can take more messages after it has been read.
+/// list, so `pop_first` still walks list by list. [`Self::table`] commits them
+/// into a COPY of the table, under the verdict each was given when a walk last
+/// ended ([`crate::ordered_fold::OrderedFold::settle`]), so the fold itself can
+/// take more messages after it has been read.
 #[derive(Debug, Clone)]
 pub(crate) struct ExchangeFold {
     table: ExchangeTable,
@@ -1473,9 +1538,21 @@ impl ExchangeFold {
     /// The table with every exchange still open given its verdict, over a copy.
     pub(crate) fn table(&self) -> ExchangeTable {
         let mut table = self.table.clone();
-        let mut open = self.open.clone();
-        table.drain_open(&mut open, &self.filter);
+        self.commit_open(&mut table);
         table
+    }
+
+    /// Commit every exchange still open into `table` as unclosed, in key order
+    /// (the order [`ExchangeTable::drain_open`] judges them in), under the
+    /// verdict [`Self::settle`] kept for it, and judged here only where none was
+    /// kept. The exchanges themselves are not copied.
+    fn commit_open(&self, table: &mut ExchangeTable) {
+        for entry in self.open.values() {
+            let truth = entry
+                .unclosed
+                .unwrap_or_else(|| self.table.unclosed_truth(entry, &self.filter));
+            table.commit_unclosed(entry, truth);
+        }
     }
 
     /// The table as the messages taken so far left it: every exchange that was
@@ -1492,14 +1569,13 @@ impl ExchangeFold {
     /// [`Self::table`] is this table and [`Self::table_so_far`] together, without
     /// the copy of the second: a reader that asks a row's verdict of both, in
     /// that order, reads the records [`Self::table`] holds for it in the order it
-    /// holds them. It costs a pass over the exchanges still open, which is what
-    /// judging them costs wherever it is done.
+    /// holds them. It costs a pass over the exchanges still open, judging only
+    /// those [`Self::settle`] kept no verdict for.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
     pub(crate) fn open_judged(&self) -> ExchangeTable {
         let mut table = ExchangeTable::new();
         table.capture_origin_ms = self.table.capture_origin_ms;
-        let mut open = self.open.clone();
-        table.drain_open(&mut open, &self.filter);
+        self.commit_open(&mut table);
         table
     }
 
@@ -1521,6 +1597,25 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
         self.filter.reads_tree()
     }
 
+    /// Judge, as unclosed, every exchange still open that has no verdict kept:
+    /// the ones opened or answered since the last walk. The others keep theirs,
+    /// so a capture whose queries never close pays for each once and not at
+    /// every reading.
+    fn settle(&mut self) {
+        let Self {
+            table,
+            open,
+            filter,
+            ..
+        } = self;
+        for entry in open.values_mut() {
+            if entry.unclosed.is_none() {
+                let truth = table.unclosed_truth(entry, filter);
+                entry.unclosed = Some(truth);
+            }
+        }
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,
@@ -1539,7 +1634,7 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
             // Placed and holding: see `crate::payload`'s fold.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.open,
             &mut self.spaces,
@@ -2071,6 +2166,83 @@ pub(crate) mod tests {
         assert!(t.totals().1.is_empty());
         let row = t.row("never/closed").expect("the request opened a row");
         assert_eq!(row.unclosed(), 1);
+    }
+
+    /// AN EXCHANGE STILL OPEN IS JUDGED ONCE, UNTIL A RESPONSE MOVES IT. A fold
+    /// that settles at the end of a walk keeps the verdict of every exchange
+    /// still open; a table read under the kept verdicts is the table judged
+    /// afresh, a kept verdict is the one read (one planted shows through), and a
+    /// response gives up the verdict of the exchange it answers and of no other.
+    #[test]
+    fn an_open_exchange_is_judged_once_until_a_response_moves_it() {
+        use crate::ordered_fold::OrderedFold;
+        let d = dissect(&[
+            (
+                true,
+                Some(1),
+                request_query(3, sender_space(0, Some("never/closed"))),
+            ),
+            (
+                true,
+                Some(2),
+                request_query(4, sender_space(0, Some("still/open"))),
+            ),
+            (
+                false,
+                Some(3),
+                response_reply(3, sender_space(0, Some("never/closed")), b"partial"),
+            ),
+        ]);
+        let grouping = crate::node::session_grouping(&d);
+        let mut fold = ExchangeFold::begin(&d, &Filter::any(), &grouping);
+        let kept = |fold: &ExchangeFold| -> Vec<Option<Truth>> {
+            fold.open.values().map(|entry| entry.unclosed).collect()
+        };
+        let order = d.message_frames_in_capture_order();
+        for (n, (flow, list, packet, frame)) in order.iter().enumerate() {
+            fold.feed(&flow, list, packet, &frame, None, &grouping);
+            if n != 1 {
+                continue;
+            }
+            assert_eq!(
+                kept(&fold),
+                [None, None],
+                "nothing is judged while a walk feeds"
+            );
+            let afresh = alloc::format!("{:?}", fold.table());
+            fold.settle();
+            assert_eq!(kept(&fold), [Some(Truth::Yes), Some(Truth::Yes)]);
+            assert_eq!(
+                alloc::format!("{:?}", fold.table()),
+                afresh,
+                "the kept verdicts give the table judged afresh"
+            );
+            if let Some(entry) = fold.open.values_mut().next() {
+                entry.unclosed = Some(Truth::No);
+            }
+            assert_eq!(
+                fold.table().unclosed(),
+                1,
+                "a kept verdict is read, not judged again"
+            );
+            assert_eq!(fold.table().requests(), 1);
+            for entry in fold.open.values_mut() {
+                entry.unclosed = Some(Truth::Yes);
+            }
+        }
+        assert_eq!(
+            kept(&fold),
+            [None, Some(Truth::Yes)],
+            "the response gave up the answered exchange's verdict and only it"
+        );
+        fold.settle();
+        assert_eq!(kept(&fold), [Some(Truth::Yes), Some(Truth::Yes)]);
+        let table = fold.table();
+        assert_eq!(table.unclosed(), 2);
+        assert_eq!(
+            table.row("never/closed").map(ExchangeRow::unclosed),
+            Some(1)
+        );
     }
 
     /// An `Err` is an answer, and a different one from a `Reply`. A plane that

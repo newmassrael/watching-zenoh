@@ -38,7 +38,11 @@
 //! took: which session owns a list, which zids a direction announced, and which
 //! zids a selector's prefix is read against. A handshake that arrives after the
 //! messages it names changes all of them for messages already folded, and a fold
-//! that kept going would hold the old reading.
+//! that kept going would hold the old reading. A handshake that arrives before
+//! any message it would change does not: the census planes go on when a later
+//! grouping only gives a session to lists whose folded messages carry no network
+//! message, and their selector reads no zid (`OrderedFold::regroups`), which is
+//! every session after the first opening as the capture grows.
 //!
 //! # What proves it
 //!
@@ -109,6 +113,26 @@ pub(crate) trait OrderedFold: Clone {
         message: Option<&[u8]>,
         grouping: &SessionGrouping,
     );
+
+    /// Whether this fold may go on under a later session grouping that only
+    /// attributes lists whose messages it took carry no network message
+    /// ([`SessionGrouping::regroups_as`]): a fold whose readings of a list's
+    /// messages depend on the list's owners and zids only through the records,
+    /// declarations and requests it carries, and whose selector reads no zid
+    /// the capture names. Such a fold goes on across the handshake of every
+    /// session after the first.
+    ///
+    /// `false` unless a fold says so: then it begins again whenever the
+    /// grouping moves, which is never a wrong answer.
+    fn regroups(&self) -> bool {
+        false
+    }
+
+    /// Called once a walk has fed every message it took, before the fold is
+    /// kept and read: where a fold settles what a reading would otherwise work
+    /// out again at every call from what it holds (the exchange plane's verdict
+    /// on each exchange still open). Nothing by default.
+    fn settle(&mut self) {}
 }
 
 /// Feed `fold` every message of `dissection` in capture order, once: the walk
@@ -316,8 +340,14 @@ impl<F: OrderedFold> Resumable<F> {
         let origin_ms = dissection.capture_origin_ms();
         let resumed = match &self.saved {
             Some(s)
-                if s.grouping.continues_as(grouping, s.fold.reads_flow_word())
-                    && s.origin_ms == origin_ms =>
+                if s.origin_ms == origin_ms
+                    && (s.grouping.continues_as(grouping, s.fold.reads_flow_word())
+                        || (s.fold.regroups()
+                            && s.grouping.regroups_as(
+                                grouping,
+                                s.fold.reads_flow_word(),
+                                |list| dissection.walked_only_transport(list, &s.marks),
+                            ))) =>
             {
                 match trims {
                     TrimPolicy::Restart => dissection.capture_order_since(Some(&s.marks)),
@@ -337,6 +367,11 @@ impl<F: OrderedFold> Resumable<F> {
                     p.expect(frames.iter().len() as u64 * F::PLANES);
                 }
                 let saved = self.saved.as_mut().expect("a resumed fold has a saved one");
+                // What the fold goes on under: equal to the grouping it was made
+                // under, or one that only gave quiet lists their sessions.
+                if saved.grouping != *grouping {
+                    saved.grouping = grouping.clone();
+                }
                 // The walk takes the messages after `saved.marks`: the reader that
                 // wants the messages after the same marks reads them here.
                 let mut tap =
@@ -360,6 +395,7 @@ impl<F: OrderedFold> Resumable<F> {
                     self.saved = None;
                     return None;
                 }
+                saved.fold.settle();
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
@@ -399,6 +435,7 @@ impl<F: OrderedFold> Resumable<F> {
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
+                fold.settle();
                 self.saved = Some(Saved {
                     fold,
                     grouping: grouping.clone(),
@@ -468,6 +505,11 @@ fn steps(progress: Option<&Progress<'_>>, n: u64) -> bool {
 /// listener. Each plane's fold is the one it always was.
 #[derive(Debug, Clone)]
 pub(crate) struct CensusFold {
+    /// The selector reads no zid the capture names, so the planes may go on
+    /// when a later session's handshake adds a session to the grouping
+    /// ([`OrderedFold::regroups`]). Each plane reads a list's owners and zids
+    /// for the records, declarations and requests of that list alone.
+    regroups: bool,
     pub(crate) keyexprs: crate::agg::AggFold,
     #[cfg(feature = "network-codecs")]
     pub(crate) exchanges: crate::exchange::ExchangeFold,
@@ -485,6 +527,7 @@ impl CensusFold {
         grouping: &SessionGrouping,
     ) -> Self {
         Self {
+            regroups: !filter.reads_zid(),
             keyexprs: crate::agg::AggFold::begin(dissection, filter, grouping),
             #[cfg(feature = "network-codecs")]
             exchanges: crate::exchange::ExchangeFold::begin(dissection, filter, grouping),
@@ -505,6 +548,10 @@ impl OrderedFold for CensusFold {
 
     fn reads_flow_word(&self) -> bool {
         self.keyexprs.reads_flow_word()
+    }
+
+    fn regroups(&self) -> bool {
+        self.regroups
     }
 
     fn reads_tree(&self) -> bool {
@@ -538,6 +585,11 @@ impl OrderedFold for CensusFold {
                 .feed(flow, list, packet, frame, message, grouping);
         }
     }
+
+    fn settle(&mut self) {
+        #[cfg(feature = "network-codecs")]
+        self.exchanges.settle();
+    }
 }
 
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -567,6 +619,11 @@ impl CensusFold {
 #[derive(Debug, Default)]
 struct SelectorPlanes {
     planes: Resumable<CensusFold>,
+    /// The selector as the planes judge it: the one asked, with its `row`
+    /// terms read against the places the rows had when the planes were last
+    /// brought up (`crate::filter::Filter::rows_numbered_by`). Another reading
+    /// is another selector for every record already folded.
+    read: Option<crate::filter::Filter>,
     /// What the planes kept after they last gave up the rows no list holds:
     /// the mark that says when to give them up again.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -677,7 +734,8 @@ impl CensusMemory {
     ///
     /// The planes begin again where a fold of the capture cannot go on at all
     /// (a list that moved or was replaced, a message that sorts before one
-    /// already folded, a grouping that changed, a stopped call), and where what
+    /// already folded, a grouping that changed the owner of a message already
+    /// folded, a stopped call), and where what
     /// they keep that is not a row's outgrows four times the messages held;
     /// then the census is of what is held, and `observed` says so. The node
     /// census begins again with them, and they with it, so every plane of one
@@ -759,8 +817,21 @@ impl CensusMemory {
     /// are continued, and a selector with none gets empty ones, taking the place of
     /// the least recently used selector's when every memory is in use. The node
     /// census is kept, since no selector narrows it.
-    pub(crate) fn for_filter(&mut self, filter: &crate::filter::Filter) {
-        self.planes.touch(filter, SelectorPlanes::default);
+    ///
+    /// `read` is `filter` as this call judges records by it, its `row` terms
+    /// read against the places the rows have now. The planes are kept under the
+    /// selector as typed, so a reading that moves does not take another selector's
+    /// slot; planes folded under another reading begin again.
+    pub(crate) fn for_filter(
+        &mut self,
+        filter: &crate::filter::Filter,
+        read: crate::filter::Filter,
+    ) {
+        let slot = self.planes.touch(filter, SelectorPlanes::default);
+        if slot.read.as_ref() != Some(&read) {
+            slot.planes = Resumable::default();
+            slot.read = Some(read);
+        }
     }
 
     /// The selector last asked under, its planes, the work counter and the node
@@ -787,7 +858,8 @@ impl CensusMemory {
         let (filter, planes) = planes
             .newest_mut()
             .expect("a plane was made above when there was none");
-        (filter.clone(), planes, stats, nodes)
+        let read = planes.read.clone().unwrap_or_else(|| filter.clone());
+        (read, planes, stats, nodes)
     }
 
     /// The node census and the selector-narrowed planes, brought up to
@@ -824,8 +896,7 @@ impl CensusMemory {
 /// the planes go on across front trims, and cover ONE scope between them.
 ///
 /// The planes are begun again whenever the node census began again since they
-/// began (its own restart, a message that names a node, or another selector's
-/// call that began it), and the node census is begun again whenever the planes
+/// began (its own restart, or another selector's call that began it), and the node census is begun again whenever the planes
 /// began over what is held (a fold that cannot go on, their open exchanges
 /// outgrowing the holding, another selector) while it holds messages the lists
 /// no longer do. A node census begun again can group the held messages

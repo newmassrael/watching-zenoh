@@ -459,6 +459,37 @@ pub(crate) const MAX_JSON_DEPTH: usize = 128;
 /// A TOTAL match rather than a `_ =>` fallback, on this crate's own rule for
 /// wire-name functions: a seventh kind must be named here rather than silently
 /// rendered as whichever string happened to be the default.
+/// The typed reading of one JSON value, from its source text: its kind as
+/// [`json_kind_word`] names it and, for a leaf, the value as JSON text. A
+/// string, a `true`, a `false` and a `null` are their own source text. A
+/// number is too, except an integer outside the range a JSON reader holds
+/// exactly, which is its digits in a string by the integer rule every typed
+/// value keeps ([`crate::proto_decode_json`]). A container has a kind and no
+/// value: its members are the rows below it.
+fn json_typed(kind: JsonKind, raw: &str) -> formats::TypedValue {
+    let json = match kind {
+        JsonKind::Object | JsonKind::Array => None,
+        JsonKind::Number if !json_number_is_exact(raw) => Some(alloc::format!("\"{raw}\"")),
+        _ => Some(alloc::string::String::from(raw)),
+    };
+    formats::TypedValue {
+        ty: Some(alloc::string::String::from(json_kind_word(kind))),
+        json,
+        enum_number: None,
+    }
+}
+
+/// Whether a JSON number's source text is a value every JSON reader holds
+/// exactly: one with a fraction or an exponent is read as a double whatever is
+/// done here, and an integer is exact up to 2^53 - 1.
+fn json_number_is_exact(raw: &str) -> bool {
+    if raw.contains(['.', 'e', 'E']) {
+        return true;
+    }
+    let digits = raw.trim_start_matches('-');
+    matches!(digits.parse::<u64>(), Ok(v) if v <= wz_session_core::json::MAX_EXACT_INTEGER)
+}
+
 const fn json_kind_word(kind: JsonKind) -> &'static str {
     match kind {
         JsonKind::Object => "object",
@@ -668,7 +699,7 @@ impl<'a> Scanner<'a> {
             value,
             start,
             end,
-            typed: None,
+            typed: Some(json_typed(kind, raw)),
         };
     }
 
@@ -1514,6 +1545,7 @@ impl PayloadCensus {
             // R2757 (open debt 790) — the node plane's answer, asked with the
             // same `direction` this record already carries.
             zid: ctx.zid(direction),
+            receiver_zid: ctx.zid(direction.peer()),
             unit_offset: crate::agg::record_unit_offset(frame, span),
             // R311y644 (§1.1p) — the census of clock-offset witnesses belongs
             // to the throughput plane, so this one reads the axis and does not
@@ -2152,7 +2184,7 @@ impl PayloadFold {
             // around a record.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.spaces,
             sink,
@@ -2579,9 +2611,10 @@ pub mod formats {
         /// One past the last.
         pub end: usize,
         /// The field AS ITS TYPE READS IT, from a decoder that knows the type:
-        /// one reading by a schema ([`crate::proto_decode`]) or a described
-        /// record (a `#name=layout` definition). `None` from a walk that knows
-        /// only the wire.
+        /// one reading by a schema ([`crate::proto_decode`]), a described
+        /// record (a `#name=layout` definition), or a format whose wire says
+        /// each value's kind (JSON, CBOR, text). `None` from a walk that knows
+        /// only the wire and not what it holds (protobuf without a schema).
         ///
         /// Beside `value` and not in place of it, so `value` keeps one meaning
         /// in every row of every document: the text a person reads. A
@@ -2765,6 +2798,16 @@ pub mod formats {
         /// format that knows its types without a schema says so.
         fn reads_types(&self) -> bool {
             self.body_schema().is_some_and(|schema| schema.read)
+        }
+
+        /// The type hash of the body schema, in the spelling of the type system
+        /// it belongs to, or `None` where it has none or none is computed:
+        /// the `RIHS01_<hex>` of a `cdr` rule's ROS type. What a row reports as
+        /// `type_hash`, beside `schema`, so a consumer compares it with the
+        /// hash a publisher's key carries. A default for the reason
+        /// [`Self::encodings`] gives.
+        fn type_hash(&self) -> Option<&str> {
+            None
         }
     }
 
@@ -3032,6 +3075,15 @@ pub mod formats {
         /// `protobuf` with a body schema (`protobuf@pkg.Pose`), owned by the
         /// map for the reason a profile rule's format is.
         Schema(usize),
+        /// `cdr` with the ROS type the rule names (`cdr@pkg/msg/Type`), owned
+        /// by the map for the reason a profile rule's format is.
+        Cdr(usize),
+        /// An ENCODING RULE (`<keyexpr>=encoding`): the built-in a sample is
+        /// read with is the one its declared encoding names. It never competes
+        /// with the other rules for a key: it is consulted only for a key no
+        /// other rule covers, whatever the order the two were declared in, so a
+        /// key rule always wins ([`FormatMap::encoding_rule_for`]).
+        Encoding,
     }
 
     /// One `.proto` file a deployment declared with `#@<file>="<text>"`.
@@ -3142,6 +3194,12 @@ pub mod formats {
         schema_set: Option<alloc::rc::Rc<crate::proto_decode::SchemaSet>>,
         /// The `protobuf@pkg.Msg` rules' formats, one per rule.
         schema_rules: Vec<crate::payload_typed::SchemaProtobuf>,
+        /// The declared ROS definition files read together, once, by the first
+        /// `cdr@` rule, and dropped when a file is declared after it, as
+        /// `schema_set` is.
+        ros_set: Option<alloc::rc::Rc<crate::ros_msg::TypeSet>>,
+        /// The `cdr@pkg/msg/Type` rules' formats, one per rule.
+        cdr_rules: Vec<CdrFormat>,
         /// The segment profiles this run registered, owned here for the reason
         /// `described` is.
         segment_profiles: Vec<SegmentProfileDef>,
@@ -3391,6 +3449,8 @@ pub mod formats {
                 schema_files: Vec::new(),
                 schema_set: None,
                 schema_rules: Vec::new(),
+                ros_set: None,
+                cdr_rules: Vec::new(),
                 segment_profiles: Vec::new(),
                 segment_rules: Vec::new(),
                 key_bindings: Vec::new(),
@@ -3663,6 +3723,8 @@ pub mod formats {
                 RuleTarget::Described(at) => &self.described[*at],
                 RuleTarget::E2e(at) => &self.e2e_rules[*at].1,
                 RuleTarget::Schema(at) => &self.schema_rules[*at],
+                RuleTarget::Cdr(at) => &self.cdr_rules[*at],
+                RuleTarget::Encoding => &ByEncoding,
             }
         }
 
@@ -3672,6 +3734,7 @@ pub mod formats {
             match target {
                 RuleTarget::E2e(at) => self.e2e_rules[*at].1.token(),
                 RuleTarget::Schema(at) => self.schema_rules[*at].token(),
+                RuleTarget::Cdr(at) => self.cdr_rules[*at].token(),
                 other => self.target_format(other).name().to_owned(),
             }
         }
@@ -3681,12 +3744,34 @@ pub mod formats {
         /// together, and a message's imports are files too.
         pub fn reads_schema_files(&self, rule: DeclarationId) -> bool {
             match self.rules.get(rule.0) {
-                Some((_, target @ (RuleTarget::Schema(_) | RuleTarget::E2e(_)))) => self
+                Some((
+                    _,
+                    target @ (RuleTarget::Schema(_) | RuleTarget::E2e(_) | RuleTarget::Cdr(_)),
+                )) => self
                     .target_format(target)
                     .body_schema()
                     .is_some_and(|schema| schema.read),
                 _ => false,
             }
+        }
+
+        /// The handles of the schema files the rule `rule` read its payload by,
+        /// for a run's ledger of what applied: every `.proto` file for a rule
+        /// read by a `.proto` schema, every ROS definition file for a `cdr`
+        /// rule, and none for a rule that read by no file. A kind's files are
+        /// read together, so a rule that read one read them all.
+        pub fn schema_files_read_by(
+            &self,
+            rule: DeclarationId,
+        ) -> impl Iterator<Item = DeclarationId> + '_ {
+            let ros = matches!(self.rules.get(rule.0), Some((_, RuleTarget::Cdr(_))));
+            let reads = self.reads_schema_files(rule);
+            let first = self.first_schema_file_id();
+            self.schema_files
+                .iter()
+                .enumerate()
+                .filter(move |(_, f)| reads && crate::ros_msg::is_definition_file(&f.name) == ros)
+                .map(move |(at, _)| DeclarationId(first + at))
         }
 
         /// The handles of every schema file, for a run's ledger of what applied.
@@ -3728,12 +3813,25 @@ pub mod formats {
                     ))
                 };
             }
+            // A ROS definition file is read here, alone, so a file that is not
+            // one is refused at its own line whether or not a rule names one of
+            // its types. Its name says every type it defines, so no two files
+            // can define one type, and the files read together later (`ros_types`)
+            // cannot be refused for anything this does not find.
+            if crate::ros_msg::is_definition_file(name) {
+                crate::ros_msg::TypeSet::read(&[crate::ros_msg::DefinitionFile {
+                    name,
+                    text: &text,
+                }])
+                .map_err(|why| bad(&why))?;
+            }
             self.schema_files.push(SchemaFileDef {
                 name: name.to_owned(),
                 written: written.to_owned(),
                 text,
             });
             self.schema_set = None;
+            self.ros_set = None;
             Ok(())
         }
 
@@ -3745,7 +3843,9 @@ pub mod formats {
             token: &str,
             message: &str,
         ) -> Result<Option<crate::payload_typed::LinkedBody>, FormatMapError> {
-            if self.schema_files.is_empty() {
+            // A ROS definition file is read by its own reader (`link_ros`).
+            let is_proto = |f: &&SchemaFileDef| !crate::ros_msg::is_definition_file(&f.name);
+            if !self.schema_files.iter().any(|f| is_proto(&f)) {
                 return Ok(None);
             }
             let set = match &self.schema_set {
@@ -3754,6 +3854,7 @@ pub mod formats {
                     let files: Vec<crate::proto_schema::ProtoFile<'_>> = self
                         .schema_files
                         .iter()
+                        .filter(is_proto)
                         .map(|f| crate::proto_schema::ProtoFile {
                             name: &f.name,
                             text: f.text.as_bytes(),
@@ -3776,10 +3877,104 @@ pub mod formats {
             }))
         }
 
+        /// The declared ROS definition files read together, with `type_name`
+        /// checked among them: defined, and every message it reaches defined.
+        /// Refused, naming the file and line, the type or the field, when the
+        /// text declares no definition file, when one cannot be read, and when
+        /// the type is not defined: a CDR payload is not read without its
+        /// definition, because nothing on the wire says what its bytes are.
+        fn link_ros(
+            &mut self,
+            token: &str,
+            type_name: &str,
+        ) -> Result<alloc::rc::Rc<crate::ros_msg::TypeSet>, FormatMapError> {
+            let refused = |why: String| {
+                FormatMapError::BadBodySchema(token.to_owned(), crate::e2e_rule::SchemaRefusal(why))
+            };
+            if !self
+                .schema_files
+                .iter()
+                .any(|f| crate::ros_msg::is_definition_file(&f.name))
+            {
+                return Err(refused(alloc::format!(
+                    "no declared definition file (`#@<package>/msg/<Type>.msg=\"...\"`) \
+                     defines {type_name}"
+                )));
+            }
+            let set = self.ros_types().map_err(refused)?;
+            set.check(type_name).map_err(refused)?;
+            Ok(set)
+        }
+
+        /// The declared ROS definition files read together, once, and kept
+        /// until a file is declared after them.
+        fn ros_types(&mut self) -> Result<alloc::rc::Rc<crate::ros_msg::TypeSet>, String> {
+            if let Some(set) = &self.ros_set {
+                return Ok(set.clone());
+            }
+            let files: Vec<crate::ros_msg::DefinitionFile<'_>> = self
+                .schema_files
+                .iter()
+                .filter(|f| crate::ros_msg::is_definition_file(&f.name))
+                .map(|f| crate::ros_msg::DefinitionFile {
+                    name: &f.name,
+                    text: &f.text,
+                })
+                .collect();
+            let set = alloc::rc::Rc::new(crate::ros_msg::TypeSet::read(&files)?);
+            self.ros_set = Some(set.clone());
+            Ok(set)
+        }
+
+        /// Every type the declared ROS definition file `file` defines,
+        /// explicit and derived, in the order rosidl adds them, each with its
+        /// RIHS01 hash, or `None` where the type reaches one no declared file
+        /// defines. Empty for a name that is not a declared definition file.
+        pub fn definition_types(&mut self, file: &str) -> Vec<(String, Option<String>)> {
+            // Each file was read alone when it was declared, and nothing else
+            // refuses them read together (`define_schema_file`), so an error
+            // here cannot arise and an empty list is not hiding one.
+            let Ok(set) = self.ros_types() else {
+                return Vec::new();
+            };
+            set.types_of_file(file)
+                .unwrap_or_default()
+                .iter()
+                .map(|name| {
+                    let hash = crate::ros_type_hash::type_hash(&set, name).ok();
+                    (name.clone(), hash)
+                })
+                .collect()
+        }
+
+        /// A `cdr` rule: the type it names, read by the declared definitions.
+        fn insert_cdr(
+            &mut self,
+            pattern: &str,
+            token: &str,
+            type_name: Option<&str>,
+        ) -> Result<(), FormatMapError> {
+            let Some(type_name) = type_name else {
+                return Err(FormatMapError::BadBodySchema(
+                    token.to_owned(),
+                    crate::e2e_rule::SchemaRefusal(String::from(
+                        "`cdr` reads a payload by its ROS type: write cdr@<package>/msg/<Type>",
+                    )),
+                ));
+            };
+            let set = self.link_ros(token, type_name)?;
+            self.push_rule(pattern, RuleTarget::Cdr(self.cdr_rules.len()))?;
+            self.cdr_rules
+                .push(CdrFormat::new(type_name.to_owned(), set));
+            Ok(())
+        }
+
         /// Whether `name` is already a format name: shipped, described, or a
         /// profile. One namespace, because a rule names a format by it.
         fn format_name_taken(&self, name: &str) -> bool {
             builtin(name).is_some()
+                || name == ENCODING_TOKEN
+                || name == CDR_TOKEN
                 || self.described.iter().any(|d| d.name() == name)
                 || self.e2e_profiles.iter().any(|p| p.name == name)
                 || self.segment_profiles.iter().any(|p| p.name == name)
@@ -3925,6 +4120,12 @@ pub mod formats {
             if let Some(profile_at) = self.segment_profile_named(format) {
                 return self.push_segment_rule(pattern, profile_at);
             }
+            // The encoding token names no format: see `RuleTarget::Encoding`.
+            // `format_name_taken` refuses a definition of that name, so this
+            // shadows nothing.
+            if format == ENCODING_TOKEN {
+                return self.push_rule(pattern, RuleTarget::Encoding);
+            }
             let target = match self.described.iter().position(|d| d.name() == format) {
                 Some(at) => RuleTarget::Described(at),
                 None => match builtin(format) {
@@ -3950,11 +4151,14 @@ pub mod formats {
             let refused = |why: crate::e2e_rule::SchemaRefusal| {
                 FormatMapError::BadBodySchema(token.to_owned(), why)
             };
+            if name == CDR_TOKEN {
+                return self.insert_cdr(pattern, token, schema);
+            }
             if let (Some(shipped), Some(schema)) = (builtin(name), schema) {
                 if shipped.name() != Protobuf.name() {
                     return Err(refused(crate::e2e_rule::SchemaRefusal(alloc::format!(
-                        "a body schema is read by `protobuf` and by the end-to-end profiles, \
-                         and `{name}` reads none"
+                        "a body schema is read by `protobuf`, `cdr` and the end-to-end \
+                         profiles, and `{name}` reads none"
                     ))));
                 }
                 crate::e2e_rule::check_schema(schema).map_err(refused)?;
@@ -4062,12 +4266,44 @@ pub mod formats {
         }
 
         /// The position of the first rule that covers `keyexpr`: the one place
-        /// the first-match-wins rule is applied.
+        /// the first-match-wins rule is applied. An encoding rule is not one of
+        /// the rules it picks from: see [`Self::encoding_rule_for`].
         fn first_rule_covering(&self, keyexpr: &str) -> Option<usize> {
-            first_covering(
-                self.rules.iter().map(|(pattern, _)| pattern.as_str()),
-                keyexpr,
-            )
+            self.first_covering_of(keyexpr, false)
+        }
+
+        /// The first rule covering `keyexpr` among the encoding rules when
+        /// `encoding` is set, and among the others when it is not, as its
+        /// position among every rule.
+        fn first_covering_of(&self, keyexpr: &str, encoding: bool) -> Option<usize> {
+            self.rules.iter().position(|(pattern, target)| {
+                matches!(target, RuleTarget::Encoding) == encoding
+                    && first_covering([pattern.as_str()], keyexpr).is_some()
+            })
+        }
+
+        /// The ENCODING RULE that covers `keyexpr`, when no other rule does:
+        /// the first in the order declared, with which one it was. Its format is
+        /// [`ByEncoding`], the token; the format a sample is read with is the
+        /// one its declared encoding names ([`chosen_by_encoding`]).
+        ///
+        /// `None` when a rule that is not an encoding rule covers the key, in
+        /// whichever order the two were declared: an operator's rule for a key
+        /// is the operator's statement about it, and a publisher's label is
+        /// read only where the operator made none.
+        pub fn encoding_rule_for(&self, keyexpr: &str) -> Option<RuleMatch<'_>> {
+            if self.first_rule_covering(keyexpr).is_some() {
+                return None;
+            }
+            let at = self.first_covering_of(keyexpr, true)?;
+            Some(RuleMatch {
+                id: DeclarationId(at),
+                rule: MatchedRule {
+                    index: at,
+                    pattern: self.rules[at].0.clone(),
+                },
+                format: &ByEncoding,
+            })
         }
 
         /// What judging a record end to end needs of these declarations, owned,
@@ -4081,9 +4317,12 @@ pub mod formats {
             if !self.has_e2e_rules() {
                 return crate::e2e_plane::JudgingRules::default();
             }
+            // An encoding rule wins no key from a profile rule, so the judging
+            // copy leaves it out rather than let it shadow one.
             let rules = self
                 .rules
                 .iter()
+                .filter(|(_, target)| !matches!(target, RuleTarget::Encoding))
                 .map(|(pattern, target)| {
                     let profile = match target {
                         RuleTarget::E2e(at) => Some(self.e2e_rules[*at].1.profile().clone()),
@@ -4120,7 +4359,10 @@ pub mod formats {
                 )),
                 // The schema files it read are marked through
                 // `reads_schema_files`: a rule reads all of them, not one.
-                RuleTarget::Builtin(_) | RuleTarget::Schema(_) => None,
+                RuleTarget::Builtin(_)
+                | RuleTarget::Schema(_)
+                | RuleTarget::Cdr(_)
+                | RuleTarget::Encoding => None,
             }
         }
 
@@ -4259,7 +4501,11 @@ pub mod formats {
     // R311y856 — the SHIPPED decoders, re-exported from the file that holds
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
-    pub use crate::payload_builtin::{builtin, Cbor, Json, Protobuf, BUILTIN_NAMES};
+    pub use crate::payload_builtin::{
+        builtin, chosen_by_encoding, ByEncoding, Cbor, Json, Protobuf, Text, BUILTIN_NAMES,
+        ENCODING_TOKEN,
+    };
+    pub use crate::payload_cdr::{CdrFormat, CDR_TOKEN};
     // `MessagePaths` is defined in this module, above `PayloadFormat`.
     // The end-to-end profile format a rule can bind a key to, re-exported for
     // the reason the others are: one module a caller reads.
@@ -4702,6 +4948,7 @@ pub mod formats {
                             kind: DeclarationKind::SegmentRule,
                             pattern: Some(pattern),
                             rule_index: Some(index),
+                            file: None,
                         });
                     }
                     // The rule lands at the end, so its position is the count
@@ -4716,6 +4963,7 @@ pub mod formats {
                         kind: DeclarationKind::FormatRule,
                         pattern: Some(pattern),
                         rule_index: Some(index),
+                        file: None,
                     })
                 }
                 DeclarationText::Definition { name, layout } => {
@@ -4725,6 +4973,7 @@ pub mod formats {
                         kind: DeclarationKind::FormatDefinition,
                         pattern: None,
                         rule_index: None,
+                        file: None,
                     })
                 }
                 DeclarationText::SchemaFile { name, text } => {
@@ -4734,6 +4983,7 @@ pub mod formats {
                         kind: DeclarationKind::SchemaFile,
                         pattern: None,
                         rule_index: None,
+                        file: Some(name),
                     })
                 }
                 DeclarationText::KeyBinding { id, keyexpr } => {
@@ -4745,6 +4995,7 @@ pub mod formats {
                         kind: DeclarationKind::KeyBinding,
                         pattern: Some(keyexpr),
                         rule_index: None,
+                        file: None,
                     })
                 }
                 DeclarationText::Name {
@@ -4759,6 +5010,7 @@ pub mod formats {
                         kind: DeclarationKind::FieldName,
                         pattern: Some(pattern),
                         rule_index: None,
+                        file: None,
                     })
                 }
             }
@@ -4847,6 +5099,9 @@ pub mod formats {
         /// A segment rule's position is among the SEGMENT rules, the list it is
         /// tried in. `Some` for a rule only.
         pub rule_index: Option<usize>,
+        /// The name of the file a schema file line declares, as read. `Some`
+        /// for that kind only.
+        pub file: Option<String>,
     }
 
     /// The first `:` or `=` in a KEY, in its quoted form, that is not preceded by
@@ -4947,6 +5202,38 @@ mod format_definition_tests {
             let (_, format) = map.for_keyexpr("demo/a").expect("the rule covers it");
             assert_eq!(format.name(), "profile", "{text}");
         }
+    }
+
+    /// An ENCODING RULE is a rule written as any rule is, read back as itself,
+    /// and consulted only for a key no other rule covers, in either order; its
+    /// token is refused as the name of a definition.
+    /// Its rules are wildcards, which a build without `filter-wildcards` refuses.
+    #[test]
+    #[cfg(feature = "filter-wildcards")]
+    fn an_encoding_rule_yields_every_key_another_rule_covers() {
+        for (text, other_at) in [
+            ("**=encoding\ndemo/a=json", 1),
+            ("demo/a=json\n**=encoding", 0),
+        ] {
+            let mut map = FormatMap::new();
+            map.declare_all(text).expect("two rules");
+            assert!(map.encoding_rule_for("demo/a").is_none(), "{text}");
+            let won = map.matching_rule("demo/a").expect("the json rule");
+            assert_eq!((won.rule.index, won.format.name()), (other_at, "json"));
+            let fallback = map.encoding_rule_for("other/b").expect("the encoding rule");
+            assert_eq!(fallback.rule.pattern, "**");
+            assert_eq!(fallback.format.name(), ENCODING_TOKEN);
+            assert!(map.matching_rule("other/b").is_none(), "{text}");
+            let texts: alloc::vec::Vec<String> =
+                map.declarations().into_iter().map(|d| d.text).collect();
+            assert!(texts.contains(&String::from("**=encoding")), "{texts:?}");
+        }
+        let mut map = FormatMap::new();
+        let taken = map.declare("#encoding=a:u8").expect_err("the token's name");
+        assert!(
+            taken.to_string().contains("already a format name"),
+            "{taken}"
+        );
     }
 
     /// R2114 (open-debt item 237) — the refusals, each with the reason a reader

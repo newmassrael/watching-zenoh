@@ -290,6 +290,33 @@ impl<'r, Row> RowAccess<'r, Row> {
     }
 }
 
+/// Where a row stands in the fan-out of one sample: the first row the sample is handed, or one after
+/// it. Only the dispatch that hands a sample to its rows makes one, once for each sample
+/// ([`Self::begin`]), and every delivery is handed one, so a context that gathers what it is handed
+/// tells the rows of one sample from those of the next without comparing the samples, and no path
+/// can hand a row a sample without saying which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FanOut {
+    first: bool,
+}
+
+impl FanOut {
+    /// The turn of the first row a sample is handed.
+    pub(crate) const fn begin() -> Self {
+        Self { first: true }
+    }
+
+    /// The turn of a row after the first, of the same sample.
+    pub(crate) const fn later() -> Self {
+        Self { first: false }
+    }
+
+    /// Whether this is the first row the sample is handed.
+    pub const fn is_first(self) -> bool {
+        self.first
+    }
+}
+
 /// What a matched subscriber row is delivered through: the context the dispatch is handed with
 /// the sample, so a row holds its own facts and no reference to the state it is delivered into.
 /// Each call names the row by the id its table gives it (`Id`), so what the context records of a
@@ -300,15 +327,22 @@ impl<'r, Row> RowAccess<'r, Row> {
 /// by a context of its own, through the shared row; `()` hands it nothing, and no row type that
 /// is read in place is a [`SampleSink`].
 pub trait SampleDelivery<Row, Id> {
-    /// Deliver one matched sample to `row`, the row `id`. The view is borrowed for the call.
-    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView);
+    /// Deliver one matched sample to `row`, the row `id`, at `turn` of the sample's fan-out. The
+    /// view is borrowed for the call.
+    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView, turn: FanOut);
 
     /// Deliver one matched plain `Put` of a received frame ([`PlainSample`]); the default is
     /// [`Self::deliver`]. A context that overrides it to gather a frame's samples also overrides
     /// [`Self::end_plain_frame`].
     #[cfg(feature = "alloc")]
-    fn deliver_plain(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &PlainSample<'_>) {
-        self.deliver(id, row, sample);
+    fn deliver_plain(
+        &mut self,
+        id: Id,
+        row: RowAccess<'_, Row>,
+        sample: &PlainSample<'_>,
+        turn: FanOut,
+    ) {
+        self.deliver(id, row, sample, turn);
     }
 
     /// The frame whose plain `Put`s were just offered has no more records for the table of
@@ -321,14 +355,26 @@ pub trait SampleDelivery<Row, Id> {
 }
 
 impl<Row: SampleSink, Id> SampleDelivery<Row, Id> for () {
-    fn deliver(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView) {
+    fn deliver(
+        &mut self,
+        _id: Id,
+        row: RowAccess<'_, Row>,
+        sample: &dyn SampleView,
+        _turn: FanOut,
+    ) {
         if let Some(row) = row.held() {
             row.deliver(sample);
         }
     }
 
     #[cfg(feature = "alloc")]
-    fn deliver_plain(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: &PlainSample<'_>) {
+    fn deliver_plain(
+        &mut self,
+        _id: Id,
+        row: RowAccess<'_, Row>,
+        sample: &PlainSample<'_>,
+        _turn: FanOut,
+    ) {
         if let Some(row) = row.held() {
             row.deliver_plain(sample);
         }

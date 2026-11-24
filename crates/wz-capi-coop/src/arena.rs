@@ -11,8 +11,8 @@
 //!
 //! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`) and,
 //!   with `queryable`, its queryables (`MAX_QUERYABLES`) are rows of the session's one table set
-//!   (below), with `liveliness` its tokens
-//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
+//!   (below), and so, with `liveliness`, are its liveliness subscribers
+//!   (`MAX_LIVELINESS_SUBSCRIPTIONS`); with `liveliness` its tokens (`MAX_LOCAL_TOKENS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
 //!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
 //! - one table of the gets pending on a face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
@@ -54,8 +54,7 @@
 //!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): its liveliness subscribers under
-//!   the limits of the application's tables, the key expressions it declares
+//!   link ([`EntityRows`]): the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
 //!   Interests those filters and listeners hold open, at most one for each of them;
@@ -117,12 +116,17 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
+#[cfg(feature = "query")]
+use wz_session_core::slot_observer::Requesters;
+use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
+#[cfg(feature = "query")]
+use crate::engine::LegSink;
+use crate::engine::{CoopTables, EntryBytes, FACE_SET_BYTES, HELD_SET_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -169,11 +173,12 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 const LANE_ROWS: usize = 5;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
-/// The application's tables apart from the session's one table set: liveliness tokens and
-/// subscribers (`liveliness`), and the declaration watchers.
-const OBSERVER_ROWS: usize = 2 * cfg!(feature = "liveliness") as usize + 1;
-/// The pending gets, and the ends of their legs (`query`).
-const GET_ROWS: usize = 1 + cfg!(feature = "query") as usize;
+/// The application's tables apart from the session's one table set: liveliness tokens
+/// (`liveliness`), and the declaration watchers.
+const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
+/// The pending gets and the ends of their legs, both of a build that asks (`query`): one that asks
+/// nothing holds no table of gets.
+const GET_ROWS: usize = 2 * cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
 const FACE_ROWS: usize = 2;
 /// The peers' tables, and the pools their rows lie in where the faces share them.
@@ -184,10 +189,9 @@ const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): liveliness
-/// subscribers (`liveliness`), the session's one table set, write filters, matching listeners,
-/// interests and the key arena.
-const ENTITY_ROWS: usize = cfg!(feature = "liveliness") as usize + 5;
+/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): the session's
+/// one table set, write filters, matching listeners, interests and the key arena.
+const ENTITY_ROWS: usize = 5;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
@@ -385,7 +389,9 @@ impl GetTables {
     }
 }
 
-/// One face's table of pending gets, as the arena lends it.
+/// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
+/// (`engine::registry::Gets`) and lays out none.
+#[cfg(feature = "query")]
 type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
@@ -737,23 +743,12 @@ impl ArenaPlan {
         // the declaration tables after them count the same limits.
         plan.entities = plan.kept(entity_rows(limits));
         #[cfg(feature = "liveliness")]
-        {
-            plan.put(
-                "liveliness tokens",
-                "MAX_LOCAL_TOKENS",
-                plan.entities.tokens,
-                wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-            );
-            plan.put(
-                "liveliness subscribers",
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
-                plan.entities.liveliness_subscribers,
-                wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberTable::<
-                    wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
-                    Lent,
-                >::ROW_BYTES,
-            );
-        }
+        plan.put(
+            "liveliness tokens",
+            "MAX_LOCAL_TOKENS",
+            plan.entities.tokens,
+            wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
+        );
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
         let watchers = plan.lent(
@@ -770,11 +765,16 @@ impl ArenaPlan {
             1,
             watcher_bytes,
         );
-        let queries = plan.lent(
-            "MAX_PENDING_QUERIES",
-            limits.max_pending_queries(),
-            caps::MAX_PENDING_QUERIES,
-        );
+        // A build that asks no query registers no get, so its tables of them hold no row.
+        let queries = if cfg!(feature = "query") {
+            plan.lent(
+                "MAX_PENDING_QUERIES",
+                limits.max_pending_queries(),
+                caps::MAX_PENDING_QUERIES,
+            )
+        } else {
+            0
+        };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
             plan.lent(
                 "MAX_PENDING_LIVELINESS_GETS",
@@ -792,14 +792,18 @@ impl ArenaPlan {
             },
             tables,
         };
-        // A row of tables, each the spans of one face's registries: a face takes one whole.
-        let get_bytes = plan.sized(FaceGets::arena_bytes(plan.gets.rows));
-        plan.put(
-            "pending gets",
-            "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
-            plan.gets.tables,
-            get_bytes,
-        );
+        // A row of tables, each the spans of one face's registries: a face takes one whole. A build
+        // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
+        #[cfg(feature = "query")]
+        {
+            let get_bytes = plan.sized(FaceGets::arena_bytes(plan.gets.rows));
+            plan.put(
+                "pending gets",
+                "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
+                plan.gets.tables,
+                get_bytes,
+            );
+        }
         // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         {
@@ -887,13 +891,6 @@ impl ArenaPlan {
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) {
         let rows = self.entities;
-        #[cfg(feature = "liveliness")]
-        self.put(
-            "liveliness subscriber declarations",
-            "MAX_LIVELINESS_SUBSCRIPTIONS",
-            rows.liveliness_subscribers,
-            EntryBytes::LIVELINESS_SUBSCRIBER,
-        );
         // The session's one table set, holding the kinds moved onto it so far.
         let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
         self.put("session tables", "MAX_DECLARED_KEYEXPRS", 1, tables);
@@ -949,6 +946,7 @@ impl ArenaPlan {
             subscribers: self.entities.subscribers,
             queryables: self.entities.queryables,
             tokens: self.entities.tokens,
+            liveliness_subscribers: self.entities.liveliness_subscribers,
             ..TableRows::default()
         }
     }

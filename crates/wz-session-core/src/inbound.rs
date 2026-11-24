@@ -463,6 +463,15 @@ impl InboundFrame {
     /// [`Self::kind_code`] of an `Init`.
     pub const KIND_INIT: u8 = 1;
 
+    /// [`Self::kind_code`] of an `Open`.
+    pub const KIND_OPEN: u8 = 2;
+
+    /// [`Self::kind_code`] of a `Close`.
+    pub const KIND_CLOSE: u8 = 3;
+
+    /// [`Self::kind_code`] of a `KeepAlive`.
+    pub const KIND_KEEPALIVE: u8 = 4;
+
     /// [`Self::kind_code`] of a `Join`.
     pub const KIND_JOIN: u8 = 7;
 
@@ -502,11 +511,11 @@ impl InboundFrame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init { .. } => Self::KIND_INIT,
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open { .. } => 2,
+            InboundFrame::Open { .. } => Self::KIND_OPEN,
             #[cfg(feature = "codec-close")]
-            InboundFrame::Close { .. } => 3,
+            InboundFrame::Close { .. } => Self::KIND_CLOSE,
             #[cfg(feature = "codec-keep-alive")]
-            InboundFrame::KeepAlive { .. } => 4,
+            InboundFrame::KeepAlive { .. } => Self::KIND_KEEPALIVE,
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Frame { .. } => 5,
             #[cfg(all(feature = "alloc", feature = "reassembly"))]

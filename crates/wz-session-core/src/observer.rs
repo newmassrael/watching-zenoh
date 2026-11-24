@@ -156,7 +156,8 @@ pub struct ApplicationLayerObserver {
         feature = "alloc",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     pending_queryable_replies: alloc::vec::Vec<crate::query::QueryableInterestReply>,
     /// The observers told, once, that the peer ended its initial declarations
@@ -458,7 +459,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 local_tokens: &mut app.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
-                liveliness_subscribers: &mut app.liveliness_subscribers,
+                liveliness_subscribers: &mut app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
                 declarations_final: &mut self.declarations_final,
             },
@@ -499,7 +500,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 local_tokens: &app.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
-                liveliness_subscribers: &app.liveliness_subscribers,
+                liveliness_subscribers: &app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
                 declarations_final: &self.declarations_final,
             },
@@ -533,7 +534,8 @@ impl ApplicationLayerObserver {
                 feature = "alloc",
                 feature = "query-queryable",
                 feature = "declare-queryable",
-                any(feature = "liveliness-token", feature = "declare-subscriber")
+                any(feature = "liveliness-token", feature = "declare-subscriber"),
+                feature = "interest-answer"
             ))]
             pending_queryable_replies: alloc::vec::Vec::new(),
             #[cfg(feature = "declarations-synced-event")]
@@ -553,7 +555,8 @@ impl ApplicationLayerObserver {
         feature = "alloc",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     fn stage_queryable_interest(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
@@ -593,7 +596,8 @@ impl ApplicationLayerObserver {
         feature = "rx-lent-control",
         feature = "query-queryable",
         feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "interest-answer"
     ))]
     fn stage_queryable_interest_view(
         queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
@@ -660,7 +664,8 @@ impl ApplicationLayerObserver {
             feature = "alloc",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         if let IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
             messages,
@@ -683,7 +688,8 @@ impl ApplicationLayerObserver {
             feature = "rx-lent-control",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         if let IterationEvent::InPlace(record) = event {
             if let Some(interest) = record.interest() {
@@ -709,7 +715,8 @@ impl ApplicationLayerObserver {
     /// A no-op when `liveliness-subscriber` is compiled out — there is no
     /// registry to flush and no subscriber to tell.
     pub fn flush_liveliness_on_link_loss(&mut self) -> usize {
-        self.app.flush_liveliness_on_link_loss(&mut self.peers)
+        self.app
+            .flush_liveliness_on_link_loss(&mut (), &mut self.peers)
     }
 
     /// R311y799 — the DECLARATION plane's twin of
@@ -812,6 +819,10 @@ impl ApplicationLayerObserver {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         self.drain_query_replies(actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(actions);
         self.drain_get_prunes(actions);
     }
@@ -851,7 +862,11 @@ impl ApplicationLayerObserver {
     /// `Self::drain_declare_replies`. Exposed demand-driven: the per-concern
     /// drains stay private until a single-concern consumer needs one (the
     /// get-prune concern has no such consumer yet, so it stays bundled in
-    /// [`Self::flush_pending`]).
+    /// [`Self::flush_pending`]). Not in a build that answers no Interest, which stages none.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     pub fn flush_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         self.drain_declare_replies(sink);
     }
@@ -867,6 +882,10 @@ impl ApplicationLayerObserver {
     /// holds this observer meanwhile stops every thread that needs it, the drive thread first.
     pub fn take_owed_replies<P: LivelinessGetPrune>(&mut self, owed: &mut OwedReplies, prunes: &P) {
         self.take_owed_reply_bodies(owed);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.take_owed_declarations(owed);
         self.drain_get_prunes(prunes);
     }
@@ -879,7 +898,11 @@ impl ApplicationLayerObserver {
 
     /// The declarations owed to peers' interests alone, resolved now and kept in `owed`:
     /// [`Self::flush_declare_replies`] for a host that sends after it lets go of this observer
-    /// (see [`Self::take_owed_replies`]).
+    /// (see [`Self::take_owed_replies`]). Not in a build that answers no Interest.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     pub fn take_owed_declarations(&mut self, owed: &mut OwedReplies) {
         self.drain_declare_replies(&*owed);
     }
@@ -909,6 +932,10 @@ impl ApplicationLayerObserver {
     /// order, so each interest-response batch's `Token`s precede its
     /// terminating `Final`. The sink owns the encode (a `VecSink` on AP, a
     /// `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     fn drain_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         self.app.drain_declare_replies(&mut self.peers, sink);
         // The QUERYABLE interest-response chains, in stage order: each chain's
@@ -917,7 +944,8 @@ impl ApplicationLayerObserver {
             feature = "alloc",
             feature = "query-queryable",
             feature = "declare-queryable",
-            any(feature = "liveliness-token", feature = "declare-subscriber")
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            feature = "interest-answer"
         ))]
         for item in core::mem::take(&mut self.pending_queryable_replies) {
             match item {
@@ -1728,6 +1756,7 @@ mod tests {
             let s = sub_fired.clone();
             observer
                 .app
+                .tables
                 .liveliness_subscribers
                 .register(
                     &observer.peers.tokens,
@@ -1922,7 +1951,12 @@ mod tests {
 // subscription BETWEEN them. What a reply announces therefore has to be true
 // when it is SENT, and until this round the AGGREGATE arm checked only that
 // the peer's INTEREST row still existed — a row an undeclare never touches.
-#[cfg(all(test, feature = "declare-subscriber", feature = "alloc"))]
+#[cfg(all(
+    test,
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "alloc"
+))]
 mod sub_interest_reply_tests {
     use super::*;
     use crate::pubsub::SubInterestReply;
@@ -2471,6 +2505,69 @@ mod sub_interest_reply_tests {
     }
 }
 
+/// A build that answers no peer's Interest (`interest-answer` off), asked as one that does: the
+/// subscriber Interest reaches the subscriber plane, and what the observer owes after it, and after
+/// a subscription the Interest's FUTURE half reaches, is nothing: no declaration and no `Final`.
+/// Such a build has no drain of answers at all (`flush_declare_replies` is not in it), so what is
+/// taken is everything owed. The build that answers is held by
+/// `a_member_interest_on_its_own_alias_is_answered`.
+#[cfg(all(
+    test,
+    feature = "declare-subscriber",
+    not(feature = "interest-answer"),
+    feature = "alloc"
+))]
+mod unanswered_interest_tests {
+    use super::*;
+
+    /// No liveliness get to prune: the tests here ask none.
+    struct NoPrunes;
+
+    impl LivelinessGetPrune for NoPrunes {
+        #[cfg(feature = "liveliness-get")]
+        fn prune_liveliness_get_interest(&self, _interest_id: u64) {}
+    }
+
+    #[test]
+    fn a_peers_subscriber_interest_is_not_answered() {
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .subscribe("demo/unasked/a", |_| {})
+            .expect("no quota is stated on this table");
+        let interest = crate::interest_build::build_interest_subscribers(
+            3,
+            /*current=*/ true,
+            /*future=*/ true,
+            0,
+            Some("demo/unasked/**"),
+        )
+        .expect("a literal key builds");
+        let frame = crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![crate::network_message::NetworkMessage::Interest(interest)],
+            has_ext: false,
+            extensions: alloc::vec::Vec::new(),
+        };
+        crate::driver_loop::deliver_frame(&frame, |event| observer.dispatch_event(event));
+        let mut owed = OwedReplies::new();
+        observer.take_owed_replies(&mut owed, &NoPrunes);
+        assert!(
+            owed.is_empty(),
+            "the CURRENT half is not answered, not even by a Final"
+        );
+        observer
+            .subscribe("demo/unasked/b", |_| {})
+            .expect("no quota is stated on this table");
+        observer.take_owed_replies(&mut owed, &NoPrunes);
+        assert!(
+            owed.is_empty(),
+            "and the FUTURE half is not told of a later subscription"
+        );
+    }
+}
+
 /// R2349 (`liveliness-history`) — the HISTORY replay covers the peer's
 /// tokens and NOT this session's own, and that exclusion is a PARITY
 /// DECISION rather than a gap.
@@ -2533,6 +2630,7 @@ mod history_replay_is_peer_scoped {
         let f = fired.clone();
         observer
             .app
+            .tables
             .liveliness_subscribers
             .register(
                 &observer.peers.tokens,
@@ -2563,7 +2661,7 @@ mod history_replay_is_peer_scoped {
     fn a_peer_token_is_replayed_to_the_same_history_subscriber() {
         let mut observer = ApplicationLayerObserver::new();
         // Same shape as the local token above, but arriving over the wire.
-        observer.app.liveliness_subscribers.dispatch_declare(
+        observer.app.tables.liveliness_subscribers.dispatch_declare(
             &mut observer.peers.tokens,
             &crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
                 decl_token_nonlocal(41, 0, Some("live/theirs")),
@@ -2575,6 +2673,7 @@ mod history_replay_is_peer_scoped {
         let f = fired.clone();
         observer
             .app
+            .tables
             .liveliness_subscribers
             .register(
                 &observer.peers.tokens,
@@ -2609,7 +2708,8 @@ mod history_replay_is_peer_scoped {
     feature = "alloc",
     feature = "query-queryable",
     feature = "declare-queryable",
-    any(feature = "liveliness-token", feature = "declare-subscriber")
+    any(feature = "liveliness-token", feature = "declare-subscriber"),
+    feature = "interest-answer"
 ))]
 mod queryable_interest_reply_tests {
     use super::*;

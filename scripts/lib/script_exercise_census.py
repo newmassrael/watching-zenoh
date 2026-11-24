@@ -188,6 +188,14 @@ DECLARED: dict[str, tuple[str, str]] = {
         "reached by a Layer C0 selftest leg",
         "run through bx on the performance host (docs/pico-perf-matrix.md)",
     ),
+    "scripts/pico-upstream-programs.sh": (
+        "the Linux reproduction of the Platform workflow's pico-upstream-windows job (release "
+        "proof row L23): builds the library and zenoh-pico and plays every scenario through a "
+        "fresh zenohd, and exits 1 on a scenario the host cannot carry (no network namespace, a "
+        "control that fails), so it cannot gate a lane; its runner pico_upstream_programs.py is "
+        "run by that job and selftested in Layer C0",
+        "run by hand, or through bx on a build host, to read a red of pico-upstream-windows",
+    ),
     "scripts/provision-zephyr.sh": (
         "provisions the Zephyr workspace and SDK at the pins ci.yml states; the hosted jobs "
         "provision with steps of their own",

@@ -261,7 +261,7 @@ impl PeerTables<Lent> {
         if let Some(space) = pools.aliases.hand_out() {
             self.subscribers.keep_alias_rows_in(space);
         }
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.subscribers.keep_interest_rows_in(&mut pools.interests);
         if let Some(space) = pools.subscribers.hand_out() {
             self.remote_subscribers.keep_rows_in(space);
@@ -335,7 +335,7 @@ pub struct PeerPoolRows {
     /// and of the queryables each this many, as a repeat is an id its kind's table holds.
     pub remote_decls: usize,
     /// The peers' subscriber interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`); none in a build
-    /// without `declare-subscriber`.
+    /// without `interest-answer`.
     pub interests: usize,
     /// Whether the faces of the session share the rows, a pool of each kind for a session of many
     /// faces, or one face has them, a span of each of its tables' own for a session of one.
@@ -405,10 +405,14 @@ impl PeerPoolRows {
         }
     }
 
-    /// The bytes the interests' rows take in an arena: none without `declare-subscriber` or
+    /// The bytes the interests' rows take in an arena: none without `interest-answer` or
     /// `peer-row-pools`. `None` past the most rows a pool or a span names, or the address space.
     pub const fn interest_bytes(&self) -> Option<usize> {
-        #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+        #[cfg(all(
+            feature = "declare-subscriber",
+            feature = "interest-answer",
+            feature = "peer-row-pools"
+        ))]
         {
             if self.shared {
                 crate::pubsub::InterestRows::pool_bytes(self.interests)
@@ -416,7 +420,11 @@ impl PeerPoolRows {
                 span_of(crate::pubsub::InterestRows::own_bytes(self.interests))
             }
         }
-        #[cfg(not(all(feature = "declare-subscriber", feature = "peer-row-pools")))]
+        #[cfg(not(all(
+            feature = "declare-subscriber",
+            feature = "interest-answer",
+            feature = "peer-row-pools"
+        )))]
         {
             Some(0)
         }
@@ -491,7 +499,11 @@ pub struct PeerPools {
     sub_repeats: RowSource<RepeatKind>,
     #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
     queryable_repeats: RowSource<RepeatKind>,
-    #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "peer-row-pools"
+    ))]
     interests: crate::pubsub::InterestRows,
 }
 
@@ -510,7 +522,7 @@ pub struct PeerPoolCounts {
     pub sub_repeats: crate::row_pool::RowCounts,
     /// The repeats of the peers' queryables; nothing without `alloc`.
     pub queryable_repeats: crate::row_pool::RowCounts,
-    /// The peers' subscriber interests; nothing without `declare-subscriber`.
+    /// The peers' subscriber interests; nothing without `interest-answer`.
     pub interests: crate::row_pool::RowCounts,
 }
 
@@ -544,7 +556,7 @@ impl PeerPools {
             sub_repeats: lend.next(decls),
             #[cfg(feature = "alloc")]
             queryable_repeats: lend.next(decls),
-            #[cfg(feature = "declare-subscriber")]
+            #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: crate::pubsub::InterestRows::lent(&mut lend, rows.interests),
         };
         lend.finish()?;
@@ -593,9 +605,9 @@ impl PeerPools {
             queryable_repeats: self.queryable_repeats.counts()?,
             #[cfg(not(feature = "alloc"))]
             queryable_repeats: crate::row_pool::RowCounts::default(),
-            #[cfg(feature = "declare-subscriber")]
+            #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: self.interests.counts()?,
-            #[cfg(not(feature = "declare-subscriber"))]
+            #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
             interests: crate::row_pool::RowCounts::default(),
         })
     }
@@ -656,10 +668,10 @@ impl<P: Storage> PeerTables<P> {
         );
         self.subscribers
             .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.subscribers
             .limit_interests_to(limits.max_inbound_sub_interests_held());
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.subscribers
             .limit_interest_replies_to(limits.max_pending_declares_held());
         let remote_decls = limits.max_remote_decls_held();
@@ -1179,7 +1191,11 @@ mod lent_tests {
 
     /// The answers staged to a peer's interest are taken out for the drain and the staging keeps
     /// its rows: the next interest's answer is staged in them.
-    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        feature = "interest-answer"
+    ))]
     #[test]
     fn a_lent_peer_side_stages_again_after_a_take() {
         use crate::pubsub::{SubInterestReply, SubscriberTable};
@@ -1225,7 +1241,11 @@ mod lent_tests {
     /// An interest the peer asks keeps its key in the key arena the tables were handed, though
     /// the interest side's rows are lent after the arena is handed (`PeerTables::lend_rows`): the
     /// row is held with its key, and the answer is more than a `Final` alone.
-    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        feature = "interest-answer"
+    ))]
     #[test]
     fn a_lent_peers_interest_keeps_its_key_in_the_key_arena() {
         use crate::key_arena::block_bytes;
@@ -1572,6 +1592,7 @@ mod lent_tests {
         feature = "alloc",
         feature = "codec-declare",
         feature = "declare-subscriber",
+        feature = "interest-answer",
         feature = "peer-row-pools"
     ))]
     #[test]
@@ -1645,6 +1666,7 @@ mod lent_tests {
         feature = "alloc",
         feature = "codec-declare",
         feature = "declare-subscriber",
+        feature = "interest-answer",
         feature = "peer-row-pools"
     ))]
     #[test]
@@ -1725,6 +1747,7 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "declare-subscriber",
+        feature = "interest-answer",
         feature = "peer-row-pools",
         not(feature = "pool-monitor")
     ))]

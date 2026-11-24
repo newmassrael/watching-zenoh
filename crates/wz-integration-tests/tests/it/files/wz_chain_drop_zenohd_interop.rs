@@ -256,7 +256,7 @@ const NEGOTIATED_MTU: u16 = 2048;
 ///
 /// ⚠ BOUNDED ABOVE BY THE OBSERVER, and this is the constraint that is easy to
 /// miss: the census reassembles with `PassiveSession`'s geometry, whose
-/// `PASSIVE_CHAIN_CAP` is 65536 bytes (`wz-session-core/src/passive.rs:1129`) —
+/// `PASSIVE_CHAIN_DEFAULT_BYTES` is 65536 bytes (`wz-session-core/src/passive.rs`) —
 /// NOT the runtime's 1 MiB slot. MEASURED at 64 KiB: every chain came back
 /// `aborted_capacity_overflow`, so the twin could never show a completed one
 /// and the proof's counter would have been read off a document that gave up

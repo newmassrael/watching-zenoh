@@ -1502,6 +1502,94 @@ fn only_link(d: &Dissection) -> crate::session_table::Link {
     row.links[0].clone()
 }
 
+/// [`crate::serial::line_capture`] read with its link type declared serial.
+fn serial_line_dissection(interfaces: u32, handshake: bool) -> Dissection {
+    Dissection::from_capture_declaring_serial(
+        &crate::serial::line_capture(interfaces, handshake),
+        &[crate::serial::FIXTURE_LINK_TYPE],
+    )
+    .expect("the capture reads")
+}
+
+/// A FLOW SAYS HOW ITS HALVES WERE TOLD APART, and the serial line says which of
+/// three things it knows: a handshake named the initiator's interface, the
+/// first interface holds `a` by convention, or one interface carried both
+/// wires and nothing separates them. A flow read off addresses says
+/// `endpoints`.
+#[test]
+fn a_flow_says_how_its_halves_were_told_apart() {
+    use crate::session_table::DirectionBasis;
+
+    for (interfaces, handshake, want) in [
+        (2, true, DirectionBasis::Handshake),
+        (2, false, DirectionBasis::InterfaceOrder),
+        (1, false, DirectionBasis::Unknown),
+        // A handshake read off the only interface names a role and still
+        // separates nothing: both wires' frames came off it.
+        (1, true, DirectionBasis::Unknown),
+    ] {
+        let d = serial_line_dissection(interfaces, handshake);
+        let link = only_link(&d);
+        assert_eq!(link.kind, crate::link::LinkKind::Serial, "{link:?}");
+        assert_eq!(
+            link.direction_basis, want,
+            "{interfaces} interface(s), handshake {handshake}"
+        );
+        let doc = session_table_json(&d);
+        assert!(
+            doc.contains(&alloc::format!(
+                "\"direction_basis\":\"{}\",\"stream_anomalies\":null",
+                want.name()
+            )),
+            "{doc}"
+        );
+    }
+    for d in [
+        tcp_session(true, 2).0.dissect(),
+        udp_session(true, 2).0.dissect(),
+    ] {
+        let link = only_link(&d);
+        assert_eq!(link.direction_basis, DirectionBasis::Endpoints);
+        assert!(
+            session_table_json(&d).contains("\"direction_basis\":\"endpoints\","),
+            "a flow read off addresses has its halves by its endpoints"
+        );
+    }
+}
+
+/// THE SERIAL LINE'S SESSION OPENS, read through a declared link type, and an
+/// undeclared one reads nothing: the same capture without the declaration is
+/// skipped, packet by packet.
+#[test]
+fn a_declared_serial_line_reads_its_session_and_an_undeclared_one_is_skipped() {
+    let d = serial_line_dissection(2, true);
+    let link = only_link(&d);
+    assert_eq!(link.phase, Ok(SessionPhase::Established), "{link:?}");
+    assert_eq!(
+        link.frames,
+        Ok(5),
+        "Init, InitAck, Open, OpenAck, keep-alive"
+    );
+    assert_eq!(link.initiator, Ok(ZID_A.to_vec()));
+    assert_eq!(link.acceptor, Ok(ZID_B.to_vec()));
+
+    let undeclared =
+        Dissection::from_capture(&crate::serial::line_capture(2, true)).expect("the capture reads");
+    assert!(
+        undeclared.serial_census().is_none(),
+        "no link type was declared serial"
+    );
+    assert!(
+        session_table(&undeclared).rows.is_empty(),
+        "an undeclared line is no flow at all"
+    );
+    assert_eq!(
+        undeclared.skipped().len(),
+        7,
+        "every packet of the line is skipped: two handshake frames and five messages"
+    );
+}
+
 /// The TLS flow `decrypted_tls` opens, before any pass.
 fn tls_session_flow() -> Dissection {
     let client = |wire: &[u8]| protected(&stream_unit(wire));
@@ -2544,6 +2632,13 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
     );
     ng[24..28].copy_from_slice(&0xFFFFu32.to_le_bytes());
     docs.push(session_table_document(&ng, DissectionLimits::default()));
+    // The serial line, in each of the three ways its halves can be told apart,
+    // so `direction_basis` is measured over every word and not over
+    // `endpoints` alone.
+    for (interfaces, handshake) in [(2, true), (2, false), (1, false)] {
+        let line = serial_line_dissection(interfaces, handshake);
+        docs.push(session_table_json(&line));
+    }
     docs
 }
 
@@ -2885,7 +2980,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                 \"confirmed\":10,\"violated\":0,\"millibits\":365,\"no_millibits\":40516,\
                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":14}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":17}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2904,6 +2999,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
              \"unit_readings\":{{\"explained\":{{\"units\":10,\"bytes\":44}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
              \"undecoded\":{{\"units\":0,\"bytes\":0}}}},\
+             \"direction_basis\":\"endpoints\",\
              \"stream_anomalies\":{{\
              \"low_to_high\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}},\
              \"high_to_low\":{{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0}}}},\

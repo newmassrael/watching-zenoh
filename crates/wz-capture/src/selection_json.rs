@@ -769,7 +769,7 @@ impl OrderedFold for SelectionFold {
         exchanges.feed(flow, list, packet, frame, census_bytes, grouping);
         let ctx = grouping
             .context(list)
-            .placed(*flow, Some(packet))
+            .placed(*flow, Some(packet), frame.produced())
             .holding(message);
         rows.take(
             filter,
@@ -780,6 +780,12 @@ impl OrderedFold for SelectionFold {
             message,
             exchanges.table_so_far(),
         );
+    }
+
+    fn settle(&mut self) {
+        if let Some(planes) = self.planes.as_mut() {
+            planes.exchanges.settle();
+        }
     }
 }
 
@@ -1322,13 +1328,14 @@ pub fn selection_since_json_coordinated(
     // node whose handshake a ceiling has taken is still the node its messages
     // were judged against.
     let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes_across_trims(d));
-    // A `flow` term compares the caller's list ids, so the selector is read
-    // against them first, as `judged_by` reads it.
+    // A `flow` term compares the caller's list ids and a `row` term the
+    // places of the rows, so the selector is read against them first, as
+    // `judged_by` reads it. A `row` term read against places that have moved
+    // since the last call is another filter, and the memory begins again.
     let numbered = if filter.is_any() {
         filter.clone()
     } else {
-        let lists = d.message_lists_with_origin().count();
-        filter.numbered_by(lists, &|list| coordinates.list_id(list))
+        crate::fields_json::read_against_the_documents(d, filter, Some(coordinates))
     };
     let text = declarations.map(|declared| declared.text);
     let judged = declarations.and_then(|declared| declared.judged);

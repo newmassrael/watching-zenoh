@@ -34,7 +34,10 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
-use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage, TableLender, ARENA_ALIGN,
+};
+use core::ptr::NonNull;
 
 /// The most rows a slot map holds: a slot's index is a `u16` counted from one.
 pub const MAX_SLOTS: usize = u16::MAX as usize;
@@ -615,14 +618,39 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
     /// with what was lent before kept by the arena, past the build's `N` or past what the arena
     /// has left.
     pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        let meta = arena.lend::<Meta, N>(rows)?;
-        let values = arena.lend::<Option<T>, N>(rows)?;
-        Ok(Self {
+        let mut lend = TableLender::new(arena);
+        let table = Self::lent_from(&mut lend, rows);
+        lend.finish().map(|()| table)
+    }
+
+    /// A table of `rows` rows lent by `lend`, as [`Self::lent`] lends one; a table of no rows,
+    /// which refuses every insert, when it is refused or a table before it was. The columns are
+    /// lent by one body for every row type (`lend_columns`), which tells them apart by the bytes
+    /// of a row alone.
+    pub fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
+        const {
+            assert!(
+                core::mem::align_of::<Option<T>>() <= ARENA_ALIGN,
+                "a row of a lent table asks for more alignment than an arena's spans start on"
+            )
+        };
+        let columns = lend_columns(lend, rows, N, Arena::table_bytes::<Option<T>>(rows));
+        // SAFETY: `lend_columns` lent the rows' column for `room` rows of `Option<T>`, its
+        // bytes counted for that type, lent to nothing before and starting on `ARENA_ALIGN`,
+        // which is at least the type's alignment (asserted above), or a span of no rows that
+        // starts there too; the metadata column likewise.
+        let (meta, values) = unsafe {
+            (
+                BoundedVec::lent_over(columns.meta, columns.room),
+                BoundedVec::lent_over(columns.rows.cast::<Option<T>>(), columns.room),
+            )
+        };
+        Self {
             meta,
             rows: values,
-            core: Core::new(rows),
+            core: columns.core,
             kind: PhantomData,
-        })
+        }
     }
 
     /// The bytes a table of `rows` rows takes in an arena ([`Self::lent`]). `None` past the
@@ -635,6 +663,45 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
             (Some(meta), Some(values)) => meta.checked_add(values),
             _ => None,
         }
+    }
+}
+
+/// The two columns of a lent table: where the arena lent each, the rows each has room for, and
+/// the core that counts them.
+struct LentColumns {
+    meta: NonNull<Meta>,
+    rows: NonNull<u8>,
+    room: u32,
+    core: Core,
+}
+
+/// Lend a table's two columns by `lend`, `rows` rows of each, at most `ceiling`: its metadata
+/// column, then its rows' column of `values` bytes (`None` past the address space). Columns of
+/// no rows, and a core that holds none, when one is refused or a table before them was. Out of
+/// line and untyped but for the bytes of a row, so the tables of every row type are lent by this
+/// one body.
+#[inline(never)]
+fn lend_columns(
+    lend: &mut TableLender<'_>,
+    rows: usize,
+    ceiling: usize,
+    values: Option<usize>,
+) -> LentColumns {
+    const {
+        assert!(
+            core::mem::align_of::<Meta>() <= ARENA_ALIGN,
+            "a slot's metadata asks for more alignment than an arena's spans start on"
+        )
+    };
+    let (meta, lent) = lend.lend_rows(rows, ceiling, Arena::table_bytes::<Meta>(rows));
+    let (values, room) = lend.lend_rows(rows, ceiling, values);
+    // A refusal of the rows' column leaves the metadata's lent: neither holds a row then.
+    let room = room.min(lent);
+    LentColumns {
+        meta: meta.cast::<Meta>(),
+        rows: values,
+        room,
+        core: Core::new(room as usize),
     }
 }
 

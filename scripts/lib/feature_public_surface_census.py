@@ -163,6 +163,9 @@ CALL_OR_PATH = re.compile(
     r"^\s*[A-Za-z_][A-Za-z0-9_:<>\.]*\s*(?:[({,]|=>|=[^=]|\.|::<)"
 )
 BARE_NAME = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,?\s*$")
+# A match arm with a guard, `None if cond =>` or `Some(x) if cond =>`: a pattern followed by
+# `if`, which no item starts with.
+GUARDED_ARM = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:]*(?:\s*\([^)]*\))?\s+if\b")
 # A foreign block that declares nothing: an item with no visibility whose only effect is the
 # `#[link]` attributes in front of it, naming a library for the linker. A foreign block that
 # declares functions makes each public or not by its own visibility, which the attribute in front
@@ -851,6 +854,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `PortPeer`, `PortPeerError`, `PORT_PEER_BACKLOG` in `pub mod udp_link`), selected by
         # `wz-capi-coop`'s `listen`, which is where a consumer reaches it; sites inside a `pub mod`,
         # the shape `app-link`'s have.
+        # `session-unicast-accept` joins: the pooled link storage a listening session's links share
+        # (`link_storage::LinkRx`, `LinkTxStore`, `LinkStorage::claim`) and the faces' owed writes
+        # (`Faces::write_owed_now`, `owing_waits`), selected by `wz-capi-coop`'s `listen`; sites
+        # inside a `pub mod` or an `impl`, the shape `udp-listen`'s have.
         frozenset(
             {
                 "alloc",
@@ -862,6 +869,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "scouting-static",
                 "session-slot",
                 "session-unicast",
+                "session-unicast-accept",
                 "switchboard",
                 "udp-listen",
             }
@@ -1467,6 +1475,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "scouting-static",
             "session-slot",
             "session-unicast",
+            "session-unicast-accept",
             "switchboard",
             "udp-listen",
         }
@@ -1895,6 +1904,8 @@ def classify(following: str) -> str:
         return "not-an-item"
     if CALL_OR_PATH.match(following) or BARE_NAME.match(following):
         return "not-an-item"
+    if GUARDED_ARM.match(following):
+        return "not-an-item"
     return "UNCLASSIFIED"
 
 
@@ -2280,6 +2291,37 @@ def abi_module_is_abi(root: pathlib.Path, rel: str, module: str) -> str | None:
     return f"the file for `pub mod {module}` was not found beside `{rel}`"
 
 
+#: An item's name after its keyword, as `attached` hands back its line.
+ITEM_NAME = re.compile(
+    r"\b(?:fn|struct|enum|trait|type|const|static|mod|union)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def has_not_twin(where: str, feat: str, root: pathlib.Path = ROOT) -> bool:
+    """Whether the item at `where` (`path:line` of its attribute) is defined again in its file
+    under an attribute that says `not(feature = "feat")`: the feature then swaps the item's
+    definition, and its path resolves in either build."""
+    rel, _, number = where.rpartition(":")
+    try:
+        lines = (root / rel).read_text(encoding="utf-8").split("\n")
+        start = int(number) - 1
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    named = ITEM_NAME.search(attached(lines, start) or "")
+    if named is None:
+        return False
+    negated = re.compile(r'not\(\s*feature\s*=\s*"' + re.escape(feat) + r'"\s*\)')
+    for i, line in enumerate(lines):
+        if i == start or not line.strip().startswith("#[cfg"):
+            continue
+        if not negated.search(attribute_span(lines, i)[0]):
+            continue
+        other = ITEM_NAME.search(attached(lines, i) or "")
+        if other is not None and other.group(1) == named.group(1):
+            return True
+    return False
+
+
 def axis_reachable_findings(
     derive: typing.Callable[[str, str], dict[str, object]] | None = None,
     sites: dict[tuple[str, str], list[Shape]] | None = None,
@@ -2394,7 +2436,15 @@ def axis_reachable_findings(
                     f"row and the site table disagree about what this feature is"
                 )
                 continue
-            nameable = [s for s in found if not s.compound and s.column == 0]
+            # A site whose item is defined again under `cfg(not(feature = ..))` is one the
+            # derivation declines on purpose: the feature swaps the item's definition and its path
+            # resolves in either build, so no probe could be written -- the axis spells it
+            # `@defer cfg-not-twin` for the packages it took. Read off the site, not the feature.
+            nameable = [
+                s
+                for s in found
+                if not s.compound and s.column == 0 and not has_not_twin(s.where, feat)
+            ]
             if nameable:
                 findings.append(
                     f"`{pkg}` / `{feat}` is excused because the axis could take "
@@ -3370,7 +3420,26 @@ def axis_reachable_selftest() -> int:
         AXIS_REACHABLE.clear()
         AXIS_REACHABLE.update(real_ar)
 
+    # A twin is read off the site's own file: the same name under `not(feature = ..)` is one;
+    # the same name under another feature's negation, or a name defined once, is not.
+    with tempfile.TemporaryDirectory() as tmp:
+        twin_root = pathlib.Path(tmp)
+        (twin_root / "lib.rs").write_text(
+            '#[cfg(feature = "x")]\npub type Rx = A;\n'
+            '#[cfg(not(feature = "x"))]\npub type Rx = B;\n'
+            '#[cfg(feature = "x")]\npub type Tx = A;\n'
+            '#[cfg(not(feature = "y"))]\npub type Tx = B;\n'
+            '#[cfg(feature = "x")]\npub fn lone() {}\n',
+            encoding="utf-8",
+        )
+        twin = has_not_twin("lib.rs:1", "x", twin_root)
+        other_feature = has_not_twin("lib.rs:5", "x", twin_root)
+        lone = has_not_twin("lib.rs:9", "x", twin_root)
+
     checks = (
+        (twin, "an item defined again under `cfg(not(feature = ..))` is a twin"),
+        (not other_feature, "a negation of ANOTHER feature makes no twin of this one"),
+        (not lone, "an item with no negated definition is no twin"),
         (not control, "the CONTROL -- a row the derivation covers entirely -- "
                       "must PASS, or the predicate refuses the shape the excuse "
                       "is for"),

@@ -557,6 +557,7 @@ fn a_lent_response_final_ends_the_pending_get_as_the_owned_one_does() {
     assert_eq!(lent.len(), 0, "the final removed the pending get");
 }
 
+#[cfg(feature = "interest-answer")]
 #[test]
 fn a_lent_alias_and_a_lent_subscriber_interest_are_kept_as_the_owned_ones_are() {
     use crate::declare_build::build_declare_kexpr;

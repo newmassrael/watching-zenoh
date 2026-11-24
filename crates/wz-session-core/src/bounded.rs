@@ -722,6 +722,18 @@ pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
 }
 
 impl<T, const N: usize> BoundedVec<T, N, Lent> {
+    /// The `room` rows at `base`, a span an arena lent, none of them holding a value yet: the
+    /// table `Arena::lend` hands out, made by the caller that lent the span itself.
+    ///
+    /// # Safety
+    /// `base` is aligned for `T`, and the `room` rows of `T` from it are valid for reads and
+    /// writes, hold no value and are used by nothing else for as long as the table lives.
+    pub(crate) const unsafe fn lent_over(base: NonNull<T>, room: u32) -> Self {
+        // SAFETY: the caller's contract, which is `LentSeq::lent`'s.
+        let inner = unsafe { LentSeq::lent(base, room) };
+        Self { inner }
+    }
+
     /// The next row, for `write` to build a value in where the table keeps it, counted as held
     /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
     /// every row it was lent. For a value too large to be one of its own in a frame, which
@@ -1072,15 +1084,44 @@ impl<T> LentSeq<T> {
         let tail = self.len().wrapping_sub(len);
         // Below the length, which is a `u32`.
         self.len = len as u32;
-        // SAFETY: the `tail` rows from `len` held values, which the length no longer covers, so
-        // each is dropped here once.
+        if !core::mem::needs_drop::<T>() {
+            return;
+        }
+        // SAFETY: the `tail` rows from `len` held values of `T`, `size_of::<T>()` bytes apart,
+        // which the length no longer covers, so each is dropped here once, by `drop_row::<T>`.
         unsafe {
-            core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(
-                self.base.as_ptr().add(len),
+            drop_rows(
+                self.base.as_ptr().add(len).cast::<u8>(),
                 tail,
-            ));
+                core::mem::size_of::<T>(),
+                drop_row::<T>,
+            );
         }
     }
+}
+
+/// Drop `len` rows `stride` bytes apart from `first`, each by `drop_one`: the walk over the rows of
+/// a lent table, one body for every row type, which hands each row to the drop of its own type.
+///
+/// # Safety
+/// The `len` rows from `first` each hold a value `drop_one` drops, which nothing reads after.
+#[inline(never)]
+unsafe fn drop_rows(first: *mut u8, len: usize, stride: usize, drop_one: unsafe fn(*mut u8)) {
+    let mut row = first;
+    for _ in 0..len {
+        // SAFETY: the caller's contract: `row` is one of the `len` rows, each a value to drop.
+        unsafe { drop_one(row) };
+        row = row.wrapping_add(stride);
+    }
+}
+
+/// Drop the `T` at `row`.
+///
+/// # Safety
+/// `row` holds a value of `T`, aligned for it, which nothing reads after.
+unsafe fn drop_row<T>(row: *mut u8) {
+    // SAFETY: the caller's contract.
+    unsafe { core::ptr::drop_in_place(row.cast::<T>()) }
 }
 
 impl<T> Drop for LentSeq<T> {
@@ -1370,6 +1411,131 @@ impl fmt::Display for LendRefused {
 
 impl core::error::Error for LendRefused {}
 
+/// Lends the tables of a set from an [`Arena`] in the order they are asked, keeping the first
+/// refusal: every table asked after it is lent no rows, as a table made without an arena is, and
+/// [`Self::finish`] hands the refusal back. The set is built whole either way and given up whole,
+/// once, so its maker has no path of its own for each table that gives up the ones before it.
+pub struct TableLender<'a> {
+    arena: &'a mut Arena,
+    refused: Option<LendRefused>,
+}
+
+impl<'a> TableLender<'a> {
+    /// A lender of the tables of one set from `arena`.
+    pub fn new(arena: &'a mut Arena) -> Self {
+        Self {
+            arena,
+            refused: None,
+        }
+    }
+
+    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// (`Arena::lend_rows`). Once a table is refused, this one among them, a span of no rows
+    /// where the arena has got to, which takes nothing and starts on [`ARENA_ALIGN`] as every span
+    /// does: the table made over it holds no value, as a full one, so its maker needs no path of
+    /// its own for a refusal.
+    pub(crate) fn lend_rows(
+        &mut self,
+        rows: usize,
+        ceiling: usize,
+        bytes: Option<usize>,
+    ) -> (NonNull<u8>, u32) {
+        if self.refused.is_none() {
+            match self.arena.lend_rows(rows, ceiling, bytes) {
+                Ok(span) => return span,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        (self.arena.next_span(), 0)
+    }
+
+    /// The table `lend` lends from the arena; the table of no rows when it is refused or a table
+    /// before it was.
+    pub fn lend_with<T: Default>(
+        &mut self,
+        lend: impl FnOnce(&mut Arena) -> Result<T, LendRefused>,
+    ) -> T {
+        if self.refused.is_none() {
+            match lend(&mut *self.arena) {
+                Ok(table) => return table,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        T::default()
+    }
+
+    /// A table of `rows` rows of `T`, at most the build's ceiling `N`, as [`Arena::lend`] lends
+    /// one; a table of no rows, which takes no value, once a table is refused, this one among them.
+    pub fn table<T, const N: usize>(&mut self, rows: usize) -> BoundedVec<T, N, Lent> {
+        const {
+            assert!(
+                core::mem::align_of::<T>() <= ARENA_ALIGN,
+                "a row of a lent table asks for more alignment than an arena's spans start on"
+            )
+        };
+        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
+        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
+        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        // (asserted above).
+        unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
+    }
+
+    /// A table of `count` buffers of `size` bytes, as [`Arena::lend_byte_cells`] lends one; a
+    /// table of no buffer once a table is refused, this one among them.
+    pub fn byte_cells(&mut self, size: usize, count: usize) -> LentByteCells {
+        if self.refused.is_none() {
+            match self.arena.lend_byte_cells(size, count) {
+                Ok(cells) => return cells,
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        LentByteCells::unlent()
+    }
+
+    /// A key arena of `bytes` bytes of blocks, as [`Arena::lend_keys`] lends one, as the tables
+    /// that keep their keys in it hold it; no arena, which keeps no key, once a table is refused,
+    /// this one among them. [`Self::finish_keys`] hands back the arena itself.
+    pub fn keys(
+        &mut self,
+        bytes: usize,
+        longest: crate::limits::MaxKeyexprBytesHeld,
+    ) -> crate::key_arena::LentKeys {
+        if self.refused.is_none() {
+            match self.arena.lend_keys(bytes, longest) {
+                Ok(keys) => return crate::key_arena::LentKeys::from(keys),
+                Err(why) => self.refused = Some(why),
+            }
+        }
+        crate::key_arena::LentKeys::default()
+    }
+
+    /// The first refusal, if a table was refused, else the key arena `keys` holds: the one
+    /// [`Self::keys`] lent, which a lend that refused nothing always holds. Refused as an arena
+    /// with no room left when `keys` holds none.
+    pub fn finish_keys(
+        self,
+        keys: crate::key_arena::LentKeys,
+    ) -> Result<crate::key_arena::KeySpace, LendRefused> {
+        match keys.space() {
+            Some(space) => self.finish().map(|()| space),
+            None => {
+                let left = self.arena.bytes().saturating_sub(self.arena.high_water());
+                Err(self
+                    .refused
+                    .unwrap_or(LendRefused::Exhausted { asked: None, left }))
+            }
+        }
+    }
+
+    /// The first refusal, if a table was refused.
+    pub fn finish(self) -> Result<(), LendRefused> {
+        match self.refused {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Arena {
     /// An arena of the `bytes` bytes at `base`, none of them lent.
     ///
@@ -1442,16 +1608,24 @@ impl Arena {
         // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
-        let inner = unsafe { LentSeq::lent(at.cast::<T>(), room) };
-        Ok(BoundedVec { inner })
+        Ok(unsafe { BoundedVec::lent_over(at.cast::<T>(), room) })
+    }
+
+    /// Where the next span starts: a span of no bytes, aligned to [`ARENA_ALIGN`] as every span
+    /// is, which no row lies in.
+    fn next_span(&self) -> NonNull<u8> {
+        // SAFETY: `lent` never passes `bytes`, so the address is inside the arena or one past its
+        // end, a multiple of `ARENA_ALIGN` from a base aligned to it.
+        unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) }
     }
 
     /// The untyped half of [`Self::lend`], compiled once for every row type: the span of `rows`
     /// rows taking `bytes` (`None` past the address space), at most `ceiling`, and the rows
     /// counted in 32 bits. Refused, taking nothing, past the ceiling, past what is left or past a
-    /// 32-bit count.
+    /// 32-bit count. A table of several columns lends each through this, in one body of its own
+    /// for every row type (`slot_map`).
     #[inline(never)]
-    fn lend_rows(
+    pub(crate) fn lend_rows(
         &mut self,
         rows: usize,
         ceiling: usize,
@@ -1965,6 +2139,45 @@ mod tests {
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
     }
 
+    /// A lender keeps its first refusal for every kind of table it lends: after it a table of
+    /// rows, a table of buffers and a key arena are each lent nothing, the arena lends no byte
+    /// more, and `finish_keys` hands the first refusal back. The CONTROL is the same three lent
+    /// with nothing refused, which take their bytes and hand the key arena back.
+    #[test]
+    fn a_lender_lends_no_kind_of_table_after_its_first_refusal() {
+        let longest = crate::limits::SessionLimits::defaults().max_keyexpr_bytes_held();
+        let mut whole = arena_of(1 << 12);
+        let mut lend = TableLender::new(&mut whole);
+        let rows: BoundedVec<u32, 4, Lent> = lend.table(4);
+        let cells = lend.byte_cells(8, 2);
+        let keys = lend.keys(64, longest);
+        assert!(
+            lend.finish_keys(keys).is_ok(),
+            "CONTROL: nothing is refused"
+        );
+        assert_eq!(rows.free_slots(), 4);
+        assert!(cells.claim().is_some());
+        assert!(whole.high_water() > 0);
+
+        let mut short = arena_of(1 << 12);
+        let mut lend = TableLender::new(&mut short);
+        let past: BoundedVec<u32, 4, Lent> = lend.table(5);
+        let rows: BoundedVec<u32, 4, Lent> = lend.table(4);
+        let cells = lend.byte_cells(8, 2);
+        let keys = lend.keys(64, longest);
+        assert!(matches!(
+            lend.finish_keys(keys),
+            Err(LendRefused::OverCeiling {
+                rows: 5,
+                ceiling: 4
+            })
+        ));
+        assert_eq!(short.high_water(), 0);
+        assert_eq!((past.free_slots(), rows.free_slots()), (0, 0));
+        assert!(cells.claim().is_none());
+        assert!(keys.space().is_none());
+    }
+
     /// A table of each policy with room for its `N`, for the algorithm to run on: the growable
     /// and the static ones as `Default` makes them, a lent one lent `N` rows of an arena of its
     /// own, so the three are filled and refused alike.
@@ -2463,6 +2676,42 @@ mod tests {
         held.push(Counted(7, &drops)).expect("within the rows");
         drop(held);
         assert_eq!(drops.get(), 7, "a dropped table drops what it held");
+    }
+
+    /// A row at least a word wide, whose drop marks its own bit: dropped at the wrong place, it
+    /// marks a bit of what lies there instead.
+    struct Wide<'a> {
+        _pad: [u64; 3],
+        bit: u32,
+        seen: &'a core::cell::Cell<u32>,
+    }
+
+    impl Drop for Wide<'_> {
+        fn drop(&mut self) {
+            self.seen.set(self.seen.get() | (1 << self.bit));
+        }
+    }
+
+    /// A lent table of rows wider than a byte drops each row once at its own place, the rows cut
+    /// off the end first and the rest with the table.
+    #[test]
+    fn a_lent_table_drops_each_wide_row_at_its_place() {
+        let seen = core::cell::Cell::new(0);
+        let mut arena = arena_of(Arena::table_bytes::<Wide<'_>>(4).expect("fits"));
+        let mut v: BoundedVec<Wide<'_>, 4, Lent> = arena.lend(4).expect("four rows fit");
+        for bit in 0..4 {
+            v.push(Wide {
+                _pad: [0; 3],
+                bit,
+                seen: &seen,
+            })
+            .expect("within the rows");
+        }
+        drop(v.pop());
+        drop(v.pop());
+        assert_eq!(seen.get(), 0b1100, "the rows taken off the end are dropped");
+        drop(v);
+        assert_eq!(seen.get(), 0b1111, "and the rest with the table");
     }
 
     /// Both policies in ONE build, side by side: what the feature selector could

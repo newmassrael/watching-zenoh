@@ -145,6 +145,24 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/ros_type_hash.rs",
+        "while let Some(next) = queue.pop() {",
+        "The RIHS01 hash collects every type a ROS type reaches with a work list: "
+        "a name leaves the list when its definition is read into the set of "
+        "referenced types, or is skipped because that set already holds it. "
+        "Nothing read from a capture is dropped; a name no declared definition "
+        "defines is returned as the refusal.",
+    ),
+    (
+        "wz-capture/ros_msg.rs",
+        "inside.pop();",
+        "The check that a ROS message definition does not contain itself walks "
+        "the messages its fields name depth first, holding the path it is on; a "
+        "name leaves that path when the walk returns from it. The path is the "
+        "walk's own position, not evidence read from a capture, and a cycle it "
+        "finds is returned as the refusal before anything is popped.",
+    ),
+    (
         "wz-capture/tcp_facts.rs",
         "peer.pending.pop_front();",
         "A direction's small segment leaves the queue of segments awaiting their "
@@ -229,7 +247,7 @@ ALLOWED = [
         # Open-debt item 924, step 4b — and a third time: a list now keeps its
         # rows either whole or as index entries, so the door takes the oldest row
         # from whichever store holds it, and the one line became the two below.
-        "Store::Held(log) => log.pop_front()?,",
+        "Store::Held(log) => Ok(log.pop_front()?),",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
         "PANICS unless the caller took the frame, so the obligation is moved "
@@ -252,7 +270,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.held.remove(&first_produced)",
+        "self.held.remove(&first_produced).map(Ok)",
         "Open-debt item 924, step 4b — the STORAGE under the door: the oldest "
         "row, kept whole, is the value returned to `discard_oldest`, which "
         "hands it back inside the receipt",
@@ -428,7 +446,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.frames.drain(..(k - self.next).min(self.frames.len()));",
+        "self.frames.drain(..skip.min(self.frames.len()));",
         "Open-debt item 924, step 4b — records of a unit READ AGAIN for one "
         "reader, that it passed over: a copy this read made, never the list's "
         "rows, which stay as they are",

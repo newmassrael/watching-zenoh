@@ -91,7 +91,7 @@ impl RowPlane {
                 .flatten();
             let ctx = grouping
                 .context(list)
-                .placed(flow, Some(packet))
+                .placed(flow, Some(packet), row.produced())
                 .holding(held.as_deref());
             plane.take(filter, ctx, origin, list, &row, held.as_deref(), exchanges);
         }
@@ -372,6 +372,7 @@ impl Base<'_> {
             source_delay_ms: None,
             outcome: None,
             zid: self.ctx.zid(direction),
+            receiver_zid: self.ctx.zid(direction.peer()),
             tree,
             row,
             // A row with no record carries no frame, and a record this plane

@@ -2625,6 +2625,20 @@ fn validate_tx_queue(
     }
 }
 
+/// The zenoh release whose config layout [`ZenohNodeConfig::from_json5`] reads:
+/// the keys it admits and refuses, and the members of each `access_control`
+/// rule, subject and policy, as that release's `zenohd` reads them.
+///
+/// Handed to consumers as data (the access-control answers of `wz-capi-c`
+/// name it), so a reader of an answer knows which layout the question was put
+/// to. A TRIPWIRE and not a copy of the pin: the key lists below are adjudicated
+/// against whichever binary the pin builds and so name no version, but what
+/// this states is a reading a person checked, and it holds only until the pin
+/// moves. `scripts/lib/claude_md_upstream_pin_gate.py` refuses it whenever it
+/// differs from `UPSTREAM_VERSION`, so a pin bump stops here until the layout
+/// has been read again against the new release and this moved with it.
+pub const ZENOH_LAYOUT_VERSION: &str = "1.10.2";
+
 /// Every upstream config leaf path [`ZenohNodeConfig::from_json5`] HONOURS,
 /// in the order `to_json5` emits them.
 ///
@@ -6784,6 +6798,48 @@ pub enum AclCompileError {
     },
 }
 
+/// One sentence per refusal, naming the list and the entry at fault. Read by
+/// the config verdict's rows, which take the variant name off `Debug` and this
+/// as the message.
+#[cfg(feature = "access-acl")]
+impl core::fmt::Display for AclCompileError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AclCompileError::BlankId => {
+                write!(f, "access_control names a blank rule, subject or policy id")
+            }
+            AclCompileError::DuplicateId { id } => write!(
+                f,
+                "access_control gives the id {id:?} to two entries of one list"
+            ),
+            AclCompileError::EmptyPolicy { index } => write!(
+                f,
+                "access_control/policies entry {index} names no rules or no subjects"
+            ),
+            AclCompileError::UnknownRule { id, index } => write!(
+                f,
+                "access_control/policies entry {index} names a rule {id:?} no rule defines"
+            ),
+            AclCompileError::UnknownSubject { id, index } => write!(
+                f,
+                "access_control/policies entry {index} names a subject {id:?} no subject defines"
+            ),
+            AclCompileError::BlankUsername { subject } => write!(
+                f,
+                "access_control/subjects entry {subject:?} names a blank username"
+            ),
+            AclCompileError::BlankCertCommonName { subject } => write!(
+                f,
+                "access_control/subjects entry {subject:?} names a blank certificate common name"
+            ),
+            AclCompileError::VocabularyDrift { literal } => write!(
+                f,
+                "access_control holds {literal:?}, read by the reader and unknown to the engine"
+            ),
+        }
+    }
+}
+
 /// R2652 — compile the retained `access_control/*` inputs into the engine's
 /// policy, the way upstream's `PolicyEnforcer::init` compiles the same subtree.
 ///
@@ -6828,6 +6884,53 @@ pub enum AclCompileError {
 pub fn acl_config_from_inputs(
     inputs: &AclConfigInputs,
 ) -> Result<Option<wz_access_control::AclConfig>, AclCompileError> {
+    let compiled = acl_config_with_origins(inputs)?;
+    Ok(compiled.map(|c| c.config))
+}
+
+/// Where one compiled rule came from: the document's rule, subject and policy
+/// whose join produced it.
+///
+/// The expansion [`acl_config_from_inputs`] performs is lossy in the compiled
+/// form alone, so a caller that has to name the rule that decided a verdict in
+/// the operator's own words takes the origins beside the rules.
+#[cfg(feature = "access-acl")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclRuleOrigin {
+    /// The `id` of the `access_control/rules` entry.
+    pub rule: String,
+    /// The `id` of the `access_control/subjects` entry.
+    pub subject: String,
+    /// The `id` of the `access_control/policies` entry, which upstream leaves
+    /// optional.
+    pub policy: Option<String>,
+    /// The policy's position in `access_control/policies`, which is how a
+    /// policy without an id is named (as [`AclCompileError::EmptyPolicy`]
+    /// names one).
+    pub policy_index: usize,
+}
+
+/// A compiled policy and, for each of its rules at the same position, where
+/// the rule came from.
+#[cfg(feature = "access-acl")]
+#[derive(Debug, Clone)]
+pub struct CompiledAcl {
+    /// What [`acl_config_from_inputs`] returns for the same inputs.
+    pub config: wz_access_control::AclConfig,
+    /// `origins[i]` is the origin of `config.rules[i]`; the two have one
+    /// length.
+    pub origins: Vec<AclRuleOrigin>,
+}
+
+/// [`acl_config_from_inputs`] with the origin of every compiled rule.
+///
+/// One compile: [`acl_config_from_inputs`] is this with the origins dropped,
+/// so a policy a node enforces and a policy whose verdicts are explained are
+/// the same rules in the same order.
+#[cfg(feature = "access-acl")]
+pub fn acl_config_with_origins(
+    inputs: &AclConfigInputs,
+) -> Result<Option<CompiledAcl>, AclCompileError> {
     use std::collections::{HashMap, HashSet};
     use wz_access_control::{
         AclCertCommonName, AclConfig, AclFlow, AclMessage, AclRule, AclUsername, Permission,
@@ -6876,6 +6979,7 @@ pub fn acl_config_from_inputs(
 
     let mut policy_ids: HashSet<&str> = HashSet::new();
     let mut out: Vec<AclRule> = Vec::new();
+    let mut origins: Vec<AclRuleOrigin> = Vec::new();
     for (index, policy) in inputs.policies.iter().enumerate() {
         if let Some(id) = &policy.id {
             if !policy_ids.insert(id.as_str()) {
@@ -6999,15 +7103,24 @@ pub fn acl_config_from_inputs(
                             cert_common_names: cert_common_names.clone(),
                             permission,
                         });
+                        origins.push(AclRuleOrigin {
+                            rule: rule.id.clone(),
+                            subject: subject.id.clone(),
+                            policy: policy.id.clone(),
+                            policy_index: index,
+                        });
                     }
                 }
             }
         }
     }
 
-    Ok(Some(AclConfig {
-        default_permission,
-        rules: out,
+    Ok(Some(CompiledAcl {
+        config: AclConfig {
+            default_permission,
+            rules: out,
+        },
+        origins,
     }))
 }
 
@@ -12493,6 +12606,87 @@ mod tests {
         assert!(second
             .iter()
             .all(|r| r.flow == wz_access_control::AclFlow::Egress));
+    }
+
+    /// Every compiled rule carries the document entries that produced it, in
+    /// the rules' own order, and the compile without origins is the same rules.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn every_compiled_acl_rule_names_the_entries_it_came_from() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ access_control: { enabled: true, default_permission: "deny",
+                 rules: [ { id: "r1", key_exprs: ["demo/**"],
+                            messages: ["put"], flows: ["ingress"], permission: "allow" },
+                          { id: "r2", key_exprs: ["demo/one"],
+                            messages: ["query"], permission: "deny" } ],
+                 subjects: [ { id: "s1", zids: ["1a2b", "3c4d"] }, { id: "s2" } ],
+                 policies: [ { id: "p1", rules: ["r1"], subjects: ["s1"] },
+                             { rules: ["r2"], subjects: ["s2"] } ] } }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        let compiled = acl_config_with_origins(&ok.config.access_control)
+            .expect("a consistent subtree compiles")
+            .expect("`enabled: true` installs a policy");
+        // r1 x s1: 2 zids x 1 flow; r2 x s2: 1 wildcard x 2 flows.
+        assert_eq!(compiled.config.rules.len(), 4);
+        assert_eq!(compiled.origins.len(), compiled.config.rules.len());
+        let p1 = AclRuleOrigin {
+            rule: String::from("r1"),
+            subject: String::from("s1"),
+            policy: Some(String::from("p1")),
+            policy_index: 0,
+        };
+        let unnamed = AclRuleOrigin {
+            rule: String::from("r2"),
+            subject: String::from("s2"),
+            policy: None,
+            policy_index: 1,
+        };
+        assert_eq!(
+            compiled.origins,
+            vec![p1.clone(), p1, unnamed.clone(), unnamed]
+        );
+        for (rule, origin) in compiled.config.rules.iter().zip(&compiled.origins) {
+            let want = if origin.rule == "r1" {
+                "demo/**"
+            } else {
+                "demo/one"
+            };
+            assert_eq!(rule.key_exprs, vec![String::from(want)]);
+        }
+
+        let plain = acl_config_from_inputs(&ok.config.access_control)
+            .expect("compiles")
+            .expect("installs");
+        assert_eq!(plain.rules.len(), compiled.config.rules.len());
+        for (a, b) in plain.rules.iter().zip(&compiled.config.rules) {
+            assert_eq!(
+                (&a.key_exprs, a.flow, a.subject, a.permission),
+                (&b.key_exprs, b.flow, b.subject, b.permission)
+            );
+        }
+        assert!(acl_config_with_origins(&AclConfigInputs::default())
+            .expect("the default compiles")
+            .is_none());
+    }
+
+    /// Each compile refusal says which list it is about, in its message and
+    /// in the key its finding blames.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn an_acl_compile_refusal_names_the_list_at_fault() {
+        let unknown = AclCompileError::UnknownRule {
+            id: String::from("ghost"),
+            index: 2,
+        };
+        let text = unknown.to_string();
+        assert!(text.contains("access_control/policies"), "{text}");
+        assert!(text.contains("\"ghost\""), "{text}");
+        assert!(text.contains('2'), "{text}");
+        let blank = AclCompileError::BlankUsername {
+            subject: String::from("s1"),
+        };
+        assert!(blank.to_string().contains("access_control/subjects"));
     }
 
     /// R2652 — `enabled` is the switch, and a policy with no rules is NOT the

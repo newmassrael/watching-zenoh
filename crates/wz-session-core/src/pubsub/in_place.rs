@@ -47,7 +47,7 @@ use crate::reliability::Reliability;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
-use crate::sink::{SampleDelivery, SampleView};
+use crate::sink::{FanOut, SampleDelivery, SampleView};
 use crate::wireexpr_resolve::{
     resolve_plain_parts_over, resolve_wireexpr_view_over, KeyexprBuf, KeyexprPastBound,
 };
@@ -358,7 +358,9 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
         }
         // Through the key gate and, for a key of a closed set, the selection: the one delivery of
-        // a message from a peer, as the copying receive takes it.
+        // a message from a peer, as the copying receive takes it. The rows it reaches are handed
+        // it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
         subs.deliver_from_peer(
             sample.keyexpr,
             self.class,
@@ -366,7 +368,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 no_allocation: true,
                 ..PeerDelivery::default()
             },
-            |id, row| cx.deliver(id, row, &sample),
+            |id, row| {
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
+            },
         );
         Ok(())
     }
@@ -472,6 +477,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             if repeats {
                 sample = sample.repeating_the_previous_key();
             }
+            let mut turn = FanOut::begin();
             subs.deliver_from_peer(
                 &current,
                 self.class,
@@ -479,7 +485,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     repeats_previous: repeats,
                     ..PeerDelivery::default()
                 },
-                |id, row| cx.deliver_plain(id, row, &sample),
+                |id, row| {
+                    cx.deliver_plain(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
             );
         }
         // The frame is done with this table: a sink that gathered its samples hands over.

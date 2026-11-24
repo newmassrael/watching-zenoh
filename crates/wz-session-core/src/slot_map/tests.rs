@@ -209,6 +209,66 @@ fn a_lent_table_past_its_build_bound_is_refused() {
     ));
 }
 
+/// Tables of two row types, both lent by the one body that lends every table's columns, each take
+/// the span their own rows count, the second laid after the first, and each holds its own rows.
+#[test]
+fn tables_of_two_row_types_each_take_the_span_of_their_rows() {
+    let small = SlotMap::<Test, u8, 4, Lent>::arena_bytes(3).unwrap();
+    let large = SlotMap::<Test, [u64; 4], 4, Lent>::arena_bytes(3).unwrap();
+    let mut arena = arena(small + large);
+    let mut bytes = SlotMap::<Test, u8, 4, Lent>::lent(&mut arena, 3).unwrap();
+    assert_eq!(arena.high_water(), small);
+    let mut words = SlotMap::<Test, [u64; 4], 4, Lent>::lent(&mut arena, 3).unwrap();
+    assert_eq!(arena.high_water(), small + large);
+    assert_eq!((bytes.capacity(), words.capacity()), (3, 3));
+    let a = bytes.insert(7).unwrap();
+    let b = words.insert([1, 2, 3, 4]).unwrap();
+    assert_eq!(bytes.get(a), Some(&7));
+    assert_eq!(words.get(b), Some(&[1, 2, 3, 4]));
+}
+
+/// A table whose rows find no room once its metadata column was lent is refused, and the
+/// metadata's span stays lent: the arena keeps what was lent before a refusal.
+#[test]
+fn a_lent_table_whose_rows_find_no_room_is_refused() {
+    let meta = Arena::table_bytes::<Meta>(2).unwrap();
+    let rows = Arena::table_bytes::<Option<[u64; 4]>>(2).unwrap();
+    let mut arena = arena(meta + rows - ARENA_ALIGN);
+    assert!(matches!(
+        SlotMap::<Test, [u64; 4], 4, Lent>::lent(&mut arena, 2),
+        Err(LendRefused::Exhausted { .. })
+    ));
+    assert_eq!(arena.high_water(), meta);
+}
+
+/// A lender keeps its first refusal: a table asked after it is lent no rows, takes nothing of the
+/// arena and refuses every insert, though the arena has the room for it, and `finish` hands the
+/// first refusal back. The CONTROL is the table lent before the refusal, which holds its rows.
+#[test]
+fn a_lender_lends_nothing_after_its_first_refusal() {
+    let fits = SlotMap::<Test, u32, 4, Lent>::arena_bytes(2).unwrap();
+    let mut arena = arena(fits * 2);
+    let mut lend = TableLender::new(&mut arena);
+    let mut first = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 2);
+    let mut past = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 5);
+    let mut after = SlotMap::<Test, u32, 4, Lent>::lent_from(&mut lend, 2);
+    assert_eq!(
+        lend.finish(),
+        Err(LendRefused::OverCeiling {
+            rows: 5,
+            ceiling: 4
+        })
+    );
+    assert_eq!(arena.high_water(), fits);
+    assert_eq!((past.capacity(), after.capacity()), (0, 0));
+    assert!(past.insert(1).is_err());
+    assert!(after.insert(1).is_err());
+    assert!(
+        first.insert(1).is_ok(),
+        "CONTROL: the table lent before holds its rows"
+    );
+}
+
 #[test]
 fn a_table_made_without_rows_on_the_lent_policy_refuses_every_insert() {
     let mut map = SlotMap::<Test, u32, 4, Lent>::new();

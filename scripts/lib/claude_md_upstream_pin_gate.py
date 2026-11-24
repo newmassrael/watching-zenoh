@@ -47,6 +47,27 @@ arguing with prose about things that are not the pin. A correct token in some OT
 section does not satisfy rule 3 -- that is a selftest row, because it is the shape
 a lazy repair would take.
 
+## The Rust constants that hand the pin to a consumer
+
+A few Rust constants state the pinned version as DATA a door hands out: the
+access-control answers of `wz-capi-c` name the zenoh release whose config
+layout they read, from `zenoh_config::ZENOH_LAYOUT_VERSION`. Each is the same
+second place as the bullet above, and answers to the same constant, with one
+difference in what it is for: it is a TRIPWIRE (`pin_constant_binding_gate.py`
+states the idea for scripts). What it states is a reading a person checked
+against one release, so when the pin moves this gate refuses until the reading
+has been done again and the constant moved with it; deriving it from the pin
+instead would let the document name a layout nobody had read.
+
+6. Every constant in `RUST_PINS` is declared exactly once in its file, as
+   `pub const NAME: &str = "...";`. A file that cannot be read, or holds the
+   constant zero times or twice, FAILS: a constant this gate cannot find is a
+   statement it cannot check.
+7. Its value equals the constant.
+
+The table is the population, written here because each row is a claim about
+what a door hands out; an empty table FAILS for the reason rule 2 gives.
+
 ## Modes
 
 `--check` grades the tracked `CLAUDE.md` against the tracked constant. `--selftest`
@@ -68,6 +89,12 @@ CENSUS = ROOT / "scripts" / "lib" / "upstream_feature_census.py"
 
 CONSTANT = "UPSTREAM_VERSION"
 SECTION_HEADING = "## External references"
+
+# The Rust constants that state the pin as data a door hands out: (file, name).
+RUST_PINS = (("crates/wz-runtime-tokio/src/zenoh_config.rs", "ZENOH_LAYOUT_VERSION"),)
+
+# A Rust string constant's declaration, anchored to a whole line.
+RUST_CONST = re.compile(r'^\s*pub const (\w+): &(?:\'static )?str = "([^"]*)";\s*$', re.M)
 
 # A version-shaped token: three dotted numbers, optionally a pre-release or build
 # suffix. The lookarounds keep it from matching inside a longer dotted run.
@@ -173,6 +200,45 @@ def grade(claude_text: str, pin: str) -> list[str]:
     return findings
 
 
+def grade_rust(sources: dict[str, str | None], pins: tuple, pin: str) -> list[str]:
+    """Findings for the Rust constants `pins` names, read from `sources` (a
+    file's text, or `None` for a file that could not be read); empty means
+    every one states the pin."""
+    if not pins:
+        return ["no Rust constant is named in RUST_PINS, and a population of zero is not a pass"]
+    findings: list[str] = []
+    for rel, name in pins:
+        text = sources.get(rel)
+        if text is None:
+            findings.append(f"{rel} cannot be read, and it is where `{name}` is declared")
+            continue
+        values = [value for found, value in RUST_CONST.findall(text) if found == name]
+        if len(values) != 1:
+            findings.append(
+                f"{rel} declares `pub const {name}: &str` {len(values)} time(s); "
+                "it must be exactly once, or this gate checks nothing"
+            )
+            continue
+        if values[0] != pin:
+            findings.append(
+                f"{rel}: `{name}` states {values[0]} but the tree enforces {pin} "
+                f"(`{CONSTANT}`); read again what it describes against {pin}, "
+                "then move it"
+            )
+    return findings
+
+
+def read_sources(pins: tuple) -> dict[str, str | None]:
+    """Each file `pins` names, read from the tree, or `None` where it cannot be."""
+    out: dict[str, str | None] = {}
+    for rel, _ in pins:
+        try:
+            out[rel] = (ROOT / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            out[rel] = None
+    return out
+
+
 def check() -> int:
     try:
         pin = read_pin(CENSUS.read_text(encoding="utf-8"))
@@ -194,7 +260,21 @@ def check() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"  claude-md-upstream-pin: CLAUDE.md states {pin}, the enforced pin")
+    rust = grade_rust(read_sources(RUST_PINS), RUST_PINS, pin)
+    if rust:
+        print("  claude-md-upstream-pin FAIL:", file=sys.stderr)
+        for f in rust:
+            print(f"    {f}", file=sys.stderr)
+        print(
+            "    A Rust constant that hands the pin to a consumer moves with the "
+            "pin, after what it states has been checked against the new release.",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"  claude-md-upstream-pin: CLAUDE.md and {len(RUST_PINS)} Rust "
+        f"constant(s) state {pin}, the enforced pin"
+    )
     return 0
 
 
@@ -309,6 +389,41 @@ def selftest() -> int:
         print(f"  selftest {'ok  ' if ok else 'BAD '} pin reader: {src.splitlines()[0]!r}")
         if not ok:
             bad += 1
+
+    # The Rust constants: each refusal arm, and the accepting one.
+    one = (("a.rs", "LAYOUT"),)
+    rust_rows = [
+        ("states the pin", {"a.rs": 'pub const LAYOUT: &str = "1.10.1";\n'}, one, None),
+        (
+            "states another version",
+            {"a.rs": 'pub const LAYOUT: &str = "1.5.0";\n'},
+            one,
+            "states 1.5.0",
+        ),
+        ("declared nowhere", {"a.rs": "pub const OTHER: &str = \"1.10.1\";\n"}, one, "0 time(s)"),
+        (
+            "declared twice",
+            {"a.rs": 'pub const LAYOUT: &str = "1.10.1";\npub const LAYOUT: &str = "1.10.1";\n'},
+            one,
+            "2 time(s)",
+        ),
+        ("file unreadable", {"a.rs": None}, one, "cannot be read"),
+        ("no constant named (population zero)", {}, (), "population of zero"),
+        (
+            "a comment that spells it is not a declaration",
+            {"a.rs": '// pub const LAYOUT: &str = "1.10.1";\n'},
+            one,
+            "0 time(s)",
+        ),
+    ]
+    for name, sources, pins, needle in rust_rows:
+        findings = grade_rust(sources, pins, pin)
+        ok = (not findings) if needle is None else any(needle in f for f in findings)
+        print(f"  selftest {'ok  ' if ok else 'BAD '} rust constant: {name}")
+        if not ok:
+            bad += 1
+            for f in findings:
+                print(f"      {f}", file=sys.stderr)
 
     # The tracked constant must itself be readable by the reader the gate uses;
     # otherwise the fixtures above would pass against a reader the tree defeats.

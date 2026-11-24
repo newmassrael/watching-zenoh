@@ -100,6 +100,14 @@ CAPI = ROOT / "crates" / "wz-capi-dissect" / "src" / "lib.rs"
 #
 # BOTH surfaces reach these.
 BOTH = {
+    # ABI 61 — the serial declaration, which the command line took first. The
+    # ABI takes it as a field of the options a handle is opened under, so a file
+    # read through that handle and a link pushed to it read the same line.
+    "declaring a link type to be raw serial": (
+        "--serial",
+        "wz_dissect_live_open_with",
+        (),
+    ),
     "keyexpr plane": ("--throughput", "wz_dissect_pcap_census", (8, 16, 17)),
     "query plane": ("--exchanges", "wz_dissect_pcap_census", (19,)),
     "node plane": ("--nodes", "wz_dissect_pcap_census", (12,)),
@@ -301,18 +309,15 @@ ONLY_CLI = {
         "--quic",
         "DELIBERATE for now: a declaration is a human judgement about a capture "
         "that begins mid-connection, and the report says which flows were declared "
-        "rather than recognised. A C consumer wanting it would want a whole "
-        "declaration struct, which this ABI's design refuses (see its module doc).",
+        "rather than recognised. Since ABI 61 a declaration crosses as a field of "
+        "the sized options a live handle is opened under, and a port list would be "
+        "one more field there; no linking consumer has read a capture that needs "
+        "it, so the command line is the one surface that takes it.",
         (),
     ),
     "the short-header connection id length": (
         "--quic-cid-len",
         "Rides the row above; it is meaningless without a QUIC declaration.",
-        (),
-    ),
-    "declaring a link type to be raw serial": (
-        "--serial",
-        "DELIBERATE, on the same argument as the QUIC declaration above.",
         (),
     ),
     "OPENING a live tap": (
@@ -987,6 +992,28 @@ ONLY_CAPI = {
         "is no earlier answer for a later one to be relative to.",
         (),
     ),
+    # (ABI 60) -- the binder with the zone a list shows times in. Filed in the
+    # round that added the symbol.
+    "the offset a list shows times in, written onto a selector's clock times": (
+        "wz_dissect_selector_bind_in_zone",
+        "DELIBERATE. A `time` literal with no offset is read in UTC by both "
+        "surfaces, through the one parser. The door is for a list whose zone is "
+        "a setting the reader chose and not text the reader typed; a person at "
+        "the command line types the offset into the literal (`12:04+09:00`), "
+        "and `--select` reads it as every door does.",
+        (),
+    ),
+    # (ABI 65) -- the binder with a zone rule that goes forward and back. Filed
+    # in the round that added the symbol.
+    "a zone rule's offsets, written onto a selector's dates and clock times": (
+        "wz_dissect_selector_bind_in_tz",
+        "DELIBERATE. A `time` value with a POSIX TZ rule in brackets is read by "
+        "both surfaces, through the one parser. The door is for a list whose zone "
+        "is a setting the reader chose; a person at the command line types the "
+        "rule or the offset into the literal, and `--select` reads it as every "
+        "door does.",
+        (),
+    ),
     # (ABI 59) -- the same values, bounded to a window of sequence numbers.
     # Filed in the round that added the symbol.
     "a WINDOW of the typed values of a few payload field paths after a cursor": (
@@ -1044,6 +1071,37 @@ ONLY_CAPI = {
         "handle chosen at the moment it opens. The command line reads a capture "
         "once; its `--bounded` flag is the live-tap preset, and a figure per axis "
         "has no list to follow.",
+        (),
+    ),
+    # A handle going on from one container of a capture into the next. Filed in
+    # the round that added the symbol.
+    "an OPEN handle going on into the next container of one capture": (
+        "wz_dissect_live_follow_next",
+        "DELIBERATE, for the reason the row for a dissection that outlives the "
+        "call gives. The door exists for a linking consumer whose capture helper "
+        "writes one capture as several files and who must keep one dissection "
+        "across them, so the lost count, the session context and the packet "
+        "numbers run on. The command line holds its dissection in its own process "
+        "and has no handle to carry from one file to the next.",
+        (),
+    ),
+    # A moved handle lent the next container of its capture. Filed in the round
+    # that added the symbol.
+    "an OPEN handle LENT the next container of one capture": (
+        "wz_dissect_live_follow_next_lent",
+        "DELIBERATE, for the reason the row for a handle going on into the next "
+        "container gives, and the one for a container lent to a handle: a "
+        "linking consumer keeps the files mapped and the handle reads them in "
+        "place. The command line maps no file for a handle to keep reading.",
+        (),
+    ),
+    # Which containers a handle still reads. Filed in the round that added the
+    # symbol.
+    "which containers an OPEN handle still reads": (
+        "wz_dissect_live_oldest_container",
+        "DELIBERATE: the answer exists for a caller that lent a handle its "
+        "containers and must know when to release one. The command line lends "
+        "no container and has nothing to release.",
         (),
     ),
     # What an open handle holds now, beside its ceilings. Filed in the round

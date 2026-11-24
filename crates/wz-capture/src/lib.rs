@@ -382,6 +382,7 @@ pub mod field_path;
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
 pub mod frag;
+mod lent;
 pub mod link;
 /// The `matches` operator's pattern (`filter-regex`).
 mod pattern;
@@ -495,6 +496,10 @@ pub mod tree_facts;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod tree_facts_tests;
 
+/// The `cdr` format: a payload in CDR read by a ROS message definition, the
+/// `cdr@<package>/msg/<Type>` rule. Private for the reason [`payload_builtin`]
+/// is, and reached through [`payload::formats`].
+mod payload_cdr;
 /// The `protobuf` format with a body schema: a payload read by the types its
 /// `.proto` schema gives it. Private for the reason [`payload_builtin`] is, and
 /// reached through [`payload::formats`].
@@ -508,6 +513,13 @@ pub mod pcapng;
 /// bytes and its first reading's facts, must produce the same records.
 #[cfg(test)]
 mod redecode_gate;
+/// The ROS message, service and action definitions (`.msg`, `.srv`,
+/// `.action`) a `cdr` rule reads by, declared as schema files are.
+mod ros_msg;
+/// The ROS 2 type hash (RIHS01) of a declared ROS type.
+mod ros_type_hash;
+/// SHA-256, the digest a ROS 2 type hash is.
+mod sha256;
 
 /// Open-debt item 924, step 5 -- the memory matrix: what a dissection holds per
 /// row for every kind of message list, against the report it makes of itself. See
@@ -1137,7 +1149,7 @@ pub struct DatagramDissection {
     /// The capture container the dissection is lent, when it is: a datagram
     /// whose payload sits in it is logged by its place there and read from it
     /// (open-debt item 924, step 4c).
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
 }
 
 /// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
@@ -1913,8 +1925,8 @@ impl messages::UnitBytes for DatagramDissection {
         None
     }
 
-    fn container(&self) -> Option<&[u8]> {
-        self.lent.as_deref().map(LentCapture::bytes)
+    fn container(&self) -> Option<&dyn wz_session_core::byte_log::LentBytes> {
+        lent_bytes(&self.lent)
     }
 }
 
@@ -1936,15 +1948,14 @@ impl DatagramDissection {
     /// decoded again from its payload when it is read (open-debt item 924,
     /// step 4c).
     pub fn scouting(&self) -> Scoutings<'_> {
-        self.scouting
-            .read(self.lent.as_deref().map(LentCapture::bytes))
+        self.scouting.read(lent_bytes(&self.lent))
     }
 
     /// The source a list of this flow reads its datagrams from, as a borrow
     /// beside the lists, so a caller that changes a list can hand it in.
-    fn datagrams(lent: &Option<alloc::sync::Arc<dyn LentCapture>>) -> messages::Datagrams<'_> {
+    fn datagrams(lent: &Option<alloc::sync::Arc<lent::LentContainers>>) -> messages::Datagrams<'_> {
         messages::Datagrams {
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
         }
     }
 
@@ -1984,13 +1995,13 @@ impl DatagramDissection {
 
     fn new(
         flow: FlowKey,
-        window_ms: Option<u64>,
+        limits: DissectionLimits,
         keep: Keep,
-        lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+        lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     ) -> Self {
         Self {
             flow,
-            session: new_session(window_ms),
+            session: new_session(limits),
             frames: messages::MessageList::new(),
             scouting: ScoutingList::default(),
             last_activity: 0,
@@ -2414,6 +2425,15 @@ impl ScoutingList {
         self.rows.get(0).map(|row| row.packet_index as usize)
     }
 
+    /// The lowest capture offset among the payloads this list reads from the
+    /// capture the dissection is lent, or `None` when it reads none from there.
+    fn oldest_lent_place(&self) -> Option<usize> {
+        (0..self.rows.len())
+            .filter_map(|i| self.rows.get(i))
+            .filter_map(|row| wz_session_core::byte_log::LogPlace::of(row.locator).in_container())
+            .min()
+    }
+
     /// Bytes the list's log holds allocated for copies of payloads.
     #[cfg(test)]
     fn log_allocated(&self) -> usize {
@@ -2444,7 +2464,10 @@ impl ScoutingList {
     /// The list as a reader reads it, with `container` the capture container
     /// the dissection is lent, which a payload logged by its place there is
     /// read from.
-    pub fn read<'a>(&'a self, container: Option<&'a [u8]>) -> Scoutings<'a> {
+    pub fn read<'a>(
+        &'a self,
+        container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
+    ) -> Scoutings<'a> {
         Scoutings {
             list: self,
             container,
@@ -2457,7 +2480,7 @@ impl ScoutingList {
 #[derive(Debug, Clone, Copy)]
 pub struct Scoutings<'a> {
     list: &'a ScoutingList,
-    container: Option<&'a [u8]>,
+    container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
 }
 
 impl<'a> Scoutings<'a> {
@@ -2953,12 +2976,14 @@ enum FlowKind {
 
 /// R311y594 — one place that decides how a per-flow observer is built, so the
 /// TCP and datagram halves cannot drift into different defaults.
-fn new_session(window_ms: Option<u64>) -> PassiveSession {
-    #[cfg(feature = "reassembly")]
-    if let Some(ms) = window_ms {
-        return PassiveSession::with_reassembly_window(ms);
-    }
-    let _ = window_ms;
+#[cfg(feature = "reassembly")]
+fn new_session(limits: DissectionLimits) -> PassiveSession {
+    PassiveSession::with_reassembly(limits.reassembly_window_ms, limits.chain_bytes_in_force())
+}
+
+/// [`new_session`] in a build with no chain routers: nothing to configure.
+#[cfg(not(feature = "reassembly"))]
+fn new_session(_limits: DissectionLimits) -> PassiveSession {
     PassiveSession::new()
 }
 
@@ -3055,7 +3080,7 @@ pub struct FlowDissection {
     /// The capture container the dissection is lent, when it is: the stream
     /// bytes of a segment that sat in it are read from it and not kept
     /// (open-debt item 924, step 3).
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     /// The plaintext each direction of a TLS flow decrypted into, once a
     /// decryption pass opened it, from the first byte a held message is read
     /// from: the source the flow's messages are read again from, in place of
@@ -3115,6 +3140,31 @@ fn lent_place(in_container: Option<usize>, packet: &[u8], payload: &[u8]) -> Opt
     in_container.and_then(|at| link::offset_within(packet, payload).map(|offset| at + offset))
 }
 
+/// Whether a message of `kind` (a row head's
+/// [`wz_session_core::inbound::InboundFrame::kind_code`]) is one the transport
+/// reads alone and that carries no network message: what no census plane reads
+/// by the session that owns its list.
+fn carries_no_network_message(kind: u8) -> bool {
+    use wz_session_core::inbound::InboundFrame;
+    [
+        InboundFrame::KIND_INIT,
+        InboundFrame::KIND_OPEN,
+        InboundFrame::KIND_CLOSE,
+        InboundFrame::KIND_KEEPALIVE,
+        InboundFrame::KIND_JOIN,
+    ]
+    .contains(&kind)
+}
+
+/// The capture a flow is lent, as a reader of its kept places takes it: every
+/// container the dissection was lent, read by capture offset.
+fn lent_bytes(
+    lent: &Option<alloc::sync::Arc<lent::LentContainers>>,
+) -> Option<&dyn wz_session_core::byte_log::LentBytes> {
+    lent.as_deref()
+        .map(|containers| containers as &dyn wz_session_core::byte_log::LentBytes)
+}
+
 /// A pair of borrows rather than the flow, so a caller that changes the list
 /// can hand it the streams beside it.
 struct Streams<'a> {
@@ -3122,7 +3172,7 @@ struct Streams<'a> {
     high_to_low: &'a StreamAssembler,
     /// The capture container the flow is lent, which runs located there are
     /// read from.
-    container: Option<&'a [u8]>,
+    container: Option<&'a dyn wz_session_core::byte_log::LentBytes>,
     /// The plaintext a decrypted flow's messages are read from instead
     /// ([`FlowDissection::plaintext`]).
     plaintext: Option<&'a [Plaintext; 2]>,
@@ -3165,11 +3215,9 @@ impl messages::UnitBytes for FlowDissection {
             Some(plaintext) => plaintext[dir_index(direction)]
                 .get(from, to)
                 .map(alloc::borrow::Cow::Borrowed),
-            None => self.assembler(direction).bytes(
-                from,
-                to,
-                self.lent.as_deref().map(LentCapture::bytes),
-            ),
+            None => self
+                .assembler(direction)
+                .bytes(from, to, lent_bytes(&self.lent)),
         }
     }
 }
@@ -3244,7 +3292,7 @@ impl FlowDissection {
         frames.discard_oldest(&Streams {
             low_to_high,
             high_to_low,
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
             plaintext: plaintext.as_deref(),
         })
     }
@@ -3281,7 +3329,7 @@ impl FlowDissection {
                 &Streams {
                     low_to_high,
                     high_to_low,
-                    container: lent.as_deref().map(LentCapture::bytes),
+                    container: lent_bytes(lent),
                     plaintext: None,
                 },
             );
@@ -3335,12 +3383,17 @@ impl FlowDissection {
         self.ingest.evidence(self.session_observations())
     }
 
-    fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>, keep: Keep) -> Self {
+    fn new(
+        flow: FlowKey,
+        limits: DissectionLimits,
+        gap_patience: Option<usize>,
+        keep: Keep,
+    ) -> Self {
         Self {
             flow,
             low_to_high: StreamAssembler::new().with_gap_patience(gap_patience),
             high_to_low: StreamAssembler::new().with_gap_patience(gap_patience),
-            session: new_session(window_ms),
+            session: new_session(limits),
             frames: messages::MessageList::new(),
             keep,
             lent: None,
@@ -3445,11 +3498,8 @@ impl FlowDissection {
         record: &tls::EncryptedRecord,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
         let from = record.stream_offset;
-        self.assembler(direction).bytes(
-            from,
-            from + record.len,
-            self.lent.as_deref().map(LentCapture::bytes),
-        )
+        self.assembler(direction)
+            .bytes(from, from + record.len, lent_bytes(&self.lent))
     }
 
     /// The assembler for one direction.
@@ -4134,11 +4184,7 @@ impl FlowDissection {
             "trimming must not outrun delivery: base {base} > before {before}"
         );
         let delivered: Vec<u8> = assembler
-            .bytes(
-                before,
-                assembler.len(),
-                self.lent.as_deref().map(LentCapture::bytes),
-            )
+            .bytes(before, assembler.len(), lent_bytes(&self.lent))
             .map(alloc::borrow::Cow::into_owned)
             .unwrap_or_default();
         self.advance_spliced(direction, before, &delivered, &splices);
@@ -4548,7 +4594,7 @@ impl FlowDissection {
         let streams = Streams {
             low_to_high,
             high_to_low,
-            container: lent.as_deref().map(LentCapture::bytes),
+            container: lent_bytes(lent),
             plaintext: None,
         };
         stream_into_session(
@@ -4737,7 +4783,7 @@ impl FlowDissection {
                 Direction::A => &self.low_to_high,
                 Direction::B => &self.high_to_low,
             };
-            let container = self.lent.as_deref().map(LentCapture::bytes);
+            let container = lent_bytes(&self.lent);
             for record in state.kept[index].iter().filter(|r| r.index >= next) {
                 // A direction this call continues must go on from the record
                 // after the last one opened; one the bound dropped in between
@@ -5084,6 +5130,18 @@ fn stream_into_session(
 /// after a third table lands.
 const FLOW_TABLES: usize = 2;
 
+/// The bytes one fragment chain joins when [`DissectionLimits::chain_bytes`]
+/// says none: the passive observer's own default
+/// (`wz_session_core::passive::PASSIVE_CHAIN_DEFAULT_BYTES`), which a test holds
+/// this equal to.
+pub const DEFAULT_CHAIN_BYTES: usize = 65_536;
+
+/// The most bytes one fragment chain may join whatever [`DissectionLimits::chain_bytes`]
+/// asks: the passive observer's slot ceiling
+/// (`wz_session_core::passive::PASSIVE_CHAIN_CAP`), which a test holds this
+/// equal to. A larger figure is held to it.
+pub const MAX_CHAIN_BYTES: usize = 1 << 30;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DissectionLimits {
     /// Per-chain reassembly deadline, in the capture's own milliseconds.
@@ -5140,6 +5198,43 @@ pub struct DissectionLimits {
     /// first, so this bites only for a flow whose held messages themselves span
     /// more than this.
     pub stream_bytes_per_direction: Option<usize>,
+    /// Reassembled bytes kept IN ALL, over both directions of every TCP flow.
+    /// Beyond it the OLDEST bytes held go, whichever flow and direction holds
+    /// them.
+    ///
+    /// # What it bounds, and what [`Self::stream_bytes_per_direction`] cannot
+    ///
+    /// The per-direction ceiling bounds memory by twice the NUMBER OF FLOWS times
+    /// itself: 1 024 flows at 4 MiB a direction may hold 8 GiB. This is the figure
+    /// a caller sizing memory means, as [`Self::frames_total`] is for messages.
+    /// "Oldest" is the order the bytes arrived in: the packet that carried the
+    /// first byte each direction still holds, and within one packet the order of
+    /// the flows. The two byte ceilings are independent and both apply.
+    ///
+    /// # What it takes
+    ///
+    /// Bytes, never messages, as the per-direction ceiling: a held message whose
+    /// bytes it takes is kept whole first and keeps its record and rows, and from
+    /// then its bytes are retired. Every byte it takes is counted in
+    /// [`DissectionDrops::stream_bytes`]. The bytes a held TLS record still covers
+    /// are not taken before the record goes.
+    ///
+    /// # What it costs
+    ///
+    /// A pass over the TCP flows per segment that adds bytes, and the same pass
+    /// per run of bytes given up once the ceiling is reached: proportional to the
+    /// number of flows held, which [`Self::max_flows_per_table`] bounds.
+    pub stream_bytes_total: Option<usize>,
+    /// The bytes one fragment chain may join into a message. `None` is
+    /// [`DEFAULT_CHAIN_BYTES`] and NOT unbounded: a chain always has a ceiling,
+    /// so [`Self::chain_bytes_in_force`] is what a document echoes. A message
+    /// whose fragments come to more is not reassembled and its chain ends as a
+    /// capacity overflow.
+    ///
+    /// What it costs is what a chain stages, as it stages it: a direction holds
+    /// at most four open chains, so the most it can hold for chains is four
+    /// times this, per direction of every flow.
+    pub chain_bytes: Option<usize>,
     /// Entries kept in the skipped-packet list.
     pub skipped_packets: Option<usize>,
     /// Flows kept IN EACH FLOW TABLE. Beyond it the least recently active is
@@ -5230,6 +5325,14 @@ impl DissectionLimits {
         self.max_flows_per_table.map(|n| n * FLOW_TABLES)
     }
 
+    /// The bytes one fragment chain may join: [`Self::chain_bytes`], or
+    /// [`DEFAULT_CHAIN_BYTES`] where that says none.
+    pub fn chain_bytes_in_force(&self) -> usize {
+        self.chain_bytes
+            .unwrap_or(DEFAULT_CHAIN_BYTES)
+            .min(MAX_CHAIN_BYTES)
+    }
+
     /// A starting point for a live tap. Not tuned — these are the shapes, and
     /// a deployment with a measured packet rate should set its own.
     ///
@@ -5247,6 +5350,13 @@ impl DissectionLimits {
             // its own 10 000 as before.
             frames_total: Some(100_000),
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
+            // Ten flows of both directions' ceiling, as `frames_total` is ten flows
+            // of the per-flow ceiling: the per-direction ceiling alone bounds memory
+            // by the number of flows.
+            stream_bytes_total: Some(10 * 2 * 4 * 1024 * 1024),
+            // The observer's own default, named so the preset bounds the axis
+            // it has always bounded.
+            chain_bytes: Some(DEFAULT_CHAIN_BYTES),
             skipped_packets: Some(10_000),
             max_flows_per_table: Some(1_024),
             // 256 concurrent half-assembled datagrams is far past what a real
@@ -5434,7 +5544,12 @@ mod message_list_census {
             lent: _,
             // Where a decrypted flow's messages are read from, not a list.
             plaintext: _,
-        } = FlowDissection::new(FlowKey::serial_line(), None, None, Keep::Entries);
+        } = FlowDissection::new(
+            FlowKey::serial_line(),
+            DissectionLimits::default(),
+            None,
+            Keep::Entries,
+        );
     }
 
     /// Every field of [`DatagramDissection`], classified.
@@ -5469,7 +5584,12 @@ mod message_list_census {
             keep: _,
             // Where the datagrams' bytes are read from, not a list.
             lent: _,
-        } = DatagramDissection::new(FlowKey::serial_line(), None, Keep::Entries, None);
+        } = DatagramDissection::new(
+            FlowKey::serial_line(),
+            DissectionLimits::default(),
+            Keep::Entries,
+            None,
+        );
     }
 
     /// Every field of [`QuicStreamDissection`], classified.
@@ -5486,7 +5606,7 @@ mod message_list_census {
             keep: _,
         } = QuicStreamDissection {
             id: 0,
-            session: new_session(None),
+            session: new_session(DissectionLimits::default()),
             frames: messages::MessageList::new(),
             fed: [0, 0],
             plaintext: Default::default(),
@@ -5525,6 +5645,8 @@ mod live_tap_tests {
             frames_per_flow,
             frames_total,
             stream_bytes_per_direction,
+            stream_bytes_total,
+            chain_bytes,
             skipped_packets,
             max_flows_per_table,
             max_pending_fragments,
@@ -5541,6 +5663,8 @@ mod live_tap_tests {
             ("frames_per_flow", frames_per_flow),
             ("frames_total", frames_total),
             ("stream_bytes_per_direction", stream_bytes_per_direction),
+            ("stream_bytes_total", stream_bytes_total),
+            ("chain_bytes", chain_bytes),
             ("skipped_packets", skipped_packets),
             ("max_flows_per_table", max_flows_per_table),
             ("max_pending_fragments", max_pending_fragments),
@@ -5556,6 +5680,35 @@ mod live_tap_tests {
             };
             assert!(v > 0, "{name} is bounded at zero, which taps nothing");
         }
+    }
+
+    /// THE CHAIN CEILING'S DEFAULT AND ITS MOST ARE THE OBSERVER'S OWN, and limits
+    /// that name none echo the default rather than "no ceiling": a chain always
+    /// has one.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_chain_ceiling_is_the_observers_and_always_a_number() {
+        assert_eq!(
+            DEFAULT_CHAIN_BYTES,
+            wz_session_core::passive::PASSIVE_CHAIN_DEFAULT_BYTES
+        );
+        assert_eq!(MAX_CHAIN_BYTES, wz_session_core::passive::PASSIVE_CHAIN_CAP);
+        assert_eq!(
+            DissectionLimits::default().chain_bytes_in_force(),
+            DEFAULT_CHAIN_BYTES
+        );
+        let raised = DissectionLimits {
+            chain_bytes: Some(4 << 20),
+            ..DissectionLimits::default()
+        };
+        assert_eq!(raised.chain_bytes_in_force(), 4 << 20);
+        let past = DissectionLimits {
+            chain_bytes: Some(usize::MAX),
+            ..DissectionLimits::default()
+        };
+        assert_eq!(past.chain_bytes_in_force(), MAX_CHAIN_BYTES);
+        let doc = crate::report::dropped_by_limits_json(&Dissection::with_limits(raised));
+        assert!(doc.contains("\"chain_bytes\":4194304,"), "{doc}");
     }
 
     /// One packet per step, cycling over a stream flow and two datagram flows, so
@@ -6625,9 +6778,10 @@ pub struct Dissection {
     /// stream or out of its own datagrams (the flows' `keep`): as index entries,
     /// except in the reference reading the redecode gate builds.
     keep: Keep,
-    /// The capture container this dissection is lent ([`Self::follow_lent`]),
-    /// which every TCP flow holds too and reads its stream's bytes from.
-    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    /// The capture containers this dissection is lent ([`Self::follow_lent`]),
+    /// which every flow holds too and reads the bytes of its kept places from,
+    /// one container or several of one capture.
+    lent: Option<alloc::sync::Arc<lent::LentContainers>>,
     /// R311y638 (§1.1r) — the earliest capture instant this dissection was
     /// shown, over every packet whatever it decoded to.
     ///
@@ -6766,7 +6920,7 @@ impl Default for Dissection {
             serial_pending: Vec::new(),
             serial_frames: messages::MessageList::new(),
             serial_origins: wz_session_core::chunk_log::ChunkLog::new(),
-            serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
+            serial_session: new_session(DissectionLimits::default()),
             serial_ingest: session_table::LinkIngest::default(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
@@ -6907,9 +7061,25 @@ impl Dissection {
                 limits.max_pending_fragments,
                 limits.reassembly_window_ms,
             ),
+            // The serial line's chains join what every flow's may.
+            serial_session: new_session(limits),
             limits,
             ..Self::default()
         }
+    }
+
+    /// Declare the link types whose packets are raw zenoh serial bytes, for
+    /// every packet pushed or followed from now on.
+    ///
+    /// The declaration the `from_*_declaring` readers take, for a dissection
+    /// that is fed rather than handed a whole file. It has to arrive before the
+    /// line's first packet does: a packet on a link type nobody declared is
+    /// skipped as one this build does not read, and nothing reads it again. A
+    /// declared link type wins over decapsulation, so declaring a readable one
+    /// takes its decoding away. See [`serial`] for why the link type is
+    /// declared and never sniffed.
+    pub fn declare_serial_linktypes(&mut self, serial_linktypes: &[u32]) {
+        self.declared_serial_linktypes = serial_linktypes.to_vec();
     }
 
     /// What staying inside [`DissectionLimits`] has cost.
@@ -7782,6 +7952,44 @@ impl Dissection {
             .sum()
     }
 
+    /// Whether every message of the list at `list` that the walk which left
+    /// `prev` took carries no network message (an INIT, an OPEN, a CLOSE, a
+    /// KEEPALIVE or a JOIN), as far as the list still holds them: what lets a
+    /// fold go on when a handshake gives that list a session
+    /// ([`node::SessionGrouping::regroups_as`]). A list the walk took nothing
+    /// of answers `true`. `false` where it cannot be known: a list whose front
+    /// was trimmed after the walk took some of it, and lists that are not the
+    /// ones `prev` was taken over.
+    pub(crate) fn walked_only_transport(&self, list: usize, prev: &OrderMarks) -> bool {
+        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, messages::Messages<'_>)> =
+            self.message_lists_with_origin().collect();
+        let Some(continues) = list_continuations(&current, Some(&prev.lists)) else {
+            return false;
+        };
+        let Some((flow, origin, frames)) = current.get(list) else {
+            return false;
+        };
+        let walked = match continues.get(list).copied().flatten() {
+            Some(at) => {
+                let mark = &prev.lists[at];
+                if mark.flow != *flow || mark.origin != *origin {
+                    return false;
+                }
+                mark.produced
+            }
+            None => 0,
+        };
+        if walked == 0 {
+            return true;
+        }
+        let first_held = frames.produced() - frames.len() as u64;
+        first_held == 0
+            && frames
+                .heads_from(0)
+                .take(walked as usize)
+                .all(|head| carries_no_network_message(head.kind))
+    }
+
     /// [`Self::capture_order_since`] for a fold that holds the HISTORY of the
     /// messages it has taken and so may go on across a front trim: the same four
     /// conditions with the second one lifted. See [`TrimPolicy::Continue`].
@@ -8349,7 +8557,7 @@ impl Dissection {
                 }
                 dg.quic_streams.push(QuicStreamDissection {
                     id: stream_id,
-                    session: new_session(self.limits.reassembly_window_ms),
+                    session: new_session(self.limits),
                     frames: messages::MessageList::new(),
                     fed: [0, 0],
                     plaintext: Default::default(),
@@ -9301,12 +9509,8 @@ impl Dissection {
         let idx = match self.flows.position(&segment.flow) {
             Some(i) => i,
             None => {
-                let mut flow = FlowDissection::new(
-                    segment.flow,
-                    self.limits.reassembly_window_ms,
-                    self.gap_patience,
-                    self.keep,
-                );
+                let mut flow =
+                    FlowDissection::new(segment.flow, self.limits, self.gap_patience, self.keep);
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
                 self.flows.len() - 1
@@ -9453,6 +9657,81 @@ impl Dissection {
             self.drops.stream_bytes += flow.trim_stream_to(Direction::B, keep);
         }
         self.enforce_total_frames();
+        self.enforce_total_stream_bytes();
+    }
+
+    /// The reassembled bytes every TCP flow retains, both directions together:
+    /// what [`DissectionLimits::stream_bytes_total`] bounds.
+    fn total_retained_stream_bytes(&self) -> usize {
+        self.flows
+            .iter()
+            .map(|f| f.low_to_high.retained_len() + f.high_to_low.retained_len())
+            .sum()
+    }
+
+    /// The direction of a TCP flow whose oldest retained byte arrived first, as
+    /// `(packet, flow, direction)`, leaving out the directions in `stuck` (by
+    /// flow and direction index), or `None` when no other direction retains a
+    /// byte. The order is `(packet, flow, direction)`, so a tie is decided by the
+    /// flow tables' order and not left to chance; a first byte no packet can be
+    /// named for reads as packet `0`, the oldest there is.
+    fn oldest_retained_stream_byte(&self, stuck: &[(usize, usize)]) -> Option<(usize, Direction)> {
+        let mut oldest: Option<(usize, usize, usize)> = None;
+        for (i, flow) in self.flows.iter().enumerate() {
+            for direction in [Direction::A, Direction::B] {
+                let side = dir_index(direction);
+                let assembler = flow.assembler(direction);
+                if assembler.retained_len() == 0 || stuck.contains(&(i, side)) {
+                    continue;
+                }
+                let packet = assembler
+                    .packet_for_offset(assembler.retained_from())
+                    .unwrap_or(0);
+                let key = (packet, i, side);
+                // A `match` and not `is_none_or`, which is newer than this crate's MSRV.
+                match oldest {
+                    Some(best) if best <= key => {}
+                    _ => oldest = Some(key),
+                }
+            }
+        }
+        oldest.map(|(_, i, side)| (i, [Direction::A, Direction::B][side]))
+    }
+
+    /// Hold the reassembled bytes every TCP flow retains inside
+    /// [`DissectionLimits::stream_bytes_total`]: while more are retained than the
+    /// ceiling allows, give up the oldest bytes held, a run of one packet's bytes
+    /// at a time and no more than the excess, whichever flow and direction holds
+    /// them.
+    ///
+    /// Called after the per-flow ceilings, at every place a stream can have
+    /// grown. A direction that can give up nothing (the bytes a held TLS record
+    /// covers) is passed over for the next oldest, so the walk ends. Every byte
+    /// taken is counted in [`DissectionDrops::stream_bytes`].
+    fn enforce_total_stream_bytes(&mut self) {
+        let Some(cap) = self.limits.stream_bytes_total else {
+            return;
+        };
+        let mut held = self.total_retained_stream_bytes();
+        let mut stuck: Vec<(usize, usize)> = Vec::new();
+        while held > cap {
+            let Some((i, direction)) = self.oldest_retained_stream_byte(&stuck) else {
+                return;
+            };
+            let assembler = self.flows[i].assembler(direction);
+            let from = assembler.retained_from();
+            let to = assembler
+                .run_end_after(from)
+                .unwrap_or_else(|| assembler.len())
+                .min(from + (held - cap));
+            let taken = self.flows[i].trim_stream_before(direction, to);
+            if taken == 0 {
+                stuck.push((i, dir_index(direction)));
+                continue;
+            }
+            self.drops.stream_bytes += taken;
+            held = held.saturating_sub(taken);
+        }
     }
 
     /// Decoded messages held that [`DissectionLimits::frames_total`] counts: each
@@ -9614,12 +9893,8 @@ impl Dissection {
         let idx = match self.flows.position(&record.flow) {
             Some(i) => i,
             None => {
-                let mut flow = FlowDissection::new(
-                    record.flow,
-                    self.limits.reassembly_window_ms,
-                    self.gap_patience,
-                    self.keep,
-                );
+                let mut flow =
+                    FlowDissection::new(record.flow, self.limits, self.gap_patience, self.keep);
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
                 self.flows.len() - 1
@@ -9736,7 +10011,7 @@ impl Dissection {
             None => {
                 self.datagram_flows.push(DatagramDissection::new(
                     d.flow,
-                    self.limits.reassembly_window_ms,
+                    self.limits,
                     self.keep,
                     self.lent.clone(),
                 ));
@@ -10367,8 +10642,11 @@ impl Dissection {
     /// `capture` is the whole container prefix on every call, as for
     /// [`Self::follow_container`], and is lent for the life of the dissection:
     /// see [`LentCapture`] for what its holder keeps. Every flow, the ones held
-    /// already and the ones to come, reads from the container lent last, which
-    /// must hold every byte an earlier one did at the same offset.
+    /// already and the ones to come, reads this container from the one lent
+    /// last under the same number ([`CaptureCursor::container`]), which must
+    /// hold every byte an earlier one did at the same offset. A container of
+    /// the capture lent under an earlier number stays lent: a place kept in it
+    /// is read there ([`Self::oldest_lent_container`] says until when).
     ///
     /// Every answer is the one [`Self::follow_container`] over the same bytes
     /// gives; what differs is what the dissection holds.
@@ -10400,23 +10678,62 @@ impl Dissection {
         self.follow_bytes(cursor, capture.bytes(), Some(&capture), tap)
     }
 
-    /// Lend this dissection `capture`, for every flow it holds and every flow
-    /// it makes.
-    fn lend(&mut self, capture: &alloc::sync::Arc<dyn LentCapture>) {
+    /// Lend this dissection `capture` as the container numbered `ordinal` of
+    /// its capture, whose first byte stands at capture offset `first_byte`, for
+    /// every flow it holds and every flow it makes. The containers lent before
+    /// it stay lent: a place kept in one of them is read from it.
+    fn lend(
+        &mut self,
+        capture: &alloc::sync::Arc<dyn LentCapture>,
+        first_byte: usize,
+        ordinal: usize,
+    ) {
         if self
             .lent
             .as_ref()
-            .is_some_and(|held| alloc::sync::Arc::ptr_eq(held, capture))
+            .is_some_and(|held| held.holds(capture, ordinal))
         {
             return;
         }
-        self.lent = Some(capture.clone());
+        let held = self.lent.as_deref().cloned().unwrap_or_default();
+        let lent = alloc::sync::Arc::new(held.with(capture.clone(), first_byte, ordinal));
         for flow in self.flows.iter_mut() {
-            flow.lent = Some(capture.clone());
+            flow.lent = Some(lent.clone());
         }
         for flow in self.datagram_flows.iter_mut() {
-            flow.lent = Some(capture.clone());
+            flow.lent = Some(lent.clone());
         }
+        self.lent = Some(lent);
+    }
+
+    /// The number ([`CaptureCursor::container`]) of the oldest container of
+    /// the capture this dissection still reads a kept place from, or `None`
+    /// when it reads none from any container it was lent.
+    ///
+    /// No later place can be kept in an earlier container, since a place is
+    /// kept in the container being read, so every container numbered below the
+    /// answer will not be read again. A pass over the places held: the runs of
+    /// every TCP stream, the segments held behind a gap, and the rows of every
+    /// datagram and scouting list.
+    pub fn oldest_lent_container(&self) -> Option<usize> {
+        let lent = self.lent.as_deref()?;
+        let mut oldest: Option<usize> = None;
+        let mut take = |at: Option<usize>| {
+            if let Some(at) = at {
+                oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            }
+        };
+        for flow in self.flows() {
+            take(flow.low_to_high.oldest_lent_place());
+            take(flow.high_to_low.oldest_lent_place());
+            take(flow.frames.oldest_lent_place());
+        }
+        for flow in self.datagram_flows() {
+            take(flow.frames.oldest_lent_place());
+            take(flow.quic_datagrams.oldest_lent_place());
+            take(flow.scouting.oldest_lent_place());
+        }
+        lent.ordinal_of(oldest?)
     }
 
     /// The walk both doors above share. `lent` is the container `bytes` are,
@@ -10436,8 +10753,19 @@ impl Dissection {
                 given: bytes.len(),
             });
         }
+        // A container after the first of a capture numbers its packets from where
+        // the one before it stopped, names its sections after that one's, and
+        // stands in the capture's bytes after the bytes the earlier ones were
+        // read to.
+        let CursorCarry {
+            first_packet,
+            first_section,
+            first_byte,
+            container,
+            ..
+        } = cursor.carried;
         if let Some(capture) = lent {
-            self.lend(capture);
+            self.lend(capture, first_byte, container);
         }
         let located = lent.is_some();
         let before = cursor.packets_produced();
@@ -10468,6 +10796,10 @@ impl Dissection {
             .walk(bytes, |event| {
                 match event {
                     CaptureEvent::Frame(f) => {
+                        let f = CapturedFrame {
+                            index: first_packet + f.index,
+                            ..f
+                        };
                         // R311y720 — the INTERFACE travels with the packet. A
                         // classic pcap has one, numbered 0, which is also what
                         // `push_packet_at` passes.
@@ -10479,7 +10811,8 @@ impl Dissection {
                             f.data,
                             located
                                 .then(|| link::offset_within(bytes, f.data))
-                                .flatten(),
+                                .flatten()
+                                .map(|at| first_byte + at),
                         );
                         tap.on_packet(dissection, &f);
                     }
@@ -10487,7 +10820,10 @@ impl Dissection {
                     CaptureEvent::Stats(s) => dissection
                         .capture_reported_drops
                         .get_or_insert_with(pcapng::DropLedger::new)
-                        .note_interface_total(&s),
+                        .note_interface_total(&pcapng::InterfaceStats {
+                            section: first_section + s.section,
+                            ..s
+                        }),
                     CaptureEvent::Drops(dropped) => dissection
                         .capture_reported_drops
                         .get_or_insert_with(pcapng::DropLedger::new)
@@ -10571,6 +10907,29 @@ enum Container {
 #[derive(Debug, Clone, Default)]
 pub struct CaptureCursor {
     inner: CaptureCursorInner,
+    /// What the containers before this one in the same capture leave it to go
+    /// on from; nothing for the first.
+    carried: CursorCarry,
+}
+
+/// What the walk of a container takes over from the containers before it in
+/// one capture ([`CaptureCursor::next_container`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct CursorCarry {
+    /// The number the container's first packet takes in the capture.
+    first_packet: usize,
+    /// The sections the earlier containers began, so that a section of this one
+    /// is named apart from theirs where a section names something (a drop
+    /// total, per section and interface).
+    first_section: usize,
+    /// The Decryption Secrets bytes the earlier containers retained.
+    secrets_spent: usize,
+    /// Where the container stands in the capture's bytes: the bytes the earlier
+    /// containers were read to, together. A place kept in a lent container is
+    /// this plus its offset in the container (see `lent`).
+    first_byte: usize,
+    /// The container's number among the capture's, counting from zero.
+    container: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10607,6 +10966,46 @@ impl CaptureCursor {
         }
     }
 
+    /// The walk of the NEXT container of a capture written as several, going on
+    /// from this one: its first packet takes the number `first_packet`, its
+    /// sections are named after the ones this walk began, and the Decryption
+    /// Secrets budget is what this walk left of it.
+    ///
+    /// The packet numbers a walk hands out stay the container's own (the number
+    /// [`captured_frame`] takes); [`Dissection::follow_container`] adds
+    /// [`Self::first_packet`] to them, so the dissection's numbering runs on
+    /// across containers as it runs on across pushes.
+    pub fn next_container(&self, first_packet: usize) -> Self {
+        let (sections, secrets_spent) = match &self.inner {
+            CaptureCursorInner::Ng(c) => (c.sections(), c.secrets_spent()),
+            CaptureCursorInner::Undecided | CaptureCursorInner::Classic(_) => {
+                (0, self.carried.secrets_spent)
+            }
+        };
+        Self {
+            inner: CaptureCursorInner::Undecided,
+            carried: CursorCarry {
+                first_packet,
+                first_section: self.carried.first_section + sections,
+                secrets_spent,
+                first_byte: self.carried.first_byte + self.consumed(),
+                container: self.carried.container + 1,
+            },
+        }
+    }
+
+    /// The number this container's first packet takes in the capture: `0` for a
+    /// walk [`Self::next_container`] did not make.
+    pub fn first_packet(&self) -> usize {
+        self.carried.first_packet
+    }
+
+    /// This container's number among the capture's: `0` for the first, and one
+    /// more for each [`Self::next_container`] that led to it.
+    pub fn container(&self) -> usize {
+        self.carried.container
+    }
+
     /// Settle the format if `bytes` is long enough to say, and report which it
     /// is. `None` means the container has not yet said.
     fn decide(&mut self, bytes: &[u8]) -> Option<Container> {
@@ -10615,7 +11014,7 @@ impl CaptureCursor {
                 return None;
             }
             self.inner = if pcapng::looks_like_pcapng(bytes) {
-                CaptureCursorInner::Ng(pcapng::PcapngCursor::new())
+                CaptureCursorInner::Ng(pcapng::PcapngCursor::continuing(self.carried.secrets_spent))
             } else {
                 CaptureCursorInner::Classic(pcap::PcapCursor::new())
             };
@@ -15223,6 +15622,39 @@ mod datagram_tests {
         assert_eq!(followed.capture_reported_drops(), Some(17));
     }
 
+    /// THE NEXT CONTAINER OF A CAPTURE NUMBERS ITS PACKETS ON AND ADDS ITS DROP
+    /// TOTAL. Each container's first section is section 0 of its own file, so a
+    /// ledger that took the second container's interface 0 for the first's would
+    /// keep the larger total and lose the smaller: 10 and then 3 are 13 lost.
+    #[test]
+    fn the_next_container_numbers_on_and_adds_its_drop_total() {
+        let packet = [0u8; 4];
+        let mut first = pcapng::write(&[(1, 6)], &[(0, 1_000, &packet), (0, 2_000, &packet)]);
+        first.extend_from_slice(&isb_block(0, Some(10)));
+        let mut second = pcapng::write(&[(1, 6)], &[(0, 3_000, &packet)]);
+        second.extend_from_slice(&isb_block(0, Some(3)));
+
+        let mut d = Dissection::new();
+        let mut cursor = CaptureCursor::new();
+        let read = d.follow_container(&mut cursor, &first);
+        assert_eq!(read.expect("the first container follows"), 2);
+        let mut next = cursor.next_container(d.next_packet_index());
+        assert_eq!(next.first_packet(), 2);
+        let read = d.follow_container(&mut next, &second);
+        assert_eq!(read.expect("the second container follows"), 1);
+        assert_eq!(
+            d.next_packet_index(),
+            3,
+            "the second container's packet is the third of the capture"
+        );
+        assert_eq!(next.consumed(), second.len(), "the walk is the second's");
+        assert_eq!(
+            d.capture_reported_drops(),
+            Some(13),
+            "each container's drop total counts once"
+        );
+    }
+
     /// One ISB carrying only `isb_ifdrop`. Kept beside its user rather than
     /// shared with `pcapng`'s own tests: that module asserts the LAYOUT, and
     /// this one asserts the figure reaches a consumer.
@@ -16740,6 +17172,61 @@ mod datagram_tests {
         assert!(
             flow.packet_for(Direction::A, live).is_some(),
             "the first RETAINED offset must still attribute"
+        );
+    }
+
+    /// THE TOTAL BYTE CEILING TAKES THE OLDEST BYTES OF ANY FLOW: two TCP flows
+    /// written one after the other hold no more than the ceiling between them,
+    /// the flow written first gives up its bytes first, every byte taken is
+    /// counted, and no message goes with them. With no ceiling nothing is taken.
+    #[test]
+    fn the_total_byte_ceiling_takes_the_oldest_bytes_of_any_flow() {
+        let msg = framed_keepalive();
+        let unit = msg.len();
+        let read = |limits: DissectionLimits| {
+            let mut d = Dissection::with_limits(limits);
+            let mut packet = 0usize;
+            for sport in [1111u16, 2222] {
+                for i in 0..5u32 {
+                    let pkt = tcp_packet_on(sport, 1000 + i * unit as u32, &msg);
+                    d.push_packet(LINKTYPE_ETHERNET, packet, &pkt);
+                    packet += 1;
+                }
+            }
+            d
+        };
+        let retained = |d: &Dissection, i: usize| {
+            let flow = &d.flows()[i];
+            flow.low_to_high.retained_len() + flow.high_to_low.retained_len()
+        };
+
+        let d = read(DissectionLimits {
+            stream_bytes_total: Some(6 * unit),
+            ..DissectionLimits::default()
+        });
+        assert_eq!(
+            (retained(&d, 0), retained(&d, 1)),
+            (unit, 5 * unit),
+            "the first flow's bytes went first and the two hold the ceiling"
+        );
+        assert_eq!(d.drops().stream_bytes, 4 * unit, "every byte taken counts");
+
+        let whole = read(DissectionLimits::default());
+        for i in 0..2 {
+            assert_eq!(
+                d.flows()[i].frames().len(),
+                whole.flows()[i].frames().len(),
+                "flow {i}: bytes go, never messages"
+            );
+        }
+        assert_eq!(
+            (
+                retained(&whole, 0),
+                retained(&whole, 1),
+                whole.drops().stream_bytes
+            ),
+            (5 * unit, 5 * unit, 0),
+            "control: with no ceiling every byte is held"
         );
     }
 

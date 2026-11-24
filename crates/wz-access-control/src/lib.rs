@@ -71,7 +71,7 @@
 
 use wz_routing_graph::Zid;
 use wz_session_core::keyexpr_match::keyexpr_includes;
-use wz_session_core::link::{InterceptorLink, LinkSubject};
+use wz_session_core::link::{InterceptorLink, LinkKind, LinkSubject};
 
 /// Allow or deny — zenoh-config `Permission`. The verdict of every rule and the
 /// workspace default.
@@ -658,8 +658,35 @@ impl AclPolicy {
         link: Option<&LinkSubject>,
         username: Option<&str>,
     ) -> Permission {
+        let decided = self.decide(subject, flow, action, keyexpr, link, username);
+        decided.permission
+    }
+
+    /// [`Self::decision`] together with what decided it: the rule at a position
+    /// of [`Self::rules`], or the configured default.
+    ///
+    /// This is the body [`Self::decision`] runs, not a second reading of the
+    /// rules, so an enforcer and a caller asking why can never disagree about a
+    /// verdict. The rule named is the FIRST applicable one of the kind that
+    /// decided: deny rules are checked before anything else, and allow rules
+    /// only narrow a default-deny policy. Under a default-allow policy an
+    /// applicable allow rule changes nothing, so such a verdict is
+    /// [`DecidedBy::Default`] even when an allow rule also applies.
+    pub fn decide(
+        &self,
+        subject: Option<&Zid>,
+        flow: AclFlow,
+        action: AclMessage,
+        keyexpr: &str,
+        link: Option<&LinkSubject>,
+        username: Option<&str>,
+    ) -> AclDecision {
+        let by_default = AclDecision {
+            permission: self.config.default_permission,
+            decided_by: DecidedBy::Default,
+        };
         if self.config.rules.is_empty() {
-            return self.config.default_permission;
+            return by_default;
         }
         // Each rule keyexpr is tested for `rule ⊇ msg` (the directional ACL
         // predicate).
@@ -692,30 +719,379 @@ impl AclPolicy {
                     .any(|ke| keyexpr_includes(ke, keyexpr))
         };
         // Deny wins, checked first (zenoh `deny.nodes_including(..).any(..)`).
-        if self
-            .config
-            .rules
-            .iter()
-            .any(|r| r.permission == Permission::Deny && applies(r))
-        {
-            return Permission::Deny;
+        for (index, rule) in self.config.rules.iter().enumerate() {
+            if rule.permission == Permission::Deny && applies(rule) {
+                return AclDecision {
+                    permission: Permission::Deny,
+                    decided_by: DecidedBy::Rule(index),
+                };
+            }
         }
         // No deny matched: a default-allow policy permits without consulting the
         // allow rules (they only narrow a default-deny).
         if self.config.default_permission == Permission::Allow {
-            return Permission::Allow;
+            return by_default;
         }
         // Default-deny: permit only on an explicit allow match.
-        if self
-            .config
-            .rules
-            .iter()
-            .any(|r| r.permission == Permission::Allow && applies(r))
-        {
-            return Permission::Allow;
+        for (index, rule) in self.config.rules.iter().enumerate() {
+            if rule.permission == Permission::Allow && applies(rule) {
+                return AclDecision {
+                    permission: Permission::Allow,
+                    decided_by: DecidedBy::Rule(index),
+                };
+            }
         }
-        Permission::Deny
+        by_default
     }
+
+    /// The verdict for a request whose subject is only PARTLY known, over every
+    /// value of the unknown attributes that a rule of this policy can tell
+    /// apart.
+    ///
+    /// Each completion of `subject` is decided by [`Self::decide`], so this is
+    /// the router's own verdict asked several times, never an estimate of it.
+    /// An unknown attribute is tried with each value the rules that could
+    /// apply (same flow, the action listed, a rule keyexpr including
+    /// `keyexpr`) name for it, and with one value none of them names:
+    ///
+    /// - zid: every zid such a rule names, and one zid none names. An unknown
+    ///   zid is a face that HAS one, so the unattributable face
+    ///   (`Known(None)`) is not among the values tried.
+    /// - link protocol: every protocol such a rule names, and one it does not
+    ///   (when [`InterceptorLink::ALL`] has one left).
+    /// - interfaces: each named interface on its own, and a link on no NIC.
+    ///   A link on several NICs is governed by the union of what its NICs
+    ///   are, so it decides nothing the single ones do not.
+    /// - username and certificate common name: every name such a rule
+    ///   names, and none, which every rule naming one reads as a non-match,
+    ///   the same reading it gives a name it does not list.
+    ///
+    /// `key` says which decisions count as the same answer: a caller that
+    /// names rules by where they came from passes a key that maps two rules of
+    /// one origin to one value. [`AclJudgement::needs`] lists every unknown
+    /// attribute for which two completions differing in that attribute alone
+    /// get a different permission or a different key; it is empty exactly when
+    /// the answer is the same for every completion. A completion count above
+    /// [`JUDGE_COMBINATION_LIMIT`] is not enumerated, and the judgement says
+    /// so rather than guessing.
+    pub fn judge<K: Clone + PartialEq>(
+        &self,
+        subject: &PartialSubject,
+        flow: AclFlow,
+        action: AclMessage,
+        keyexpr: &str,
+        key: impl Fn(AclDecision) -> K,
+    ) -> AclJudgement<K> {
+        let mut relevant: Vec<&AclRule> = Vec::new();
+        for rule in &self.config.rules {
+            let includes = rule
+                .key_exprs
+                .iter()
+                .any(|ke| keyexpr_includes(ke, keyexpr));
+            if rule.flow == flow && rule.messages.contains(&action) && includes {
+                relevant.push(rule);
+            }
+        }
+
+        let zids: Vec<Option<Zid>> = match &subject.zid {
+            Attribute::Known(zid) => vec![*zid],
+            Attribute::Unknown => {
+                let mut named: Vec<Zid> = Vec::new();
+                for rule in &relevant {
+                    let SubjectSelector::Zid(zid) = rule.subject else {
+                        continue;
+                    };
+                    if !named.contains(&zid) {
+                        named.push(zid);
+                    }
+                }
+                let other = unnamed_zid(&named);
+                named.push(other);
+                named.into_iter().map(Some).collect()
+            }
+        };
+        let protocols: Vec<InterceptorLink> = match &subject.link_protocol {
+            Attribute::Known(protocol) => vec![*protocol],
+            Attribute::Unknown => {
+                let mut named: Vec<InterceptorLink> = Vec::new();
+                for rule in &relevant {
+                    for protocol in &rule.link_protocols {
+                        if !named.contains(protocol) {
+                            named.push(*protocol);
+                        }
+                    }
+                }
+                let other = InterceptorLink::ALL.iter().find(|p| !named.contains(p));
+                if let Some(other) = other {
+                    named.push(*other);
+                }
+                named
+            }
+        };
+        let interfaces: Vec<Vec<String>> = match &subject.interfaces {
+            Attribute::Known(names) => vec![names.clone()],
+            Attribute::Unknown => {
+                let mut named: Vec<Vec<String>> = Vec::new();
+                for rule in &relevant {
+                    for name in &rule.interfaces {
+                        let single = vec![name.clone()];
+                        if !named.contains(&single) {
+                            named.push(single);
+                        }
+                    }
+                }
+                named.push(Vec::new());
+                named
+            }
+        };
+        let usernames: Vec<Option<String>> = match &subject.username {
+            Attribute::Known(name) => vec![name.clone()],
+            Attribute::Unknown => {
+                let mut named: Vec<Option<String>> = Vec::new();
+                for rule in &relevant {
+                    for name in &rule.usernames {
+                        push_new_name(&mut named, name.as_str());
+                    }
+                }
+                named.push(None);
+                named
+            }
+        };
+        let common_names: Vec<Option<String>> = match &subject.cert_common_name {
+            Attribute::Known(name) => vec![name.clone()],
+            Attribute::Unknown => {
+                let mut named: Vec<Option<String>> = Vec::new();
+                for rule in &relevant {
+                    for name in &rule.cert_common_names {
+                        push_new_name(&mut named, name.as_str());
+                    }
+                }
+                named.push(None);
+                named
+            }
+        };
+
+        let axes = [
+            (SubjectAttribute::Zid, zids.len()),
+            (SubjectAttribute::LinkProtocol, protocols.len()),
+            (SubjectAttribute::Interfaces, interfaces.len()),
+            (SubjectAttribute::Username, usernames.len()),
+            (SubjectAttribute::CertCommonName, common_names.len()),
+        ];
+        let mut total = Some(1usize);
+        for (_, n) in &axes {
+            total = total.and_then(|t| t.checked_mul(*n));
+        }
+        let Some(total) = total.filter(|t| *t <= JUDGE_COMBINATION_LIMIT) else {
+            let mut needs = Vec::new();
+            for (attribute, n) in &axes {
+                if *n > 1 {
+                    needs.push(*attribute);
+                }
+            }
+            return AclJudgement {
+                permission: None,
+                decided_by: Vec::new(),
+                needs,
+                exhaustive: false,
+            };
+        };
+
+        // Mixed radix over the five axes, the zid digit varying fastest. Every
+        // axis has at least one value, so `total` is at least one.
+        let mut strides = [0usize; 5];
+        let mut stride = 1usize;
+        for (slot, (_, n)) in strides.iter_mut().zip(axes.iter()) {
+            *slot = stride;
+            stride *= *n;
+        }
+        let digit = |index: usize, axis: usize| (index / strides[axis]) % axes[axis].1;
+
+        let mut decisions: Vec<(Permission, K)> = Vec::with_capacity(total);
+        for index in 0..total {
+            let link = LinkSubject {
+                kind: link_kind_of(protocols[digit(index, 1)]),
+                interfaces: Some(interfaces[digit(index, 2)].clone()),
+                cert_common_name: common_names[digit(index, 4)].clone(),
+                cert_credential_zid: None,
+            };
+            let zid = zids[digit(index, 0)].as_ref();
+            let username = usernames[digit(index, 3)].as_deref();
+            let decision = self.decide(zid, flow, action, keyexpr, Some(&link), username);
+            decisions.push((decision.permission, key(decision)));
+        }
+
+        let mut needs = Vec::new();
+        for (axis, (attribute, n)) in axes.iter().enumerate() {
+            let mut varies = false;
+            for index in (0..total).filter(|i| digit(*i, axis) == 0) {
+                for k in 1..*n {
+                    varies |= decisions[index] != decisions[index + k * strides[axis]];
+                }
+            }
+            if varies {
+                needs.push(*attribute);
+            }
+        }
+        let first = decisions[0].0;
+        let settled = decisions.iter().all(|(p, _)| *p == first);
+        let mut decided_by: Vec<K> = Vec::new();
+        for (_, k) in &decisions {
+            if !decided_by.contains(k) {
+                decided_by.push(k.clone());
+            }
+        }
+        AclJudgement {
+            permission: settled.then_some(first),
+            decided_by,
+            needs,
+            exhaustive: true,
+        }
+    }
+}
+
+/// What decided a verdict of [`AclPolicy::decide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecidedBy {
+    /// The configured default permission: no rule applied, or the default is
+    /// allow and no deny rule applied.
+    Default,
+    /// The rule at this position of [`AclPolicy::rules`].
+    Rule(usize),
+}
+
+/// A verdict and what decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AclDecision {
+    /// The verdict [`AclPolicy::decision`] returns for the same request.
+    pub permission: Permission,
+    /// The rule or the default that produced it.
+    pub decided_by: DecidedBy,
+}
+
+/// One attribute of a request's subject, as a caller that may not know it
+/// states it to [`AclPolicy::judge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attribute<T> {
+    /// Not known: every value a rule can tell apart is tried.
+    Unknown,
+    /// Known to be this.
+    Known(T),
+}
+
+/// A request's subject with each attribute known or not, the input of
+/// [`AclPolicy::judge`]. These are the five axes a rule can narrow by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialSubject {
+    /// The peer's zid. `Known(None)` is a face the router could not attribute
+    /// to any peer (see [`AclPolicy::decision`]).
+    pub zid: Attribute<Option<Zid>>,
+    /// The protocol a rule sees the link as.
+    pub link_protocol: Attribute<InterceptorLink>,
+    /// The names of the NICs the link sits on. `Known(vec![])` is a link on no
+    /// NIC (a unix socket, a pipe, a serial line).
+    pub interfaces: Attribute<Vec<String>>,
+    /// The name the peer authenticated with. `Known(None)` is a face that
+    /// authenticated no name.
+    pub username: Attribute<Option<String>>,
+    /// The common name of the peer's leaf certificate. `Known(None)` is a face
+    /// with no certificate name to report.
+    pub cert_common_name: Attribute<Option<String>>,
+}
+
+impl PartialSubject {
+    /// A subject nothing is known about.
+    pub const UNKNOWN: Self = Self {
+        zid: Attribute::Unknown,
+        link_protocol: Attribute::Unknown,
+        interfaces: Attribute::Unknown,
+        username: Attribute::Unknown,
+        cert_common_name: Attribute::Unknown,
+    };
+}
+
+/// A subject attribute a judgement can depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubjectAttribute {
+    /// [`PartialSubject::zid`].
+    Zid,
+    /// [`PartialSubject::link_protocol`].
+    LinkProtocol,
+    /// [`PartialSubject::interfaces`].
+    Interfaces,
+    /// [`PartialSubject::username`].
+    Username,
+    /// [`PartialSubject::cert_common_name`].
+    CertCommonName,
+}
+
+impl SubjectAttribute {
+    /// The attribute's name, the field name of [`PartialSubject`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SubjectAttribute::Zid => "zid",
+            SubjectAttribute::LinkProtocol => "link_protocol",
+            SubjectAttribute::Interfaces => "interfaces",
+            SubjectAttribute::Username => "username",
+            SubjectAttribute::CertCommonName => "cert_common_name",
+        }
+    }
+}
+
+/// The most completions [`AclPolicy::judge`] decides for one request. Past it
+/// the judgement is returned with [`AclJudgement::exhaustive`] false. The
+/// count is the product, over the unknown attributes, of the values the
+/// applicable rules name for each, so a policy reaches it only with hundreds
+/// of named values on several unknown attributes at once.
+pub const JUDGE_COMBINATION_LIMIT: usize = 1 << 16;
+
+/// The answer of [`AclPolicy::judge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclJudgement<K> {
+    /// The verdict, when every completion of the subject gets the same one;
+    /// `None` when it depends on an unknown attribute, or when the completions
+    /// were not enumerated.
+    pub permission: Option<Permission>,
+    /// The distinct keys of the decisions, in the order first met. One entry
+    /// when the decision is the same for every completion.
+    pub decided_by: Vec<K>,
+    /// The unknown attributes the answer depends on, in the order of
+    /// [`PartialSubject`]'s fields. Empty when the answer is determined.
+    pub needs: Vec<SubjectAttribute>,
+    /// False when the completions outnumbered [`JUDGE_COMBINATION_LIMIT`]:
+    /// then `permission` is `None`, `decided_by` is empty and `needs` lists
+    /// every unknown attribute with more than one value to try.
+    pub exhaustive: bool,
+}
+
+/// A zid none of `named` is. `named` is finite, so one of the first
+/// `named.len() + 1` candidates is free.
+fn unnamed_zid(named: &[Zid]) -> Zid {
+    let mut n: u64 = 1;
+    loop {
+        let candidate = Zid::from_slice(&n.to_le_bytes());
+        if !named.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Add `name` to `named` unless it is there already.
+fn push_new_name(named: &mut Vec<Option<String>>, name: &str) {
+    let name = Some(String::from(name));
+    if !named.contains(&name) {
+        named.push(name);
+    }
+}
+
+/// A link kind a rule sees as `protocol`. Rules read only the protocol, so
+/// any kind that maps to it decides the same.
+fn link_kind_of(protocol: InterceptorLink) -> Option<LinkKind> {
+    LinkKind::ALL
+        .iter()
+        .copied()
+        .find(|kind| kind.interceptor_protocol() == protocol)
 }
 
 #[cfg(test)]
@@ -1370,5 +1746,369 @@ mod tests {
             ],
         });
         assert!(named.reads_username());
+    }
+
+    // ── What decided a verdict, and a verdict over a partly known subject ──
+
+    fn ask(policy: &AclPolicy, keyexpr: &str) -> AclDecision {
+        let z = zid(&[1]);
+        policy.decide(
+            Some(&z),
+            AclFlow::Ingress,
+            AclMessage::Put,
+            keyexpr,
+            None,
+            None,
+        )
+    }
+
+    fn ask_decision(policy: &AclPolicy, keyexpr: &str) -> Permission {
+        let z = zid(&[1]);
+        policy.decision(
+            Some(&z),
+            AclFlow::Ingress,
+            AclMessage::Put,
+            keyexpr,
+            None,
+            None,
+        )
+    }
+
+    /// `decide` names the first applicable rule of the kind that decided, or the
+    /// default, and its permission is always `decision`'s.
+    #[test]
+    fn decide_names_the_rule_or_the_default_that_decided() {
+        let open = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![
+                allow_rule(SubjectSelector::Any, "admin/**"),
+                deny_rule(SubjectSelector::Any, "admin/**"),
+                deny_rule(SubjectSelector::Any, "admin/cfg"),
+            ],
+        });
+        assert_eq!(
+            ask(&open, "admin/cfg"),
+            AclDecision {
+                permission: Permission::Deny,
+                decided_by: DecidedBy::Rule(1),
+            },
+            "the first applicable deny, not a later one and not the allow"
+        );
+        assert_eq!(
+            ask(&open, "demo/data"),
+            AclDecision {
+                permission: Permission::Allow,
+                decided_by: DecidedBy::Default,
+            }
+        );
+
+        let closed = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![
+                deny_rule(SubjectSelector::Any, "secret/**"),
+                allow_rule(SubjectSelector::Any, "metrics/**"),
+            ],
+        });
+        assert_eq!(
+            ask(&closed, "metrics/cpu"),
+            AclDecision {
+                permission: Permission::Allow,
+                decided_by: DecidedBy::Rule(1),
+            }
+        );
+        assert_eq!(
+            ask(&closed, "demo/data"),
+            AclDecision {
+                permission: Permission::Deny,
+                decided_by: DecidedBy::Default,
+            }
+        );
+        assert_eq!(
+            ask(&AclPolicy::new(AclConfig::deny_all()), "x"),
+            AclDecision {
+                permission: Permission::Deny,
+                decided_by: DecidedBy::Default,
+            }
+        );
+
+        for policy in [&open, &closed] {
+            for key in ["admin/cfg", "demo/data", "metrics/cpu", "secret/a"] {
+                assert_eq!(
+                    ask_decision(policy, key),
+                    ask(policy, key).permission,
+                    "decision and decide disagree on {key}"
+                );
+            }
+        }
+    }
+
+    /// The judgement of a put on `keyexpr` by a subject described by `subject`,
+    /// with the decisions keyed by what decided them.
+    fn judge_put(
+        policy: &AclPolicy,
+        subject: &PartialSubject,
+        keyexpr: &str,
+    ) -> AclJudgement<DecidedBy> {
+        policy.judge(subject, AclFlow::Ingress, AclMessage::Put, keyexpr, by_rule)
+    }
+
+    /// Decisions keyed by the rule position or the default that made them.
+    fn by_rule(decision: AclDecision) -> DecidedBy {
+        decision.decided_by
+    }
+
+    /// A rule that applies whatever the subject decides the answer outright,
+    /// and the answer needs nothing.
+    #[test]
+    fn judge_reports_an_allow_and_a_deny_that_need_nothing() {
+        let closed = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![allow_rule(SubjectSelector::Any, "metrics/**")],
+        });
+        let allowed = judge_put(&closed, &PartialSubject::UNKNOWN, "metrics/cpu");
+        assert_eq!(allowed.permission, Some(Permission::Allow));
+        assert_eq!(allowed.decided_by, vec![DecidedBy::Rule(0)]);
+        assert!(allowed.needs.is_empty());
+        assert!(allowed.exhaustive);
+
+        let open = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
+        });
+        let denied = judge_put(&open, &PartialSubject::UNKNOWN, "admin/cfg");
+        assert_eq!(denied.permission, Some(Permission::Deny));
+        assert_eq!(denied.decided_by, vec![DecidedBy::Rule(0)]);
+        assert!(denied.needs.is_empty());
+    }
+
+    /// No rule applies: the default decides, and says so.
+    #[test]
+    fn judge_reports_the_default_when_no_rule_applies() {
+        let closed = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![allow_rule(SubjectSelector::Any, "metrics/**")],
+        });
+        let judged = judge_put(&closed, &PartialSubject::UNKNOWN, "admin/cfg");
+        assert_eq!(judged.permission, Some(Permission::Deny));
+        assert_eq!(judged.decided_by, vec![DecidedBy::Default]);
+        assert!(judged.needs.is_empty());
+    }
+
+    /// A rule narrowed by an attribute the caller does not know splits the
+    /// answer, and the judgement names that attribute; knowing it settles it.
+    #[test]
+    fn judge_names_the_unknown_attribute_the_answer_depends_on() {
+        let deny_alice = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                usernames: vec![user("alice")],
+                ..deny_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        let unknown = judge_put(&deny_alice, &PartialSubject::UNKNOWN, "admin/cfg");
+        assert_eq!(unknown.permission, None);
+        assert_eq!(unknown.needs, vec![SubjectAttribute::Username]);
+        assert_eq!(
+            unknown.decided_by,
+            vec![DecidedBy::Rule(0), DecidedBy::Default]
+        );
+        assert!(unknown.exhaustive);
+
+        let alice = PartialSubject {
+            username: Attribute::Known(Some(String::from("alice"))),
+            ..PartialSubject::UNKNOWN
+        };
+        let known = judge_put(&deny_alice, &alice, "admin/cfg");
+        assert_eq!(known.permission, Some(Permission::Deny));
+        assert!(known.needs.is_empty());
+
+        let nobody = PartialSubject {
+            username: Attribute::Known(None),
+            ..PartialSubject::UNKNOWN
+        };
+        let unnamed = judge_put(&deny_alice, &nobody, "admin/cfg");
+        assert_eq!(unnamed.permission, Some(Permission::Allow));
+        assert_eq!(unnamed.decided_by, vec![DecidedBy::Default]);
+
+        // The same rule does not apply to another key, so it splits nothing
+        // there: only the rules that could apply are read.
+        let elsewhere = judge_put(&deny_alice, &PartialSubject::UNKNOWN, "demo/data");
+        assert_eq!(elsewhere.permission, Some(Permission::Allow));
+        assert!(elsewhere.needs.is_empty());
+    }
+
+    /// Each of the five axes is tried, and only the one a rule narrows by is
+    /// named.
+    #[test]
+    fn judge_tries_every_axis_a_rule_can_narrow_by() {
+        fn narrowed(rule: AclRule) -> AclPolicy {
+            AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![rule],
+            })
+        }
+        fn on(subject: PartialSubject, policy: &AclPolicy) -> Option<Permission> {
+            judge_put(policy, &subject, "admin/cfg").permission
+        }
+        let base = || deny_rule(SubjectSelector::Any, "admin/**");
+        let cases = [
+            (
+                narrowed(deny_rule(SubjectSelector::Zid(zid(&[0xAA])), "admin/**")),
+                SubjectAttribute::Zid,
+            ),
+            (
+                narrowed(AclRule {
+                    link_protocols: vec![InterceptorLink::Tcp],
+                    ..base()
+                }),
+                SubjectAttribute::LinkProtocol,
+            ),
+            (
+                narrowed(AclRule {
+                    interfaces: vec![String::from("eth0")],
+                    ..base()
+                }),
+                SubjectAttribute::Interfaces,
+            ),
+            (
+                narrowed(AclRule {
+                    cert_common_names: vec![cn("leaf.example")],
+                    ..base()
+                }),
+                SubjectAttribute::CertCommonName,
+            ),
+        ];
+        for (policy, attribute) in &cases {
+            let judged = judge_put(policy, &PartialSubject::UNKNOWN, "admin/cfg");
+            assert_eq!(judged.permission, None, "{attribute:?}");
+            assert_eq!(judged.needs, vec![*attribute]);
+        }
+
+        // Known values settle each one.
+        assert_eq!(
+            on(
+                PartialSubject {
+                    zid: Attribute::Known(Some(zid(&[0xAA]))),
+                    ..PartialSubject::UNKNOWN
+                },
+                &cases[0].0
+            ),
+            Some(Permission::Deny)
+        );
+        assert_eq!(
+            on(
+                PartialSubject {
+                    link_protocol: Attribute::Known(InterceptorLink::Udp),
+                    ..PartialSubject::UNKNOWN
+                },
+                &cases[1].0
+            ),
+            Some(Permission::Allow)
+        );
+        assert_eq!(
+            on(
+                PartialSubject {
+                    interfaces: Attribute::Known(vec![String::from("lo"), String::from("eth0")]),
+                    ..PartialSubject::UNKNOWN
+                },
+                &cases[2].0
+            ),
+            Some(Permission::Deny),
+            "a link on several NICs is governed when any of them is listed"
+        );
+        assert_eq!(
+            on(
+                PartialSubject {
+                    interfaces: Attribute::Known(Vec::new()),
+                    ..PartialSubject::UNKNOWN
+                },
+                &cases[2].0
+            ),
+            Some(Permission::Allow),
+            "a link on no NIC is not governed by a rule naming one"
+        );
+        assert_eq!(
+            on(
+                PartialSubject {
+                    cert_common_name: Attribute::Known(None),
+                    ..PartialSubject::UNKNOWN
+                },
+                &cases[3].0
+            ),
+            Some(Permission::Allow)
+        );
+    }
+
+    /// `needs` is read through the caller's key: three rules of one origin
+    /// deciding for three zids is one answer to a caller that names origins,
+    /// and three answers to one that names positions.
+    #[test]
+    fn judge_reads_the_answer_through_the_callers_key() {
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![
+                deny_rule(SubjectSelector::Zid(zid(&[0xAA])), "admin/**"),
+                deny_rule(SubjectSelector::Zid(zid(&[0xBB])), "admin/**"),
+                deny_rule(SubjectSelector::Any, "admin/**"),
+            ],
+        });
+        let by_position = judge_put(&policy, &PartialSubject::UNKNOWN, "admin/cfg");
+        assert_eq!(by_position.permission, Some(Permission::Deny));
+        assert_eq!(by_position.needs, vec![SubjectAttribute::Zid]);
+        assert_eq!(by_position.decided_by.len(), 3);
+
+        fn any_rule(decision: AclDecision) -> bool {
+            matches!(decision.decided_by, DecidedBy::Rule(_))
+        }
+        let by_origin = policy.judge(
+            &PartialSubject::UNKNOWN,
+            AclFlow::Ingress,
+            AclMessage::Put,
+            "admin/cfg",
+            any_rule,
+        );
+        assert_eq!(by_origin.permission, Some(Permission::Deny));
+        assert!(by_origin.needs.is_empty());
+        assert_eq!(by_origin.decided_by, vec![true]);
+    }
+
+    /// Past the limit nothing is enumerated, and the judgement says which
+    /// attributes it would have needed instead of answering.
+    #[test]
+    fn judge_declines_past_the_combination_limit() {
+        let mut rules: Vec<AclRule> = Vec::new();
+        for n in 1u16..=300 {
+            let selector = SubjectSelector::Zid(zid(&n.to_le_bytes()));
+            rules.push(deny_rule(selector, "admin/**"));
+        }
+        let usernames: Vec<AclUsername> = (1..=300).map(|n| user(&format!("user{n}"))).collect();
+        rules.push(AclRule {
+            usernames,
+            ..deny_rule(SubjectSelector::Any, "admin/**")
+        });
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules,
+        });
+        let judged = judge_put(&policy, &PartialSubject::UNKNOWN, "admin/cfg");
+        assert!(!judged.exhaustive);
+        assert_eq!(judged.permission, None);
+        assert!(judged.decided_by.is_empty());
+        assert_eq!(
+            judged.needs,
+            vec![SubjectAttribute::Zid, SubjectAttribute::Username]
+        );
+    }
+
+    #[test]
+    fn subject_attribute_names_are_the_partial_subject_fields() {
+        assert_eq!(SubjectAttribute::Zid.as_str(), "zid");
+        assert_eq!(SubjectAttribute::LinkProtocol.as_str(), "link_protocol");
+        assert_eq!(SubjectAttribute::Interfaces.as_str(), "interfaces");
+        assert_eq!(SubjectAttribute::Username.as_str(), "username");
+        assert_eq!(
+            SubjectAttribute::CertCommonName.as_str(),
+            "cert_common_name"
+        );
     }
 }

@@ -516,6 +516,15 @@ impl LiveDissection {
         Self::over(Dissection::with_limits(limits))
     }
 
+    /// A handle reading under `limits` that takes the packets of
+    /// `serial_linktypes` for raw zenoh serial bytes, from its first packet
+    /// ([`wz_capture::Dissection::declare_serial_linktypes`]).
+    pub fn new_declaring(limits: DissectionLimits, serial_linktypes: &[u32]) -> Self {
+        let mut dissection = Dissection::with_limits(limits);
+        dissection.declare_serial_linktypes(serial_linktypes);
+        Self::over(dissection)
+    }
+
     /// R2171 (open-debt item 547) — a handle over a capture FILE already read.
     ///
     /// # Why this reads the file through `Dissection` rather than per packet
@@ -660,6 +669,74 @@ impl LiveDissection {
         let named = self.keys.absorb(text);
         self.keys.run(&mut self.dissection);
         named
+    }
+
+    /// THE CONTAINER BEING FOLLOWED HAS ENDED, and `bytes` is the NEXT container
+    /// of the same capture, from its first byte: a whole container with its own
+    /// headers, as a writer that splits one capture into several files writes
+    /// it. Returns the number the next container's first packet takes, and what
+    /// [`Self::follow`] of `bytes` returns.
+    ///
+    /// Nothing of the dissection begins again: the flows and their sessions, a
+    /// fragment chain still open, the counts of what was lost and what a ceiling
+    /// took, the census's memory and the decryption keys go on as they would
+    /// within one container. What begins again is the walk of the container. Its
+    /// packets are numbered on from the last packet this handle numbered, its
+    /// sections are named after the ones before it, and the Decryption Secrets
+    /// budget is the capture's (see [`CaptureCursor::next_container`]).
+    ///
+    /// A handle that has read nothing of any container is not moved: this is
+    /// then [`Self::follow`]. The move stands when `bytes` does not read, so a
+    /// caller hands the next container to [`Self::follow`] as it grows.
+    pub fn follow_next(&mut self, bytes: &[u8]) -> (usize, Result<usize, FollowError>) {
+        let first_packet = self.move_on();
+        (first_packet, self.follow(bytes))
+    }
+
+    /// [`Self::follow_next`] over a next container this handle is LENT, as
+    /// [`Self::follow_lent`] is lent one. The containers lent before it stay
+    /// lent: what the handle kept of them is read there until
+    /// [`Self::oldest_container`] says the handle reads them no more.
+    pub fn follow_next_lent(
+        &mut self,
+        capture: Arc<dyn LentCapture>,
+    ) -> (usize, Result<usize, FollowError>) {
+        let first_packet = self.move_on();
+        (first_packet, self.follow_lent(capture))
+    }
+
+    /// End the walk of the container followed now and begin the next one's,
+    /// unless nothing of any container has been read; the number the next
+    /// container's first packet takes.
+    fn move_on(&mut self) -> usize {
+        let first_packet = self.dissection.next_packet_index();
+        if self.cursor.consumed() > 0 {
+            self.cursor = self.cursor.next_container(first_packet);
+            self.fields_memory.forget_container();
+            self.facts_memory.forget_container();
+        }
+        first_packet
+    }
+
+    /// WHICH CONTAINERS THE HANDLE STILL NEEDS: `(oldest, current)`, where
+    /// `current` is the number of the container followed now (`0` for the
+    /// first, one more for each [`Self::follow_next`] that moved the handle on)
+    /// and `oldest` the number of the oldest container a kept message's bytes
+    /// are still read from, which is `current` when the handle reads none
+    /// from an earlier one.
+    ///
+    /// A container numbered below `oldest` is never read again: a message is
+    /// kept where the container being followed holds it, so no later message
+    /// can be kept in an earlier one. A handle that copied a container reads
+    /// nothing from it, and its number never holds `oldest` back. The answer
+    /// is a pass over the places the handle keeps.
+    pub fn oldest_container(&self) -> (usize, usize) {
+        let current = self.cursor.container();
+        let oldest = self
+            .dissection
+            .oldest_lent_container()
+            .map_or(current, |held| held.min(current));
+        (oldest, current)
     }
 
     /// How many bytes of the container [`Self::follow`] has consumed.
@@ -1115,16 +1192,22 @@ impl LiveDissection {
     /// messages that arrived, whether or not a ceiling trimmed a list since. They
     /// begin again, over what is held, only where a fold cannot go on at all (a
     /// flow that appeared among the stream flows or left the table, a handshake
-    /// that changes who owns an earlier message, a message that sorts before one
-    /// already folded, a stopped call, another selector) and where the exchanges
-    /// still open alone outgrow four times the messages held; then `trimmed` is
-    /// 0 again. The node census is kept the same way, begins again when a
-    /// message that arrived names a node, and begins again with the other planes
-    /// and they with it, so one document covers one set of messages; the
-    /// scouting lists are folded over a
-    /// copy on every call, and a capture that holds many exchanges that never
-    /// close pays for each of them on every call, because a call judges the
-    /// exchanges still open.
+    /// that changes who owns a message already folded (one that arrives after
+    /// traffic of its flow, or on a list before lists already given a session;
+    /// the handshake of a session that opens after the others changes nothing
+    /// folded and the planes go on), a message that sorts before one
+    /// already folded, a stopped call, a selector whose memory was given up to
+    /// make room for another, which with the default of one memory
+    /// ([`Self::set_selector_memories`]) is every change of selector) and where
+    /// the exchanges still open alone outgrow four times the messages held; then
+    /// `trimmed` is 0 again. The node census is kept the same way, goes on
+    /// across a message that names a node (each list is kept apart and the lists
+    /// are joined at every call, so the bytes a direction carried before its
+    /// handshake are credited anew and a late list's nodes are numbered before
+    /// later ones, without folding a message again), and begins again with the
+    /// other planes, so one document covers one set of messages. Each
+    /// scouting list is read once as it grows, and each exchange still open is
+    /// judged once and keeps its verdict until a response to it arrives.
     ///
     /// `None` when the callback set by [`Self::set_progress`] stopped the census; the
     /// plane that was being folded is then dropped from the memory and the next call
@@ -1337,6 +1420,8 @@ impl LiveDissection {
     /// rows: this reader keeps no copy of a pushed packet, so those rows are
     /// re-read from it exactly as the capture doors re-read theirs. An empty
     /// slice renders none of them and says so with `capture_reread: false`.
+    /// After [`Self::follow_next`] it is the container the handle follows now,
+    /// and a row whose packet was in an earlier container is not re-read.
     pub fn fields_where(
         &mut self,
         capture: &[u8],
@@ -1997,6 +2082,9 @@ fn record_of(
 struct HandleIds {
     lists: Vec<Option<ListNumbers>>,
     scouting: BTreeMap<FlowKey, ListNumbers>,
+    /// The number the first packet of the container the handle follows takes:
+    /// `0` until [`LiveDissection::follow_next`] moved it on.
+    first_packet: usize,
 }
 
 /// One list's id and the row sequence numbers of the messages it still holds.
@@ -2027,11 +2115,16 @@ impl HandleIds {
                 .iter()
                 .map(|(flow, mark)| (*flow, ListNumbers::of(mark)))
                 .collect(),
+            first_packet: handle.cursor.first_packet(),
         }
     }
 }
 
 impl wz_capture::fields_json::RowCoordinates for HandleIds {
+    fn container_first_packet(&self) -> usize {
+        self.first_packet
+    }
+
     fn list_id(&self, list: usize) -> Option<u64> {
         self.lists.get(list)?.as_ref().map(|n| n.list_id)
     }

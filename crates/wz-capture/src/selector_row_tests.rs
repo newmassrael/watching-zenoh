@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Every row judged, and the row's own facts: `msg`, the endpoints, the
-//! ports, the link, the flow and the packet, over records and over rows that
-//! carry none.
+//! ports, the link, the flow, the packet and the row's place, over records and
+//! over rows that carry none.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -158,6 +158,7 @@ fn view<'a>(row: Option<RowFacts<'a>>, kind: Record) -> RecordView<'a> {
         source_delay_ms: None,
         outcome: None,
         zid: None,
+        receiver_zid: None,
         tree: None,
         row,
         e2e: None,
@@ -174,6 +175,7 @@ fn a_plane_given_no_row_facts_decides_no_row_term() {
         "link == udp",
         "flow == 0",
         "packet == 0",
+        "row == 0",
         "zenoh == yes",
     ] {
         let filter = Filter::parse(selector).expect("compiles");
@@ -193,7 +195,7 @@ fn a_plane_given_no_row_facts_decides_no_row_term() {
 fn a_serial_line_has_no_address_and_no_port() {
     let serial = FlowKey::serial_line();
     let names = ["Frame", "Push"];
-    let facts = RowFacts::of(&names, Some(0), 0, &serial, Direction::A, None);
+    let facts = RowFacts::of(&names, Some(0), None, 0, &serial, Direction::A, None);
     for selector in ["addr == 10.0.0.1", "port == 0", "sport < 9"] {
         let filter = Filter::parse(selector).expect("compiles");
         assert_eq!(
@@ -216,7 +218,7 @@ fn a_zenoh_term_is_undecided_where_the_flow_has_no_word_and_decided_where_it_has
     let flow = FlowKey::serial_line();
     let names = ["Frame"];
     let judged = |selector: &str, word: Option<ZenohVerdict>| {
-        let facts = RowFacts::of(&names, Some(0), 0, &flow, Direction::A, word);
+        let facts = RowFacts::of(&names, Some(0), None, 0, &flow, Direction::A, word);
         Filter::parse(selector)
             .expect("compiles")
             .matches(&view(Some(facts), Record::None))
@@ -295,4 +297,240 @@ fn an_unread_record_is_undecided_where_no_record_is_decided() {
     let filter = Filter::parse("kind != query").expect("compiles");
     assert_eq!(filter.matches(&view(None, Record::None)), Truth::Yes);
     assert_eq!(filter.matches(&view(None, Record::Unread)), Truth::Unknown);
+}
+
+/// The word each row of the selection document over `d` carries, in row
+/// order.
+fn words_in(d: &crate::Dissection, selector: &str) -> Vec<String> {
+    let filter = Filter::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
+    let doc = crate::selection_json::selection_json_where_coordinated(d, &filter, None, &Numbered);
+    doc.split("\"selected\":\"")
+        .skip(1)
+        .map(|s| s.split('"').next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// One Put on `a/b` from 10.0.0.1:`port` to 10.0.0.2:7447, as packet `i`.
+fn put_from(d: &mut crate::Dissection, i: usize, port: u16) {
+    put_on(d, i, port, "a/b");
+}
+
+/// One UDP flow per source port, one Put per packet, in the order `ports`
+/// gives.
+fn flows_of(ports: &[u16]) -> crate::Dissection {
+    let mut d = crate::Dissection::new();
+    for (i, port) in ports.iter().enumerate() {
+        put_from(&mut d, i, *port);
+    }
+    d
+}
+
+/// `row` is the row's place in the order the documents write rows, counted
+/// from 0: one number per row, where `packet` is the packet's.
+#[test]
+fn row_is_the_rows_place_in_the_documents() {
+    assert_words("row == 1", ["no", "yes", "no"]);
+    assert_words("row >= 1", ["no", "yes", "yes"]);
+    assert_words("row < 1", ["yes", "no", "no"]);
+    assert_words("row != 1", ["yes", "no", "yes"]);
+    assert_words("not row == 1", ["yes", "no", "yes"]);
+    assert_words("row in {0, 2}", ["yes", "no", "yes"]);
+    assert_words("row == 3", ["no", "no", "no"]);
+    assert_words("row == 1 and kind == put", ["no", "yes", "no"]);
+}
+
+/// The rows of one flow are written before the next flow's, so a row's place
+/// and its packet part: packets 0, 1, 2 on flows a, b, a are written a, a, b.
+#[test]
+fn row_follows_the_documents_order_and_packet_the_capture() {
+    let d = flows_of(&[43210, 43211, 43210]);
+    assert_eq!(words_in(&d, "row == 1"), ["no", "yes", "no"]);
+    assert_eq!(words_in(&d, "packet == 1"), ["no", "no", "yes"]);
+    assert_eq!(words_in(&d, "row == 2"), ["no", "no", "yes"]);
+    assert_eq!(words_in(&d, "packet == 2"), ["no", "yes", "no"]);
+}
+
+/// A ceiling that takes the front of a list moves no row's place: the rows it
+/// took keep theirs, so the two rows still held are 3 and 4, not 0 and 1.
+#[test]
+fn a_ceiling_that_trims_the_front_moves_no_rows_place() {
+    let limits = crate::DissectionLimits {
+        frames_per_flow: Some(2),
+        ..crate::DissectionLimits::default()
+    };
+    let mut d = crate::Dissection::with_limits(limits);
+    for i in 0..5 {
+        put_from(&mut d, i, 43210);
+    }
+    let places = crate::fields_json::row_ordinals(&d);
+    assert_eq!(places.place_of(0, 3), Some(3));
+    assert_eq!(places.place_of(0, 4), Some(4));
+    assert_eq!(
+        places.place_of(0, 0),
+        None,
+        "a row the ceiling took has no place"
+    );
+    assert_eq!(words_in(&d, "row == 4"), ["no", "yes"]);
+    assert_eq!(words_in(&d, "row < 3"), ["no", "no"]);
+    // The same rows read without the ceiling have the same places.
+    let unbounded = crate::fields_json::row_ordinals(&flows_of(&[43210; 5]));
+    assert_eq!(unbounded.place_of(0, 3), Some(3));
+    assert_eq!(unbounded.place_of(0, 4), Some(4));
+}
+
+/// A `row` term no door has read against a dissection is undecided over a row
+/// that carries every fact, and so is one over a list no document writes.
+#[test]
+fn a_row_term_is_decided_only_against_the_documents_places() {
+    let flow = FlowKey::serial_line();
+    let names = ["Frame"];
+    let facts = RowFacts::of(&names, Some(0), Some(0), 0, &flow, Direction::A, None);
+    let filter = Filter::parse("row == 0").expect("compiles");
+    assert!(filter.reads_row_ordinal());
+    let packet = Filter::parse("packet == 0").expect("compiles");
+    assert!(!packet.reads_row_ordinal());
+    assert_eq!(
+        filter.matches(&view(Some(facts), Record::None)),
+        Truth::Unknown
+    );
+    // Read against the places of a capture that writes list 0, the same row is
+    // decided; against places that write no list, it is not.
+    let read = filter.rows_numbered_by(&crate::fields_json::row_ordinals(&capture()));
+    assert_eq!(read.matches(&view(Some(facts), Record::None)), Truth::Yes);
+    let at_one = RowFacts::of(&names, Some(1), Some(1), 0, &flow, Direction::A, None);
+    assert_eq!(read.matches(&view(Some(at_one), Record::None)), Truth::No);
+    let none = filter.rows_numbered_by(&crate::filter::RowOrdinals::default());
+    assert_eq!(
+        none.matches(&view(Some(facts), Record::None)),
+        Truth::Unknown
+    );
+    // A row the walk did not place is undecided too.
+    let unplaced = RowFacts::of(&names, Some(0), None, 0, &flow, Direction::A, None);
+    assert_eq!(
+        read.matches(&view(Some(unplaced), Record::None)),
+        Truth::Unknown
+    );
+}
+
+/// The keyexpr plane of a census document: what lies between its key and the
+/// node plane's.
+fn keyexpr_plane(census: &str) -> &str {
+    let from = census.find(",\"keyexprs\":").expect("a keyexpr plane");
+    let to = census.find(",\"nodes\":").expect("a node plane");
+    &census[from..to]
+}
+
+/// One Put on `key` from 10.0.0.1:`port` to 10.0.0.2:7447, as packet `i`.
+fn put_on(d: &mut crate::Dissection, i: usize, port: u16, key: &'static str) {
+    use crate::payload::tests_support::push_declaring;
+    let wire = crate::datagram_tests::frame_carrying(&push_declaring(key, 5, b"x"));
+    let packet = crate::datagram_tests::udp_packet([10, 0, 0, 1], port, [10, 0, 0, 2], 7447, &wire);
+    d.push_packet_at(crate::link::LINKTYPE_ETHERNET, i, Some(i as u64), &packet);
+}
+
+/// A census writes no rows, and still decides a `row` term by the place the
+/// selection document gives the row that carried each record: row 1 is the Put
+/// on `a/b`, row 2 the one on `a/c`, and no record is left undecided.
+#[test]
+fn a_census_decides_a_row_term_by_the_documents_places() {
+    let d = capture();
+    let filter = Filter::parse("row == 1").expect("compiles");
+    let census = crate::census_json::census_json_where(&d, &filter);
+    let keyexprs = keyexpr_plane(&census);
+    assert!(keyexprs.contains("\"keyexpr\":\"a/b\""), "{keyexprs}");
+    assert!(!keyexprs.contains("\"keyexpr\":\"a/c\""), "{keyexprs}");
+    assert!(keyexprs.contains("\"matched\":1,"), "{keyexprs}");
+    assert!(keyexprs.contains("\"undecided\":0}"), "{keyexprs}");
+    // The complement picks the other Put, and still decides every record.
+    let other = Filter::parse("row != 1").expect("compiles");
+    let census = crate::census_json::census_json_where(&d, &other);
+    let keyexprs = keyexpr_plane(&census);
+    assert!(keyexprs.contains("\"keyexpr\":\"a/c\""), "{keyexprs}");
+    assert!(keyexprs.contains("\"undecided\":0}"), "{keyexprs}");
+}
+
+/// A kept census goes on while the rows a `row` term picks stay where they
+/// were, and begins again when a row is placed before one of them: a Put on
+/// the first flow moves the second flow's row from 1 to 2, and row 1 is then
+/// the first flow's second Put. At every step the kept census is the census a
+/// fresh fold writes.
+#[test]
+fn a_kept_census_begins_again_when_the_rows_a_row_term_picks_move() {
+    use crate::census_json::{census_json_where, census_json_where_resumable};
+    let filter = Filter::parse("row == 1").expect("compiles");
+    let mut d = crate::Dissection::new();
+    put_on(&mut d, 0, 43210, "a/x");
+    put_on(&mut d, 1, 43211, "b/x");
+    let mut memory = crate::CensusMemory::new();
+    let first = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(first, census_json_where(&d, &filter));
+    let plane = keyexpr_plane(&first);
+    assert!(plane.contains("\"keyexpr\":\"b/x\""), "{plane}");
+    assert!(!plane.contains("\"keyexpr\":\"a/x\""), "{plane}");
+
+    // A row after every picked one moves none of them: the planes go on.
+    let restarts = memory.stats().restarts;
+    put_on(&mut d, 2, 43211, "b/x");
+    let appended = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(appended, census_json_where(&d, &filter));
+    assert_eq!(memory.stats().restarts, restarts);
+
+    // A row before the picked one moves it: the planes begin again.
+    put_on(&mut d, 3, 43210, "a/x");
+    let moved = census_json_where_resumable(&d, &filter, &mut memory);
+    assert_eq!(moved, census_json_where(&d, &filter));
+    assert!(memory.stats().restarts > restarts);
+    let plane = keyexpr_plane(&moved);
+    assert!(plane.contains("\"keyexpr\":\"a/x\""), "{plane}");
+    assert!(!plane.contains("\"keyexpr\":\"b/x\""), "{plane}");
+}
+
+/// The planes are kept under the selector as typed: a reading that moved
+/// takes the selector's own slot again, not another selector's.
+#[test]
+fn a_row_term_that_moved_keeps_one_selector_memory() {
+    use crate::census_json::{census_json_where, census_json_where_resumable};
+    let filter = Filter::parse("row > 0").expect("compiles");
+    let mut d = crate::Dissection::new();
+    put_on(&mut d, 0, 43210, "a/x");
+    let mut memory = crate::CensusMemory::new();
+    memory.set_selector_memories(4);
+    for i in 1..4 {
+        put_on(&mut d, i, 43210, "a/x");
+        let kept = census_json_where_resumable(&d, &filter, &mut memory);
+        assert_eq!(kept, census_json_where(&d, &filter));
+    }
+    assert_eq!(memory.selectors_in_use(), 1);
+    assert_eq!(memory.selector_evictions(), 0);
+}
+
+/// `row` takes an integer and the six comparisons, and nothing else.
+#[test]
+fn row_takes_an_integer() {
+    assert!(matches!(
+        Filter::parse("row == first")
+            .map(|_| ())
+            .expect_err("not an integer")
+            .kind,
+        FilterErrorKind::NotAnInteger(_)
+    ));
+    assert!(matches!(
+        Filter::parse("row contains 1")
+            .map(|_| ())
+            .expect_err("not a substring")
+            .kind,
+        FilterErrorKind::OperatorNotAdmitted { field: "row", .. }
+    ));
+    assert!(Filter::parse("row <= 10").is_ok());
+}
+
+/// `time` and `elapsed` written as a person writes them select the rows their
+/// instants name: this capture began 1 ms after the epoch, a row per ms.
+#[test]
+fn time_and_elapsed_read_clock_times_dates_and_units_over_rows() {
+    assert_words("time > 00:00:00.001", ["no", "yes", "yes"]);
+    assert_words("time >= 1970-01-01T00:00:00.002Z", ["no", "yes", "yes"]);
+    assert_words("time == 1970-01-01T09:00:00.003+09:00", ["no", "no", "yes"]);
+    assert_words("elapsed >= 1ms", ["no", "yes", "yes"]);
+    assert_words("elapsed < 0.002s", ["yes", "yes", "no"]);
 }

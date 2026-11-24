@@ -681,15 +681,24 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    // The gets pending on the session's own queryables are held apart from every face's.
-    let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(row(&dial, "pending gets").count, 1 + own);
-    assert_eq!(row(&listening, "pending gets").count, 3 + own);
-    assert_eq!(listening.gets().tables, 3 + own);
-    assert_eq!(
-        row(&listening, "pending gets").entry_bytes,
-        row(&dial, "pending gets").entry_bytes,
-        "every face's table is the same"
+    // The gets pending on the session's own queryables are held apart from every face's. A build
+    // that asks no query lays out no table of them.
+    #[cfg(feature = "query")]
+    {
+        let own = usize::from(cfg!(feature = "local-queryable"));
+        assert_eq!(row(&dial, "pending gets").count, 1 + own);
+        assert_eq!(row(&listening, "pending gets").count, 3 + own);
+        assert_eq!(listening.gets().tables, 3 + own);
+        assert_eq!(
+            row(&listening, "pending gets").entry_bytes,
+            row(&dial, "pending gets").entry_bytes,
+            "every face's table is the same"
+        );
+    }
+    #[cfg(not(feature = "query"))]
+    assert!(
+        dial.rows().iter().all(|row| row.part != "pending gets"),
+        "a build that asks no query lays out no table of gets"
     );
     // What a face's peer writes is held once for each face, as its gets are, and never for the
     // session's own gets.
@@ -709,7 +718,15 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         pooled(caps::RX_POOL_BUFFERS, 3 + 2),
         "the links share a pool of receive buffers"
     );
-    assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
+    assert_eq!(
+        dial.gets().rows.queries,
+        if cfg!(feature = "query") {
+            caps::MAX_PENDING_QUERIES
+        } else {
+            0
+        },
+        "a build that asks no query lends its gets no row"
+    );
     assert_eq!(
         row(&listening, "session tables"),
         row(&dial, "session tables"),
@@ -1471,7 +1488,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         entities.interests(),
         Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
     );
-    assert_eq!(plan.gets().rows.queries, preset("MAX_PENDING_QUERIES"));
+    assert_eq!(
+        plan.gets().rows.queries,
+        if cfg!(feature = "query") {
+            preset("MAX_PENDING_QUERIES")
+        } else {
+            0
+        }
+    );
     assert_eq!(
         plan.peers().rows.pending_declares,
         preset("MAX_PENDING_DECLARES")

@@ -1217,7 +1217,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     /// undeclaration: drop the membership entry first (so a `get_matching_status`
     /// fired from inside the `on_undecl` chain observes the post-undeclare state),
     /// fan it to the observers, and re-evaluate the matching watches.
+    // Out of line: the owned and the lent forms of an undeclaration both apply it.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+    #[inline(never)]
     fn apply_undeclared<Q: Storage>(
         &mut self,
         peer: &mut RemoteSubscriberPeer<Q>,

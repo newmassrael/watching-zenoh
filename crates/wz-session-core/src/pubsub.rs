@@ -116,7 +116,7 @@ use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, P
 use crate::keyexpr_match::keyexpr_intersects_text;
 use crate::keyexpr_match::{keyexpr_intersects_text_with, KeyFacts, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 use crate::row_pool::RowList;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -134,7 +134,11 @@ use crate::row_pool::RowList;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
-#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "declare-subscriber",
+    feature = "interest-answer"
+))]
 use crate::wireexpr_resolve::resolve_wireexpr_into_over;
 // R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
 // header has no mapping bit), and `absorb_declare` is its only caller here, so
@@ -210,8 +214,12 @@ use crate::sample::Reliability;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::sample::{Sample, SampleKind, TimestampHint};
-use crate::sink::{RowAccess, SampleDelivery, SampleSink, SampleView};
-#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+use crate::sink::{FanOut, RowAccess, SampleDelivery, SampleSink, SampleView};
+#[cfg(all(
+    feature = "alloc",
+    feature = "declare-subscriber",
+    feature = "interest-answer"
+))]
 use crate::transport_profile::owned::InterestOwned;
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
 // adapter); only needed by the `alloc`-gated `register` /
@@ -368,7 +376,7 @@ pub struct SubscriberTable<C, P: Storage = Profile> {
 pub struct SubscriberPeer<P: Storage = Profile> {
     #[cfg(feature = "storage-profile")]
     naming: PeerNaming<P>,
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     interests: InterestSide<P>,
     /// transport-shm — the receive side of shared memory for a push from this peer: the
     /// capability negotiated with it, the resolver, the means of acknowledging its slices and
@@ -532,7 +540,7 @@ impl OwnZid {
 
 /// What a session's peer asked to be told about our subscriptions, and what is
 /// staged back to it. See [`SubscriberPeer`].
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 struct InterestSide<P: Storage = Profile> {
     /// R311y530 — inbound SUBSCRIBER `Interest`s this session has been told
     /// about, zenoh's per-face `remote-interests` table restricted to the
@@ -550,40 +558,40 @@ struct InterestSide<P: Storage = Profile> {
     /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
     /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
     /// could.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     rows: <P as Storage>::Pooled<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }>,
     /// R311y530 — the staged interest-response chain, drained by
     /// [`Self::take_staged_sub_interest_replies`] through a
     /// [`crate::response_sink::DeclareReplySink`].
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     staged: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P>,
     /// What the two tables above could not take, counted rather than dropped
     /// in silence. Every field stays zero on the growable backing with no
     /// quota stated, where nothing is refused; see [`SubInterestRefusals`].
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     refusals: SubInterestRefusals,
     /// The [`SubscriberTable`] epoch this side last staged announcements for.
     /// Only a side that does NOT see registrations as they happen (a session slot,
     /// under `session-slot`) reads it; see [`Self::reconcile`].
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     reconciled_epoch: u64,
     /// The most interests the side remembers (`MAX_INBOUND_SUB_INTERESTS`): what the session's
     /// creator resolved ([`SubscriberPeer::limit_interests_to`]), the build's value until it does.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     quota: crate::limits::MaxInboundSubInterestsHeld,
     /// The most items the side stages between two drains (`MAX_PENDING_DECLARES`): what the
     /// session's creator resolved ([`SubscriberPeer::limit_interest_replies_to`]), the build's
     /// value until it does.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     reply_quota: crate::limits::MaxPendingDeclaresHeld,
     /// The longest key an interest is remembered under (`MAX_KEYEXPR_BYTES`): what the session's
     /// creator resolved ([`SubscriberPeer::limit_keys_to`]), the build's value until it does.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
     /// policy ([`SubscriberPeer::keep_keys_in`]). An interest whose key finds no room there is
     /// answered by its `Final` alone, as one whose key is past the bound is.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     keys: P::Keys,
 }
 
@@ -643,7 +651,7 @@ impl InPlaceFallbacks {
 /// Interests is staged before the drain runs. A refusal is the peer's to see as
 /// an unanswered or un-pushed interest; this is where the session says how many
 /// there were.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SubInterestRefusals {
     /// CURRENT reply chains staged NOT AT ALL, because the staging buffer could
@@ -689,7 +697,7 @@ fn push_priority_band(push: &PushOwned) -> usize {
 /// [`MAX_KEYEXPR_CHUNKS`] is treated as non-matching rather than matched
 /// truncated, mirroring the sibling registries' conservative rule; the
 /// matcher applies that bound itself.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool {
     match interest {
         Some(interest) => keyexpr_intersects(pattern, interest),
@@ -698,7 +706,7 @@ fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool 
 }
 
 /// Whether any subscription of `subs` intersects the interest `pattern` (`None` = match-all).
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 fn any_matches<L: LocalSubscribers + ?Sized>(subs: &L, pattern: Option<&str>) -> bool {
     subs.any_subscription(&mut |_, sub_pattern, _| {
         subscription_matches_interest(sub_pattern, pattern)
@@ -706,7 +714,7 @@ fn any_matches<L: LocalSubscribers + ?Sized>(subs: &L, pattern: Option<&str>) ->
 }
 
 /// R311y530 — one remembered inbound SUBSCRIBER `Interest`.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 struct InboundSubInterest<P: Storage = Profile> {
     /// The peer's interest id, echoed on every reply and on the terminating
     /// `DeclFinal` so the peer routes them to this interest.
@@ -762,7 +770,7 @@ struct InboundSubInterest<P: Storage = Profile> {
 
 /// R311y530 — one staged item of a session-local subscriber interest-response
 /// chain. Deliberately two `u64`s wide at most: see `inbound_sub_interests`.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 pub enum SubInterestReply {
     /// Reply ONCE with the interest's own keyexpr (the AGGREGATE form).
     Aggregate {
@@ -1228,7 +1236,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// S9a — `peer` is the asking peer's side, whose interest rows are read and
     /// written and whose staging buffer is filled; the subscription table this
     /// answers from is `self`'s, and one table serves every peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn respond_to_subscriber_interest_borrowed<Q: Storage>(
         &mut self,
         peer: &mut SubscriberPeer<Q>,
@@ -1251,7 +1259,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// [`Self::respond_to_subscriber_interest_borrowed`] over the interest side
     /// alone, so the owned entry can hold the keyexpr it resolved out of the
     /// peer's other half while it runs.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     fn respond_to_interest<Q: Storage>(
         &mut self,
         interests: &mut InterestSide<Q>,
@@ -1274,7 +1282,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// declare path can forget it, and for a table with many peers from
     /// [`SubscriberPeer::reconcile`], which finds the same subscriptions by their
     /// ids instead of by being told.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     fn stage_future_subscriber_pushes<Q: Storage>(
         &self,
         interests: &mut InterestSide<Q>,
@@ -1304,7 +1312,11 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// per announced aggregate into a `BoundedVec` only for the drain to throw
     /// them away. `an_unrelated_unregister_stages_no_aggregate_retraction` is
     /// the red that keeps this line honest; the wire tests are not.
-    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "declare-undeclare"
+    ))]
     fn stage_emptied_aggregate_retracts<Q: Storage>(&self, interests: &mut InterestSide<Q>) {
         interests.retract_emptied(self);
     }
@@ -1319,7 +1331,11 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// be a lie at the moment it is sent. Clearing `announced` here rather
     /// than at stage time is what makes the pair idempotent — two staged
     /// retractions for one interest emit once.
-    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "declare-undeclare"
+    ))]
     pub fn take_aggregate_retract<Q: Storage>(
         &self,
         peer: &mut SubscriberPeer<Q>,
@@ -1369,7 +1385,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// S9a — the interest row an `Aggregate` resolves through is the asking
     /// peer's (`peer`); the subscription a `Concrete` resolves through is the
     /// table's.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn sub_interest_reply<'a, Q: Storage>(
         &'a self,
         peer: &'a SubscriberPeer<Q>,
@@ -1437,12 +1453,17 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     where
         C: SampleSink,
     {
+        // The rows the message reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
         if is_remote {
             return self.deliver_from_peer(
                 view.keyexpr(),
                 class,
                 PeerDelivery::default(),
-                |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
+                |id, row| {
+                    SampleDelivery::<C, _>::deliver(&mut (), id, row, view, turn);
+                    turn = FanOut::later();
+                },
             );
         }
         // The application's own message: no key gate, matched as it is.
@@ -1453,7 +1474,10 @@ impl<C, P: Storage> SubscriberTable<C, P> {
             view.keyexpr(),
             false,
             false,
-            |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
+            |id, row| {
+                SampleDelivery::<C, _>::deliver(&mut (), id, row, view, turn);
+                turn = FanOut::later();
+            },
         )
     }
 
@@ -1788,16 +1812,22 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
         }
 
+        // The rows this sample reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
         if is_remote {
             subs.deliver_from_peer(
                 sample.keyexpr(),
                 self.class,
                 PeerDelivery::default(),
-                |id, row| cx.deliver(id, row, &sample),
+                |id, row| {
+                    cx.deliver(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
             );
         } else {
             subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
-                cx.deliver(id, row, &sample)
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
             });
         }
     }
@@ -1900,7 +1930,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         #[cfg(feature = "declare-subscriber")]
         if let Some(interest) = record.interest() {
+            #[cfg(feature = "interest-answer")]
             self.respond_to_subscriber_interest_view(subs, interest);
+            #[cfg(not(feature = "interest-answer"))]
+            Self::ignore_subscriber_interest(interest.interest_id);
         }
         // Nothing of either kind is compiled in: the arguments are unread.
         let _ = (&self, &subs, &record);
@@ -1963,7 +1996,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
             // [`Self::respond_to_subscriber_interest`].
             #[cfg(feature = "declare-subscriber")]
             NetworkMessage::Interest(interest) => {
-                self.respond_to_subscriber_interest(subs, interest)
+                #[cfg(feature = "interest-answer")]
+                self.respond_to_subscriber_interest(subs, interest);
+                #[cfg(not(feature = "interest-answer"))]
+                Self::ignore_subscriber_interest(interest.interest_id);
             }
             _ => {}
         }
@@ -1971,6 +2007,19 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // not, and the signature is the same in every subset.
         let _ = (&subs, &cx);
     }
+
+    /// A peer's subscriber Interest, in a build that answers none (`interest-answer` off): no row
+    /// is kept for it, no reply is staged and no `Final` is owed. This is zenoh-pico's answer on a
+    /// unicast transport: the session hands every Interest that is not a `Final` to the interest
+    /// plane (`vendor/zenoh-pico/src/session/rx.c` @ `case _Z_N_INTEREST: {`), which returns
+    /// before reading it on a unicast one (`vendor/zenoh-pico/src/session/interest.c` @
+    /// `// Nothing to do on unicast`). A node that takes sessions or joins a group answers.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        not(feature = "interest-answer"),
+        any(feature = "alloc", feature = "rx-lent-control")
+    ))]
+    fn ignore_subscriber_interest(_interest_id: u64) {}
 
     /// R311y530 — `alloc` inbound-parse entry: consume an inbound
     /// `Interest`, resolve its keyexpr through the peer mapping table, and
@@ -1988,7 +2037,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// whole absorb of an interest allocates nothing; one longer than
     /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
     /// terminating `Final` alone, as an over-long one always was.
-    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        feature = "interest-answer"
+    ))]
     fn respond_to_subscriber_interest<L: LocalSubscribers>(
         &mut self,
         subs: &mut L,
@@ -2044,6 +2097,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     #[cfg(all(
         feature = "storage-profile",
         feature = "declare-subscriber",
+        feature = "interest-answer",
         feature = "rx-lent-control"
     ))]
     fn respond_to_subscriber_interest_view<L: LocalSubscribers>(
@@ -2686,7 +2740,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 shared_key_ids: None,
                 own_zid: None,
             },
-            #[cfg(feature = "declare-subscriber")]
+            #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::new(),
@@ -2718,7 +2772,7 @@ impl SubscriberPeer<crate::bounded::Static> {
                 shared_key_ids: None,
                 own_zid: None,
             },
-            #[cfg(feature = "declare-subscriber")]
+            #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::new(),
@@ -2750,26 +2804,26 @@ impl SubscriberPeer<Lent> {
     ///
     /// The key arena and the rows of interests the side was handed stay its own: lending its
     /// staging before or after it was handed them keeps the interests' keys and rows in them.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
         self.interests.staged = arena.lend(staged)?;
         Ok(())
     }
 
-    /// Nothing to lend: a build without `declare-subscriber` keeps no interest of the peer.
-    #[cfg(not(feature = "declare-subscriber"))]
+    /// Nothing to lend: a build that answers no Interest keeps no interest of the peer.
+    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
     pub fn lend_rows(&mut self, _arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
         Ok(())
     }
 
     /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub const fn arena_bytes(staged: usize) -> Option<usize> {
         InterestSide::<Lent>::arena_bytes(staged)
     }
 
-    /// The bytes of an arena [`Self::lent`] takes: none without `declare-subscriber`.
-    #[cfg(not(feature = "declare-subscriber"))]
+    /// The bytes of an arena [`Self::lent`] takes: none in a build that answers no Interest.
+    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
     pub const fn arena_bytes(_staged: usize) -> Option<usize> {
         Some(0)
     }
@@ -2787,7 +2841,11 @@ impl SubscriberPeer<Lent> {
     /// Keep the interests the peer asks from here on in rows `rows` hands out, the session's: a
     /// pool the faces share, or a span of this side's own if no table took it before; the
     /// interests held elsewhere are forgotten first. Rows with nothing left to hand change nothing.
-    #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "peer-row-pools"
+    ))]
     pub fn keep_interest_rows_in(&mut self, rows: &mut InterestRows) {
         if let Some(space) = rows.0.hand_out() {
             self.interests.rows.keep_rows_in(space);
@@ -2961,7 +3019,7 @@ impl<P: Storage> SubscriberPeer<P> {
     pub fn forget_peer(&mut self) {
         #[cfg(feature = "storage-profile")]
         self.naming.aliases.reset();
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.interests.forget();
         // The next peer on this slot is not known to be the last one.
         self.class = None;
@@ -3116,7 +3174,7 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
         self.naming.key_quota = quota;
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         {
             self.interests.key_quota = quota;
         }
@@ -3133,7 +3191,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// arena, on the lent policy. The aliases already held keep theirs.
     #[cfg(feature = "storage-profile")]
     pub fn keep_keys_in(&mut self, keys: P::Keys) {
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         {
             self.interests.keys = keys.clone();
         }
@@ -3417,7 +3475,7 @@ impl<P: Storage> PeerNaming<P> {
     }
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 impl<P: Storage> Default for InterestSide<P> {
     /// No interest registered, nothing staged.
     fn default() -> Self {
@@ -3434,7 +3492,7 @@ impl<P: Storage> Default for InterestSide<P> {
     }
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 impl InterestSide<Lent> {
     /// The bytes of an arena [`SubscriberPeer::lend_rows`] takes: the staging's. `None` past the
     /// address space.
@@ -3444,7 +3502,11 @@ impl InterestSide<Lent> {
 }
 
 /// The kind of row a peer's interests are kept in on the lent policy.
-#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
 type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
 
 /// Where every face of a session keeps the interests its peer asks
@@ -3452,11 +3514,19 @@ type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
 /// from its arena once, so a face holds the interests its peer asked and the session holds what its
 /// faces together asked, up to the pool's rows; or, for a session of one face, a span of that
 /// face's own, handed to the first side that asks and to no other.
-#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
 #[derive(Debug)]
 pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
 
-#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+))]
 impl InterestRows {
     /// `rows` interests lent by `lend`: a pool the faces share, or a span of one face's own, a group
     /// of its own ([`Self::own_bytes`]). A refusal is `lend`'s to hand back.
@@ -3483,7 +3553,7 @@ impl InterestRows {
     }
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 impl InterestSide<crate::bounded::Static> {
     /// No interest registered, nothing staged, of the static policy. `const`.
     const fn new_static() -> Self {
@@ -3504,7 +3574,7 @@ impl InterestSide<crate::bounded::Static> {
     }
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 impl<P: Storage> InterestSide<P> {
     /// Answer subscriber interest `interest_id` on `pattern` out of `subs`, the session's own
     /// subscribers: remember it for its FUTURE half and stage the CURRENT dump, as
@@ -3792,7 +3862,7 @@ impl<P: Storage> InterestSide<P> {
 
 /// The interest plane of one peer's side: what it registered, what is staged back
 /// to it, and what could not be.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 impl<P: Storage> SubscriberPeer<P> {
     /// Hold this side to the `MAX_INBOUND_SUB_INTERESTS` the session's creator resolved: an
     /// interest that would leave it with more rows than `quota` admits is not remembered, as a
@@ -3800,7 +3870,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// [`SubInterestRefusals::future_interests`], an AGGREGATE CURRENT one has its chain refused),
     /// and the rows already held are kept. A limit of each peer's, so it is the peer's side that
     /// holds it, whatever table its interests are answered through.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn limit_interests_to(&mut self, quota: crate::limits::MaxInboundSubInterestsHeld) {
         self.interests.quota = quota;
     }
@@ -3814,7 +3884,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// A quota under the subscriptions a match-all interest is answered with, plus its `Final`,
     /// refuses that interest's chain every time it is asked. The build holds its own capacities
     /// clear of that (`caps.rs`); a stage that states a lower quota states that refusal.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
         self.interests.reply_quota = quota;
     }
@@ -4067,12 +4137,12 @@ impl<C, P: Storage> SubscriberTable<C, P> {
         sink: C,
     ) -> Result<SubscriptionId, RegisterError> {
         let id = self.register_sink(keyexpr_pattern, allowed_origin, sink)?;
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         {
             self.stage_future_subscriber_pushes(&mut peer.interests, id);
             peer.interests.reconciled_epoch = self.epoch;
         }
-        #[cfg(not(feature = "declare-subscriber"))]
+        #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
         let _ = peer;
         Ok(id)
     }
@@ -4087,13 +4157,13 @@ impl<C, P: Storage> SubscriberTable<C, P> {
     /// retirement route can skip the retraction.
     pub fn unregister_for(&mut self, peer: &mut SubscriberPeer<P>, id: SubscriptionId) -> bool {
         let removed = self.unregister(id);
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         if removed {
             #[cfg(feature = "declare-undeclare")]
             self.stage_emptied_aggregate_retracts(&mut peer.interests);
             peer.interests.reconciled_epoch = self.epoch;
         }
-        #[cfg(not(feature = "declare-subscriber"))]
+        #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
         let _ = peer;
         removed
     }
@@ -4202,8 +4272,10 @@ pub trait LocalSubscribers {
     where
         Self: Sized,
     {
+        let mut turn = FanOut::begin();
         self.fire_matching(sample.keyexpr(), true, false, |id, row| {
-            cx.deliver(id, row, sample)
+            cx.deliver(id, row, sample, turn);
+            turn = FanOut::later();
         })
     }
 }
@@ -4372,13 +4444,13 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
     }
 
     /// [`SubscriberPeer::limit_interests_to`] for this registry's peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn limit_interests_to(&mut self, quota: crate::limits::MaxInboundSubInterestsHeld) {
         self.peer.limit_interests_to(quota);
     }
 
     /// [`SubscriberPeer::limit_interest_replies_to`] for this registry's peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
         self.peer.limit_interest_replies_to(quota);
     }
@@ -4489,7 +4561,7 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
 
     /// [`SubscriberTable::respond_to_subscriber_interest_borrowed`] for this
     /// registry's peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn respond_to_subscriber_interest_borrowed(
         &mut self,
         interest_id: u64,
@@ -4585,7 +4657,7 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
 
     /// [`SubscriberPeer::take_staged_sub_interest_replies`] for this registry's
     /// peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn take_staged_sub_interest_replies(
         &mut self,
     ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P::Scratch> {
@@ -4593,26 +4665,34 @@ impl<C, P: Storage> SubscriberRegistry<C, P> {
     }
 
     /// [`SubscriberTable::sub_interest_reply`] for this registry's peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn sub_interest_reply(&self, item: &SubInterestReply) -> Option<(u64, &str)> {
         self.table.sub_interest_reply(&self.peer, item)
     }
 
     /// [`SubscriberPeer::mark_aggregate_announced`] for this registry's peer.
-    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "declare-undeclare"
+    ))]
     pub fn mark_aggregate_announced(&mut self, interest_id: u64) {
         self.peer.mark_aggregate_announced(interest_id);
     }
 
     /// [`SubscriberTable::take_aggregate_retract`] for this registry's peer.
-    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "interest-answer",
+        feature = "declare-undeclare"
+    ))]
     pub fn take_aggregate_retract(&mut self, interest_id: u64) -> Option<u64> {
         self.table
             .take_aggregate_retract(&mut self.peer, interest_id)
     }
 
     /// [`SubscriberPeer::interest_staging_refusals`] for this registry's peer.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     pub fn interest_staging_refusals(&self) -> SubInterestRefusals {
         self.peer.interest_staging_refusals()
     }
@@ -4853,6 +4933,10 @@ mod tests {
             type LivelinessSubscriber = u32;
             type Matching = u32;
             type Reply = u32;
+            type QueryablePresence = crate::session_tables::Present;
+            type LivelinessPresence = crate::session_tables::Present;
+            type FilterPresence = crate::session_tables::Present;
+            type GetPresence = crate::session_tables::Present;
         }
         let counter = Arc::new(AtomicUsize::new(0));
         let counted = counter.clone();
@@ -9028,6 +9112,7 @@ mod metadata_decode_isolation_tests {
 #[cfg(all(
     test,
     feature = "declare-subscriber",
+    feature = "interest-answer",
     any(not(feature = "alloc"), feature = "bounded-heapless")
 ))]
 mod fixed_backing_interest_staging_tests {
@@ -9262,7 +9347,7 @@ mod entity_id_space_tests {
     /// An aggregate interest's reply takes its declaration id from the same
     /// counter, so a table with no id left stores no row for it and refuses
     /// the chain rather than answer under an id it does not have.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     #[test]
     fn an_aggregate_interest_is_refused_once_the_ids_are_spent() {
         let mut control = SubscriberRegistry::new();
@@ -9413,6 +9498,7 @@ mod match_memo_position_tests {
     feature = "alloc",
     not(feature = "bounded-heapless"),
     feature = "declare-subscriber",
+    feature = "interest-answer",
     any(feature = "keyexpr-wildcard-double", feature = "declare-undeclare")
 ))]
 mod heap_table_interest_staging_tests {
@@ -9558,7 +9644,7 @@ mod local_subscribers_tests {
         };
         assert_eq!(
             table.fire_matching("a/b", true, false, |id, row: RowAccess<'_, BoxedSink>| {
-                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample, FanOut::begin())
             }),
             1
         );
@@ -9566,7 +9652,7 @@ mod local_subscribers_tests {
         assert_eq!(remote_heard.load(Ordering::Relaxed), 0);
         assert_eq!(
             table.fire_matching("a/b", false, false, |id, row: RowAccess<'_, BoxedSink>| {
-                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample, FanOut::begin())
             }),
             2
         );

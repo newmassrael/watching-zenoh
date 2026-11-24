@@ -1398,6 +1398,78 @@ impl Encryption {
     }
 }
 
+/// How a flow's two halves, `a` and `b`, were told apart, the closed set.
+///
+/// A flow read off addresses has its halves by its endpoints, and the word says
+/// so. The serial line has no addresses: its halves are its capture interfaces,
+/// one per wire, and which interface is which end is a separate finding (see
+/// [`crate::serial`]). A reader that showed a serial line's `a` as a measured
+/// direction when it is a convention, or when one interface carried both wires,
+/// would be reporting a guess as a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectionBasis {
+    /// The flow's two endpoints: `a` runs from the lower to the higher.
+    Endpoints,
+    /// A serial handshake frame named the interface the initiator sent on, and
+    /// that interface's frames are `a`.
+    Handshake,
+    /// No serial handshake frame settled it, so the first interface the capture
+    /// holds is `a`: a convention, not a measurement.
+    InterfaceOrder,
+    /// One interface carried both wires of the serial line, so nothing in the
+    /// capture separates the directions; every message reads `a`.
+    Unknown,
+}
+
+impl DirectionBasis {
+    /// The word this finding is written as.
+    pub const fn name(self) -> &'static str {
+        match self {
+            DirectionBasis::Endpoints => "endpoints",
+            DirectionBasis::Handshake => "handshake",
+            DirectionBasis::InterfaceOrder => "interface_order",
+            DirectionBasis::Unknown => "unknown",
+        }
+    }
+
+    /// Every finding, from an exhaustive match.
+    pub fn all() -> [DirectionBasis; 4] {
+        let one = |b: DirectionBasis| match b {
+            DirectionBasis::Endpoints => DirectionBasis::Endpoints,
+            DirectionBasis::Handshake => DirectionBasis::Handshake,
+            DirectionBasis::InterfaceOrder => DirectionBasis::InterfaceOrder,
+            DirectionBasis::Unknown => DirectionBasis::Unknown,
+        };
+        [
+            one(DirectionBasis::Endpoints),
+            one(DirectionBasis::Handshake),
+            one(DirectionBasis::InterfaceOrder),
+            one(DirectionBasis::Unknown),
+        ]
+    }
+
+    /// Every word, sorted.
+    pub fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Self::all().iter().map(|b| b.name()).collect();
+        words.sort_unstable();
+        words
+    }
+
+    /// What a serial line's census says about its halves.
+    ///
+    /// One interface is checked first: a handshake read off the only interface
+    /// names a role, and still every frame of both wires came off it.
+    pub fn of_serial(census: &crate::serial::SerialCensus) -> Self {
+        if census.direction_unattributed {
+            DirectionBasis::Unknown
+        } else if census.roles_witnessed {
+            DirectionBasis::Handshake
+        } else {
+            DirectionBasis::InterfaceOrder
+        }
+    }
+}
+
 /// Why a flow is not a row, the closed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Why {
@@ -1500,6 +1572,8 @@ pub struct Link {
     /// The flow's stream anomaly counters per direction, or why the link has
     /// none ([`DirectedAnomalies::of`]).
     pub stream_anomalies: Stated<DirectedAnomalies>,
+    /// How the flow's two halves were told apart.
+    pub direction_basis: DirectionBasis,
 }
 
 /// One row: a session, or a flow whose session is not known.
@@ -1765,7 +1839,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
         } else {
             Encryption::Unknown
         };
-        links.push(link_of(
+        let mut link = link_of(
             FlowKey::serial_line(),
             encryption,
             clear,
@@ -1776,7 +1850,9 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             &d.serial_ingest,
             d.serial_session_observations(),
             Err(Unstated::NoSequence),
-        ));
+        );
+        link.direction_basis = DirectionBasis::of_serial(&census);
+        links.push(link);
     }
     (links, excluded)
 }
@@ -1926,6 +2002,7 @@ fn link_of(
         evidence: ingest.evidence(sessions),
         readings: ingest.readings(),
         stream_anomalies,
+        direction_basis: DirectionBasis::Endpoints,
     }
 }
 

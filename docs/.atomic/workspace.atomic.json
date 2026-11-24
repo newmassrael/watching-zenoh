@@ -7145,6 +7145,63 @@
         "Release-form heap at open is 288-376 KB a process against zenoh-pico's 16 KB, outside the coop arena (26 KB client, 59 KB peer): measure by phase and pay.",
         "Remaining structural phases: one table set for every entity kind, per-session rx/tx pools, process pool limits at the pico preset."
       ]
+    },
+    "Round 4621": {
+      "decision_summary": "Ten consumer requests answered. Packet, section and interface comments of a pcapng are carried on rows, in the summary and on the interface list. A selector selects a row by its place in the documents (row), reads ISO-8601 dates and clock times with an offset the caller may bind, unit-suffixed intervals, and the two-ended node terms zids and session. An encoding rule reads a sample by its declared encoding where no key rule covers it, with a text format, typed json and cbor leaves and the encoding's schema; a cdr rule reads CDR by declared ROS message and service definitions. A live handle opens under a sized options struct that declares serial link types and sets the byte ceiling, the reassembly window and the bytes one fragment chain may join, and goes on into a capture's next container. A live census keeps scouting folds and open-exchange verdicts across calls. The C library answers what a config's access control decides per message, from the router's own engine.",
+      "changes_bullets": [
+        "wz-capture: the pcapng option reader gives comments; rows carry packet_comments, the summary a comments object, interfaces their comments. The selector gains row, clock and date literals (filter/clock.rs), unit intervals, zids and session, and RecordView a receiver ZID. payload_builtin gains text and the encoding rule kind; json and cbor leaves are typed; ros_msg.rs and payload_cdr.rs read .msg/.srv and CDR. The serial reader is fed by declared link types, session_table flows say direction_basis, a follow moves into a next container with sections and packets numbered on, the field documents re-read that container, scouting folds and open verdicts are kept.",
+        "wz-capi-dissect: wz_dissect_selector_bind_in_zone, wz_dissect_live_open_with and its options struct (serial types, stream bytes, window, chain bytes), wz_dissect_live_follow_next; ABI 59 to 64; fields 83, row_facts 23, summary 10, census 28, session_table 16, selection 8, retention 5, health 6, selection_since 6, selector_diagnose 12, selector_fields 8.",
+        "wz-access-control: decide names the rule or default that decided; judge takes a partial subject and names the attributes the answer needs. wz-runtime-tokio keeps each compiled rule's document origin. wz-capi-c: wz_capi_c_config_acl_verdicts, refusals in the validation door's shape; its ABI 19 to 20."
+      ],
+      "verification_bullets": [
+        "wz-capture library tests with dissect and network codecs 1896 passed and 6 ignored, and with default features 1386 passed and 6 ignored, among them comments on the rows a packet starts and in the summary, the row place across a front trim, clock, date and unit literals, zids and session over rows, a JSON publisher read by its encoding with no key rule, a CDR String read by a declared definition, a serial capture read when declared and skipped when not, a capture read as two containers equal to it read as one, a raised chain cap reassembling what the default gives up, and a scouting fold and an open verdict each read once. wz-capi-dissect 275 passed and 4 ignored; wz-capi-c 228, among them allow, deny, the default decision and a needed attribute; wz-access-control 27; wz-runtime-tokio's acl tests 14; wz-analyze 72. Clippy with warnings denied per touched crate. Layers C1bo, C1ch, C1bn, C1bt and C1bz pass. The upstream citation gate, the discard-site lint and the count guard pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "RIHS01 type hashes are not computed (no reference vector here); wstring, .action and representations other than plain CDR are refused. A handle that moved into a next container is lent no container; an INIT or JOIN still restarts a live census's planes; there is no ceiling on the bytes of all flows together. Census and values doors leave row undecided. A time literal takes a fixed offset, not a named zone. Nine static gates fail on the base tree before this round and still fail: limit_read_gate (selftest and check), gate_provenance_lint, logic_census_coverage_gate, reason_review_pin_gate, root_relative_exclusion_lint, self_report_lint, script_exercise_census and completeness_gate; they name files this round does not touch."
+      ]
+    },
+    "Round 4622": {
+      "decision_summary": "This session's residues paid. RIHS01 type hashes are computed for every declared ROS message, service and action type, proven on five published values; wstring, .action files and the three XCDR2 representations are read; comments of packets no row begins in ride on their flow, and the values document says how a format was chosen. A row term is decided by the census and values doors; a time literal may carry a POSIX TZ rule with summer time, refusing a skipped or repeated local time; the access-control answers name the zenoh layout they read, bound to the pin. A live handle is lent every container of a capture and says the oldest it still reads; a census folds on across INIT and JOIN; a caller may bound the stream bytes of all flows. Four static gates red since before this session pass again.",
+      "changes_bullets": [
+        "wz-capture: sha256.rs, ros_type_hash.rs; ros_msg.rs derives service events and actions and carries Time, ServiceEventInfo and UUID; payload_cdr.rs reads wstring, PLAIN, DELIMITED and PL CDR2; fields rows' unrowed_comments; field_values chosen_by, encoding_schema, type_hash; filter/tz.rs; census and values read row; lent.rs and container-wide places; NodeCensus list parts; regroups_as; stream_bytes_total. wz-session-core: LentBytes for the logs and assembler. wz-capi-dissect: wz_dissect_selector_bind_in_tz (65), wz_dissect_live_follow_next_lent and wz_dissect_live_oldest_container (66), stream_bytes_total (67); census 30, fields 86, row_facts 26, summary 11, session_table 17, selection 9, retention 6, health 7, selection_since 7, field_values 5, selector_diagnose 13, selector_bind 2, declarations_diagnose 6. wz-capi-c: acl_verdicts revision 1 with zenoh_layout; ZENOH_LAYOUT_VERSION bound by claude_md_upstream_pin_gate. Gates: provenance, root-relative path, script census row, reason pins re-read, S8 row for acl_verdict.rs."
+      ],
+      "verification_bullets": [
+        "wz-capture library tests with dissect and network codecs 1942 passed and 6 ignored, default 1425; wz-session-core 1314; wz-capi-dissect 280 and 4 ignored; wz-capi-c 229; wz-analyze 72. Among them the five published RIHS01 values (String, Twist, Empty, AddTwoInts, RotateAbsolute_SendGoal) computed exactly, both summer-time transitions of two rules, a lent two-container capture equal to a copied one, and a census folded across three handshakes equal to a fresh one at every step with nothing refolded. Clippy with warnings denied per touched crate. Layers C1bo, C1ch, C1bn, C1bt and C1bz (the touched crates) pass; gate_provenance, root_relative_exclusion, script_exercise_census, reason_review_pin, discard_site, accessor_reach_census, the citation gate and the count guard pass."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Still red, owned by the integration branch that is rewriting the cooperative engine (it fixes them where it lands): limit_read_gate (engine.rs and round.rs read build limits; ALLOWED names the removed lane.rs), logic_census_coverage_gate and completeness (rows for round.rs, endpoint.rs, refusal.rs, unicast_rx.rs; stale lane.rs rows), self_report_lint (capi-coop tests.rs), and wz-session-core's all-features rustdoc, 36 links, red on the base too. A clock time on a capture day that skips or repeats it is undecided rather than placed by a rule. An IP fragment's packet comment is counted in the summary and carried on no flow."
+      ]
+    },
+    "Round 4623": {
+      "decision_summary": "The pico C ABI's release form (no_std, coop engine, no heap after open) is integrated across the six lanes of int12 and its size ratchet is met without raising it (owner 2026-11-24). Measured on the size gate's case pico-client-coop-nostd: sessions 106,679 -> 96,350 B (3.37 -> 3.04x zenoh-pico), doors 81,938 -> 61,570, whole image 379,112 -> 328,519 B (2.22 -> 1.93x); codec and language now WIN and are locked. Each size step was measured by symbol diff and kept only when the image shrank. Allocation after open stays 0 in all 23 C1nh families. zenoh-pico's own API tests pass on the library in their namespace sandbox, batching and client included, at upstream's buffer sizes.",
+      "changes_bullets": [
+        "wz-session-core: tables of a kind the build never uses are absent (Presence), one lender per session region with sticky refusal, peer Interest answers only under interest-answer, fan-out turn joins delivery records, total multicast_peer_rows and passive_messages.",
+        "wz-capi-coop: open in stages (lend_session, core_of, engine_of), one announce and one retract body, no gets table without query, one-face builds hold no hand-off queue, matching watches swept by one body.",
+        "wz-runtime-coop: one cell claim body, a link's room and read waits named apart.",
+        "wz-capi-pico: one endpoint text body; integration arm at upstream buffer sizes; Layer Z pico tests in a netns sandbox.",
+        "Gates: size ledger rows, reason pins, limit-read, sn-res-words, discard-site, ext-identity, feature surface, accessor reach, own-space witness."
+      ],
+      "verification_bullets": [
+        "int12 lane union (120 lanes: crate tests and clippy per feature form) green but a face_table timeout that passed 10 of 10 in isolation; C1nh no-heap ratchet 23/23 at 0; pico upstream API tests 17 with batching and client in the sandbox; pre-push hook gate list (119) green on the tree merged with main dc898a1e1; size_ledger_gate --check green; capture and capi-coop clippy and tests after the main merge."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Performance matrix of the no_std form against zenoh-pico (scripts/pico-compare.sh perf) running on int12; out-of-line size steps on the publish and delivery paths must be re-measured for speed.",
+        "Size to 1.0x by area: sessions 3.04x, doors 2.93x, transport 3.40x, driver 1.87x.",
+        "Hand-off queue heap in listen/group builds (branch l0-handoff-noheap, red test).",
+        "session-close-ingress reason: correction that not every witness test carries the atom prefix (needs a store primitive)."
+      ]
     }
   },
   "inventory_entries": {

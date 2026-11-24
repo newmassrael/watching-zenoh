@@ -193,10 +193,16 @@ local-subscriber = []
 # this build's too: every build of more faces than one shares the faces' rows in the session's
 # pools (`peer-row-pools`), so a face that goes gives its set back at once.
 listen = [
+    "interest-answer",
     "wz-runtime-coop/session-unicast-accept",
     "wz-runtime-coop/udp-listen",
     "wz-session-core/peer-row-pools",
 ]
+# The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
+# application registers after a peer asked is staged for that peer's face before each drain. A peer
+# asks a node that listens or joins a group, so `listen` and `group` turn it on; a client that
+# only dials answers no Interest, as zenoh-pico's unicast session does, and has none of it.
+interest-answer = ["wz-session-core/interest-answer"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
@@ -207,6 +213,7 @@ app-transport = ["wz-runtime-coop/app-link"]
 # session core's; the Push items the session puts on the group share the queue its replies take
 # (`codec-push`). Off, a config that names a group is refused by name and the text has none of it.
 group = [
+    "interest-answer",
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
     "wz-session-core/peer-row-pools",
