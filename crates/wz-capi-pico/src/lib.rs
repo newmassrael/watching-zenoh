@@ -501,8 +501,6 @@ pub mod config_policy;
 // What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
 // unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
-// Totality debt TD-168 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
 // surface (the clock of the observation plane).
