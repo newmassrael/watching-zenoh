@@ -1276,32 +1276,16 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// — without building a C handle it never hands out, and lets it keep them on a
 /// task, which a value holding raw pointers into its own storage cannot do.
 pub(crate) struct PlainPublisher {
-    /// R2962 — pico's write filter for this publisher: the Interest it asks its
-    /// peers, and the state that decides whether a put or delete is SENT. It holds the
-    /// session the publisher is declared in, which the publisher reaches through it.
-    /// Declared BEFORE `key`, so it drops first: the Interest is retracted while
-    /// the declaration it names still stands, which is upstream's order
-    /// (`_z_undeclare_publisher` clears the filter, then the key).
-    filter: WriteFilter,
-    /// R2959 — the publisher's key WITH the declaration pico makes for it:
-    /// `_z_declare_publisher` runs `_z_declared_keyexpr_declare` on the key
+    /// The publisher's key WITH the declaration pico makes for it
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &publisher->_key, keyexpr),`),
-    /// and every put then rides the declared id. Dropping the state drops the
-    /// key, which retracts the declaration AFTER the publisher itself is gone —
-    /// upstream's order.
-    key: DeclaredKeyexpr,
-    /// The key as every put and delete of this publisher names it on the wire, made once at
-    /// declare: the declaration's id and the rest of the key are fixed for as long as `key` holds
-    /// the declaration. After the filter, as `key` is, so the declaration it keeps is retracted
-    /// after the filter's Interest.
-    wire: WireKey,
-    /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
-    /// allocated ONCE at declare from the session's entity counter. See
-    /// `SharedSession::next_entity_id` for why it is allocated rather than
-    /// derived. Only the unstable API reports it, so only `unstable-api` keeps it.
-    #[cfg(feature = "unstable-api")]
-    eid: wz_session_core::wire_id::EntityId,
+    /// the key as every put and delete names it on the wire, the `eid` half of the global id
+    /// `z_publisher_id` reports, and pico's write filter, which decides whether a put or delete
+    /// is SENT and holds the session the publisher reaches through it. Held whole as it was
+    /// declared, so nothing of it is moved field by field on the way to the publisher's place;
+    /// its filter drops before its key, which is upstream's order (`_z_undeclare_publisher`
+    /// clears the filter, then the key).
+    entity: FilteredKey,
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
     declared: PublisherQos,
@@ -1406,43 +1390,54 @@ impl PublisherQos {
         }
     }
 
-    /// `opts` as this publisher sends it: its QoS on top of whatever the call
-    /// carried, and its encoding when the call carried none. Taken by value, so the call's
-    /// attachment and encoding move into what is sent and are not copied; the publisher's
-    /// encoding is lent for the publish, so a put copies none of it.
+    /// Make `opts` what this publisher sends, where they lie: its QoS on top of whatever the call
+    /// carried, and its encoding when the call carried none. The call's attachment and encoding
+    /// stay where they are and are not copied; the publisher's encoding is lent for the publish, so
+    /// a put copies none of it.
     ///
-    /// One body out of line: the declare and both ways a publish is sent call it, and each copy
-    /// inlined would rebuild the whole options value in place.
+    /// One body out of line: the declare and both ways a publish is sent call it. In place, so no
+    /// caller moves the whole options value in and out of it.
     #[inline(never)]
-    fn apply<'a>(&'a self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
-        let mut out = opts
-            .with_priority(self.priority)
-            .with_congestion_control(self.congestion_control)
-            .with_express(self.is_express)
-            .with_reliability(self.reliability)
-            .with_locality(self.destination);
-        if out.encoding.is_none() {
+    fn apply<'a>(&'a self, opts: &mut PublishOptions<'a>) {
+        opts.set_priority(self.priority);
+        opts.set_congestion_control(self.congestion_control);
+        opts.set_express(self.is_express);
+        opts.reliability = self.reliability;
+        opts.allowed_destination = self.destination;
+        if opts.encoding.is_none() {
             if let Some(encoding) = &self.encoding {
-                out = out.with_encoding_ref(encoding.view());
+                opts.set_encoding_ref(encoding.view());
             }
         }
-        out
     }
 }
 
 impl PlainPublisher {
-    /// Declare a publisher on `keyexpr`: its key's declaration, then the write
-    /// filter that names it — pico's order in `z_declare_publisher`.
+    /// Declare a publisher on `keyexpr` that sends with `declared`, for a composite that holds it
+    /// itself: `declare_entity` with a key of its own.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn declare(
+        session: &PicoSession,
+        keyexpr: &str,
+        declared: PublisherQos,
+    ) -> Result<Self, ZResult> {
+        let entity = Self::declare_entity(session, keyexpr, None, &declared)?;
+        Ok(Self { entity, declared })
+    }
+
+    /// Declare what a publisher on `keyexpr` stands on: its key's declaration, then the write
+    /// filter that names it — pico's order in `z_declare_publisher` — with the plain way a put
+    /// that brings nothing of its own is sent, worked out from `declared`.
     ///
     /// `existing` is the caller's own key when it is already a declaration
     /// (`declared_of`), which is shared rather than declared again. `declared` is
     /// what the publisher then sends every sample with.
-    pub(crate) fn declare(
+    fn declare_entity(
         session: &PicoSession,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
-        declared: PublisherQos,
-    ) -> Result<Self, ZResult> {
+        declared: &PublisherQos,
+    ) -> Result<FilteredKey, ZResult> {
         let filtered = FilteredKey::declare(
             session,
             FilterPlane::Subscribers,
@@ -1455,18 +1450,15 @@ impl PlainPublisher {
         let wire = &filtered.wire;
         filtered.filter.keep_plain(
             matches!(wire.names_in(filtered.key.literal()), (id, None) if id != 0)
-                .then(|| declared.apply(put_options()).plain_put_params())
+                .then(|| {
+                    let mut bare = put_options();
+                    declared.apply(&mut bare);
+                    bare.plain_put_params()
+                })
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
         );
-        Ok(Self {
-            #[cfg(feature = "unstable-api")]
-            eid: filtered.eid,
-            filter: filtered.filter,
-            key: filtered.key,
-            wire: filtered.wire,
-            declared,
-        })
+        Ok(filtered)
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the
@@ -1478,55 +1470,61 @@ impl PlainPublisher {
     /// sends whatever the filter says, as upstream's multicast transport does. The engine
     /// judges the filter in the step that sends ([`WriteFilter::publish`]). `None` is a put that
     /// brings nothing of its own, which goes the plain way the filter's row keeps.
-    pub(crate) fn publish(&self, payload: &[u8], opts: Option<PublishOptions>) -> ZResult {
+    pub(crate) fn publish<'a>(
+        &'a self,
+        payload: &[u8],
+        opts: Option<&mut PublishOptions<'a>>,
+    ) -> ZResult {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
-        let engine = self.filter.engine();
+        let FilteredKey {
+            filter, key, wire, ..
+        } = &self.entity;
+        let engine = filter.engine();
         if engine.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        let opts = opts.map(|opts| self.declared.apply(opts));
-        match self
-            .filter
-            .publish(self.key.literal(), &self.wire, payload, opts.as_ref())
-        {
+        let opts = opts.map(|opts| {
+            self.declared.apply(opts);
+            &*opts
+        });
+        match filter.publish(key.literal(), wire, payload, opts) {
             FilteredPut::Suppressed => Z_OK,
             FilteredPut::Sent(sent) => publish_code(sent),
             // The filter let a bare put through and it is not plain on this node (no plain form
             // kept, a subscriber of the session, a group or a link that rewrites keys).
-            FilteredPut::NotPlain => publish_code(engine.publish_on_wire_all(
-                self.key.literal(),
-                &self.wire,
-                payload,
-                &self.declared.apply(put_options()),
-            )),
+            FilteredPut::NotPlain => {
+                let mut bare = put_options();
+                self.declared.apply(&mut bare);
+                publish_code(engine.publish_on_wire_all(key.literal(), wire, payload, &bare))
+            }
         }
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "advanced")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
-        self.eid
+        self.entity.eid
     }
 
     /// The publisher's key with its declaration.
     #[cfg(feature = "advanced")]
     pub(crate) fn key(&self) -> &DeclaredKeyexpr {
-        &self.key
+        &self.entity.key
     }
 
     /// pico's matching status of the publisher: whether its write filter has a match
     /// (`!_z_write_filter_active`).
     pub(crate) fn filter_matches(&self) -> bool {
-        !self.filter.active()
+        !self.entity.filter.active()
     }
 
     /// The publisher's write filter: its matching listeners are declared on it
     /// ([`WriteFilter::declare_matching_listener`]), and it retracts them when the publisher
     /// goes, as pico's filter takes its callbacks with it at `z_undeclare_publisher`.
     pub(crate) fn filter(&self) -> &WriteFilter {
-        &self.filter
+        &self.entity.filter
     }
 }
 
@@ -1547,24 +1545,24 @@ impl PublisherState {
     /// Point the cached view at this state's own keyexpr. MUST run only once
     /// the state sits at its FINAL address (i.e. after `Box::new`).
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.core.key.loaned();
+        self.loaned_keyexpr = self.core.entity.key.loaned();
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
-    fn publish(&self, payload: &[u8], opts: Option<PublishOptions>) -> ZResult {
+    fn publish<'a>(&'a self, payload: &[u8], opts: Option<&mut PublishOptions<'a>>) -> ZResult {
         self.core.publish(payload, opts)
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
-        self.core.eid
+        self.core.entity.eid
     }
 
     /// The SESSION's zid — the other half of that global id.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.core.filter.engine().zid()
+        self.core.entity.filter.engine().zid()
     }
 
     /// The cached borrow `z_publisher_keyexpr` hands back.
@@ -1967,7 +1965,7 @@ pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
 /// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`], or
 /// `None` when it carries nothing: a NULL `options`, which is the plain default
 /// as it is in pico, or one whose every field is empty. The put then sends from
-/// what its publisher was declared with, and no options are built for it.
+/// what its publisher was declared with, and the options built for it are not sent.
 ///
 /// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
 /// ownership transfer is unconditional once the call is made.
@@ -1978,33 +1976,48 @@ pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
 /// landed in R311y559 and the reason expired with it.
 ///
 /// The options borrow the moved attachment and encoding, which `held` holds for as long as the put
-/// runs.
+/// runs. They are built in `room`, where the put sends them from, and not for NULL options.
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
-unsafe fn publisher_put_options<'a>(
+unsafe fn publisher_put_options<'o, 'a>(
     options: *const z_publisher_put_options_t,
     held: &'a mut PutHeld,
-) -> Option<PublishOptions<'a>> {
+    room: &'o mut Option<PublishOptions<'a>>,
+) -> Option<&'o mut PublishOptions<'a>> {
     if options.is_null() {
         return None;
     }
-    let (opts, carried) = PutCarried {
+    let opts = room.insert(put_options());
+    PutCarried {
         encoding: (*options).encoding,
         timestamp: (*options).timestamp,
         attachment: (*options).attachment,
         source_info: (*options).source_info(),
     }
-    .fold(put_options(), held);
-    carried.then_some(opts)
+    .fold(opts, held)
+    .then_some(opts)
 }
 
 /// What a put holds for as long as it runs and its options borrow: the attachment and the encoding
 /// its options moved in, each sent from where it lies and let go when the put returns.
 #[derive(Default)]
 struct PutHeld {
-    attachment: Option<MovedBytes<'static>>,
-    encoding: Option<OwnedEncoding>,
+    attachment: core::mem::ManuallyDrop<Option<MovedBytes<'static>>>,
+    encoding: core::mem::ManuallyDrop<Option<OwnedEncoding>>,
+}
+
+impl Drop for PutHeld {
+    /// One body for every way out of both put doors: with the fields dropped by the compiler,
+    /// each return of each door held its own copy of both releases.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: each field is dropped here once, and nothing reads it after.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.attachment);
+            core::mem::ManuallyDrop::drop(&mut self.encoding);
+        }
+    }
 }
 
 /// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
@@ -2018,21 +2031,18 @@ struct PutCarried {
 }
 
 impl PutCarried {
-    /// `opts` with what the options carry, and whether they carried anything. The moved encoding
-    /// and attachment are consumed on every path; each is read where it lies, held in `held` for
-    /// as long as the options borrow it, so a put with an encoding copies none of it. One body for
-    /// both put doors, out of line so that neither export holds a copy of it.
+    /// Put what the options carry into `opts`, where they lie, and answer whether they carried
+    /// anything. The moved encoding and attachment are consumed on every path; each is read where
+    /// it lies, held in `held` for as long as the options borrow it, so a put with an encoding
+    /// copies none of it. One body for both put doors, out of line so that neither export holds a
+    /// copy of it.
     ///
     /// # Safety
     /// Each field must be null or valid as the options struct it was read from requires.
     #[inline(never)]
-    unsafe fn fold<'a>(
-        self,
-        mut opts: PublishOptions<'a>,
-        held: &'a mut PutHeld,
-    ) -> (PublishOptions<'a>, bool) {
-        held.attachment = read_moved_bytes(self.attachment);
-        held.encoding = crate::encoding::take_moved_encoding(self.encoding);
+    unsafe fn fold<'a>(self, opts: &mut PublishOptions<'a>, held: &'a mut PutHeld) -> bool {
+        *held.attachment = read_moved_bytes(self.attachment);
+        *held.encoding = crate::encoding::take_moved_encoding(self.encoding);
         let held: &'a PutHeld = held;
         let attachment = held.attachment.as_deref().map(ByteBuf::as_slice);
         let encoding = held.encoding.as_ref().map(OwnedEncoding::view);
@@ -2043,21 +2053,21 @@ impl PutCarried {
             || timestamp.is_some()
             || source_info.is_some();
         if let Some(attachment) = attachment {
-            opts = opts.with_attachment(attachment);
+            opts.set_attachment(attachment);
         }
         if let Some(encoding) = encoding {
-            opts = opts.with_encoding_ref(encoding);
+            opts.set_encoding_ref(encoding);
         }
         if let Some(ts) = timestamp {
-            opts = opts.with_timestamp(ts);
+            opts.set_timestamp(ts);
         }
         // A source info is read only where the option field exists, and the setter it reaches is
         // linked only there: without the unstable API the field is pico's absent value.
         #[cfg(feature = "unstable-api")]
         if let Some(si) = source_info {
-            opts = opts.with_source_info(si);
+            opts.set_source_info(si);
         }
-        (opts, carried)
+        carried
     }
 }
 
@@ -2095,7 +2105,7 @@ mod put_options_tests {
     #[test]
     fn a_put_and_a_delete_state_their_qos_through_one_body() {
         use super::{
-            session_delete_options, session_put_options, z_delete_options_default,
+            put_options, session_delete_options, session_put_options, z_delete_options_default,
             z_delete_options_t, z_put_options_default, z_put_options_t,
         };
         use wz_session_core::sample::SampleKind;
@@ -2115,8 +2125,10 @@ mod put_options_tests {
             del.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
             del.is_express = true;
             let mut held = PutHeld::default();
-            let stated_put = session_put_options(&put, &mut held);
-            let stated_del = session_delete_options(&del);
+            let mut stated_put = put_options();
+            session_put_options(&put, &mut held, &mut stated_put);
+            let mut stated_del = put_options();
+            session_delete_options(&del, &mut stated_del);
             assert!(stated_put.qos.is_some(), "the stated QoS is set");
             assert_eq!(stated_put.qos, stated_del.qos);
             assert_eq!(stated_put.reliability, stated_del.reliability);
@@ -2127,9 +2139,10 @@ mod put_options_tests {
             assert!(matches!(stated_put.kind, SampleKind::Put));
             assert!(matches!(stated_del.kind, SampleKind::Del));
             del.priority = 6;
+            let mut restated = put_options();
+            session_delete_options(&del, &mut restated);
             assert_ne!(
-                session_delete_options(&del).qos,
-                stated_put.qos,
+                restated.qos, stated_put.qos,
                 "the delete's own priority is read"
             );
         }
@@ -2153,13 +2166,13 @@ mod put_options_tests {
             reliability: Reliability::BestEffort,
             ..PublisherQos::pico_default()
         };
-        let call = put_options()
+        let mut sent = put_options()
             .with_attachment(&[7, 8])
             .with_encoding(EncodingHint {
                 packed_id: 4,
                 schema: None,
             });
-        let sent = declared.apply(call);
+        declared.apply(&mut sent);
         assert_eq!(sent.attachment, Some(&[7u8, 8][..]));
         assert_eq!(
             sent.encoding
@@ -2173,7 +2186,8 @@ mod put_options_tests {
             Reliability::BestEffort,
             "the publisher's QoS is laid over the call's"
         );
-        let bare = declared.apply(put_options());
+        let mut bare = put_options();
+        declared.apply(&mut bare);
         assert_eq!(
             bare.encoding
                 .as_ref()
@@ -2373,12 +2387,17 @@ mod put_options_tests {
         // SAFETY: each pointer handed over is null or points at a live value of its type, which
         // outlives the call.
         unsafe {
-            assert!(publisher_put_options(core::ptr::null(), &mut PutHeld::default()).is_none());
+            let mut held = PutHeld::default();
+            let mut room = None;
+            assert!(publisher_put_options(core::ptr::null(), &mut held, &mut room).is_none());
+            assert!(room.is_none(), "no options are built for NULL ones");
             let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
+            let mut held = PutHeld::default();
+            let mut room = None;
             assert!(
-                publisher_put_options(&options, &mut PutHeld::default()).is_none(),
+                publisher_put_options(&options, &mut held, &mut room).is_none(),
                 "default options carry nothing"
             );
             let mut stamp = z_timestamp_t {
@@ -2390,8 +2409,9 @@ mod put_options_tests {
             };
             options.timestamp = &mut stamp;
             let mut held = PutHeld::default();
-            let carried =
-                publisher_put_options(&options, &mut held).expect("a timestamp is carried");
+            let mut room = None;
+            let carried = publisher_put_options(&options, &mut held, &mut room)
+                .expect("a timestamp is carried");
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
         }
     }
@@ -2401,7 +2421,7 @@ mod put_options_tests {
     /// a session's put states beside them is kept, and the caller's moved bytes are spent.
     #[test]
     fn both_put_doors_carry_a_moved_attachment_and_spend_it() {
-        use super::{session_put_options, z_put_options_default, z_put_options_t};
+        use super::{put_options, session_put_options, z_put_options_default, z_put_options_t};
         use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
         let moved = |bytes: &[u8]| {
             let mut owned = z_owned_bytes_t::null_value();
@@ -2430,7 +2450,8 @@ mod put_options_tests {
             put.timestamp = &mut stamp;
             put.is_express = true;
             let mut held = PutHeld::default();
-            let carried = session_put_options(&put, &mut held);
+            let mut carried = put_options();
+            session_put_options(&put, &mut held, &mut carried);
             assert_eq!(carried.attachment, Some(&b"session"[..]));
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
             assert_eq!(
@@ -2446,11 +2467,67 @@ mod put_options_tests {
             let mut options = options.assume_init();
             options.attachment = &mut attachment;
             let mut held = PutHeld::default();
-            let carried =
-                publisher_put_options(&options, &mut held).expect("an attachment is carried");
+            let mut room = None;
+            let carried = publisher_put_options(&options, &mut held, &mut room)
+                .expect("an attachment is carried");
             assert_eq!(carried.attachment, Some(&b"publisher"[..]));
             assert!(carried.timestamp.is_none());
             assert!(attachment._this.handle.is_null(), "the attachment is spent");
+        }
+    }
+
+    /// What a put holds is let go when its hold is dropped, once, and not while the options that
+    /// borrow it are sent. Turned red by a drop of the hold that leaves the moved attachment held.
+    #[test]
+    fn a_puts_hold_lets_its_moved_attachment_go_when_it_is_dropped() {
+        use super::{put_options, PutCarried};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use core::ffi::c_void;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count(_data: *mut c_void, context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut bytes = *b"held";
+        let released = AtomicUsize::new(0);
+        let context = &released as *const AtomicUsize as *mut c_void;
+        // SAFETY: `bytes` and `released` outlive the payload made over them, and every pointer
+        // handed over is null or points at a live value of its type.
+        unsafe {
+            let mut owned = z_owned_bytes_t::null_value();
+            let made = crate::platform::z_bytes_from_buf(
+                &mut owned,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                Some(count),
+                context,
+            );
+            assert_eq!(made, crate::result::Z_OK);
+            let mut attachment = z_moved_bytes_t { _this: owned };
+            let mut held = PutHeld::default();
+            let mut opts = put_options();
+            let carried = PutCarried {
+                encoding: core::ptr::null_mut(),
+                timestamp: core::ptr::null_mut(),
+                attachment: &mut attachment,
+                source_info: core::ptr::null_mut(),
+            }
+            .fold(&mut opts, &mut held);
+            assert!(carried, "an attachment is carried");
+            assert_eq!(opts.attachment, Some(&b"held"[..]));
+            drop(opts);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                0,
+                "held while the put runs"
+            );
+            drop(held);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "let go once, with the hold"
+            );
         }
     }
 
@@ -2477,15 +2554,18 @@ mod put_options_tests {
             let mut options = options.assume_init();
             options.source_info = &mut info;
             let mut held = PutHeld::default();
-            let carried =
-                publisher_put_options(&options, &mut held).expect("a source info is carried");
-            let source = carried.source_info.expect("the source info");
+            let mut room = None;
+            let carried = publisher_put_options(&options, &mut held, &mut room)
+                .expect("a source info is carried");
+            let source = carried.source_info.as_ref().expect("the source info");
             assert_eq!((source.eid, source.sn), (0x5150, 9001));
             assert_eq!(source.zid, [0xa1; 16]);
             let mut unset = z_source_info_t::empty();
             options.source_info = &mut unset;
+            let mut held = PutHeld::default();
+            let mut room = None;
             assert!(
-                publisher_put_options(&options, &mut PutHeld::default()).is_none(),
+                publisher_put_options(&options, &mut held, &mut room).is_none(),
                 "pico's null source info is no source info"
             );
         }
@@ -2497,7 +2577,7 @@ mod put_options_tests {
     #[test]
     fn without_the_unstable_api_no_put_or_delete_carries_a_source_info() {
         use super::{
-            session_delete_options, session_put_options, z_delete_options_default,
+            put_options, session_delete_options, session_put_options, z_delete_options_default,
             z_delete_options_t, z_put_options_default, z_put_options_t,
         };
         // SAFETY: each pointer handed over is null or points at a live value of its type, which
@@ -2506,18 +2586,20 @@ mod put_options_tests {
             let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
             z_put_options_default(put.as_mut_ptr());
             let put = put.assume_init();
-            assert!(session_put_options(&put, &mut PutHeld::default())
-                .source_info
-                .is_none());
-            assert!(
-                session_put_options(core::ptr::null(), &mut PutHeld::default())
-                    .source_info
-                    .is_none()
-            );
+            let mut held = PutHeld::default();
+            let mut stated = put_options();
+            session_put_options(&put, &mut held, &mut stated);
+            assert!(stated.source_info.is_none());
+            let mut held = PutHeld::default();
+            let mut stated = put_options();
+            session_put_options(core::ptr::null(), &mut held, &mut stated);
+            assert!(stated.source_info.is_none());
             let mut delete = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
             z_delete_options_default(delete.as_mut_ptr());
             let delete = delete.assume_init();
-            assert!(session_delete_options(&delete).source_info.is_none());
+            let mut stated = put_options();
+            session_delete_options(&delete, &mut stated);
+            assert!(stated.source_info.is_none());
         }
     }
 }
@@ -2764,7 +2846,8 @@ pub(crate) unsafe fn source_info_hint_of(
     ))
 }
 
-/// Fold a caller's `z_put_options_t` into wz's [`PublishOptions`].
+/// Fold a caller's `z_put_options_t` into `opts`, where they lie: `opts` start as
+/// [`put_options`].
 ///
 /// Consumes the moved `encoding` and `attachment` on EVERY path — pico's
 /// ownership transfer is unconditional once the call is made — and a NULL
@@ -2784,17 +2867,17 @@ pub(crate) unsafe fn source_info_hint_of(
 unsafe fn session_put_options<'a>(
     options: *const z_put_options_t,
     held: &'a mut PutHeld,
-) -> PublishOptions<'a> {
-    let opts = put_options();
+    opts: &mut PublishOptions<'a>,
+) {
     if options.is_null() {
-        return opts;
+        return;
     }
     // The moved values are consumed first, before anything else is read.
     #[cfg(feature = "unstable-api")]
     let source_info = (*options).source_info;
     #[cfg(not(feature = "unstable-api"))]
     let source_info = core::ptr::null_mut();
-    let (opts, _) = PutCarried {
+    PutCarried {
         encoding: (*options).encoding,
         timestamp: (*options).timestamp,
         attachment: (*options).attachment,
@@ -2808,21 +2891,20 @@ unsafe fn session_put_options<'a>(
         reliability: (*options).reliability(),
         destination: (*options).allowed_destination(),
     }
-    .apply(opts)
+    .apply(opts);
 }
 
-/// Fold a caller's `z_delete_options_t` into wz's [`PublishOptions`], as the
-/// Del kind.
+/// Fold a caller's `z_delete_options_t` into `opts`, where they lie, as the Del kind: `opts`
+/// start as [`put_options`].
 ///
 /// # Safety
 /// `options` must be null or a valid delete-options struct.
-unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishOptions<'static> {
-    let mut opts = put_options();
+unsafe fn session_delete_options(options: *const z_delete_options_t, opts: &mut PublishOptions) {
     opts.kind = SampleKind::Del;
     if options.is_null() {
-        return opts;
+        return;
     }
-    opts = StatedQos {
+    StatedQos {
         priority: (*options).priority,
         congestion_control: (*options).congestion_control,
         is_express: (*options).is_express,
@@ -2831,13 +2913,12 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
     }
     .apply(opts);
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-        opts = opts.with_timestamp(ts);
+        opts.set_timestamp(ts);
     }
     #[cfg(feature = "unstable-api")]
     if let Some(si) = source_info_hint_of((*options).source_info) {
-        opts = opts.with_source_info(si);
+        opts.set_source_info(si);
     }
-    opts
 }
 
 /// The QoS and the destination a session's put and delete state, read the same way from
@@ -2851,15 +2932,15 @@ struct StatedQos {
 }
 
 impl StatedQos {
-    /// `opts` with the stated QoS and destination. One body for both session doors, out of line
-    /// so that neither holds a copy of the five setters and the moves of the options between them.
+    /// Lay the stated QoS and destination over `opts`, where they lie. One body for both session
+    /// doors, out of line so that neither holds a copy of the five setters.
     #[inline(never)]
-    fn apply(self, opts: PublishOptions<'_>) -> PublishOptions<'_> {
-        opts.with_priority(crate::qos::priority_from_pico(self.priority))
-            .with_congestion_control(push_congestion_from_pico(self.congestion_control))
-            .with_express(self.is_express)
-            .with_reliability(reliability_from_pico(self.reliability))
-            .with_locality(self.destination)
+    fn apply(self, opts: &mut PublishOptions<'_>) {
+        opts.set_priority(crate::qos::priority_from_pico(self.priority));
+        opts.set_congestion_control(push_congestion_from_pico(self.congestion_control));
+        opts.set_express(self.is_express);
+        opts.reliability = reliability_from_pico(self.reliability);
+        opts.allowed_destination = self.destination;
     }
 }
 
@@ -2902,11 +2983,12 @@ pub unsafe extern "C" fn z_put(
 ) -> ZResult {
     guarded(|| {
         let mut held = PutHeld::default();
-        let resolved = session_put_options(options, &mut held);
+        let mut opts = put_options();
+        session_put_options(options, &mut held, &mut opts);
         let Some(buf) = read_moved_bytes(payload) else {
             return Z_ERR_NULL;
         };
-        session_publish(zs, keyexpr, &buf, &resolved)
+        session_publish(zs, keyexpr, &buf, &opts)
     })
 }
 
@@ -2926,7 +3008,11 @@ pub unsafe extern "C" fn z_delete(
     keyexpr: *const z_loaned_keyexpr_t,
     options: *const z_delete_options_t,
 ) -> ZResult {
-    guarded(|| session_publish(zs, keyexpr, &[], &session_delete_options(options)))
+    guarded(|| {
+        let mut opts = put_options();
+        session_delete_options(options, &mut opts);
+        session_publish(zs, keyexpr, &[], &opts)
+    })
 }
 
 /// Publish a DELETE through a declared publisher (pico `z_publisher_delete`).
@@ -2951,14 +3037,14 @@ pub unsafe extern "C" fn z_publisher_delete(
         opts.kind = SampleKind::Del;
         if !options.is_null() {
             if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-                opts = opts.with_timestamp(ts);
+                opts.set_timestamp(ts);
             }
             #[cfg(feature = "unstable-api")]
             if let Some(si) = source_info_hint_of((*options).source_info) {
-                opts = opts.with_source_info(si);
+                opts.set_source_info(si);
             }
         }
-        state.publish(&[], Some(opts))
+        state.publish(&[], Some(&mut opts))
     })
 }
 
@@ -3064,13 +3150,18 @@ pub unsafe extern "C" fn z_declare_publisher(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let core = match PlainPublisher::declare(&session, ke, declared_of(keyexpr), declared) {
-            Ok(core) => core,
-            Err(rc) => return rc,
-        };
-        let state = slot.fill(PublisherState {
-            core,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+        let entity =
+            match PlainPublisher::declare_entity(&session, ke, declared_of(keyexpr), &declared) {
+                Ok(entity) => entity,
+                Err(rc) => return rc,
+            };
+        // What can be refused is declared above; the publisher is made where it lies, so the
+        // declared entity is moved once, into its place.
+        let state = slot.fill_in_place(|at: *mut PublisherState| {
+            at.write(PublisherState {
+                core: PlainPublisher { entity, declared },
+                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            })
         });
         (*state).bind();
         *publisher = z_owned_publisher_t {
@@ -3105,7 +3196,8 @@ pub unsafe extern "C" fn z_publisher_put(
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
         let mut held = PutHeld::default();
-        state.publish(&buf, publisher_put_options(options, &mut held))
+        let mut room = None;
+        state.publish(&buf, publisher_put_options(options, &mut held, &mut room))
     })
 }
 
