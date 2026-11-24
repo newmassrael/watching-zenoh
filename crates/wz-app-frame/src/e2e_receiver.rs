@@ -40,6 +40,7 @@
 //! gives, and never grow. A fixed-memory image will take them from the static
 //! tables a generator writes from the deployment's catalogue.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::e2e_frame::{logical_value, open_view, BuildError, OpenedView, Values};
@@ -241,7 +242,8 @@ struct Stream {
 /// The receiving judge of one message.
 #[derive(Debug, Clone)]
 pub struct Receiver {
-    profile: Profile,
+    /// Shared, not copied, as a sender's is.
+    profile: Arc<Profile>,
     /// The logical value the identifier field must carry, when it is judged.
     expected_ident: Option<u64>,
     /// Whether the slots are bound by a list (else taken in arrival order).
@@ -261,7 +263,19 @@ impl Receiver {
     /// own, up to its `max_gap_ceiling`. `slot_limit` is the most sender slots
     /// the build allows.
     pub fn new(
-        profile: Profile,
+        profile: impl Into<Arc<Profile>>,
+        expected: &Values,
+        keying: Keying,
+        max_gap: Option<u64>,
+        slot_limit: usize,
+    ) -> Result<Self, NewError> {
+        Self::with_profile(profile.into(), expected, keying, max_gap, slot_limit)
+    }
+
+    /// [`Self::new`] for a profile already shared: one body, whichever form
+    /// the caller held the profile in.
+    fn with_profile(
+        profile: Arc<Profile>,
         expected: &Values,
         keying: Keying,
         max_gap: Option<u64>,

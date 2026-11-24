@@ -41,6 +41,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::e2e_frame::{build, crc_over, feed, write_be, BuildError, Values};
@@ -195,7 +196,9 @@ pub struct Protected {
 /// The sender of one message under one profile.
 #[derive(Debug, Clone)]
 pub struct StreamSender {
-    profile: Profile,
+    /// Shared, not copied: a profile does not change once read, and a catalog
+    /// hands one to every sender and receiver of its message.
+    profile: Arc<Profile>,
     /// The header every frame starts from, made when the sender is: each field written from the
     /// values, the counter, the length and the CRC written again for each frame.
     header: Vec<u8>,
@@ -217,7 +220,17 @@ impl StreamSender {
     /// derived field with no address, are refused now and not at the first
     /// send.
     pub fn new(
-        profile: Profile,
+        profile: impl Into<Arc<Profile>>,
+        values: Values,
+        options: SenderOptions,
+    ) -> Result<Self, SendError> {
+        Self::with_profile(profile.into(), values, options)
+    }
+
+    /// [`Self::new`] for a profile already shared: one body, whichever form
+    /// the caller held the profile in.
+    fn with_profile(
+        profile: Arc<Profile>,
         values: Values,
         options: SenderOptions,
     ) -> Result<Self, SendError> {
