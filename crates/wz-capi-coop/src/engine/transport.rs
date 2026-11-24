@@ -11,10 +11,10 @@ use wz_runtime_coop::face_life::{FaceRole, Turn};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::FaceRead;
+use wz_runtime_coop::locator_text::parse_locator;
 use wz_runtime_coop::session_drive::{LinkWait, PendingDial};
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
-use wz_session_mcu::dial::parse_locator;
 
 /// The transport's part of [`Core`]: the session's links and what their handshakes and
 /// receives are handed.

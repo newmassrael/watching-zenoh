@@ -445,6 +445,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/link_cells.rs` | S5 | |
 | `crates/wz-runtime-coop/src/link_storage.rs` | S5 | |
 | `crates/wz-runtime-coop/src/local.rs` | S5 | |
+| `crates/wz-runtime-coop/src/locator_text.rs` | S5 | |
 | `crates/wz-runtime-coop/src/reassembly_rx.rs` | S5 | |
 | `crates/wz-runtime-coop/src/runtime_impl.rs` | S5 | |
 | `crates/wz-runtime-coop/src/session_drive.rs` | S5 | |

@@ -123,6 +123,8 @@ use wz_session_core::locality::Locality;
 use wz_session_core::locator_directory::LocatorText;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
@@ -147,8 +149,6 @@ use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
-#[cfg(feature = "listen")]
-use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::McuActions;
 #[cfg(feature = "queryable")]
 use {
@@ -488,7 +488,7 @@ impl EndpointRefusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The endpoint does not parse as a locator this build can dial or listen on.
-    Locator(wz_session_mcu::connect_manager::DialRefused),
+    Locator(wz_runtime_coop::locator_text::DialRefused),
     /// The network opened no link, listener or group for it.
     Link(LinkOpenError),
     /// The handshake ended with a close reason.
@@ -977,7 +977,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint.as_ref()) else {
+        let Ok(at) = wz_runtime_coop::locator_text::parse_listen_locator(endpoint.as_ref()) else {
             continue;
         };
         let transport = match at.proto {

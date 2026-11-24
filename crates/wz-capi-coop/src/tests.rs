@@ -2487,8 +2487,8 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
 #[test]
 fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
     use crate::{EndpointRefusal, Refusal};
+    use wz_runtime_coop::locator_text::DialRefused;
     use wz_runtime_coop::session_drive::LinkOpenError;
-    use wz_session_mcu::connect_manager::DialRefused;
 
     let refusal = |endpoint: &str, why| EndpointRefusal::new(endpoint, why).to_string();
     assert_eq!(
