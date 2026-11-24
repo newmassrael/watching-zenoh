@@ -104,22 +104,22 @@ fn waits_for_buffer(link: &CellRc<dyn SessionDatagramLink>) -> bool {
 
 impl<S> Wire<S> {
     /// The link whose session half is `session`, run by `task`: `link` is what the session's
-    /// step reads, behind whatever gates the session put on it, and `input` and `room` what its
-    /// owner waits on for its input and its room, read off the link without the gates
+    /// step reads, behind whatever gates the session put on it, and `input_wait` and `room_wait`
+    /// what its owner waits on for its input and its room, read off the link without the gates
     /// ([`SessionDatagramLink::input_wait`], [`SessionDatagramLink::room_wait`]).
     pub fn new(
         session: S,
         task: CoopLocalJoinHandle<DriverOutcome>,
         link: CellRc<dyn SessionDatagramLink>,
-        input: Option<WaitOn>,
-        room: Option<WaitOn>,
+        input_wait: Option<WaitOn>,
+        room_wait: Option<WaitOn>,
     ) -> Self {
         Self {
             session,
             task,
             link,
-            input,
-            room,
+            input: input_wait,
+            room: room_wait,
         }
     }
 
@@ -975,8 +975,8 @@ mod tests {
             local.run_until_idle();
         }
         let link = CellRc::boxed(Quiet { holds }).into_link();
-        let (input, room) = (link.input_wait(), link.room_wait());
-        Wire::new(session, task, link, input, room)
+        let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+        Wire::new(session, task, link, input_wait, room_wait)
     }
 
     /// A link its owner waits on by `on`, owing its stack a write when `owes`.
@@ -1005,8 +1005,8 @@ mod tests {
     fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
         let task = local.spawn_local(async { DriverOutcome::Terminated });
         let link = CellRc::boxed(Waited { on, owes }).into_link();
-        let (input, room) = (link.input_wait(), link.room_wait());
-        Wire::new(session(true, None), task, link, input, room)
+        let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
+        Wire::new(session(true, None), task, link, input_wait, room_wait)
     }
 
     /// What a wait of a stack was asked last: how many entries, for how long.
