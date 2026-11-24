@@ -23,13 +23,6 @@ use sce_rust_runtime::Engine;
 use wz_runtime_core::TimeSource;
 
 use crate::driver_loop::DriverLoopOutcome;
-// The decode and judgement of a unit (`decode_unit_in`, `decide_unit_in`) are the only readers of
-// this and of `InboundFrame` below, and are compiled where one of their callers is.
-#[cfg(any(
-    feature = "alloc",
-    all(feature = "codec-frame", feature = "session-slot")
-))]
-use crate::inbound::inbound_to_fsm_event;
 use crate::lease::LeaseCheckOutcome;
 #[cfg(feature = "transport-keepalive")]
 use crate::link::BoxedLinkDriver;
@@ -721,146 +714,116 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     // The message is read in the slot the caller decoded it into: taking it by value, or a
     // result that held it, would be a slot of this frame the size of the message.
     match parsed {
-        Ok(_) => match inbound_to_fsm_event(frame) {
-            Some(event) => decide_admitted(
-                event,
-                &frame.control_facts(),
-                frame.control_chain(),
-                to_engine,
-                actions,
-                engine,
-            ),
-            None => match take_decoded(frame) {
-                #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-                InboundFrame::Frame {
-                    reliable,
-                    sn,
-                    payload,
-                    has_ext,
-                    extensions,
-                    priority,
-                } => {
-                    // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
-                    // a session that did NOT negotiate QoS is a wire-spec
-                    // violation (a peer must not prioritize without a
-                    // negotiated `is_qos`). A QoS session accepts every
-                    // priority on its own conduit.
-                    //
-                    // R2927 — and it is LINK-FATAL, as upstream's is, where
-                    // wz used to drop the frame and keep the link: see
-                    // [`crate::link::LostCause::UnknownPriority`]. Every
-                    // build checks, since the priority is decoded in every
-                    // build; a build without `transport-qos` negotiates none.
-                    //
-                    // R311ke — per-channel RX SN gate (pico
-                    // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
-                    // / duplicate / reordered frame drops before its
-                    // payload reaches the application layer. R311y215 —
-                    // the gate is per-(priority, reliable) conduit. The
-                    // typed outcome lets `report_outcome_reassembling`
-                    // clear the channel's in-progress chain (dbuf-clear
-                    // parity) and observers count the drop.
-                    //
-                    // Both gates are [`refuse_frame`], which the in-place
-                    // receive path ([`dispatch_datagram`]) runs too.
-                    if let Some(refused) = refuse_frame(actions, to_engine, priority, reliable, sn)
-                    {
-                        // The frame's records are dropped and the batch goes on behind them,
-                        // unless the refusal ended the link.
-                        if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
-                            park_the_batch_after_a_refused_frame(actions, &payload);
+        Ok(_) => {
+            // Made once for the event and the checks: making them reads the zid.
+            let facts = frame.control_facts();
+            match crate::inbound::control_event(frame.ext_admission(), &facts) {
+                Some(event) => decide_admitted(
+                    event,
+                    &facts,
+                    frame.control_chain(),
+                    to_engine,
+                    actions,
+                    engine,
+                ),
+                None => match take_decoded(frame) {
+                    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
+                    InboundFrame::Frame {
+                        reliable,
+                        sn,
+                        payload,
+                        has_ext,
+                        extensions,
+                        priority,
+                    } => {
+                        // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
+                        // a session that did NOT negotiate QoS is a wire-spec
+                        // violation (a peer must not prioritize without a
+                        // negotiated `is_qos`). A QoS session accepts every
+                        // priority on its own conduit.
+                        //
+                        // R2927 — and it is LINK-FATAL, as upstream's is, where
+                        // wz used to drop the frame and keep the link: see
+                        // [`crate::link::LostCause::UnknownPriority`]. Every
+                        // build checks, since the priority is decoded in every
+                        // build; a build without `transport-qos` negotiates none.
+                        //
+                        // R311ke — per-channel RX SN gate (pico
+                        // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
+                        // / duplicate / reordered frame drops before its
+                        // payload reaches the application layer. R311y215 —
+                        // the gate is per-(priority, reliable) conduit. The
+                        // typed outcome lets `report_outcome_reassembling`
+                        // clear the channel's in-progress chain (dbuf-clear
+                        // parity) and observers count the drop.
+                        //
+                        // Both gates are [`refuse_frame`], which the in-place
+                        // receive path ([`dispatch_datagram`]) runs too.
+                        if let Some(refused) =
+                            refuse_frame(actions, to_engine, priority, reliable, sn)
+                        {
+                            // The frame's records are dropped and the batch goes on behind them,
+                            // unless the refusal ended the link.
+                            if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
+                                park_the_batch_after_a_refused_frame(actions, &payload);
+                            }
+                            return refused;
                         }
-                        return refused;
-                    }
-                    // The lane of a data stream: a frame every record of which is a plain
-                    // Put is reported as where its records lie, and the generic decode
-                    // below never runs for it. One record that is anything else sends the
-                    // whole frame down the generic path, so this reads what the codec
-                    // reads or declines. The network counters count each record as its
-                    // owned message (`count_rx_plain_puts`). Not on the fixed backing, whose
-                    // bounded keyexpr buffer cannot hold every key a Put names.
-                    #[cfg(all(feature = "pubsub-put", not(feature = "bounded-heapless")))]
-                    if actions.plain_put_lane_open() {
-                        if let Some(puts) = crate::plain_push::read_plain_puts(&payload) {
-                            #[cfg(feature = "transport-stats")]
-                            count_rx_plain_puts(actions, &payload, &puts);
-                            return DriverLoopOutcome::FramePlainPuts {
-                                reliable,
-                                sn,
-                                priority,
-                                payload,
-                                puts,
-                            };
-                        }
-                    }
-                    match parse_frame_payload_out_of_line(&payload) {
-                        // `payload` is a range of the unit when the unit was
-                        // lent, so the messages below are ranges of it too.
-                        Ok(mut messages) => {
-                            park_the_batch_after_the_frame(actions, &mut messages);
-                            DriverLoopOutcome::FramePayload {
-                                reliable,
-                                sn,
-                                messages: crate::driver_loop::frame_records(
-                                    count_rx_network_messages(actions, messages),
-                                ),
-                                has_ext,
-                                extensions,
-                                // R311y221 — the true decoded band (already
-                                // in scope from the InboundFrame::Frame
-                                // destructure above; gates the RX conduit at
-                                // `admit_rx_frame_sn`). DEFAULT under non-QoS.
-                                priority,
+                        // The lane of a data stream: a frame every record of which is a plain
+                        // Put is reported as where its records lie, and the generic decode
+                        // below never runs for it. One record that is anything else sends the
+                        // whole frame down the generic path, so this reads what the codec
+                        // reads or declines. The network counters count each record as its
+                        // owned message (`count_rx_plain_puts`). Not on the fixed backing, whose
+                        // bounded keyexpr buffer cannot hold every key a Put names.
+                        #[cfg(all(feature = "pubsub-put", not(feature = "bounded-heapless")))]
+                        if actions.plain_put_lane_open() {
+                            if let Some(puts) = crate::plain_push::read_plain_puts(&payload) {
+                                #[cfg(feature = "transport-stats")]
+                                count_rx_plain_puts(actions, &payload, &puts);
+                                return DriverLoopOutcome::FramePlainPuts {
+                                    reliable,
+                                    sn,
+                                    priority,
+                                    payload,
+                                    puts,
+                                };
                             }
                         }
-                        Err(parse_err) => {
-                            *to_engine = Some(E::FramingError);
-                            DriverLoopOutcome::ParseError(parse_err)
+                        match parse_frame_payload_out_of_line(&payload) {
+                            // `payload` is a range of the unit when the unit was
+                            // lent, so the messages below are ranges of it too.
+                            Ok(mut messages) => {
+                                park_the_batch_after_the_frame(actions, &mut messages);
+                                DriverLoopOutcome::FramePayload {
+                                    reliable,
+                                    sn,
+                                    messages: crate::driver_loop::frame_records(
+                                        count_rx_network_messages(actions, messages),
+                                    ),
+                                    has_ext,
+                                    extensions,
+                                    // R311y221 — the true decoded band (already
+                                    // in scope from the InboundFrame::Frame
+                                    // destructure above; gates the RX conduit at
+                                    // `admit_rx_frame_sn`). DEFAULT under non-QoS.
+                                    priority,
+                                }
+                            }
+                            Err(parse_err) => {
+                                *to_engine = Some(E::FramingError);
+                                DriverLoopOutcome::ParseError(parse_err)
+                            }
                         }
                     }
-                }
-                #[cfg(feature = "codec-keep-alive")]
-                InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
-                // R311im — surface the decoded fragment to the drive
-                // loop, which owns the stateful ReassemblyDispatcher +
-                // clock. This pure helper cannot reassemble (no slot
-                // pool, no `now_ms`), so it hands the fragment up.
-                #[cfg(all(feature = "alloc", feature = "reassembly"))]
-                InboundFrame::Fragment {
-                    reliable,
-                    sn,
-                    more,
-                    payload,
-                    has_ext,
-                    extensions,
-                    priority,
-                    markers,
-                } => {
-                    // R311y215 (SN-safety F5) / R2927 — as with Frame, a
-                    // prioritized fragment on a non-QoS session is link-fatal
-                    // (upstream's fragment arm bails the same way).
-                    if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
-                        *to_engine = Some(E::LinkLost);
-                        return DriverLoopOutcome::LinkLost(
-                            crate::link::LostCause::UnknownPriority,
-                        );
-                    }
-                    // R311ke — fragments ride the same per-(priority,
-                    // reliable) conduit SN counter as frames (pico gates
-                    // them through the same `_z_sn_precedes`,
-                    // rx.c:160-176), so the gate must see them too or a
-                    // frame following a fragment chain would compare
-                    // against a stale baseline. The chain-level
-                    // ring-consecutive check stays in the
-                    // ReassemblyDispatcher (a forward GAP passes here
-                    // and aborts there, exactly pico's two-stage check),
-                    // unless the `reliable-gap-reconnect` policy ends the
-                    // link on it (`refuse_by_sn`).
-                    if let Some(refused) = refuse_by_sn(actions, to_engine, priority, reliable, sn)
-                    {
-                        return refused;
-                    }
-                    DriverLoopOutcome::Fragment {
+                    #[cfg(feature = "codec-keep-alive")]
+                    InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
+                    // R311im — surface the decoded fragment to the drive
+                    // loop, which owns the stateful ReassemblyDispatcher +
+                    // clock. This pure helper cannot reassemble (no slot
+                    // pool, no `now_ms`), so it hands the fragment up.
+                    #[cfg(all(feature = "alloc", feature = "reassembly"))]
+                    InboundFrame::Fragment {
                         reliable,
                         sn,
                         more,
@@ -869,28 +832,72 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         extensions,
                         priority,
                         markers,
+                    } => {
+                        // R311y215 (SN-safety F5) / R2927 — as with Frame, a
+                        // prioritized fragment on a non-QoS session is link-fatal
+                        // (upstream's fragment arm bails the same way).
+                        if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
+                            *to_engine = Some(E::LinkLost);
+                            return DriverLoopOutcome::LinkLost(
+                                crate::link::LostCause::UnknownPriority,
+                            );
+                        }
+                        // R311ke — fragments ride the same per-(priority,
+                        // reliable) conduit SN counter as frames (pico gates
+                        // them through the same `_z_sn_precedes`,
+                        // rx.c:160-176), so the gate must see them too or a
+                        // frame following a fragment chain would compare
+                        // against a stale baseline. The chain-level
+                        // ring-consecutive check stays in the
+                        // ReassemblyDispatcher (a forward GAP passes here
+                        // and aborts there, exactly pico's two-stage check),
+                        // unless the `reliable-gap-reconnect` policy ends the
+                        // link on it (`refuse_by_sn`).
+                        if let Some(refused) =
+                            refuse_by_sn(actions, to_engine, priority, reliable, sn)
+                        {
+                            return refused;
+                        }
+                        DriverLoopOutcome::Fragment {
+                            reliable,
+                            sn,
+                            more,
+                            payload,
+                            has_ext,
+                            extensions,
+                            priority,
+                            markers,
+                        }
                     }
-                }
-                // A build with no accepting role has no event for a peer's InitSyn or OpenSyn: it
-                // does not negotiate with the peer, and drops the frame silently, as it drops any
-                // frame the admission refuses (no Close frame: anti-amplification).
-                #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
-                InboundFrame::Init { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
-                InboundFrame::Open { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
-                // Every other message `inbound_to_fsm_event` projects to an event (a handshake
-                // message, a Close, a JOIN, transport OAM, a network envelope, an unknown id), so
-                // the arm above took it; one it did not is judged as the framing error it projects to.
-                _ => decide_admitted(
-                    E::FramingError,
-                    &frame.control_facts(),
-                    frame.control_chain(),
-                    to_engine,
-                    actions,
-                    engine,
-                ),
-            },
-        },
+                    // A build with no accepting role has no event for a peer's InitSyn or
+                    // OpenSyn: it does not negotiate with the peer, and drops the frame silently,
+                    // as it drops any frame the admission refuses (no Close frame:
+                    // anti-amplification).
+                    #[cfg(all(
+                        feature = "codec-init-body",
+                        not(feature = "session-unicast-accept")
+                    ))]
+                    InboundFrame::Init { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
+                    #[cfg(all(
+                        feature = "codec-open-body",
+                        not(feature = "session-unicast-accept")
+                    ))]
+                    InboundFrame::Open { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
+                    // Every other message `inbound::control_event` projects to an event (a
+                    // handshake message, a Close, a JOIN, transport OAM, a network envelope, an
+                    // unknown id), so the arm above took it; one it did not is judged as the
+                    // framing error it projects to.
+                    _ => decide_admitted(
+                        E::FramingError,
+                        &frame.control_facts(),
+                        frame.control_chain(),
+                        to_engine,
+                        actions,
+                        engine,
+                    ),
+                },
+            }
+        }
         Err(err) => {
             *to_engine = Some(E::FramingError);
             DriverLoopOutcome::ParseError(err)
@@ -939,13 +946,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
         }
     }
     // The peer's chain is read once for every reader below: its patch level and its region
-    // identity off an Init in one walk (some for every Init), and, for the readers of a slice of
-    // owned entries that the extensions a build with an allocator negotiates take, the chain
-    // made owned once.
+    // identity off an Init as one walk answers them (some for every Init; a chain read where it
+    // lies answers what the walk of its read found), and, for the readers of a slice of owned
+    // entries that the extensions a build with an allocator negotiates take, the chain made owned
+    // once.
     #[cfg(feature = "codec-init-body")]
     let (peer_patch, peer_region) = match facts {
         crate::inbound::ControlFacts::Init(_) => {
-            let (patch, region) = crate::extregion::peer_patch_and_region_in(chain.entries());
+            let (patch, region) = chain.patch_and_region();
             (Some(patch), Some(region))
         }
         _ => (None, None),
@@ -1155,14 +1163,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // refused Open seeds no SN and adopts no lease.
     //
     // An OpenAck is admitted, its bound refused or taken and the rest of it taken in one hold of
-    // the facts (`admit_open_ack_in`); it is dropped silently, as any frame not admitted is, when
+    // the facts (`admit_open_ack`); it is dropped silently, as any frame not admitted is, when
     // none is awaited (R2782: a replay after `Established` was measured to reset the RX
     // baseline).
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { is_ack: false, .. }) =
         facts
     {
-        if !actions.admit_peer_remote_bound_in(chain.entries()) {
+        if !actions.admit_read_peer_remote_bound(chain.remote_bound()) {
             *to_engine = Some(E::EstablishmentExtRejected);
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
@@ -1176,7 +1184,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     }) = facts
     {
         use crate::session_actions::OpenAckAdmission as A;
-        match actions.admit_open_ack_in(*lease, *initial_sn, chain.entries()) {
+        match actions.admit_open_ack(*lease, *initial_sn, chain.remote_bound()) {
             A::Taken => {}
             A::NotAwaited => return DriverLoopOutcome::SideEffectOnly,
             A::BoundRefused => {
@@ -1430,7 +1438,9 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     }) = facts
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
-        if engine.get_current_state() == S::SentInitSyn && !actions.init_ack_zid_acceptable(zid) {
+        if engine.get_current_state() == S::SentInitSyn
+            && !actions.init_ack_zid_acceptable(zid.as_deref().unwrap_or_default())
+        {
             *to_engine = Some(E::FramingError);
             return DriverLoopOutcome::InitAckPeerMismatch;
         }
@@ -1460,7 +1470,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             }) if engine.get_current_state()
                 == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitSyn =>
             {
-                actions.link_admitted(zid)
+                actions.link_admitted(zid.as_deref().unwrap_or_default())
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {

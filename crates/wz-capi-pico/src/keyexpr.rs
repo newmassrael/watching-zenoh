@@ -150,8 +150,9 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
 /// session that is gone gives nothing back. This object of the program's is what names the
 /// session; a key handed to the session's own tables holds the bare id (`Self::share_on`).
 pub(crate) struct WireDeclaration {
-    /// The session the declaration was made on.
-    session: Weak<Engine>,
+    /// The session the declaration was made on. Let go of only by the drop, so a holder's drop
+    /// glue is the one call to it.
+    session: ManuallyDrop<Weak<Engine>>,
     /// Taken only by the drop.
     hold: ManuallyDrop<KeyHold>,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
@@ -167,7 +168,7 @@ impl WireDeclaration {
         prefix_len: usize,
     ) -> Self {
         Self {
-            session: Arc::downgrade(shared),
+            session: ManuallyDrop::new(Arc::downgrade(shared)),
             hold: ManuallyDrop::new(KeyHold::taken(mapping_id)),
             prefix_len,
         }
@@ -209,7 +210,7 @@ impl Clone for WireDeclaration {
 
 impl Drop for WireDeclaration {
     // Out of line, as `KeyText`'s drop is: every drop of a declared key reaches it, and each copy
-    // inlined would carry the session's upgrade and the release of the hold.
+    // inlined would carry the session's upgrade, the release of the hold and the weak count.
     #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the hold is taken here, once, and the field is not read again.
@@ -218,6 +219,8 @@ impl Drop for WireDeclaration {
             Some(engine) => hold.release(Arc::as_ref(&engine)),
             None => hold.outlived_its_session(),
         }
+        // SAFETY: the session is let go of here, once, after its last read.
+        unsafe { ManuallyDrop::drop(&mut self.session) };
     }
 }
 
@@ -233,8 +236,8 @@ pub(crate) struct KeyText {
     /// Taken only by the drop.
     key: ManuallyDrop<HeldKey>,
     /// The engine whose key arena holds `key`, kept for as long as it does; `None` for a copy
-    /// of its own.
-    engine: Option<Arc<Engine>>,
+    /// of its own. Let go of only by the drop, so a holder's drop glue is the one call to it.
+    engine: ManuallyDrop<Option<Arc<Engine>>>,
 }
 
 impl KeyText {
@@ -242,7 +245,7 @@ impl KeyText {
     pub(crate) fn owned(text: &str) -> Self {
         Self {
             key: ManuallyDrop::new(HeldKey::own(text)),
-            engine: None,
+            engine: ManuallyDrop::new(None),
         }
     }
 
@@ -258,7 +261,7 @@ impl KeyText {
             Some(Ok(Some(key))) => {
                 return Ok(Self {
                     key: ManuallyDrop::new(key),
-                    engine: Some(shared.clone()),
+                    engine: ManuallyDrop::new(Some(shared.clone())),
                 })
             }
             Some(Err(why)) => refusal_of(why),
@@ -278,7 +281,7 @@ impl KeyText {
     /// `text` kept where this key's text is: in the same session's key arena when this is a block
     /// of one, refused as [`Self::of_session`] refuses; a copy of its own otherwise.
     pub(crate) fn beside(&self, text: &str) -> Result<Self, ZResult> {
-        match &self.engine {
+        match &*self.engine {
             Some(engine) => Self::of_session(engine, text),
             None => Ok(Self::owned(text)),
         }
@@ -288,14 +291,14 @@ impl KeyText {
     /// copy for one of its own.
     #[inline(never)]
     pub(crate) fn share(&self) -> Self {
-        if let Some(engine) = &self.engine {
+        if let Some(engine) = &*self.engine {
             // An engine that keeps no key arena made no key of one; a copy reads the same.
             if let Some(Ok(Some(key))) =
                 key_arena(engine).map(|keys| SessionKeys::key(keys, KeyAsk::Share(&self.key)))
             {
                 return Self {
                     key: ManuallyDrop::new(key),
-                    engine: Some(engine.clone()),
+                    engine: ManuallyDrop::new(Some(engine.clone())),
                 };
             }
         }
@@ -314,7 +317,8 @@ impl Drop for KeyText {
     fn drop(&mut self) {
         // SAFETY: the key is taken here, once, and the field is not read again.
         let key = unsafe { ManuallyDrop::take(&mut self.key) };
-        match self.engine.take() {
+        // SAFETY: the engine is taken here, once, and the field is not read again.
+        match unsafe { ManuallyDrop::take(&mut self.engine) } {
             Some(engine) => {
                 if let Some(keys) = key_arena(&engine) {
                     let _ = SessionKeys::key(keys, KeyAsk::Release(key));
@@ -1037,7 +1041,7 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
-    owned_keyexpr_at(dst, Box::into_raw(Box::new(key)));
+    owned_keyexpr_at(dst, Box::into_raw(crate::object_slot::boxed(key)));
 }
 
 /// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot
@@ -2584,6 +2588,31 @@ mod arena_key_tests {
         wire.let_go(Arc::as_ref(&engine));
         assert!(room_for(&engine, text.len()), "and lets it go");
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// A declared key holds its session's engine through its text and names it through its
+    /// declaration, and lets both go when it is dropped: the counts of the engine are back where
+    /// they were. Turned red by a drop that leaves the text's engine or the declaration's session
+    /// held.
+    #[test]
+    fn a_dropped_key_lets_its_engine_go() {
+        let (session, engine) = listening();
+        let strong = Arc::strong_count(&engine);
+        let weak = Arc::weak_count(&engine);
+        let key = DeclaredKeyexpr::declare(&engine, "demo/counts/a", None).expect("declared");
+        assert!(key.literal.is_session());
+        assert!(
+            Arc::strong_count(&engine) > strong,
+            "the text holds the engine"
+        );
+        assert!(
+            Arc::weak_count(&engine) > weak,
+            "the declaration names the session"
+        );
+        drop(key);
+        assert_eq!(Arc::strong_count(&engine), strong);
+        assert_eq!(Arc::weak_count(&engine), weak);
         close(session);
     }
 

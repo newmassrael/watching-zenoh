@@ -191,7 +191,7 @@ use deliveries::Deliveries;
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
-use registry::{FaceId, Registry, DIAL_FACE};
+use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
@@ -2356,7 +2356,8 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
 /// out at once. Without it everything the dispatch staged goes out at once.
 pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     registry: Rc<RefCell<Registry>>,
-    face: FaceId,
+    /// The face the link serves, its set found by its place for every frame and not looked for.
+    face: HeldFace,
     actions: SessionHandle<C>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -2666,7 +2667,8 @@ impl<C: ClockSource + 'static> LinkCalls<C> for LinkMaking<'_> {
         let generation = self.session.plane.next_generation();
         let dispatch = FaceDispatch {
             registry: self.session.registry.clone(),
-            face,
+            // The registry holds the face before its link is made (`Registry::add_face`).
+            face: self.session.registry.borrow().held(face),
             actions: actions.clone(),
             #[cfg(feature = "queryable")]
             plane: self.session.plane.clone(),
@@ -3116,6 +3118,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
+        // What the lost link's peer was told went with it: the next link's peer holds nothing.
+        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+            face.replay.discard();
+        }
         self.rooms.forget(id);
         self.lose_link(id);
     }
@@ -3444,21 +3450,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// What a lost link of face `id` takes with it: what its peer was told, and what the session
-    /// holds of it (`SessionState::lose_face`).
+    /// What a lost link of face `id` takes with it: what the session holds of it
+    /// (`SessionState::lose_face`). What the peer was told is the caller's, which holds the face's
+    /// place: a group keeps no replay.
     /// Out of line: a lost face and a group that ended each take what the peer declared.
     #[inline(never)]
     fn lose_link(&mut self, id: FaceId) {
-        // What the lost link's peer was told went with it: the next link's peer holds nothing.
-        if let Some(face) = self
-            .transport
-            .links
-            .faces_mut()
-            .iter_mut()
-            .find(|face| face.id == id)
-        {
-            face.replay.discard();
-        }
         self.session.lose_face(id);
         #[cfg(feature = "liveliness")]
         self.retract_owed();

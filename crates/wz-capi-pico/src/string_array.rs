@@ -67,7 +67,7 @@ impl StringArrayEntry {
             _start: bytes.as_ptr(),
             _len: bytes.len(),
         };
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             _bytes: bytes,
             view,
         })
@@ -104,7 +104,7 @@ enum Items {
 
 impl StringArrayState {
     pub(crate) fn new(items: Vec<String>) -> Box<Self> {
-        Box::new(Self {
+        crate::object_slot::boxed(Self {
             items: Items::Owned(
                 items
                     .into_iter()
@@ -121,16 +121,19 @@ impl StringArrayState {
     /// borrowing would silently extend the caller's lifetime obligation to an
     /// array it never pushed to.
     pub(crate) fn copied(&self) -> Box<Self> {
-        let entries = (0..self.len())
-            .filter_map(|k| self.view(k))
-            .map(|view| {
-                // SAFETY: an entry's view reads its own bytes, and a lent view a live string
-                // (`Self::lent`).
-                let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-                StringArrayEntry::new(Box::from(bytes.unwrap_or(&[])))
-            })
-            .collect();
-        Box::new(Self {
+        // Sized once and filled by a plain loop: a collect of the filtered views reads the first
+        // apart from the rest, and carries the copy of an entry twice.
+        let mut entries = Vec::with_capacity(self.len());
+        for k in 0..self.len() {
+            let Some(view) = self.view(k) else {
+                continue;
+            };
+            // SAFETY: an entry's view reads its own bytes, and a lent view a live string
+            // (`Self::lent`).
+            let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
+            entries.push(StringArrayEntry::new(Box::from(bytes.unwrap_or(&[]))));
+        }
+        crate::object_slot::boxed(Self {
             items: Items::Owned(entries),
         })
     }
@@ -646,6 +649,28 @@ mod tests {
             assert_eq!(z_string_array_len(&loaned), 2);
         }
         assert_eq!(entries(&state), strings.map(|s| s.as_bytes().to_vec()));
+    }
+
+    /// A copy of a lent array holds every lent string, in order, in storage of its own, and owns
+    /// them. Turned red by a copy that drops or reorders an entry, or keeps reading the lender's.
+    #[test]
+    fn a_copy_of_a_lent_array_owns_each_string_in_order() {
+        let strings = ["tcp/10.0.0.1:7447", "", "udp/10.0.0.2:7447"];
+        let views = lent_views(&strings);
+        // SAFETY: `views` and `strings` outlive the array.
+        let state = unsafe { StringArrayState::lent(&views) };
+        let copy = state.copied();
+        assert!(!copy.is_lent());
+        assert_eq!(copy.len(), strings.len());
+        assert_eq!(entries(&copy), strings.map(|s| s.as_bytes().to_vec()));
+        for (k, text) in strings
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| !text.is_empty())
+        {
+            let view = copy.view(k).expect("an entry per string");
+            assert_ne!(view._start, text.as_ptr(), "entry {k} is a copy");
+        }
     }
 
     /// Every entry's bytes, read through its view.

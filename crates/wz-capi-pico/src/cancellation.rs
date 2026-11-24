@@ -133,7 +133,7 @@ pub unsafe extern "C" fn z_cancellation_token_new(
         }
         let arc = CancellationToken::new();
         *token = z_owned_cancellation_token_t {
-            handle: Box::into_raw(Box::new(arc)) as *mut c_void,
+            handle: Box::into_raw(crate::object_slot::boxed(arc)) as *mut c_void,
             _cnt: core::ptr::null_mut(),
         };
         Z_OK
@@ -207,7 +207,8 @@ pub unsafe extern "C" fn z_cancellation_token_clone(
         match token_ref(src) {
             Some(arc) => {
                 *dst = z_owned_cancellation_token_t {
-                    handle: Box::into_raw(Box::new(Arc::clone(arc))) as *mut c_void,
+                    handle: Box::into_raw(crate::object_slot::boxed(Arc::clone(arc)))
+                        as *mut c_void,
                     _cnt: core::ptr::null_mut(),
                 };
                 Z_OK

@@ -723,15 +723,38 @@ pub fn push_text<const N: usize>(
     text: &mut heapless::String<N>,
     s: &str,
 ) -> Result<(), CapacityFull<()>> {
-    // SAFETY: what is appended is a whole `str`, so the text stays UTF-8; the bytes are written
-    // into the buffer's room past its length, checked first, and the length is set after them.
+    // SAFETY: what is appended is a whole `str`, so the text stays UTF-8, and `push_bytes` writes
+    // all of it or none.
+    push_bytes(unsafe { text.as_mut_vec() }, s.as_bytes())
+}
+
+/// Where an append of `add` bytes to a heapless buffer of capacity `N` that holds `len` ends, or
+/// `None` when the buffer has no room for it: the one room check of [`push_bytes`], which a reader
+/// that refuses what such a buffer would not keep asks too.
+#[inline]
+pub const fn append_end<const N: usize>(len: usize, add: usize) -> Option<usize> {
+    match len.checked_add(add) {
+        Some(end) if end <= N => Some(end),
+        _ => None,
+    }
+}
+
+/// Append `s` to `bytes` with one copy, all or nothing: refused, `bytes` is left as it was.
+/// heapless's own `extend_from_slice` and `from_slice` copy a byte at a time, a loop each caller
+/// inlines; every heapless byte buffer of the crate, and every heapless text through
+/// [`push_text`], appends through this instead.
+#[inline]
+pub fn push_bytes<const N: usize>(
+    bytes: &mut heapless::Vec<u8, N>,
+    s: &[u8],
+) -> Result<(), CapacityFull<()>> {
+    let len = bytes.len();
+    let Some(end) = append_end::<N>(len, s.len()) else {
+        return Err(CapacityFull(()));
+    };
+    // SAFETY: the bytes are written into the buffer's room past its length, checked above, and
+    // the length is set after them; `u8` needs no drop, so nothing is lost if the length is not.
     unsafe {
-        let bytes = text.as_mut_vec();
-        let len = bytes.len();
-        let end = match len.checked_add(s.len()) {
-            Some(end) if end <= N => end,
-            _ => return Err(CapacityFull(())),
-        };
         core::ptr::copy_nonoverlapping(s.as_ptr(), bytes.as_mut_ptr().add(len), s.len());
         bytes.set_len(end);
     }
@@ -2554,6 +2577,39 @@ mod tests {
             "three bytes past two of room"
         );
         assert_eq!(short.as_str(), "a");
+    }
+
+    /// The room check ends an append where it fits, at the capacity included, and answers none
+    /// past it or past the end of the address space.
+    #[test]
+    fn an_append_ends_inside_the_capacity_or_nowhere() {
+        assert_eq!(append_end::<4>(1, 3), Some(4));
+        assert_eq!(append_end::<4>(0, 0), Some(0));
+        assert_eq!(append_end::<4>(1, 4), None);
+        assert_eq!(append_end::<4>(usize::MAX, 1), None);
+    }
+
+    /// A heapless byte buffer takes a whole slice in one copy: an append that fits lands after what
+    /// the buffer holds, one that fills the capacity to the byte is taken, and one past it is
+    /// refused with the buffer left as it was. Turned red by a length set before the room is
+    /// checked, or by a refused append that writes part of itself.
+    #[test]
+    fn a_heapless_byte_buffer_takes_a_whole_slice_or_nothing() {
+        let mut bytes: heapless::Vec<u8, 6> = heapless::Vec::new();
+        assert!(push_bytes(&mut bytes, &[1, 2]).is_ok());
+        assert!(push_bytes(&mut bytes, &[]).is_ok());
+        assert!(push_bytes(&mut bytes, &[3, 4, 5, 6]).is_ok());
+        assert_eq!(bytes.as_slice(), &[1, 2, 3, 4, 5, 6]);
+        assert!(push_bytes(&mut bytes, &[7]).is_err());
+        assert_eq!(bytes.as_slice(), &[1, 2, 3, 4, 5, 6]);
+
+        let mut short: heapless::Vec<u8, 3> = heapless::Vec::new();
+        assert!(push_bytes(&mut short, &[9]).is_ok());
+        assert!(
+            push_bytes(&mut short, &[8, 8, 8]).is_err(),
+            "three past two of room"
+        );
+        assert_eq!(short.as_slice(), &[9]);
     }
 
     /// A table of the lent policy that no arena lent rows to is a defect of its maker, not a table

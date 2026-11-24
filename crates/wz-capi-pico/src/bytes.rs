@@ -144,8 +144,7 @@ unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
 fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
     let layout =
         core::alloc::Layout::from_size_align(bytes, core::mem::align_of::<BlockHead>()).ok()?;
-    // SAFETY: a block is never of zero bytes: it has its head.
-    NonNull::new(unsafe { alloc::alloc::alloc(layout) }).map(|at| (at, bytes))
+    crate::object_slot::try_heap_place(layout).map(|at| (at, bytes))
 }
 
 /// Give back a block [`take_block`] handed out.
@@ -161,8 +160,8 @@ unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
 }
 
 /// One holder's share of a block: a payload's storage, or a string's or a slice's that payloads
-/// made over it share. The last share let go runs the caller's release, for the record of an
-/// alias, and gives the block back.
+/// made over it share, or an encoding's kept schema. The last share let go runs the caller's
+/// release, for the record of an alias, and gives the block back.
 pub(crate) struct Block {
     head: NonNull<BlockHead>,
 }
@@ -196,6 +195,15 @@ impl Block {
         // SAFETY: a new block, of one holder, with room for the bytes.
         unsafe { block.write(0, bytes) };
         Some(block)
+    }
+
+    /// A block holding a copy of `bytes` and where the copy starts in it, for a holder that only
+    /// reads them by start and length and needs none of a payload's segment ends: an encoding's
+    /// kept schema. `None` when there is no room for one.
+    pub(crate) fn kept_copy(bytes: &[u8]) -> Option<(Self, NonNull<u8>)> {
+        let block = Self::copy_of(bytes)?;
+        let start = block_start(&block);
+        Some((block, start))
     }
 
     /// A block holding the record of the caller's `len` bytes at `start`, which `release` lets
@@ -706,7 +714,7 @@ impl SliceState {
             Some(start) if !start.is_null() => start,
             _ => NonNull::<u8>::dangling().as_ptr().cast_const(),
         };
-        Ok(Box::new(SliceState {
+        Ok(crate::object_slot::boxed(SliceState {
             backing,
             filled: len,
             self_view: z_loaned_slice_t {
@@ -738,7 +746,7 @@ impl StringState {
     /// the library's and holds no block.
     fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
         if bytes.is_empty() {
-            return Ok(Box::new(StringState {
+            return Ok(crate::object_slot::boxed(StringState {
                 backing: None,
                 filled: 0,
                 self_view: z_loaned_string_t {
@@ -755,7 +763,7 @@ impl StringState {
             block.write(bytes.len(), &[0]);
         }
         let start = block.span().0;
-        Ok(Box::new(StringState {
+        Ok(crate::object_slot::boxed(StringState {
             backing: Some(block),
             filled,
             self_view: z_loaned_string_t {
@@ -780,7 +788,7 @@ impl StringState {
             NoRoom
         })?;
         let view_start = block.span().0;
-        Ok(Box::new(StringState {
+        Ok(crate::object_slot::boxed(StringState {
             backing: Some(block),
             filled: len,
             self_view: z_loaned_string_t {
@@ -844,9 +852,9 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
 /// Box `buf`, in a kept allocation when this thread has one; `None` never.
 #[cfg(not(wz_process_pools))]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
-    // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
-    // is the same allocation, and the optimiser writes nothing into it.
-    let mut slot = kept_box().unwrap_or_else(|| Box::new(core::mem::MaybeUninit::uninit()));
+    // An uninitialised value boxed is the allocation alone: nothing is written into it.
+    let mut slot =
+        kept_box().unwrap_or_else(|| crate::object_slot::boxed(core::mem::MaybeUninit::uninit()));
     slot.write(buf);
     Some(Box::into_raw(slot).cast::<ByteBuf>())
 }
