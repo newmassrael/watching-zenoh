@@ -184,7 +184,7 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    | fact (today in `wz-capi-coop`) | owner |
    |---|---|
    | the session lock, the read task (`start_reader`), the wait set (`LinkWaits`, `IdleWait`, the waits of `LinkRooms`, the clock's wake), the task and timer tables, the reservation of the region | L0 |
-   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial_from`, `dial_answered`, `dial_or_wait`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
+   | each face's link lifecycle (`LinkSupervisor`'s link states, `poll_face`, `dial`, `redial_later`), making a link's session (`start_wire`: its parameters, cookie key, admission, gates, cells), the reassembly Router, the endpoints' rows, a face's send state (the held drop, `sending_on`) and the hand-off of a dropped publish to the other faces | L2 |
    | the entity tables and their counters, the keys and the shared key ids, the query plane and pending gets, the round of deliveries, the declaration watches, the face reports, what a face that comes up is told again (`replay`), which faces a publish goes to | L3 |
    | the places of the ABI's handle and objects | L4 |
 
