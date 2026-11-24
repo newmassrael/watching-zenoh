@@ -208,7 +208,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         "fixture uses protocol defaults so the S flag stays clear"
     );
 
-    let wz = encode_join(&params, &tx);
+    let wz = encode_join(&params, &tx).expect("a JOIN encodes");
 
     let flags = wire_const::FLAG_T_JOIN_T | wire_const::FLAG_T_Z;
     let pico = pico_encode_qos_join(&params, flags, &per_priority);

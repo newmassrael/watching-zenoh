@@ -299,7 +299,8 @@ fn the_pump_in_its_cell_admits_a_peer_over_the_loopback_as_a_task() {
     let join = encode_join(
         &peer,
         &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-    );
+    )
+    .expect("a JOIN encodes");
     socket.send_to(group, port, &join).expect("inject the JOIN");
     let hand_session = MulticastSession {
         dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),

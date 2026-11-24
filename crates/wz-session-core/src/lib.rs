@@ -2674,8 +2674,6 @@ mod multicast_member_scope;
     feature = "codec-join",
     feature = "storage-profile"
 ))]
-// Totality debt TD-063 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod multicast_join;
 
 // R311lv — the shared multicast RX classify + dispatch SSOT consumed by both

@@ -676,7 +676,8 @@ mod tests {
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
@@ -740,7 +741,8 @@ mod tests {
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
@@ -831,7 +833,8 @@ mod tests {
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -916,7 +919,8 @@ mod tests {
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -1021,7 +1025,8 @@ mod tests {
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -1139,7 +1144,8 @@ mod tests {
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -1272,7 +1278,8 @@ mod tests {
         let other_join = encode_join(
             &other,
             &MulticastTxConduits::new(sn::mask_from_res(other.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &other_join)
             .expect("inject peer JOIN");
@@ -1408,7 +1415,8 @@ mod tests {
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
@@ -1506,7 +1514,8 @@ mod tests {
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");
@@ -1725,7 +1734,8 @@ mod tests {
         let peer_join = encode_join(
             &peer,
             &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-        );
+        )
+        .expect("a JOIN encodes");
         socket
             .send_to(group, port, &peer_join)
             .expect("inject peer JOIN");

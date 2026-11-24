@@ -115,7 +115,8 @@ fn a_join_beacon_written_into_an_array_costs_the_heap_nothing() {
             encode_join_into(&p, &tx, &mut sink).expect("fits its bound");
             sink.position()
         });
-        let (owned, owned_allocations) = allocations_during(|| encode_join(&p, &tx));
+        let (owned, owned_allocations) =
+            allocations_during(|| encode_join(&p, &tx).expect("a JOIN encodes"));
         println!("{what}: array {lent} allocation(s), Vec {owned_allocations}");
         if slot[..written] != owned[..] {
             wrong.push(format!("{what}: the bytes differ"));
