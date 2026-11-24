@@ -1040,8 +1040,9 @@ pub mod query_options;
 
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a
 /// matching Interest. Moved down from `wz-runtime-tokio`, which re-exports both, so a C ABI over
-/// the cooperative engine hands them to an engine without naming that one.
-#[cfg(feature = "alloc")]
+/// the cooperative engine hands them to an engine without naming that one. Unconditional, as
+/// [`session_tables`] is: their rows keep the key a retraction names; the Interest's form, which
+/// keeps text of its own, comes with `session-matching`, and so with `alloc`.
 pub mod declare_form;
 
 // §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror

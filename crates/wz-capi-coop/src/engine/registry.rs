@@ -1711,10 +1711,7 @@ mod tests {
             .declare_liveliness_subscriber(
                 "demo/**",
                 false,
-                KeyForm {
-                    prefix: None,
-                    names_key: false,
-                },
+                KeyForm::default(),
                 super::super::LivelinessRow::new(
                     WireKey::literal().into_holds(),
                     LivelinessSink::shared(move |sample: LivelinessSample<'_>| {

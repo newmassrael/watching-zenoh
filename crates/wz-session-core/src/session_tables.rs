@@ -49,6 +49,7 @@ use crate::bounded::{
     TableLender,
 };
 use crate::caps;
+use crate::declare_form::RetractionKey;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
@@ -408,8 +409,24 @@ pub struct KeyForm {
     /// of the key. One that names no live declaration, or one the key does not start with, is not
     /// used: the key goes on the wire whole.
     pub prefix: Option<KeyexprHandle>,
-    /// Whether the retraction names the key beside the id.
-    pub names_key: bool,
+    /// What the retraction names beside the id.
+    pub retraction: Retraction,
+}
+
+/// What an entity's retraction names beside its id: the one record of it, read off the entity's
+/// row ([`SessionTables::retraction_of`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Retraction {
+    /// Nothing: the id alone.
+    #[default]
+    ById,
+    /// The key, named as the entity's announcement names it ([`SessionTables::wire_of`]), read
+    /// when the retraction is: the declaration its row holds while that stands, the whole key
+    /// otherwise.
+    AsAnnounced,
+    /// The key, named as the declaring ABI states it: a declaration of the entity's own key that
+    /// need not be the one its announcement names, and the rest of the key past it.
+    Named(RetractionKey),
 }
 
 /// An entity's key, as its row keeps it.
@@ -417,7 +434,7 @@ pub struct KeyForm {
 pub struct EntityKey<Key> {
     key: Key,
     prefix: Option<KeyexprHandle>,
-    names_key: bool,
+    retraction: Retraction,
 }
 
 impl<Key: KeyBacking> EntityKey<Key> {
@@ -431,9 +448,9 @@ impl<Key: KeyBacking> EntityKey<Key> {
         self.prefix
     }
 
-    /// Whether the retraction names the key beside the id.
-    pub fn names_key(&self) -> bool {
-        self.names_key
+    /// What the retraction names beside the id, as the declaration stated it.
+    pub fn retraction(&self) -> Retraction {
+        self.retraction
     }
 
     /// The key as the row keeps it: a clone is one more holder of it, for a reader past the row.
@@ -1334,7 +1351,7 @@ impl<P: Storage> Declaring<'_, P> {
         Ok(EntityKey {
             key,
             prefix,
-            names_key: form.names_key,
+            retraction: form.retraction,
         })
     }
 
@@ -1578,15 +1595,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// The form of an entity's key whose wire names the declaration `mapping_id` (`0` for none):
-    /// named by that declaration while it stands, which the entity's row then holds, and with the
-    /// key named in its retraction when `names_key`.
-    pub fn key_form(&self, mapping_id: ExprId, names_key: bool) -> KeyForm {
+    /// named by that declaration while it stands, which the entity's row then holds, and retracted
+    /// naming what `retraction` says beside the id.
+    pub fn key_form(&self, mapping_id: ExprId, retraction: Retraction) -> KeyForm {
         let prefix = if mapping_id == 0 {
             None
         } else {
             self.keyexpr_by_id(mapping_id)
         };
-        KeyForm { prefix, names_key }
+        KeyForm { prefix, retraction }
     }
 
     /// The next key expression id: from 1, past any still declared and any `usable` refuses;
@@ -1642,6 +1659,20 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 suffix,
             },
             None => literal,
+        }
+    }
+
+    /// What the retraction of the entity whose key is `key` names beside its id, read against
+    /// that key ([`RetractionKey::names`]): `None` for the id alone, and for a key retracted as
+    /// it is announced, the declaration its row holds while that stands, the whole key otherwise.
+    pub fn retraction_of(&self, key: &EntityKey<P::Key>) -> Option<RetractionKey> {
+        match key.retraction {
+            Retraction::ById => None,
+            Retraction::AsAnnounced => {
+                let form = self.wire_of(key);
+                Some(RetractionKey::declared(form.mapping, form.suffix))
+            }
+            Retraction::Named(named) => Some(named),
         }
     }
 

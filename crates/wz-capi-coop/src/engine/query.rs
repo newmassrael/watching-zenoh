@@ -51,7 +51,6 @@ use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal, Wire
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::query::QueryResponder;
 #[cfg(feature = "local-queryable")]
@@ -70,15 +69,14 @@ use crate::round::CoopCalls;
 use super::{key_on_link, CoopEngine};
 
 /// One of the session's own queryables, as a row of the session's tables holds it: the row keeps
-/// the key the queryable answers for, whether it answers for the whole of it and the declaration
-/// its key is named by, which it holds, and this everything else the session knows of it, its
-/// callback among it.
+/// the key the queryable answers for, whether it answers for the whole of it, the declaration its
+/// key is named by, which it holds, and what its retraction names, and this everything else the
+/// session knows of it, its callback among it.
 /// The queryable is that one row (`docs/c-abi-architecture.md`, P1), and so is its callback's life
 /// (P11): a call is begun on the row's latch as a query arrives, under the session's lock, and
 /// ended once the query was handed to the callback, or dropped unhanded, with no lock held; an
 /// undeclared row is let go of by whoever ends its last call.
 pub(crate) struct QueryableRow {
-    retraction: Option<RetractionKey>,
     /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
     /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
     /// of the session held.
@@ -97,24 +95,13 @@ impl super::RowHolds for QueryableRow {
 }
 
 impl QueryableRow {
-    /// A queryable retracted as `retraction` names it, keeping `holds`, answering through
-    /// `sink`.
-    pub(crate) fn new(
-        retraction: Option<RetractionKey>,
-        holds: WireHolds,
-        sink: QueryableSink,
-    ) -> Self {
+    /// A queryable keeping `holds`, answering through `sink`.
+    pub(crate) fn new(holds: WireHolds, sink: QueryableSink) -> Self {
         Self {
-            retraction,
             holds,
             sink,
             latch: CallLatch::new(),
         }
-    }
-
-    /// What its retraction names its key by, when its declaration asked to.
-    pub(super) fn retraction(&self) -> Option<&RetractionKey> {
-        self.retraction.as_ref()
     }
 
     /// Hand `query` to the callback, its replies made through `responder` and its holds taken
@@ -645,7 +632,6 @@ mod round_tests {
     /// A queryable's row, boxed so it lies where it is while a call of it runs.
     fn row() -> Box<QueryableRow> {
         Box::new(QueryableRow::new(
-            None,
             WireKey::literal().into_holds(),
             QueryableSink::shared(|_, _, _| {}),
         ))

@@ -49,7 +49,6 @@ impl Row {
     fn new(sink: SubscriberSink) -> Self {
         Self {
             row: Box::new(SubscriberRow::new(
-                None,
                 WireKey::literal().into_holds(),
                 sink,
                 true,

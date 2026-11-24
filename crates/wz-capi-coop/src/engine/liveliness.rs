@@ -25,8 +25,6 @@ use wz_capi_port::{LivelinessSink, SubId, TokenId, WireHolds, WireKey};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
-#[cfg(feature = "group")]
-use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_tables::WireForm;
@@ -63,12 +61,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
         let Some(row) = tables.tokens().get(handle) else {
             return;
         };
-        let form = tables.wire_of(row.key());
-        let wire = super::group::wire_key_of(form);
-        let retraction = row
-            .key()
-            .names_key()
-            .then(|| RetractionKey::declared(form.mapping, form.suffix));
+        let wire = super::group::wire_key_of(tables.wire_of(row.key()));
+        let retraction = tables.retraction_of(row.key());
         self.transport
             .announce_to_groups(super::group::GroupEntity {
                 what: wz_session_core::declare_form::GroupDeclaration::Token,

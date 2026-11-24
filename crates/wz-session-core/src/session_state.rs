@@ -26,7 +26,7 @@ use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
 use crate::replay_pacing::ReplayPacing;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::round::{ReadRoom, Round, RoundCalls};
-use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
+use crate::session_tables::{KeyForm, Retraction, RowCallbacks, SessionTables};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
 /// The parts of a session's state an engine keeps in types of its own: each is `()` where the
@@ -98,11 +98,12 @@ impl<P: SessionParts> SessionState<P> {
     }
 
     /// The form an entity's key whose wire names the declaration `mapping_id` (`0` for none) takes
-    /// in the session's tables ([`SessionTables::key_form`]).
+    /// in the session's tables, retracted naming what `retraction` says
+    /// ([`SessionTables::key_form`]).
     // Out of line: each declaration of an entity on a key asks it, each a copy inlined.
     #[inline(never)]
-    pub fn key_form(&self, mapping_id: ExprId, names_key: bool) -> KeyForm {
-        self.tables().key_form(mapping_id, names_key)
+    pub fn key_form(&self, mapping_id: ExprId, retraction: Retraction) -> KeyForm {
+        self.tables().key_form(mapping_id, retraction)
     }
 }
 
@@ -574,13 +575,13 @@ mod tests {
         let state = new_state::<Unwatched>();
         let declared = state.tables_mut().declare_keyexpr("demo/").unwrap();
         assert_eq!(
-            state.key_form(declared.id, true),
+            state.key_form(declared.id, Retraction::AsAnnounced),
             KeyForm {
                 prefix: Some(declared.handle),
-                names_key: true
+                retraction: Retraction::AsAnnounced
             }
         );
-        assert_eq!(state.key_form(0, false), KeyForm::default());
+        assert_eq!(state.key_form(0, Retraction::ById), KeyForm::default());
     }
 
     /// A session's own request ids count from 0 and wrap past the last.

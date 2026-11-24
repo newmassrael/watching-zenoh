@@ -66,7 +66,7 @@ use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
     InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, MatchingListenerHandle,
-    Plane, RowCallbacks, SessionTables, SubscriberHandle, WriteFilterHandle,
+    Plane, Retraction, RowCallbacks, SessionTables, SubscriberHandle, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -1777,13 +1777,12 @@ fn sleep_ms(ms: u32) {
 }
 
 /// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// its entity id, the pattern the subscriber matches and the declaration its key is named by, which
-/// it holds, and this everything else the session knows of it, its callback among it. The subscriber is that one
-/// row (`docs/c-abi-architecture.md`, P1), and so is its callback's life (P11): a call is begun on
-/// the row's latch with the session held and made after it, and an undeclared row is let go of by
-/// whoever sees its last call end.
+/// its entity id, the pattern the subscriber matches, the declaration its key is named by, which
+/// it holds, and what its retraction names, and this everything else the session knows of it, its
+/// callback among it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1), and so
+/// is its callback's life (P11): a call is begun on the row's latch with the session held and made
+/// after it, and an undeclared row is let go of by whoever sees its last call end.
 pub(crate) struct SubscriberRow {
-    retraction: Option<RetractionKey>,
     /// What the ABI's key held besides the declaration the tables' row holds: the declaration the
     /// retraction names and an object of the ABI's, which go with the row, let go of with no lock
     /// of the session held.
@@ -1814,18 +1813,12 @@ impl RowHolds for SubscriberRow {
 }
 
 impl SubscriberRow {
-    /// A subscriber retracted as `retraction` names it, keeping `holds`, handing what it hears
-    /// to `sink`, the timestamp shown when `expose`.
+    /// A subscriber keeping `holds`, handing what it hears to `sink`, the timestamp shown when
+    /// `expose`.
     // Out of line: measured smaller apart from the declaration that builds the row.
     #[inline(never)]
-    pub(crate) fn new(
-        retraction: Option<RetractionKey>,
-        holds: WireHolds,
-        sink: SubscriberSink,
-        expose: bool,
-    ) -> Self {
+    pub(crate) fn new(holds: WireHolds, sink: SubscriberSink, expose: bool) -> Self {
         Self {
-            retraction,
             holds,
             sink,
             expose,
@@ -6202,7 +6195,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire.let_go(self);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(wire.mapping_id, retraction.is_some());
+        let form = core.session.key_form(
+            wire.mapping_id,
+            retraction.map_or(Retraction::ById, Retraction::Named),
+        );
         // The tables' row holds the declaration the key is named by, so the key's own hold of it
         // is given back once the row stands, and the entity holds it once; the row keeps what
         // else the key held.
@@ -6210,7 +6206,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let named = holds.take_named();
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let row = SubscriberRow::new(retraction, holds, sink, exposed_by(&core.policy));
+        let row = SubscriberRow::new(holds, sink, exposed_by(&core.policy));
         let declared = tables_mut(&core.session.registry).declare_subscriber(
             keyexpr,
             allowed_origin,
@@ -6243,12 +6239,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.subscribers().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));
+                let retraction = tables.retraction_of(row.key());
                 core.transport.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Subscriber,
                     entity: id,
                     keyexpr: row.key().as_str(),
                     wire: &wire,
-                    retraction: row.callback().retraction.as_ref(),
+                    retraction: retraction.as_ref(),
                     allowed_origin,
                 });
             }
@@ -6311,20 +6308,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             // The declaration its key is named by goes with it when it is the last that holds it;
             // what the links are told is read while the row stands.
-            let (handle, prefix, retraction) = tables(&core.session.registry)
-                .subscribers()
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(handle, row)| {
-                    (
-                        handle,
-                        row.key().prefix(),
-                        // Read against the key, held past the row.
-                        row.callback()
-                            .retraction
-                            .map(|names| (names, row.key().backing().clone())),
-                    )
-                })?;
+            let found = {
+                let tables = tables(&core.session.registry);
+                let found = tables
+                    .subscribers()
+                    .iter()
+                    .find(|(_, row)| row.id() == id)
+                    .map(|(handle, row)| {
+                        (
+                            handle,
+                            row.key().prefix(),
+                            // Read against the key, held past the row.
+                            tables
+                                .retraction_of(row.key())
+                                .map(|names| (names, row.key().backing().clone())),
+                        )
+                    });
+                found
+            };
+            let (handle, prefix, retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, then the declaration's, which comes before every
             // subscriber.
@@ -6736,13 +6738,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire.let_go(self);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(wire.mapping_id, retraction.is_some());
+        let form = core.session.key_form(
+            wire.mapping_id,
+            retraction.map_or(Retraction::ById, Retraction::Named),
+        );
         // The tables' row holds the declaration the key is named by, so the key's own hold of it
         // is given back once the row stands, and the entity holds it once; the row keeps what
         // else the key held.
         let mut holds = wire.into_holds();
         let named = holds.take_named();
-        let row = QueryableRow::new(retraction, holds, sink);
+        let row = QueryableRow::new(holds, sink);
         let declared = tables_mut(&core.session.registry).declare_queryable(
             keyexpr,
             allowed_origin,
@@ -6776,6 +6781,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.queryables().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));
+                let retraction = tables.retraction_of(row.key());
                 core.transport.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Queryable {
                         complete: row.complete(),
@@ -6783,7 +6789,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     entity: id,
                     keyexpr: row.key().as_str(),
                     wire: &wire,
-                    retraction: row.callback().retraction(),
+                    retraction: retraction.as_ref(),
                     allowed_origin,
                 });
             }
@@ -7298,20 +7304,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             // The declaration its key is named by goes with it when it is the last that holds it;
             // what the links are told is read while the row stands.
-            let (handle, prefix, retraction) = tables(&core.session.registry)
-                .queryables()
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(handle, row)| {
-                    (
-                        handle,
-                        row.key().prefix(),
-                        // Read against the key, held past the row.
-                        row.callback()
-                            .retraction()
-                            .map(|names| (*names, row.key().backing().clone())),
-                    )
-                })?;
+            let found = {
+                let tables = tables(&core.session.registry);
+                let found = tables
+                    .queryables()
+                    .iter()
+                    .find(|(_, row)| row.id() == id)
+                    .map(|(handle, row)| {
+                        (
+                            handle,
+                            row.key().prefix(),
+                            // Read against the key, held past the row.
+                            tables
+                                .retraction_of(row.key())
+                                .map(|names| (names, row.key().backing().clone())),
+                        )
+                    });
+                found
+            };
+            let (handle, prefix, retraction) = found?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the queryable's, then the declaration's, which comes before every queryable.
             let place = core.queryable_place(handle);
@@ -7357,7 +7368,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // the session cannot hold or no id left refuses it before anything is registered or
             // sent. It holds the key expression declaration its key is named by for as long as it
             // stands.
-            let form = core.session.key_form(wire.mapping_id, retraction.is_some());
+            // A token's retraction names its key as its announcement does.
+            let named = if retraction.is_some() {
+                Retraction::AsAnnounced
+            } else {
+                Retraction::ById
+            };
+            let form = core.session.key_form(wire.mapping_id, named);
             let declared = tables_mut(&core.session.registry).declare_token(keyexpr, form)?;
             core.announce_token(declared.handle);
             // A token takes no traffic of its own, so every group that is told tokens is told it.
@@ -7388,12 +7405,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     .iter()
                     .find(|(_, row)| row.id() == id)
                     .map(|(handle, row)| {
-                        // What its retraction names: the declaration's id and the length of the rest
-                        // of the key, read while the declaration stands.
-                        let names = row.key().names_key().then(|| {
-                            let form = tables.wire_of(row.key());
-                            (form.mapping, form.suffix.len())
-                        });
+                        // What its retraction names, read while the declaration stands.
+                        let names = tables.retraction_of(row.key());
                         (handle, names, row.key().prefix())
                     });
             found
@@ -7414,13 +7427,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let key = undeclared.row.as_ref().map(|row| row.key().as_str());
         core.retract_at(token_place, &|actions| {
             if let Some(key) = key {
-                let names = names.map(|(mapping, rest)| {
-                    (
-                        mapping,
-                        key.get(key.len().saturating_sub(rest)..).unwrap_or(key),
-                    )
-                });
-                retract_token(actions, id, names);
+                retract_token(actions, id, names.map(|names| names.names(key)));
             }
         });
         core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
@@ -7452,7 +7459,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire.let_go(self);
             return Err(Declined::NoEntityId);
         };
-        let form = core.session.key_form(wire.mapping_id, false);
+        let form = core.session.key_form(wire.mapping_id, Retraction::ById);
         let mut holds = wire.into_holds();
         let mut named = holds.take_named();
         let declared = tables_mut(&core.session.registry).declare_liveliness_subscriber(
