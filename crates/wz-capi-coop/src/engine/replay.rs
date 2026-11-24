@@ -39,6 +39,7 @@ use wz_session_core::session_tables::QueryableHandle;
 use wz_session_core::session_tables::{InterestHandle, KeyexprHandle, SubscriberHandle};
 #[cfg(feature = "liveliness")]
 use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
+use wz_session_core::wire_id::EntityId;
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -89,6 +90,33 @@ pub(super) enum TurnEnd {
     /// The replay was given up on a turn the link refused, at once without a pace or when the
     /// pace said so: the link is to end, and the session tells everything again over the next one.
     EndsLink,
+}
+
+/// What a declaration sends a link, handed to the walks of the faces by reference: whether the link
+/// took it. A trait of one method, so a value handed as `&dyn` has its body made once, where a
+/// `dyn Fn`'s table holds `call` and `call_once` apart, each a copy of a small body.
+pub(super) trait SendTo<C: ClockSource + 'static> {
+    /// Send it over `actions`: whether the link took it.
+    fn send_to(&self, actions: &McuActions<C>) -> bool;
+}
+
+impl<C: ClockSource + 'static, F: Fn(&McuActions<C>) -> bool> SendTo<C> for F {
+    fn send_to(&self, actions: &McuActions<C>) -> bool {
+        self(actions)
+    }
+}
+
+/// What a retraction or an undoing tells a link, handed by reference as [`SendTo`] is: a send
+/// whose refusal changes nothing.
+pub(super) trait TellTo<C: ClockSource + 'static> {
+    /// Tell it over `actions`.
+    fn tell_to(&self, actions: &McuActions<C>);
+}
+
+impl<C: ClockSource + 'static, F: Fn(&McuActions<C>)> TellTo<C> for F {
+    fn tell_to(&self, actions: &McuActions<C>) {
+        self(actions);
+    }
 }
 
 /// Where the replay of the current link stands; its pace is the session's
@@ -367,8 +395,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: usize,
         on_refusal: OnRefusal,
-        send: &dyn Fn(&McuActions<C>) -> bool,
-        undo: &dyn Fn(&McuActions<C>),
+        send: &dyn SendTo<C>,
+        undo: &dyn TellTo<C>,
     ) -> bool {
         announce_on(
             self.transport.links.faces_mut(),
@@ -405,7 +433,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            &|actions| {
+            &|actions: &McuActions<C>| {
                 let tables = super::tables(registry);
                 let told = tables.subscribers().get(handle).is_some_and(|row| {
                     tables
@@ -440,7 +468,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            &|actions| {
+            &|actions: &McuActions<C>| {
                 let tables = super::tables(registry);
                 let asked = tables
                     .interests()
@@ -477,7 +505,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            &|actions| {
+            &|actions: &McuActions<C>| {
                 let tables = super::tables(registry);
                 let told = tables.queryables().get(handle).is_some_and(|row| {
                     tables.named(row.key()).is_some_and(|key| {
@@ -497,8 +525,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn announce_or_undo_at(
         &mut self,
         place: usize,
-        send: &dyn Fn(&McuActions<C>) -> bool,
-        undo: &dyn Fn(&McuActions<C>),
+        send: &dyn SendTo<C>,
+        undo: &dyn TellTo<C>,
     ) -> bool {
         self.announce_with(place, OnRefusal::Undo, send, undo)
     }
@@ -542,7 +570,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            &|actions| {
+            &|actions: &McuActions<C>| {
                 let tables = super::tables(registry);
                 let taken = tables.tokens().get(handle).is_some_and(|row| {
                     tables
@@ -580,7 +608,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.faces_mut(),
             place,
             OnRefusal::Forget,
-            &|actions| {
+            &|actions: &McuActions<C>| {
                 let tables = super::tables(registry);
                 let asked = tables
                     .liveliness_subscribers()
@@ -603,9 +631,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The declaration at `index` of `kind`'s list was removed: retract it with `send`
     /// ([`Self::retract_at`]). `index` is where it lay, and the kinds before it in the replay's
     /// order are as they were.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn Fn(&McuActions<C>)) {
+    pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn TellTo<C>) {
         let place = self.place(kind, index);
         self.retract_at(place, send);
+    }
+
+    /// The Interest `interest`, which a write filter or a matching listener held last, ended:
+    /// tell each face whose peer was asked it, `rank` its place among the Interests read while
+    /// it stood ([`Self::retract`]). Nothing when either is `None`.
+    // Out of line: the filter's and the listener's undeclarations end their Interest alike.
+    #[inline(never)]
+    pub(super) fn end_interest(&mut self, interest: Option<EntityId>, rank: Option<usize>) {
+        if let (Some(interest), Some(at)) = (interest, rank) {
+            self.retract(
+                Kind::Interest,
+                at,
+                &super::interest_final::<C>(u64::from(interest)),
+            );
+        }
     }
 
     /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
@@ -613,20 +656,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Call it once, after the row went, with the place read while it stood: a send then finds
     /// none of the session's tables borrowed, and nothing is kept to send later.
     #[inline(never)]
-    pub(super) fn retract_at(&mut self, place: usize, send: &dyn Fn(&McuActions<C>)) {
+    pub(super) fn retract_at(&mut self, place: usize, send: &dyn TellTo<C>) {
         for face in self.transport.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
             if matches!(face.replay.cursor.removed(place), Removal::Retract) {
-                send(&wire.actions);
+                send.tell_to(&wire.actions);
             }
         }
     }
 }
 
 /// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
-/// for every such caller, so the call through `&dyn Fn` is made once.
+/// for every such caller, so its call through `&dyn TellTo` is made once.
 fn undo_nothing<C: ClockSource + 'static>(_actions: &McuActions<C>) {}
 
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
@@ -642,8 +685,8 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
     faces: &mut [Face<C, L>],
     place: usize,
     on_refusal: OnRefusal,
-    send: &dyn Fn(&McuActions<C>) -> bool,
-    undo: &dyn Fn(&McuActions<C>),
+    send: &dyn SendTo<C>,
+    undo: &dyn TellTo<C>,
 ) -> bool {
     // Whether the replay of `face` is past the declaration, so its link is told it now.
     let emits_now = |face: &Face<C, L>| {
@@ -655,7 +698,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         let Link::Up(wire) = &face.link else {
             continue;
         };
-        if emits_now(face) && !send(&wire.actions) && on_refusal == OnRefusal::Undo {
+        if emits_now(face) && !send.send_to(&wire.actions) && on_refusal == OnRefusal::Undo {
             refused_at = Some(at);
             break;
         }
@@ -664,7 +707,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         for face in faces.iter().take(refused) {
             if let Link::Up(wire) = &face.link {
                 if emits_now(face) {
-                    undo(&wire.actions);
+                    undo.tell_to(&wire.actions);
                 }
             }
         }

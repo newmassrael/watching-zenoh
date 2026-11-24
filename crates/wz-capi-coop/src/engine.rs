@@ -195,7 +195,7 @@ use registry::{FaceId, Registry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
-use replay::{Kind, Replay, TurnEnd};
+use replay::{Replay, TurnEnd};
 
 #[cfg(feature = "listen")]
 mod faces_added;
@@ -2216,7 +2216,7 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
 }
 
 /// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
-/// for every caller that sends it, so its body and its call through `&dyn Fn` are made once.
+/// for every caller that sends it, so its body and its call through `&dyn TellTo` are made once.
 fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&McuActions<C>) {
     move |actions| actions.send_undeclare_kexpr(mapping_id)
 }
@@ -2787,19 +2787,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Start a handshake with the first endpoint, from index `from` on, that a link opens to, as
-    /// the dial role's face. `Err` with the reason the last endpoint tried gave (`last` when none
-    /// is), or with [`OpenError::EntropyUnavailable`] when the platform gives no cookie key for
-    /// the attempt.
+    /// the dial role's face, at `at` in the face table, which holds the link from then on. `Err`
+    /// with the reason the last endpoint tried gave (`last` when none is), or with
+    /// [`OpenError::EntropyUnavailable`] when the platform gives no cookie key for the attempt;
+    /// the face keeps the link it held then.
     ///
     /// A dial the network has not answered yet is left under way (`Link::Dialing`), and the steps
     /// that follow ask it (`Self::dial_answered`), so no dial is waited for while the session is
     /// held; one answered at once runs its handshake here. The dial names its endpoint by its
     /// row of the session's endpoint texts, which holds the text.
+    ///
+    /// The link is put in its face where it is made, and not handed back: the link is the
+    /// largest value of the dial, and each caller that put it would move it once more.
     fn dial_from(
         &mut self,
+        at: usize,
         mut from: usize,
         mut last: OpenError,
-    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
+    ) -> Result<(), OpenError> {
         // Which row is dialled next is the transport's walk to say; each turn moves `from` past
         // the row it handed back, so the walk ends.
         loop {
@@ -2807,20 +2812,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let deadline_us = self.open_deadline_us();
             match walked {
                 DialWalk::Dialing { dial, next } => {
-                    return Ok(Link::Dialing {
-                        dial,
-                        next,
-                        deadline_us,
-                    });
+                    self.transport.links.put_link(
+                        at,
+                        Link::Dialing {
+                            dial,
+                            next,
+                            deadline_us,
+                        },
+                    );
+                    return Ok(());
                 }
                 DialWalk::Answered {
                     endpoint,
                     next,
                     answer,
                 } => {
-                    match self.dial_answered(DIAL_FACE, Some(&endpoint), next, deadline_us, answer)
-                    {
-                        Ok(link) => return Ok(link),
+                    match self.dial_answered(
+                        at,
+                        DIAL_FACE,
+                        Some(&endpoint),
+                        next,
+                        deadline_us,
+                        answer,
+                    ) {
+                        Ok(()) => return Ok(()),
                         // Neither is the endpoint's: the next one would be refused the same.
                         Err(refused @ (OpenError::EntropyUnavailable | OpenError::NoTask(_))) => {
                             return Err(refused)
@@ -2836,25 +2851,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// The dial of `endpoint` that face `face` made answered: its link's handshake begun, given
-    /// up at `deadline_us` as the dial was, the dial role's going on from endpoint `next` after
-    /// it. [`OpenError::Unreachable`] when the dial was refused, [`OpenError::EntropyUnavailable`]
-    /// when the platform gives no cookie key for the attempt.
+    /// The dial of `endpoint` that face `face`, at `at` in the face table, made answered: its
+    /// link's handshake begun and put in the face, given up at `deadline_us` as the dial was, the
+    /// dial role's going on from endpoint `next` after it. [`OpenError::Unreachable`] when the
+    /// dial was refused, [`OpenError::EntropyUnavailable`] when the platform gives no cookie key
+    /// for the attempt; the face keeps the link it held then.
     fn dial_answered(
         &mut self,
+        at: usize,
         face: FaceId,
         endpoint: Option<&DialEndpoint>,
         next: usize,
         deadline_us: u64,
         answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
-    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
+    ) -> Result<(), OpenError> {
         let opened = self.transport.dialled(endpoint, answer)?;
         let wire = self.open_wire(face, opened, SessionRole::Initiator, endpoint)?;
-        Ok(Link::Opening {
-            wire,
-            next,
-            deadline_us,
-        })
+        self.transport.links.put_link(
+            at,
+            Link::Opening {
+                wire,
+                next,
+                deadline_us,
+            },
+        );
+        Ok(())
     }
 
     /// Dial from endpoint `from` on; when none answers, wait `redial_ms` to dial them all again,
@@ -2866,23 +2887,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// counted from before the dials would then already be over, the next read would dial again at
     /// once, and the session would be held through dial after dial with no room for a publish or
     /// a close to take it.
+    /// The face at `at` holds the dial's link, or the wait; it keeps the link it held when the
+    /// session ends instead.
     /// Out of line: four arms of `poll_face` dial or wait, and one body serves them.
     #[inline(never)]
     fn dial_or_wait(
         &mut self,
+        at: usize,
         from: usize,
         last: OpenError,
         redial_ms: Option<u64>,
-    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
-        match (self.dial_from(from, last), redial_ms) {
-            (Ok(link), _) => Ok(link),
+    ) -> Result<(), OpenError> {
+        match (self.dial_from(at, from, last), redial_ms) {
+            (Ok(()), _) => Ok(()),
             (Err(OpenError::EntropyUnavailable), _) => Err(OpenError::EntropyUnavailable),
             (Err(last), None) => Err(last),
             (Err(_), Some(ms)) => {
                 let ended_us = self.now_us();
-                Ok(Link::Waiting {
-                    at_us: ended_us.saturating_add(ms.saturating_mul(1000)),
-                })
+                self.transport.links.put_link(
+                    at,
+                    Link::Waiting {
+                        at_us: ended_us.saturating_add(ms.saturating_mul(1000)),
+                    },
+                );
+                Ok(())
             }
         }
     }
@@ -2973,13 +3001,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             endpoint,
         } = step;
         let id = life.id();
-        match effect {
-            FaceEffect::Stay => Ok(()),
+        // Every arm that does not end here names what follows and the reason the last endpoint
+        // gave, and one call carries them out.
+        let (then, last) = match effect {
+            FaceEffect::Stay => return Ok(()),
             // The face table decides whether the node is held already, and installs the link
             // itself.
             FaceEffect::BringUp => {
                 self.bring_up(at, now_us);
-                Ok(())
+                return Ok(());
             }
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router
@@ -2987,20 +3017,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // `return _zp_unicast_failed_result(ztu, executor);`).
             FaceEffect::Lose { then } => {
                 self.lose_face_link(at, id, now_us);
-                if then == Next::EndSession {
-                    return Err(OpenError::Unreachable(EndpointRefusal::new(
-                        "",
-                        Refusal::LinkLost,
-                    )));
-                }
-                self.follow(at, then, OpenError::NoEndpoint, redial_ms)
+                let last = if then == Next::EndSession {
+                    OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
+                } else {
+                    OpenError::NoEndpoint
+                };
+                (then, last)
             }
             // The link's task, told to stop, ends in the pass of the tasks before its link goes.
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
                 let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
-                self.follow(at, then, last, redial_ms)
+                (then, last)
             }
             // The dial under way was asked, never waited for: its link's handshake begins once
             // it is made. Refused, or not answered by its deadline, the dial role's face dials the
@@ -3008,7 +3037,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             FaceEffect::Handshake { next, deadline_us } => {
                 let answered = match answer {
                     Some(answer) => {
-                        self.dial_answered(id, endpoint.as_ref(), next, deadline_us, answer)
+                        self.dial_answered(at, id, endpoint.as_ref(), next, deadline_us, answer)
                     }
                     None => Err(OpenError::Unreachable(EndpointRefusal::new(
                         self.transport.endpoint_text(endpoint.as_ref()),
@@ -3016,12 +3045,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     ))),
                 };
                 match answered {
-                    Ok(link) => {
-                        self.transport.links.put_link(at, link);
-                        Ok(())
+                    Ok(()) => return Ok(()),
+                    Err(OpenError::EntropyUnavailable) => {
+                        return Err(OpenError::EntropyUnavailable)
                     }
-                    Err(OpenError::EntropyUnavailable) => Err(OpenError::EntropyUnavailable),
-                    Err(last) => self.follow(at, life.after_failure(next), last, redial_ms),
+                    Err(last) => (life.after_failure(next), last),
                 }
             }
             FaceEffect::DialFailed { then } => {
@@ -3033,19 +3061,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     self.transport.endpoint_text(endpoint.as_ref()),
                     why,
                 ));
-                self.follow(at, then, last, redial_ms)
+                (then, last)
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
             // the face that held the node is gone, and so is any link in the making to it. Read
             // from the face table each step and not told by the face that goes, so a link that
             // dies in its handshake frees the node as well.
-            FaceEffect::Dial { from } => self.follow(
-                at,
-                Next::DialFrom { from },
-                OpenError::NoEndpoint,
-                redial_ms,
-            ),
-        }
+            FaceEffect::Dial { from } => (Next::DialFrom { from }, OpenError::NoEndpoint),
+        };
+        self.follow(at, then, last, redial_ms)
     }
 
     /// What follows a link of the face at `at` that failed or was lost (`then`), `last` the
@@ -3065,11 +3089,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Ok(())
             }
             Next::EndSession => Err(last),
-            Next::DialFrom { from } => {
-                let link = self.dial_or_wait(from, last, redial_ms)?;
-                self.transport.links.put_link(at, link);
-                Ok(())
-            }
+            Next::DialFrom { from } => self.dial_or_wait(at, from, last, redial_ms),
             // The dial role's link reached a node another face holds or is bringing up: the node
             // refused it (`install_link_admission`). It stands by, and dials again when no other
             // face has the node, where dialling at once would be refused again and the handshake
@@ -4039,8 +4059,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.transport.endpoints.listens(),
             core.config.groups.len(),
         ) {
-            let link = core.dial_from(0, OpenError::NoEndpoint)?;
-            core.transport.links.put_link(0, link);
+            core.dial_from(0, 0, OpenError::NoEndpoint)?;
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.transport.dial_settled() {
@@ -5210,8 +5229,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Give back to the session what a key held of its declarations (`RowHolds`), with no lock
     /// of the session held: a release may retract a declaration, which takes the lock.
+    // Out of line: every undeclaration, refused declaration and close gives holds back, and each
+    // would otherwise carry the releases and the drop of what the key kept.
+    #[inline(never)]
     fn give_back(&self, holds: WireHolds) {
         holds.release(self);
+    }
+
+    /// Let go of `wire`, a key no row came to hold, giving back what it held
+    /// ([`Self::give_back`]), with no lock of the session held.
+    // Out of line: each refusal of a declaration lets its key go, and one body serves them.
+    #[inline(never)]
+    fn let_go_of_key(&self, wire: WireKey) {
+        self.give_back(wire.into_holds());
     }
 
     /// Let go of each row whose last call ended after it was undeclared, when a call said one may
@@ -6252,7 +6282,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6263,7 +6293,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(
@@ -6408,7 +6438,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&core.session.registry).undeclare_subscriber(handle)?;
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions| {
+            core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 SubscriberRow::retract(id, names, actions);
             });
@@ -6466,7 +6496,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let place = core.keyexpr_place(declared.handle);
         let taken = core.announce_or_undo_at(
             place,
-            &|actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
+            &|actions: &McuActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             &undeclare_kexpr::<C>(id),
         );
         if !taken {
@@ -6552,13 +6582,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let unwatched =
                 tables_mut(&core.session.registry).undeclare_matching_listener(handle)?;
             // The row went before the links are told: a send never finds the tables borrowed.
-            if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
-                core.retract(
-                    Kind::Interest,
-                    at,
-                    &interest_final::<C>(u64::from(interest)),
-                );
-            }
+            core.end_interest(unwatched.interest_final, place);
             unwatched.row
         });
         // Nothing it was owed is handed, its row being gone; its callback is let go of here, with
@@ -6689,13 +6713,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (last_held, place) {
-            core.retract(
-                Kind::Interest,
-                at,
-                &interest_final::<C>(u64::from(interest)),
-            );
-        }
+        core.end_interest(last_held, place);
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
@@ -6792,7 +6810,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: QueryableSink,
     ) -> Result<QblId, Declined> {
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -6803,7 +6821,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(
@@ -7400,7 +7418,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&core.session.registry).undeclare_queryable(handle)?;
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions| {
+            core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 QueryableRow::retract(id, names, actions);
             });
@@ -7455,7 +7473,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         });
         // The row holds the declaration its key is named by, so the key the ABI named it by is
         // not kept: what it held goes back, declared or refused, with no lock held.
-        wire.let_go(self);
+        self.let_go_of_key(wire);
         declared
     }
 
@@ -7493,7 +7511,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.transport.retract_from_groups(id);
         // The rows went before the links are told: a send never finds the tables borrowed.
         let key = undeclared.row.as_ref().map(|row| row.key().as_str());
-        core.retract_at(token_place, &|actions| {
+        core.retract_at(token_place, &|actions: &McuActions<C>| {
             if let Some(key) = key {
                 retract_token(actions, id, names.map(|names| names.names(key)));
             }
@@ -7512,7 +7530,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal.
         let Some(mut guard) = self.live() else {
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::Closed);
         };
         let core = &mut guard.0;
@@ -7524,7 +7542,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let next = tables(&core.session.registry).next_entity_id();
         let Some(id) = next else {
             drop(guard);
-            wire.let_go(self);
+            self.let_go_of_key(wire);
             return Err(Declined::NoEntityId);
         };
         let form = core.session.key_form(wire.mapping_id, Retraction::ById);
