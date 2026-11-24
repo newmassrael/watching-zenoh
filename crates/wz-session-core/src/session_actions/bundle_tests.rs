@@ -810,6 +810,43 @@ mod lent_handshake {
         );
     }
 
+    /// The InitSyn and the OpenSyn a lend-only opener sends are the bytes the heap encoders write
+    /// for its chains: the patch level on the InitSyn, and on the OpenSyn the bound the session
+    /// decided. A build that stages no handshake extension writes both from its parameters
+    /// (`encode_init_patch_into`, `encode_open_bound_into`) and one that stages writes them from
+    /// its chains, and each lend-only leg runs this. Turned red by either writer putting another
+    /// entry, header or value on the wire, or leaving the bound off.
+    #[test]
+    fn a_lent_opening_handshake_writes_the_bytes_of_its_chains() {
+        use crate::extbound::{encode_remote_bound_ext, Bound};
+        use crate::handshake_encode::{encode_init_with_caps, encode_open, InitCaps};
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        binding.send_init_syn();
+        actions.fact_local_remote_bound(|slot| *slot = Some(Bound::South));
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "the InitSyn and the OpenSyn");
+        let params = params();
+        // The InitSyn advertises the batch its link can receive, as the session's sender does.
+        let caps = InitCaps {
+            batch_size: actions.own_batch_advertisement(),
+            ..InitCaps::of(&params)
+        };
+        let patch = [crate::extpatch::encode_patch_ext()];
+        let init_syn = encode_init_with_caps(&params, caps, false, patch.as_slice().into(), None)
+            .expect("the InitSyn the heap encoder writes");
+        assert_eq!(
+            sent[0], init_syn,
+            "the InitSyn carries the patch level alone"
+        );
+        let bound = [encode_remote_bound_ext(Bound::South)];
+        let open_syn =
+            encode_open(&params, false, None, &bound).expect("the OpenSyn the heap encoder writes");
+        assert_eq!(sent[1], open_syn, "the OpenSyn carries the bound alone");
+    }
+
     /// Every lend-only control message is written by one writer, which holds the initiator's
     /// OpenSyn as it went out, and nothing of the InitSyn before it, for a replay that sends those
     /// very bytes again. A build whose domain of `handshake-stray-message` leaves the replay out
