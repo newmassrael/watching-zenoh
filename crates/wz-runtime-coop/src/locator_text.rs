@@ -223,22 +223,27 @@ fn ipv6_groups(text: &mut Text<'_>, groups: &mut [u16]) -> (usize, bool) {
 
 /// The IPv4 address at the front of `text` as `core::net` reads one, taken from it: four octets
 /// of one to three decimal digits, `.` between two, none above 255 and none written with a
-/// leading zero. A fourth digit in an octet refuses the address. [`socket_addr_v4`] reads one
+/// leading zero. A fourth digit in an octet refuses the address, and so does a `.` after the
+/// fourth octet, which no address's text has in either family. [`socket_addr_v4`] reads one
 /// before its port and [`ipv6_groups`] one as an IPv6 address's last two groups.
 fn ipv4_address(text: &mut Text<'_>) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
-    for (index, octet) in octets.iter_mut().enumerate() {
-        if index > 0 && !text.eat(b'.') {
-            return None;
-        }
+    let mut read = 0usize;
+    // Octets are read while a `.` follows one, and the address is four of them: the text ends the
+    // loop, not a count of four, so the reader is one body and not one copy for each octet.
+    loop {
         let leading_zero = text.0.first() == Some(&b'0');
         let (digits, value) = text.number(10);
         if digits == 0 || digits > 3 || (digits > 1 && leading_zero) {
             return None;
         }
-        *octet = u8::try_from(value).ok()?;
+        *octets.get_mut(read)? = u8::try_from(value).ok()?;
+        read = read.wrapping_add(1);
+        if !text.eat(b'.') {
+            break;
+        }
     }
-    Some(octets)
+    (read == octets.len()).then_some(octets)
 }
 
 /// The text of an address still to be read, which each reader above takes its part from. A
@@ -660,5 +665,27 @@ mod tests {
                 7447
             ))))
         );
+    }
+
+    /// The octet reader takes four octets and leaves what follows them, and refuses a `.` after
+    /// the fourth, which no address's text has. Turned red by a reader that stops at the fourth
+    /// octet whatever follows it, or one that takes fewer than four.
+    #[test]
+    fn the_octet_reader_takes_four_octets_and_refuses_a_fifth() {
+        let mut text = Text(b"10.0.0.1:7447");
+        std::assert_eq!(ipv4_address(&mut text), Some([10, 0, 0, 1]));
+        std::assert_eq!(text.0, b":7447", "what follows the address is left");
+        let mut text = Text(b"1.2.3.4]");
+        std::assert_eq!(ipv4_address(&mut text), Some([1, 2, 3, 4]));
+        std::assert_eq!(text.0, b"]");
+        let refused: [&[u8]; 6] = [b"1.2.3.4.5", b"1.2.3.4.", b"1.2.3", b"1.2.3.", b"1", b""];
+        for refused in refused {
+            std::assert_eq!(
+                ipv4_address(&mut Text(refused)),
+                None,
+                "{:?}",
+                core::str::from_utf8(refused)
+            );
+        }
     }
 }
