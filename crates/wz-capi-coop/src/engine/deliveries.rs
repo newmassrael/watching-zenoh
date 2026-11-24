@@ -4,7 +4,7 @@
 //! The threads that hand out a session's deliveries now, and the callbacks each of them runs.
 //!
 //! A callback that steps its session again hands out nothing itself: the delivery it is inside of
-//! goes on to hand out what the inner step queued, in order ([`Deliveries::enter`]). A put or a
+//! goes on to hand out what the inner step queued, in order ([`Deliveries::within`]). A put or a
 //! get of the session's own calls each subscriber or queryable it reaches at once, from inside that
 //! entity's own callback too, as zenoh-pico does: a callback is called through a shared borrow and
 //! is not marked here.
@@ -12,11 +12,13 @@
 //! It is asked on every delivery, so the case of one thread delivering, which is a read task's or a
 //! program's that steps its session itself, is answered with atomics: the first thread to deliver
 //! holds the owner's word ([`os::current_word`]). A thread that delivers while another holds the
-//! word is kept in a list under a lock, as every thread was before; the count of that list says,
-//! without its lock, whether there is anything in it to look for. A set held per engine and keyed by thread is what
-//! a thread-local set keyed by engine would be, without a thread-local, which an MCU kernel does
-//! not give a Rust image.
+//! word is linked into a list under a lock, its link lying in its own frame for as long as it
+//! delivers, so any number of threads deliver at once with nothing reserved for them and nothing
+//! taken of the heap; the count of that list says, without its lock, whether there is anything in
+//! it to look for. A set held per engine and keyed by thread is what a thread-local set keyed by
+//! engine would be, without a thread-local, which an MCU kernel does not give a Rust image.
 
+use core::cell::Cell;
 use core::sync::atomic::Ordering;
 
 use portable_atomic::AtomicUsize;
@@ -33,120 +35,98 @@ const NO_THREAD: usize = 0;
 pub(super) struct Deliveries {
     /// The word of the thread that delivers with the owner's place, or [`NO_THREAD`].
     owner: AtomicUsize,
-    /// How many threads `others` holds: each thread counts itself in after it is put in and out
+    /// How many threads `others` holds: each thread counts itself in after it is linked and out
     /// before it is taken out, so a thread in the list always reads its own count in it.
     beside: AtomicUsize,
     /// The threads delivering beside the owner.
-    others: Lock<Vec<Beside>>,
+    others: Lock<Others>,
     /// How often `others` was taken, which the tests of the cost of one sample count.
     #[cfg(all(test, feature = "std"))]
     others_taken: core::sync::atomic::AtomicUsize,
 }
 
-/// A thread of [`Deliveries::others`].
+/// A thread delivering beside the owner: its link in [`Deliveries::others`], which lies in the
+/// thread's frame of [`Deliveries::within`] and is taken out of the list before that frame ends.
 struct Beside {
     word: usize,
-    /// Whether it delivers now.
-    delivering: bool,
+    /// The next thread of the list, null for none; written only under the list's lock.
+    next: Cell<*const Beside>,
 }
 
-impl Beside {
-    /// Whether nothing of the thread is kept: it delivers nothing.
-    fn is_spent(&self) -> bool {
-        !self.delivering
-    }
-}
+/// The first thread of the list of those delivering beside the owner, null for none.
+struct Others(*const Beside);
+
+// SAFETY: the links are reached only under the lock that holds this head, and each stands in its
+// thread's frame for as long as it is linked (`Beside`), so whichever thread holds the lock reads
+// and writes links that stand, one thread at a time.
+unsafe impl Send for Others {}
 
 impl Deliveries {
     pub(super) fn new() -> Self {
         Self {
             owner: AtomicUsize::new(NO_THREAD),
             beside: AtomicUsize::new(0),
-            others: Lock::new(Vec::new()),
+            others: Lock::new(Others(core::ptr::null())),
             #[cfg(all(test, feature = "std"))]
             others_taken: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// A delivery on this thread, until the guard drops; `None` when this thread delivers for the
-    /// engine already, which leaves what it would hand out to the delivery it is inside of.
-    pub(super) fn enter(&self) -> Option<Delivering<'_>> {
+    /// Run `f` as a delivery of this thread's, told whether it is one: `false` when this thread
+    /// delivers for the engine already, which leaves what it would hand out to the delivery it is
+    /// inside of. A thread that delivers beside the owner is linked into the list for as long as
+    /// `f` runs, by a link in this frame.
+    pub(super) fn within<R>(&self, f: impl FnOnce(bool) -> R) -> R {
         let word = os::current_word();
-        if self.owner.load(Ordering::Acquire) == word {
-            return None;
-        }
-        if self.beside.load(Ordering::Acquire) > 0
-            && self.with_others(|others| others.iter().any(|t| t.word == word && t.delivering))
-        {
-            return None;
+        if self.delivers(word) {
+            return f(false);
         }
         if self
             .owner
             .compare_exchange(NO_THREAD, word, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            return Some(Delivering {
-                set: self,
-                word,
-                owner: true,
-            });
+            let _owner = Owning(self);
+            return f(true);
         }
-        let added = self.with_others(|others| match others.iter_mut().find(|t| t.word == word) {
-            Some(thread) => {
-                thread.delivering = true;
-                false
-            }
-            None => {
-                others.push(Beside {
-                    word,
-                    delivering: true,
-                });
-                true
-            }
-        });
-        if added {
-            self.beside.fetch_add(1, Ordering::AcqRel);
-        }
-        Some(Delivering {
-            set: self,
+        let link = Beside {
             word,
-            owner: false,
-        })
+            next: Cell::new(core::ptr::null()),
+        };
+        let _linked = Linked::link(self, &link);
+        f(true)
     }
 
     /// Whether this thread delivers for the engine now: a callback of the session may run below
     /// on its stack, so nothing here waits for a call to end.
     pub(super) fn delivers_here(&self) -> bool {
-        let word = os::current_word();
+        self.delivers(os::current_word())
+    }
+
+    /// Whether the thread of `word` delivers for the engine now.
+    fn delivers(&self, word: usize) -> bool {
         self.owner.load(Ordering::Acquire) == word
             || (self.beside.load(Ordering::Acquire) > 0
-                && self.with_others(|others| others.iter().any(|t| t.word == word && t.delivering)))
+                && self.with_others(|others| {
+                    let mut at = others.0;
+                    while !at.is_null() {
+                        // SAFETY: a link in the list stands until its own thread takes it out,
+                        // under this lock (`Others`).
+                        let link = unsafe { &*at };
+                        if link.word == word {
+                            return true;
+                        }
+                        at = link.next.get();
+                    }
+                    false
+                }))
     }
 
     /// The threads beside the owner, held for `f`.
-    fn with_others<R>(&self, f: impl FnOnce(&mut Vec<Beside>) -> R) -> R {
+    fn with_others<R>(&self, f: impl FnOnce(&mut Others) -> R) -> R {
         #[cfg(all(test, feature = "std"))]
         self.others_taken.fetch_add(1, Ordering::Relaxed);
         self.others.with(f)
-    }
-
-    /// Take `word`'s thread out of `others` when nothing of it is kept any more.
-    fn let_go_of(&self, word: usize, change: impl FnOnce(&mut Beside)) {
-        let removed = self.with_others(|others| {
-            let Some((at, thread)) = others.iter_mut().enumerate().find(|(_, t)| t.word == word)
-            else {
-                return false;
-            };
-            change(thread);
-            let spent = thread.is_spent();
-            if spent {
-                others.swap_remove(at);
-            }
-            spent
-        });
-        if removed {
-            self.beside.fetch_sub(1, Ordering::AcqRel);
-        }
     }
 
     /// How often the list of the threads beside the owner was taken since the engine was made.
@@ -156,27 +136,63 @@ impl Deliveries {
     }
 }
 
-/// One thread's delivery for one engine, from [`Deliveries::enter`] to drop.
-pub(super) struct Delivering<'a> {
-    set: &'a Deliveries,
-    word: usize,
-    owner: bool,
+/// The owner's place held by this thread, let go of as it drops.
+struct Owning<'a>(&'a Deliveries);
+
+impl Drop for Owning<'_> {
+    fn drop(&mut self) {
+        self.0.owner.store(NO_THREAD, Ordering::Release);
+    }
 }
 
-impl Drop for Delivering<'_> {
+/// A thread's link in the list of those beside the owner, taken out as it drops, before the
+/// frame the link lies in ends.
+struct Linked<'a> {
+    set: &'a Deliveries,
+    link: &'a Beside,
+}
+
+impl<'a> Linked<'a> {
+    /// Put `link` first in `set`'s list, and count it in.
+    fn link(set: &'a Deliveries, link: &'a Beside) -> Self {
+        set.with_others(|others| {
+            link.next.set(others.0);
+            others.0 = core::ptr::from_ref(link);
+        });
+        set.beside.fetch_add(1, Ordering::AcqRel);
+        Self { set, link }
+    }
+}
+
+impl Drop for Linked<'_> {
     fn drop(&mut self) {
-        if self.owner {
-            self.set.owner.store(NO_THREAD, Ordering::Release);
-        } else {
-            self.set
-                .let_go_of(self.word, |thread| thread.delivering = false);
-        }
+        self.set.beside.fetch_sub(1, Ordering::AcqRel);
+        let gone = core::ptr::from_ref(self.link);
+        let after = self.link.next.get();
+        self.set.with_others(|others| {
+            if others.0 == gone {
+                others.0 = after;
+                return;
+            }
+            let mut at = others.0;
+            while !at.is_null() {
+                // SAFETY: a link in the list stands until its own thread takes it out, under this
+                // lock (`Others`).
+                let link = unsafe { &*at };
+                if link.next.get() == gone {
+                    link.next.set(after);
+                    return;
+                }
+                at = link.next.get();
+            }
+        });
     }
 }
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
 
     /// A thread that delivers already enters no second delivery, which is how a callback that
     /// steps its session again leaves what it queued to the delivery it is inside of; the one
@@ -184,14 +200,11 @@ mod tests {
     #[test]
     fn a_thread_that_delivers_already_enters_no_second_delivery() {
         let set = Deliveries::new();
-        let outer = set.enter();
-        assert!(outer.is_some(), "the first delivery is entered");
-        assert!(set.enter().is_none(), "the same thread enters no second");
-        drop(outer);
-        assert!(
-            set.enter().is_some(),
-            "once it ended, the thread delivers again"
-        );
+        set.within(|outer| {
+            assert!(outer, "the first delivery is entered");
+            set.within(|inner| assert!(!inner, "the same thread enters no second"));
+        });
+        set.within(|again| assert!(again, "once it ended, the thread delivers again"));
         assert_eq!(set.others_taken(), 0, "one thread asked no lock");
     }
 
@@ -201,30 +214,109 @@ mod tests {
     #[test]
     fn a_second_thread_delivers_beside_the_first() {
         let set = Deliveries::new();
-        let owner = set.enter().expect("the owner's delivery");
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let beside = set.enter();
-                    assert!(
-                        beside.is_some(),
-                        "a second thread delivers beside the first"
-                    );
-                    assert!(set.enter().is_none(), "and enters no second delivery");
-                    drop(beside);
-                })
-                .join()
-                .expect("the second thread");
+        let taken = set.within(|owner| {
+            assert!(owner, "the owner's delivery");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        set.within(|beside| {
+                            assert!(beside, "a second thread delivers beside the first");
+                            assert!(set.delivers_here(), "and is known to deliver");
+                            set.within(|inner| assert!(!inner, "and enters no second delivery"));
+                        });
+                        assert!(!set.delivers_here(), "and is let go of once it is done");
+                    })
+                    .join()
+                    .expect("the second thread");
+            });
+            assert!(
+                set.others_taken() > 0,
+                "CONTROL: the second thread was kept in the list"
+            );
+            assert_eq!(set.beside.load(Ordering::Acquire), 0, "and taken out of it");
+            set.others_taken()
         });
-        assert!(
-            set.others_taken() > 0,
-            "CONTROL: the second thread was kept in the list"
-        );
-        assert_eq!(set.beside.load(Ordering::Acquire), 0, "and taken out of it");
-        let taken = set.others_taken();
-        drop(owner);
-        let again = set.enter();
-        assert!(again.is_some());
+        set.within(|again| assert!(again));
         assert_eq!(set.others_taken(), taken, "the owner alone asked no lock");
+    }
+
+    /// A thread that delivers beside the owner takes nothing of the heap to be kept in the list:
+    /// its link lies in its own frame.
+    #[test]
+    fn a_thread_delivering_beside_the_owner_allocates_nothing() {
+        use crate::tests::redial_heap::counted;
+        let set = Deliveries::new();
+        let allocated = set.within(|owner| {
+            assert!(owner, "the owner's delivery");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let mut entered = false;
+                        let allocated = counted(|| {
+                            entered = set.within(|beside| beside);
+                        });
+                        assert!(entered, "CONTROL: the thread delivered beside the owner");
+                        allocated
+                    })
+                    .join()
+                    .expect("the second thread")
+            })
+        });
+        assert_eq!(allocated, 0, "a thread beside the owner took the heap");
+    }
+
+    /// Threads beside the owner come and go in any order: each that stands is known to deliver,
+    /// one taken out of the middle of the list leaves the others linked, and once every one is
+    /// gone the list is empty.
+    #[test]
+    fn threads_beside_the_owner_leave_in_any_order() {
+        const THREADS: usize = 3;
+        let set = Deliveries::new();
+        // Each thread links in its turn, so the list is the threads in the reverse of their turns
+        // and the thread of the middle turn lies in the middle of it.
+        let turn = AtomicUsize::new(0);
+        let linked = Barrier::new(THREADS + 1);
+        let middle_gone = Barrier::new(THREADS + 1);
+        set.within(|owner| {
+            assert!(owner, "the owner's delivery");
+            std::thread::scope(|scope| {
+                for at in 0..THREADS {
+                    let (set, turn, linked, middle_gone) = (&set, &turn, &linked, &middle_gone);
+                    scope.spawn(move || {
+                        while turn.load(Ordering::Acquire) != at {
+                            std::thread::yield_now();
+                        }
+                        if at == THREADS / 2 {
+                            set.within(|beside| {
+                                assert!(beside);
+                                turn.store(at + 1, Ordering::Release);
+                                linked.wait();
+                            });
+                            assert!(!set.delivers_here(), "a thread gone is not known");
+                            middle_gone.wait();
+                        } else {
+                            set.within(|beside| {
+                                assert!(beside);
+                                turn.store(at + 1, Ordering::Release);
+                                linked.wait();
+                                middle_gone.wait();
+                                assert!(set.delivers_here(), "a thread that stands is known");
+                            });
+                        }
+                    });
+                }
+                linked.wait();
+                middle_gone.wait();
+            });
+            assert_eq!(
+                set.beside.load(Ordering::Acquire),
+                0,
+                "every thread was counted out"
+            );
+            assert!(
+                set.with_others(|others| others.0.is_null()),
+                "and taken out of the list"
+            );
+        });
     }
 }
