@@ -2031,13 +2031,15 @@ mod tests {
             reliability: Reliability::Reliable,
         };
         let reached = observer
-            .borrow_mut()
+            .try_borrow_mut()
+            .expect("an idle observer lends")
             .tables
             .subscribers
             .dispatch_borrowed(&view("demo/in", b"21.5!"), true);
         assert_eq!(reached, 1);
         let reached = observer
-            .borrow_mut()
+            .try_borrow_mut()
+            .expect("an idle observer lends")
             .tables
             .subscribers
             .dispatch_borrowed(&view("demo/elsewhere", b"x"), true);
@@ -2108,7 +2110,15 @@ mod tests {
         let observer = held
             .get()
             .expect("the observer was built before the refusal");
-        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 2);
+        assert_eq!(
+            observer
+                .try_borrow_mut()
+                .expect("an idle observer lends")
+                .tables
+                .subscribers
+                .len(),
+            2
+        );
         assert_eq!(
             stated_declared.all().len(),
             2,
@@ -2126,7 +2136,15 @@ mod tests {
             control_declared,
         )
         .expect("the build's limits take it");
-        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 3);
+        assert_eq!(
+            observer
+                .try_borrow_mut()
+                .expect("an idle observer lends")
+                .tables
+                .subscribers
+                .len(),
+            3
+        );
         assert_eq!(control_declared.all().len(), 3);
     }
 

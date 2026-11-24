@@ -312,9 +312,12 @@ where
             IterationEvent::MulticastPeerLost(_) => state.member_lost(),
             _ => {}
         }
-        let mut peers = state.peers.borrow_mut();
-        let mut observer = observer.borrow_mut();
-        observer.dispatch_event(&mut (), &mut peers, &mut requesters, event);
+        // The cell lends nothing only before its install or to a dispatch from inside a
+        // dispatch; the one task never makes either, and the event then has no observer.
+        if let Some(mut observer) = observer.try_borrow_mut() {
+            let mut peers = state.peers.borrow_mut();
+            observer.dispatch_event(&mut (), &mut peers, &mut requesters, event);
+        }
     };
     let mut publisher = GroupPublisher::<P>::new();
     let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);

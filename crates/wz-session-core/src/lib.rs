@@ -2054,8 +2054,6 @@ pub mod session_memory;
 /// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
 /// that holds several peers in one session (`tests/it/files/slot_observer_heap.rs`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-095 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
