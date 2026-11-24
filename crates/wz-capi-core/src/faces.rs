@@ -127,7 +127,7 @@ use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::session_tables::{RowCallbacks, SessionTables};
+use wz_session_core::session_tables::{KeyexprHandle, RowCallbacks, SessionTables};
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
@@ -1332,6 +1332,10 @@ struct SubEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
+    /// in its place.
+    held: [Option<KeyexprHandle>; 2],
     /// The key the retraction names beside the id, when the declaring ABI's
     /// reference library names one — see
     /// [`SubscribeOptions::with_retraction_naming`]. Kept for the same reason
@@ -1358,6 +1362,10 @@ struct QblEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
+    /// in its place.
+    held: [Option<KeyexprHandle>; 2],
     /// The key the retraction names beside the id — see
     /// [`SubEntry::retraction`].
     retraction: Option<RetractionKey>,
@@ -1407,6 +1415,10 @@ struct TokenEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
+    /// in its place.
+    held: [Option<KeyexprHandle>; 2],
     /// The declaring ABI's retraction shape, kept so a replayed token retracts
     /// the way the first one does.
     options: LivelinessOptions,
@@ -1444,6 +1456,10 @@ struct LiveSubEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
+    /// in its place.
+    held: [Option<KeyexprHandle>; 2],
     sink: LivelinessSink,
 }
 
@@ -3271,21 +3287,26 @@ impl SharedSession {
     /// Hold, for an entry the registry records from here on, each declaration it names
     /// ([`declarations_named`]) in the session's one count of a declaration's holders, as zenoh-pico
     /// counts its resource's `_refcount`: the key the entry was declared on holds none of its own.
-    /// One no longer declared takes none.
-    fn hold_named(guard: &mut Inner, named: [ExprId; 2]) {
-        for id in named {
-            if let Some(handle) = guard.tables.keyexpr_by_id(id) {
-                guard.tables.retain_keyexpr(handle);
-            }
-        }
+    /// One no longer declared takes none. The rows held, for the entry to keep.
+    fn hold_named(guard: &mut Inner, named: [ExprId; 2]) -> [Option<KeyexprHandle>; 2] {
+        named.map(|id| {
+            guard
+                .tables
+                .keyexpr_by_id(id)
+                .filter(|&handle| guard.tables.retain_keyexpr(handle))
+        })
     }
 
     /// Let go of what an entry taken out of the registry held ([`Self::hold_named`]), after its
-    /// own retraction went: with no lock held, since the last hold of a declaration retracts it,
-    /// which takes the lock.
-    fn release_named(&self, named: [ExprId; 2]) {
-        for id in named.into_iter().filter(|&id| id != 0) {
-            self.release_keyexpr(id);
+    /// own retraction went, by the rows it held: a row retracted whatever held it is gone, and a
+    /// declaration that took its id since is another row, which this does not touch. With no lock
+    /// held on the way in, since the last hold of a declaration retracts it, which takes the lock.
+    fn release_named(&self, held: [Option<KeyexprHandle>; 2]) {
+        for handle in held.into_iter().flatten() {
+            let mut guard = self.lock();
+            if let Some(mapping_id) = guard.tables.undeclare_keyexpr(handle) {
+                self.retract_keyexpr_locked(&mut guard, mapping_id);
+            }
         }
     }
 
@@ -4073,13 +4094,13 @@ impl SharedSession {
         // What each entry held goes back with the entry, outside the lock.
         let ((subs, qbls, live_subs, matches), copies) = dropped;
         for entry in subs {
-            self.release_named(declarations_named(&entry.wire, entry.retraction));
+            self.release_named(entry.held);
         }
         for entry in qbls {
-            self.release_named(declarations_named(&entry.wire, entry.retraction));
+            self.release_named(entry.held);
         }
         for entry in live_subs {
-            self.release_named(declarations_named(&entry.wire, None));
+            self.release_named(entry.held);
         }
         drop(matches);
         drop(copies);
@@ -5248,8 +5269,9 @@ impl SharedSession {
         // unlocked: what they run may re-enter the session.
         let legs = self.own_liveliness_legs(&guard, &keyexpr);
         // Its retraction names the key it was declared on, the declaration its key names.
-        Self::hold_named(&mut guard, declarations_named(&wire, None));
+        let held = Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.tokens.push(TokenEntry {
+            held,
             id,
             keyexpr: keyexpr.clone(),
             links,
@@ -5304,7 +5326,7 @@ impl SharedSession {
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
         if let Some(entry) = dropped_entry {
-            self.release_named(declarations_named(&entry.wire, None));
+            self.release_named(entry.held);
         }
         // And the session's own liveliness subscribers, last: the token is gone from the wire
         // when they hear of it.
@@ -5404,8 +5426,9 @@ impl SharedSession {
             Vec::new()
         };
         let leg = (!history.is_empty()).then(|| sink());
-        Self::hold_named(&mut guard, declarations_named(&wire, None));
+        let held = Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.live_subs.push(LiveSubEntry {
+            held,
             id,
             keyexpr,
             history: options.history,
@@ -6324,7 +6347,9 @@ impl SharedSession {
         // Every listener that counts the session's own entities reads it again, whatever origin
         // this one accepts: a listener of upstream's rule counts it either way.
         let local_key = Some(keyexpr.clone());
+        let held = Self::hold_named(&mut guard, declarations_named(&wire, retraction));
         let entry = SubEntry {
+            held,
             id,
             keyexpr,
             allowed_origin,
@@ -6338,10 +6363,6 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::subscribe_on_groups(&mut guard, &entry);
         }
-        Self::hold_named(
-            &mut guard,
-            declarations_named(&entry.wire, entry.retraction),
-        );
         guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
@@ -7131,11 +7152,11 @@ impl SharedSession {
         #[cfg(all(feature = "multicast-transport", feature = "liveliness"))]
         drop(dropped_group_live);
         if let Some(entry) = dropped_entry {
-            self.release_named(declarations_named(&entry.wire, entry.retraction));
+            self.release_named(entry.held);
         }
         drop(dropped_live);
         if let Some(entry) = dropped_live_entry {
-            self.release_named(declarations_named(&entry.wire, None));
+            self.release_named(entry.held);
         }
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
@@ -7317,7 +7338,9 @@ impl SharedSession {
             }
         }
         let local_key = Some(keyexpr.clone());
+        let held = Self::hold_named(&mut guard, declarations_named(&wire, retraction));
         let entry = QblEntry {
+            held,
             id,
             keyexpr,
             complete,
@@ -7333,10 +7356,6 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::answer_on_groups(&mut guard, &entry);
         }
-        Self::hold_named(
-            &mut guard,
-            declarations_named(&entry.wire, entry.retraction),
-        );
         guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
@@ -7388,7 +7407,7 @@ impl SharedSession {
         #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
         drop(dropped_groups);
         if let Some(entry) = dropped_entry {
-            self.release_named(declarations_named(&entry.wire, entry.retraction));
+            self.release_named(entry.held);
         }
         if let Some(key) = local_key {
             self.refresh_local_matches(
@@ -8443,6 +8462,53 @@ mod matching_aggregate_tests {
         );
         assert!(shared.keyexpr_declarations().is_empty());
         assert_eq!(*hits.lock().expect("test mutex"), 1);
+    }
+
+    /// An entry lets go of the declarations it held by their rows, not by their ids: a declaration
+    /// retracted whatever held it, whose id a later declaration takes again once the ids wrap, is
+    /// not the one the entry's going lets go of. Turned red by an entry that lets go by the id
+    /// (`release_named` through `release_keyexpr`), which retracts the new declaration.
+    #[test]
+    fn an_entrys_going_spares_a_declaration_that_took_a_retracted_id_again() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        let old = shared
+            .acquire_keyexpr("wz/held/old".to_owned())
+            .expect("the first id is not exhausted");
+        let sub = shared
+            .declare_subscriber_on_wire(
+                "wz/held/old/x".to_owned(),
+                WireKey::aliased_tail(old, "/x".len()),
+                Locality::Any,
+                None,
+                sink,
+            )
+            .expect("declared");
+        // Retracted whatever holds it, as the program's undeclaration of its key does.
+        shared.undeclare_keyexpr(old);
+        // The ids are minted onward and wrap: declarations made and let go of come to the
+        // retracted id again.
+        let again = (0..=u32::from(u16::MAX))
+            .find_map(|_| {
+                let id = shared
+                    .acquire_keyexpr("wz/held/new".to_owned())
+                    .expect("an id is free");
+                if id == old {
+                    return Some(id);
+                }
+                shared.release_keyexpr(id);
+                None
+            })
+            .expect("the retracted id is minted again");
+        shared.undeclare_subscriber(sub);
+        assert_eq!(
+            shared.keyexpr_declarations(),
+            vec![(again, "wz/held/new".to_owned())],
+            "the new declaration stands after the old holder went"
+        );
+        shared.release_keyexpr(again);
+        assert!(shared.keyexpr_declarations().is_empty());
     }
 
     /// `declare_keyexpr` is not `acquire_keyexpr`: each call is its own
