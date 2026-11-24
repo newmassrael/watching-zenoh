@@ -380,6 +380,12 @@ pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
     id_len(id.id) as u8
 }
 
+/// Whether `id` is the id of zero bytes, which names no node: the sixteen bytes compared as one
+/// number, rather than walked one by one.
+pub(crate) fn id_is_zero(id: [u8; Z_ID_SIZE]) -> bool {
+    u128::from_ne_bytes(id) == 0
+}
+
 /// The length of the id `id` up to its last non-zero byte, as zenoh writes an id: 0 for the
 /// id of zero bytes.
 pub(crate) fn id_len(id: [u8; Z_ID_SIZE]) -> usize {
@@ -438,6 +444,20 @@ mod tests {
         assert_eq!(&closure.context as *const _ as usize - base, 0);
         assert_eq!(&closure.call as *const _ as usize - base, word);
         assert_eq!(&closure.drop as *const _ as usize - base, 2 * word);
+    }
+
+    /// The id of zero bytes is the only zero one: a single non-zero byte anywhere, of any bit,
+    /// makes an id that names a node.
+    #[test]
+    fn an_id_is_zero_only_when_every_byte_is() {
+        assert!(id_is_zero([0u8; Z_ID_SIZE]));
+        for at in 0..Z_ID_SIZE {
+            for bit in [0x01u8, 0x80] {
+                let mut id = [0u8; Z_ID_SIZE];
+                id[at] = bit;
+                assert!(!id_is_zero(id), "byte {at} set to {bit:#04x}");
+            }
+        }
     }
 
     /// `_z_id_len` strips TRAILING zeros only, and reports 0 for the empty id.
