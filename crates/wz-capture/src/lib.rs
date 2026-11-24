@@ -495,6 +495,10 @@ pub mod tree_facts;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod tree_facts_tests;
 
+/// The `cdr` format: a payload in CDR read by a ROS message definition, the
+/// `cdr@<package>/msg/<Type>` rule. Private for the reason [`payload_builtin`]
+/// is, and reached through [`payload::formats`].
+mod payload_cdr;
 /// The `protobuf` format with a body schema: a payload read by the types its
 /// `.proto` schema gives it. Private for the reason [`payload_builtin`] is, and
 /// reached through [`payload::formats`].
@@ -508,6 +512,9 @@ pub mod pcapng;
 /// bytes and its first reading's facts, must produce the same records.
 #[cfg(test)]
 mod redecode_gate;
+/// The ROS message and service definitions (`.msg`, `.srv`) a `cdr` rule
+/// reads by, declared as schema files are.
+mod ros_msg;
 
 /// Open-debt item 924, step 5 -- the memory matrix: what a dissection holds per
 /// row for every kind of message list, against the report it makes of itself. See

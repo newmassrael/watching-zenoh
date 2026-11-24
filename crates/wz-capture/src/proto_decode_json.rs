@@ -138,6 +138,14 @@ pub(crate) fn float_json(v: f64) -> String {
     out.finish()
 }
 
+/// A single-precision typed value as JSON text, in the shortest spelling
+/// that reads back to the same `float32`.
+pub(crate) fn float32_json(v: f32) -> String {
+    let mut out = JsonOut::default();
+    write_float(v, f64::from(v), &mut out);
+    out.finish()
+}
+
 /// A text typed value as a JSON string.
 pub(crate) fn text_json(text: &str) -> String {
     let mut out = JsonOut::default();
@@ -268,6 +276,7 @@ mod tests {
         assert_eq!(integer_json(-(1 << 60)), "\"-1152921504606846976\"");
         assert_eq!(float_json(0.5), "0.5");
         assert_eq!(float_json(f64::NAN), "\"NaN\"");
+        assert_eq!(float32_json(0.1), "0.1");
         assert_eq!(float_json(f64::NEG_INFINITY), "\"-Infinity\"");
         assert_eq!(text_json("a \"b\""), "\"a \\\"b\\\"\"");
         assert_eq!(bytes_json(&[0xff, 0x00]), "\"/wA=\"");

@@ -636,13 +636,13 @@ impl<'a> Declarations<'a> {
         if let Some(profile) = self.map.segment_profile_of(id) {
             self.used.borrow_mut().insert(profile);
         }
-        // And every schema file, when the rule read its payload by them: the
-        // files are read together, so a rule that read one applied them all,
-        // and reporting an imported file as unused would send a reader to
-        // delete what the message it read was built from.
-        if self.map.reads_schema_files(id) {
-            self.used.borrow_mut().extend(self.map.schema_file_ids());
-        }
+        // And every schema file of the kind the rule read its payload by: the
+        // files of a kind are read together, so a rule that read one applied
+        // them all, and reporting an imported file as unused would send a
+        // reader to delete what the message it read was built from.
+        self.used
+            .borrow_mut()
+            .extend(self.map.schema_files_read_by(id));
     }
 
     /// The declared name for this path, RECORDING that the declaration applied.

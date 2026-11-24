@@ -4150,6 +4150,13 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *                                payload is an instance of: the payload is
  *                                READ by the types the declared files give
  *                                it instead of walked by the wire
+ *     #@std_msgs/msg/String.msg="string data"
+ *                                a ROS message DEFINITION, declared as a
+ *                                .proto file is; its name says what it
+ *                                defines (see READING CDR below)
+ *     demo/chatter=cdr@std_msgs/msg/String
+ *                                a CDR rule: the payload is READ as an
+ *                                instance of that ROS type
  *
  * READING BY THE SCHEMA, at field-document revision 57. The files are read
  * together, once per call, when the first rule naming a message is installed;
@@ -4162,6 +4169,61 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * no schema (`json@...`). A text that carries NO schema file and a rule that
  * names a message installs as a profile rule always has: the name is
  * carried, the payload is walked by the wire, and the row says so.
+ *
+ * READING CDR BY A ROS DEFINITION. A ROS 2 publisher's payload is CDR, which
+ * says nothing about its own fields, so it is read only by the definition of
+ * its type. A definition is the type's `.msg` file, or a service's `.srv`
+ * file, as ROS installs them (`share/<package>/msg/<Type>.msg`): the source a
+ * person has at hand, where the generated `.idl` adds nothing the wire needs.
+ * Each is declared on one line, `#@<name>="<text>"`, the text one JSON
+ * string, and its NAME says what it defines: `<package>/msg/<Type>.msg` the
+ * type `<package>/msg/<Type>`, and `<package>/srv/<Type>.srv` the two types
+ * a service's samples carry, `<package>/srv/<Type>_Request` and
+ * `<package>/srv/<Type>_Response`. A field naming another type
+ * (`geometry_msgs/Point`, or `Point` within the file's own package) is found
+ * among every declared definition, wherever in the text it is. Constants,
+ * defaults and comments are passed over, as nothing of them is on the wire.
+ * `.action` files are not read.
+ *
+ * `<keyexpr>=cdr@<package>/msg/<Type>` reads the key's payload as that type.
+ * The rule is REFUSED (WZ_DISSECT_ERR_DECLARATION) when the text declares no
+ * definition file, when a definition cannot be read (the message names the
+ * file and the line), when the type, or a type one of its fields names, is
+ * defined by none, when a type contains itself, and for a bare `cdr`. The
+ * `.proto` files of the same text are read by their own reader, unaffected.
+ *
+ * The bytes are plain CDR (XCDR version 1), what ROS 2 publishers send: the
+ * four-byte encapsulation header, `00 01` little-endian or `00 00`
+ * big-endian, then the fields in order, each primitive aligned to its size
+ * from the end of the header. A `decoded` block names `format` `cdr`,
+ * `schema` the type, `typed` true, and its `fields` start with the message
+ * itself at path `$` (its `type` the type's name), then a row per field
+ * under its parent's path by NAME (`$.pose.position.x`), its `name` the
+ * definition's, its `type` as the definition spells it (`float64`,
+ * `string<=8`, `geometry_msgs/msg/Point[3]`). An array or a sequence is a
+ * row, `typed_value` `null`, with each element a row under it by index
+ * (`$.points.0`), except a run of `uint8`, `byte` or `char`, which is one
+ * row whose `typed_value` is its bytes in base64. A message with no fields
+ * holds the one `uint8` rosidl gives it, `structure_needs_at_least_one_member`.
+ * `typed_value` follows the mapping above (an integer past 2^53 - 1 as its
+ * digits in a string). Spans count from the payload's first byte, the header
+ * included.
+ *
+ * Where the definition and the bytes disagree the block is `refused` and its
+ * `why` names the field's path and the byte: the payload ending inside a
+ * field, a string not NUL-terminated or not UTF-8, a string or a sequence
+ * longer than its bound, a count the bytes left cannot hold, a `bool` other
+ * than 0 or 1, more bytes after the message than the three of padding a
+ * serializer may append, and a representation other than plain CDR (at byte
+ * 0). A `wstring` field is refused by name: its character width differs
+ * between serializers, and this library does not guess it.
+ *
+ * The type hash a ROS 2 key carries (`RIHS01_...`) is NOT computed from the
+ * definitions: it is a digest of a canonical type description that includes
+ * every field's type identifier and every referenced type, and no reference
+ * implementation or vector is available to this library to prove a digest
+ * against; a hash that is subtly wrong would report every publisher as
+ * mismatched. Compare the type NAME (`schema`) instead.
  *
  * A `decoded` block then carries
  *

@@ -14760,6 +14760,49 @@ mod tests {
         assert!(!unasked.contains("\"chosen_by\""), "{unasked}");
     }
 
+    /// A ROS 2 publisher's CDR payload is read into its fields through the
+    /// ABI by the definition the text declares and the rule that names it,
+    /// and the same capture under a rule whose type no file defines is refused
+    /// as a declaration.
+    #[test]
+    fn a_cdr_payload_is_read_by_its_declared_ros_definition() {
+        const CDR: u32 = 7;
+        // std_msgs/msg/String "hello": the little-endian header, the length
+        // counting the NUL, the bytes, the NUL and the padding to four.
+        let hello = [
+            0u8, 1, 0, 0, 6, 0, 0, 0, b'h', b'e', b'l', b'l', b'o', 0, 0, 0,
+        ];
+        let file = capture_declaring(CDR, &hello);
+        let declarations = "#@std_msgs/msg/String.msg=\"string data\"\n\
+                            demo/**=cdr@std_msgs/msg/String";
+        let decoded = call_fields_with_payloads(&file, 0, declarations).expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":\"std_msgs/msg/String\",\
+                 \"despite_encoding\":null,\"format\":\"cdr\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.data\",\"name\":\"data\",\"value\":\"\\\"hello\\\"\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"type\":\"string\",\"typed_value\":\"hello\""),
+            "{decoded}"
+        );
+        assert_eq!(
+            call_fields_with_payloads(
+                &file,
+                0,
+                "#@std_msgs/msg/String.msg=\"string data\"\ndemo/**=cdr@std_msgs/msg/Nope",
+            ),
+            Err(WZ_DISSECT_ERR_DECLARATION)
+        );
+    }
+
     /// R311y914 (open-debt item 433) — A CBOR TOPIC CAN BE DECODED THROUGH THE
     /// ABI, and a cbor LABEL no longer silences the rule.
     ///
