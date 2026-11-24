@@ -951,7 +951,9 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
 
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue
 /// of handed legs not at all, so a stream of puts pays no lock for what no other publish left
-/// behind. The CONTROL is a read step, which looks at the queue under its lock every time.
+/// behind. The CONTROL is a read step, which looks at the queue under its lock every time. A
+/// build of the dial face alone keeps no queue.
+#[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue() {
     let router = Router::start(CatchAll::None);

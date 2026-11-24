@@ -531,6 +531,28 @@ impl ReplySink for BoxedReplySink {
     }
 }
 
+/// The sink of a build that asks no query: no value of it exists, so a table of pending gets
+/// over it holds no row the build can make, and what would deliver to, drop or sweep such a row
+/// is code the compiler knows is never reached. A build that asks chooses a sink that can be made
+/// ([`BoxedReplySink`], or an MCU's own `enum`) in its place.
+pub enum NoReplies {}
+
+impl ReplySink for NoReplies {
+    fn on_reply(&mut self, _reply: &dyn ReplyView) {
+        match *self {}
+    }
+    fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+        match *self {}
+    }
+    fn on_timeout(&mut self, _rid: crate::wire_id::RequestId) {
+        match *self {}
+    }
+    #[cfg(feature = "alloc")]
+    fn on_reply_owned(&mut self, _reply: crate::reply::InboundReply) {
+        match *self {}
+    }
+}
+
 /// R311y321 — reception-side reply consolidation as a DECORATOR over any
 /// [`ReplySink`], the apply-half of the `query-consolidation` atom.
 ///
@@ -744,6 +766,16 @@ impl ReplyHold for HeapHold {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sink of a build that asks no query takes no byte, and neither does a value that might
+    /// hold one: `None` is the only value `Option<NoReplies>` has. The CONTROL is a sink that can
+    /// be made, whose `Option` holds a value as well as `None`.
+    #[test]
+    fn the_sink_of_a_build_that_asks_nothing_has_no_value() {
+        assert_eq!(core::mem::size_of::<NoReplies>(), 0);
+        assert_eq!(core::mem::size_of::<Option<NoReplies>>(), 0);
+        assert!(core::mem::size_of::<Option<CountingReplySink>>() > 0);
+    }
 
     // A no-heap concrete reply sink: the shape an MCU consumer `enum`
     // variant takes. Reads the inbound reply through `ReplyView` and

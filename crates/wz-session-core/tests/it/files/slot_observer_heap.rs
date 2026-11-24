@@ -478,7 +478,7 @@ fn a_peer_whose_tables_are_lent_is_answered_in_the_rows_it_was_lent() {
 
 /// The answers staged to a lent peer's subscriber interests are drained and the staging keeps its
 /// rows: the next interest's chain is staged in them and drained in its turn.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 #[test]
 fn a_lent_peers_interest_answers_drain_and_keep_their_rows() {
     let (mut observer, _seen) = slot();

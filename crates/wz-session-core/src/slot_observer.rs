@@ -44,10 +44,14 @@ use crate::decl_sink::{DeclSink, UndeclSink};
 use crate::declare::liveliness::LivelinessRegistry;
 #[cfg(feature = "liveliness-get")]
 use crate::declare::liveliness_get::LivelinessGetRegistry;
-#[cfg(all(feature = "alloc", feature = "liveliness-subscriber"))]
-use crate::declare::liveliness_subscriber::LivelinessSubscriberTable;
+use crate::declare::liveliness_sample::LivelinessSampleSink;
+use crate::declare::liveliness_subscriber::LivelinessDelivered;
+#[cfg(feature = "liveliness-subscriber")]
+use crate::declare::liveliness_subscriber::{
+    LivelinessSubscriberTable, LocalLivelinessSubscribers,
+};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
-use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+use crate::declare::local_token::LocalTokenRegistry;
 #[cfg(feature = "declare-queryable")]
 use crate::declare::queryable::RemoteQueryableTable;
 #[cfg(feature = "declare-subscriber")]
@@ -62,7 +66,7 @@ use crate::peer_tables::PeerTables;
 pub use crate::pubsub::LocalSubscribers;
 use crate::pubsub::{SubscriberTable, SubscriptionId};
 #[cfg(feature = "query-queryable")]
-use crate::query::{LocalQueryables, QueryDelivery, QueryableRegistry};
+use crate::query::{LocalQueryables, QueryDelivered, QueryableRegistry};
 use crate::query_sink::QuerySink;
 use crate::reply::ReplyRegistry;
 use crate::reply_sink::ReplySink;
@@ -197,6 +201,130 @@ impl<R: ReplySink, G: ReplySink, P: Storage> Default for Requesters<R, G, P> {
     }
 }
 
+/// The requester side of one session as the observer's fan and drains read it: the pending gets
+/// and liveliness snapshots of [`Requesters`], or none at all ([`NoRequesters`]) in a build that
+/// asks nothing, whose fan and drains then carry no requester path. Who holds the session's
+/// requesters chooses which by the type it passes.
+pub trait RequesterTables {
+    /// Whether the liveliness token answering `interest_id` belongs to one of this session's
+    /// pending liveliness snapshots, and so to no liveliness subscriber.
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, interest_id: u64) -> bool;
+
+    /// Fan `event` into the pending snapshots, then the pending gets, resolving the peer's keys
+    /// through `peer_table`.
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    );
+
+    /// Whether a snapshot terminated since the last drain, its prune still to run.
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool;
+
+    /// Hand the interest of every snapshot that terminated to `sink` to prune.
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, sink: &S);
+}
+
+impl<R: ReplySink, G: ReplySink, P: Storage> RequesterTables for Requesters<R, G, P> {
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, interest_id: u64) -> bool {
+        self.liveliness_gets.has_pending(interest_id)
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        event: IterationEvent<'_, '_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets
+            .dispatch_iteration_event(event, peer_table);
+        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+        self.replies.dispatch_iteration_event(event, peer_table);
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool {
+        self.liveliness_gets.has_finalized()
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, sink: &S) {
+        for interest_id in self.liveliness_gets.take_finalized() {
+            sink.prune_liveliness_get_interest(interest_id);
+        }
+    }
+}
+
+/// The requester side of a session that asks nothing: no get and no liveliness snapshot is ever
+/// pending, so the observer's fan hands it nothing and its drains find nothing in it. Of no size
+/// and with nothing to drop: a session that holds it holds no table of pending gets.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NoRequesters;
+
+impl RequesterTables for NoRequesters {
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, _interest_id: u64) -> bool {
+        false
+    }
+
+    #[cfg(any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-get"
+    ))]
+    fn dispatch_iteration_event(
+        &mut self,
+        _event: IterationEvent<'_, '_>,
+        _peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, _sink: &S) {}
+}
+
+/// The calls a table of pending gets answers where a session keeps one ([`Requesters::lent`],
+/// [`Requesters::arena_bytes`], [`Requesters::clear`]), answered for a session that asks nothing,
+/// so the session's code that lends, sizes and empties its requester side is the same for both.
+impl NoRequesters {
+    /// No requester side to lend: nothing of `arena` is taken, whatever the rows say.
+    pub fn lent(
+        _arena: &mut Arena,
+        _keys: KeySpace,
+        _rows: RequesterRows,
+        _limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused> {
+        Ok(Self)
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes: none.
+    pub const fn arena_bytes(_rows: RequesterRows) -> Option<usize> {
+        Some(0)
+    }
+
+    /// Nothing is pending, so nothing ends.
+    pub fn clear(&mut self) {}
+}
+
 /// What the OTHER faces of a session declare, which the matching verdicts of one face's dispatch
 /// count beside that face's own and the application's: a matching listener on a publisher
 /// matches while ANY face's peer holds a subscriber for it, so a peer that undeclares one
@@ -273,10 +401,6 @@ pub struct SlotObserverOf<
     /// The tokens wz itself holds, answered to a peer's interest.
     #[cfg(feature = "liveliness-token")]
     pub local_tokens: LocalTokenRegistry<P>,
-    /// The local liveliness subscribers.
-    #[cfg(feature = "liveliness-subscriber")]
-    pub liveliness_subscribers:
-        LivelinessSubscriberTable<crate::declare::liveliness_sample::BoxedLivelinessSampleSink, P>,
 }
 
 /// How many rows each application table of an observer of the lent policy is lent
@@ -291,8 +415,6 @@ pub struct ObserverRows<S = RegistryRows> {
     pub tables: S,
     /// The tokens the session holds (`MAX_LOCAL_TOKENS`).
     pub local_tokens: usize,
-    /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`).
-    pub liveliness_subscribers: usize,
 }
 
 /// The sink types a node registers on its [`SlotObserverOf`]: one type for each kind of
@@ -308,33 +430,33 @@ pub trait ObserverSinks {
     type SubscriberId: Copy;
     /// The id the tables give a queryable's row, which a delivery names it by.
     type QueryableId: Copy;
+    /// The id the tables give a liveliness subscriber's row, which a delivery names it by.
+    type LivelinessSubscriberId: Copy;
     /// The context a matched row is delivered through, handed to the dispatch
-    /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples
-    /// and its queries go to. `()` for rows that deliver themselves ([`SampleSink`],
-    /// [`crate::query::ResponderSink`]).
-    #[cfg(feature = "query-queryable")]
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>
-        + QueryDelivery<Self::Queryable, Self::QueryableId>;
-    /// See the form with queryables.
-    #[cfg(not(feature = "query-queryable"))]
+    /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
+    /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
+    /// [`crate::query::ResponderSink`], [`LivelinessSampleSink`]). How each kind's rows are told
+    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
     type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
     /// policies ([`RegistryTables`]), or the session's one table set, whose rows are the session's
     /// only record of each entity. One type for every kind the bundle holds, so a kind that moves
     /// into it adds no type here (`docs/c-abi-architecture.md`, P1).
-    #[cfg(feature = "query-queryable")]
-    type Tables<P: Storage>: ObserverTables<
-        Sink = Self::Subscriber,
-        RowId = Self::SubscriberId,
-        Queryables: LocalQueryables<Sink = Self::Queryable, RowId = Self::QueryableId>,
-    >;
-    /// See the form with queryables.
-    #[cfg(not(feature = "query-queryable"))]
-    type Tables<P: Storage>: ObserverTables<Sink = Self::Subscriber, RowId = Self::SubscriberId>;
+    type Tables<P: Storage>: ObserverTables<Sink = Self::Subscriber, RowId = Self::SubscriberId>
+        + QueryTables<Self::Queryable, Self::QueryableId>
+        + LivelinessTables<Self::LivelinessSubscriber, Self::LivelinessSubscriberId>;
     /// What a local queryable's row keeps of its queryable, asked through [`Self::Delivery`]: a
     /// row that answers itself is asked by `()` with the view and the responder of the wire
     /// dispatch as their own types, so a closed sink is called with no vtable.
+    #[cfg(feature = "query-queryable")]
+    type Queryable: QueryDelivered<Self::Delivery, Self::QueryableId>;
+    /// What a local queryable's row keeps of its queryable; a build that asks none reads nothing
+    /// of it.
+    #[cfg(not(feature = "query-queryable"))]
     type Queryable;
+    /// What a local liveliness subscriber's row keeps of its subscriber, told through
+    /// [`Self::Delivery`].
+    type LivelinessSubscriber: LivelinessDelivered<Self::Delivery, Self::LivelinessSubscriberId>;
     /// What a peer's declaration is announced to.
     type Declared: DeclSink;
     /// What a peer's undeclaration is announced to.
@@ -350,9 +472,12 @@ impl ObserverSinks for HeapSinks {
     type Subscriber = crate::sink::BoxedSink;
     type SubscriberId = SubscriptionId;
     type QueryableId = crate::query::QueryableId;
+    type LivelinessSubscriberId = u64;
     type Delivery = ();
-    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
+    type Tables<P: Storage> =
+        RegistryTables<Self::Subscriber, Self::Queryable, Self::LivelinessSubscriber, P>;
     type Queryable = crate::query_sink::BoxedQuerySink;
+    type LivelinessSubscriber = crate::declare::liveliness_sample::BoxedLivelinessSampleSink;
     type Declared = crate::decl_sink::BoxedDeclSink;
     type Undeclared = crate::decl_sink::BoxedUndeclSink;
 }
@@ -391,14 +516,16 @@ impl UndeclSink for NoSink {
     }
 }
 
-/// What the observer asks of the application's tables ([`ObserverSinks::Tables`]) beyond what
-/// its paths read of the subscriptions ([`LocalSubscribers`]): to be made empty, to be held to the
-/// session's limits, and the table its queryables are asked through.
-pub trait ObserverTables: LocalSubscribers + Sized {
-    /// The table the session's own queryables are kept in and asked through.
-    #[cfg(feature = "query-queryable")]
-    type Queryables: LocalQueryables;
+impl LivelinessSampleSink for NoSink {
+    fn on_sample(&mut self, _sample: crate::declare::liveliness_sample::LivelinessSample<'_>) {
+        match *self {}
+    }
+}
 
+/// What the observer asks of the application's tables ([`ObserverSinks::Tables`]) beyond what
+/// its paths read of the subscriptions ([`LocalSubscribers`]): to be made empty and to be held to
+/// the session's limits.
+pub trait ObserverTables: LocalSubscribers + Sized {
     /// Tables of no entity. Of the lent policy they were lent no rows, and refuse every
     /// registration; [`LentTables::lend`] makes the ones a session holds.
     fn empty() -> Self;
@@ -406,20 +533,53 @@ pub trait ObserverTables: LocalSubscribers + Sized {
     /// Hold the tables to the limits `limits` states, what the creator of the session resolved for
     /// them. What they hold is kept, and what they are asked for next is held to the new bound.
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits);
+}
 
-    /// The queryables, to read.
+/// The table of the application's tables the session's own queryables are kept in and asked
+/// through, whose rows keep a `Sink` named by an `Id`. Without `query-queryable` the build keeps
+/// none, and every bundle meets this with nothing.
+pub trait QueryTables<Sink, Id> {
+    /// The queryables' table.
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &Self::Queryables;
+    type Queryables: LocalQueryables<Sink = Sink, RowId = Id>;
 
-    /// The queryables to ask, with our own id space beside them where the tables hold the key
-    /// expressions the session declared: a peer's query names its key through the one while the
-    /// other is asked, so the two are borrowed apart.
+    /// The queryables, to read, where the tables keep them.
+    #[cfg(feature = "query-queryable")]
+    fn queryables(&self) -> Option<&Self::Queryables>;
+
+    /// The queryables to ask where the tables keep them, with our own id space beside them where
+    /// the tables hold the key expressions the session declared: a peer's query names its key
+    /// through the one while the other is asked, so the two are borrowed apart.
     #[cfg(feature = "query-queryable")]
     fn queries_mut(
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut Self::Queryables,
+        Option<&mut Self::Queryables>,
+    );
+}
+
+/// The table of the application's tables the session's own liveliness subscribers are kept in and
+/// told a peer's tokens through, whose rows keep a `Sink` named by an `Id`. Without
+/// `liveliness-subscriber` the build keeps none, and every bundle meets this with nothing.
+pub trait LivelinessTables<Sink, Id> {
+    /// The liveliness subscribers' table.
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessSubscribers: LocalLivelinessSubscribers<Sink = Sink, RowId = Id>;
+
+    /// The liveliness subscribers, to read, where the tables keep them.
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_subscribers(&self) -> Option<&Self::LivelinessSubscribers>;
+
+    /// The liveliness subscribers to tell where the tables keep them, with our own id space beside
+    /// them where the tables hold the key expressions the session declared: a peer's token names
+    /// its key through the one while the other is told, so the two are borrowed apart.
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_mut(
+        &mut self,
+    ) -> (
+        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<&mut Self::LivelinessSubscribers>,
     );
 }
 
@@ -435,9 +595,10 @@ pub trait LentTables: ObserverTables {
     fn lend(arena: &mut Arena, keys: KeySpace, rows: Self::Rows) -> Result<Self, LendRefused>;
 }
 
-/// The application's tables of the storage policies: the subscriber table and the queryable
-/// registry, each the record of its kind. `S` is a subscription's sink, `Q` a queryable's.
-pub struct RegistryTables<S, Q, P: Storage = Profile> {
+/// The application's tables of the storage policies: the subscriber table, the queryable registry
+/// and the liveliness subscribers' table, each the record of its kind. `S` is a subscription's
+/// sink, `Q` a queryable's, `L` a liveliness subscriber's.
+pub struct RegistryTables<S, Q, L: LivelinessSampleSink, P: Storage = Profile> {
     /// The local subscriptions.
     pub subscribers: SubscriberTable<S, P>,
     /// The local queryables.
@@ -445,6 +606,11 @@ pub struct RegistryTables<S, Q, P: Storage = Profile> {
     pub queryables: QueryableRegistry<Q, P>,
     #[cfg(not(feature = "query-queryable"))]
     queryables: core::marker::PhantomData<fn() -> Q>,
+    /// The local liveliness subscribers.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub liveliness_subscribers: LivelinessSubscriberTable<L, P>,
+    #[cfg(not(feature = "liveliness-subscriber"))]
+    liveliness_subscribers: core::marker::PhantomData<fn() -> L>,
 }
 
 /// How many rows each registry of [`RegistryTables`] of the lent policy is lent.
@@ -454,10 +620,12 @@ pub struct RegistryRows {
     pub subscribers: usize,
     /// The queryables (`MAX_QUERYABLES`).
     pub queryables: usize,
+    /// The liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`).
+    pub liveliness_subscribers: usize,
 }
 
 /// The subscriptions are the subscriber table's: every read is its own.
-impl<S, Q, P: Storage> LocalSubscribers for RegistryTables<S, Q, P> {
+impl<S, Q, L: LivelinessSampleSink, P: Storage> LocalSubscribers for RegistryTables<S, Q, L, P> {
     type Sink = S;
     type RowId = SubscriptionId;
 
@@ -528,10 +696,7 @@ impl<S, Q, P: Storage> LocalSubscribers for RegistryTables<S, Q, P> {
     }
 }
 
-impl<S, Q, P: Storage> ObserverTables for RegistryTables<S, Q, P> {
-    #[cfg(feature = "query-queryable")]
-    type Queryables = QueryableRegistry<Q, P>;
-
+impl<S, Q, L: LivelinessSampleSink, P: Storage> ObserverTables for RegistryTables<S, Q, L, P> {
     fn empty() -> Self {
         Self {
             subscribers: SubscriberTable::default(),
@@ -539,6 +704,10 @@ impl<S, Q, P: Storage> ObserverTables for RegistryTables<S, Q, P> {
             queryables: QueryableRegistry::default(),
             #[cfg(not(feature = "query-queryable"))]
             queryables: core::marker::PhantomData,
+            #[cfg(feature = "liveliness-subscriber")]
+            liveliness_subscribers: LivelinessSubscriberTable::default(),
+            #[cfg(not(feature = "liveliness-subscriber"))]
+            liveliness_subscribers: core::marker::PhantomData,
         }
     }
 
@@ -553,11 +722,25 @@ impl<S, Q, P: Storage> ObserverTables for RegistryTables<S, Q, P> {
             self.queryables
                 .limit_keys_to(limits.max_keyexpr_bytes_held());
         }
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            self.liveliness_subscribers
+                .limit_to(limits.max_liveliness_subscriptions_held());
+            self.liveliness_subscribers
+                .limit_keys_to(limits.max_keyexpr_bytes_held());
+        }
     }
+}
+
+impl<S, Q, L: LivelinessSampleSink, P: Storage> QueryTables<Q, crate::query::QueryableId>
+    for RegistryTables<S, Q, L, P>
+{
+    #[cfg(feature = "query-queryable")]
+    type Queryables = QueryableRegistry<Q, P>;
 
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &QueryableRegistry<Q, P> {
-        &self.queryables
+    fn queryables(&self) -> Option<&QueryableRegistry<Q, P>> {
+        Some(&self.queryables)
     }
 
     #[cfg(feature = "query-queryable")]
@@ -565,16 +748,42 @@ impl<S, Q, P: Storage> ObserverTables for RegistryTables<S, Q, P> {
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut QueryableRegistry<Q, P>,
+        Option<&mut QueryableRegistry<Q, P>>,
     ) {
         (
             LocalSubscribers::own_space(&self.subscribers),
-            &mut self.queryables,
+            Some(&mut self.queryables),
         )
     }
 }
 
-impl<S, Q> LentTables for RegistryTables<S, Q, Lent> {
+/// The liveliness subscribers' slots are named by their Interest's id.
+impl<S, Q, L: LivelinessSampleSink, P: Storage> LivelinessTables<L, u64>
+    for RegistryTables<S, Q, L, P>
+{
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessSubscribers = LivelinessSubscriberTable<L, P>;
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_subscribers(&self) -> Option<&LivelinessSubscriberTable<L, P>> {
+        Some(&self.liveliness_subscribers)
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_mut(
+        &mut self,
+    ) -> (
+        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<&mut LivelinessSubscriberTable<L, P>>,
+    ) {
+        (
+            LocalSubscribers::own_space(&self.subscribers),
+            Some(&mut self.liveliness_subscribers),
+        )
+    }
+}
+
+impl<S, Q, L: LivelinessSampleSink> LentTables for RegistryTables<S, Q, L, Lent> {
     type Rows = RegistryRows;
 
     fn lend(arena: &mut Arena, keys: KeySpace, rows: RegistryRows) -> Result<Self, LendRefused> {
@@ -584,6 +793,14 @@ impl<S, Q> LentTables for RegistryTables<S, Q, Lent> {
             queryables: QueryableRegistry::lent(arena, keys, rows.queryables)?,
             #[cfg(not(feature = "query-queryable"))]
             queryables: core::marker::PhantomData,
+            #[cfg(feature = "liveliness-subscriber")]
+            liveliness_subscribers: LivelinessSubscriberTable::lent(
+                arena,
+                keys,
+                rows.liveliness_subscribers,
+            )?,
+            #[cfg(not(feature = "liveliness-subscriber"))]
+            liveliness_subscribers: core::marker::PhantomData,
         })
     }
 }
@@ -592,9 +809,6 @@ impl<S, Q> LentTables for RegistryTables<S, Q, Lent> {
 /// creator gave it ([`SessionTables::limit_to`], [`SessionTables::lent`]), and a key it cannot
 /// keep is refused by the key arena. Of the session's limits it reads the match cache's size.
 impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
-    #[cfg(feature = "query-queryable")]
-    type Queryables = crate::session_tables::Queryables<F, P>;
-
     fn empty() -> Self {
         Self::new()
     }
@@ -602,10 +816,17 @@ impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits) {
         self.limit_memo_to(limits.match_memo_slots());
     }
+}
+
+impl<F: RowCallbacks, P: Storage> QueryTables<F::Queryable, crate::session_tables::QueryableHandle>
+    for SessionTables<F, P>
+{
+    #[cfg(feature = "query-queryable")]
+    type Queryables = crate::session_tables::Queryables<F, P>;
 
     #[cfg(feature = "query-queryable")]
-    fn queryables(&self) -> &Self::Queryables {
-        SessionTables::queryables(self)
+    fn queryables(&self) -> Option<&Self::Queryables> {
+        SessionTables::kept_queryables(self)
     }
 
     #[cfg(feature = "query-queryable")]
@@ -613,10 +834,44 @@ impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
         &mut self,
     ) -> (
         Option<crate::wireexpr_resolve::OwnSpace<'_>>,
-        &mut Self::Queryables,
+        Option<&mut Self::Queryables>,
     ) {
         let (own, queryables) = SessionTables::queries_mut(self);
-        (Some(own), queryables)
+        (
+            Some(own),
+            <F::QueryablePresence as crate::session_tables::Presence>::get_mut::<
+                crate::session_tables::Queryables<F, P>,
+            >(queryables),
+        )
+    }
+}
+
+impl<F: RowCallbacks, P: Storage>
+    LivelinessTables<F::LivelinessSubscriber, crate::session_tables::LivelinessSubscriberHandle>
+    for SessionTables<F, P>
+{
+    #[cfg(feature = "liveliness-subscriber")]
+    type LivelinessSubscribers = crate::session_tables::LivelinessSubscribers<F, P>;
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_subscribers(&self) -> Option<&Self::LivelinessSubscribers> {
+        SessionTables::kept_liveliness_subscribers(self)
+    }
+
+    #[cfg(feature = "liveliness-subscriber")]
+    fn liveliness_mut(
+        &mut self,
+    ) -> (
+        Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+        Option<&mut Self::LivelinessSubscribers>,
+    ) {
+        let (own, subscribers) = SessionTables::liveliness_mut(self);
+        (
+            Some(own),
+            <F::LivelinessPresence as crate::session_tables::Presence>::get_mut::<
+                crate::session_tables::LivelinessSubscribers<F, P>,
+            >(subscribers),
+        )
     }
 }
 
@@ -635,9 +890,12 @@ impl ObserverSinks for NoSinks {
     type Subscriber = NoSink;
     type SubscriberId = SubscriptionId;
     type QueryableId = crate::query::QueryableId;
+    type LivelinessSubscriberId = u64;
     type Delivery = ();
-    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
+    type Tables<P: Storage> =
+        RegistryTables<Self::Subscriber, Self::Queryable, Self::LivelinessSubscriber, P>;
     type Queryable = NoSink;
+    type LivelinessSubscriber = NoSink;
     type Declared = NoSink;
     type Undeclared = NoSink;
 }
@@ -859,11 +1117,6 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             ptr::write(addr_of_mut!((*at).liveliness), LivelinessRegistry::new());
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
-            #[cfg(feature = "liveliness-subscriber")]
-            ptr::write(
-                addr_of_mut!((*at).liveliness_subscribers),
-                LivelinessSubscriberTable::with_sink_backing(),
-            );
         }
     }
 
@@ -886,8 +1139,6 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 liveliness: _,
             #[cfg(feature = "liveliness-token")]
                 local_tokens: _,
-            #[cfg(feature = "liveliness-subscriber")]
-                liveliness_subscribers: _,
         } = observer;
     }
 }
@@ -929,12 +1180,6 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
             liveliness: LivelinessRegistry::lent(arena, watchers)?,
             #[cfg(feature = "liveliness-token")]
             local_tokens: LocalTokenRegistry::lent(arena, keys, rows.local_tokens)?,
-            #[cfg(feature = "liveliness-subscriber")]
-            liveliness_subscribers: LivelinessSubscriberTable::lent(
-                arena,
-                keys,
-                rows.liveliness_subscribers,
-            )?,
         };
         observer.limit_to(limits);
         Ok(observer)
@@ -1017,9 +1262,6 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "liveliness-token")]
         self.local_tokens
             .limit_keys_to(limits.max_keyexpr_bytes_held());
-        #[cfg(feature = "liveliness-subscriber")]
-        self.liveliness_subscribers
-            .limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "declare-subscriber")]
         self.remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
@@ -1034,9 +1276,6 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "liveliness-token")]
         self.local_tokens
             .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "liveliness-subscriber")]
-        self.liveliness_subscribers
-            .limit_to(limits.max_liveliness_subscriptions_held());
     }
 
     /// Fan an [`IterationEvent`] of one session into every registry, against that
@@ -1050,11 +1289,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     // in, and inlined into the session's `on_event` they are all there for the length of the
     // application layer's call.
     #[inline(never)]
-    pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn dispatch_event<Q: RequesterTables, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
     ) {
         self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
@@ -1068,17 +1307,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     // however few planes the event concerns. Out of line, the stack under this call is this frame
     // and the one plane running.
     #[inline(never)]
-    pub fn dispatch_event_among<
-        R: ReplySink,
-        G: ReplySink,
-        Q: Storage,
-        O: OtherPeers,
-        T: Storage,
-    >(
+    pub fn dispatch_event_among<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
     ) {
@@ -1090,14 +1323,63 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "query-queryable")]
         {
             let (own, queryables) = self.tables.queries_mut();
-            peers.queries.dispatch_iteration_event(
-                queryables,
-                cx,
-                event,
-                peers.subscribers.mapping_spaces_over(own),
-                &mut peers.replies,
-                &mut peers.finals,
-            );
+            let spaces = peers.subscribers.mapping_spaces_over(own);
+            match queryables {
+                Some(queryables) => peers.queries.dispatch_iteration_event(
+                    queryables,
+                    cx,
+                    event,
+                    spaces,
+                    &mut peers.replies,
+                    &mut peers.finals,
+                ),
+                // Tables that keep no queryable still end a peer's query, as one no queryable
+                // answers.
+                None => peers.queries.dispatch_iteration_event(
+                    &mut crate::session_tables::AbsentTable::<
+                        <K::Tables<P> as QueryTables<K::Queryable, K::QueryableId>>::Queryables,
+                    >::new(),
+                    cx,
+                    event,
+                    spaces,
+                    &mut peers.replies,
+                    &mut peers.finals,
+                ),
+            }
+        }
+        // A peer's token is resolved through both id spaces while the liveliness subscribers are
+        // told, so the tables lend the two apart. A `Declare(DeclToken)` whose outer
+        // `interest_id` names a pending liveliness GET belongs to that GET and to no subscriber.
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            #[cfg(feature = "liveliness-get")]
+            let claimed = |id: u64| requesters.claims(id);
+            #[cfg(not(feature = "liveliness-get"))]
+            let claimed = |_: u64| false;
+            let (own, subscribers) = self.tables.liveliness_mut();
+            let spaces = peers.subscribers.mapping_spaces_over(own);
+            match subscribers {
+                Some(subscribers) => peers.tokens.dispatch_iteration_event_unclaimed(
+                    subscribers,
+                    cx,
+                    event,
+                    spaces,
+                    &claimed,
+                ),
+                // Tables that keep no liveliness subscriber still keep the peer's tokens.
+                None => peers.tokens.dispatch_iteration_event_unclaimed(
+                    &mut crate::session_tables::AbsentTable::<
+                        <K::Tables<P> as LivelinessTables<
+                            K::LivelinessSubscriber,
+                            K::LivelinessSubscriberId,
+                        >>::LivelinessSubscribers,
+                    >::new(),
+                    cx,
+                    event,
+                    spaces,
+                    &claimed,
+                ),
+            }
         }
         // The two id spaces this session resolves through, as the subscriber side
         // just refreshed them (R311y739): an `M=0` alias names an id WE declared
@@ -1106,7 +1388,6 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "liveliness-token",
-            feature = "liveliness-subscriber",
             feature = "liveliness-get",
             feature = "codec-response",
             feature = "codec-response-final",
@@ -1139,7 +1420,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 peer_table,
                 &|c| {
                     (c.locality.allows_local()
-                        && queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required))
+                        && queryables.is_some_and(|queryables| {
+                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                        }))
                         || others.answers(c)
                 },
             );
@@ -1155,16 +1438,15 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // liveliness GET belongs to that GET and to no observer plane (zenoh
         // answers the query and returns first): the claim is per id.
         #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
-        {
-            let gets = &requesters.liveliness_gets;
-            self.liveliness
-                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
-        }
+        self.liveliness
+            .dispatch_iteration_event_unclaimed(event, peer_table, &|id| requesters.claims(id));
         #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
         self.liveliness.dispatch_iteration_event(event, peer_table);
         // R283 -- stage an interest-response for each inbound non-final liveliness
-        // Interest, whole chains or none, into THIS session's staging.
-        #[cfg(feature = "liveliness-token")]
+        // Interest, whole chains or none, into THIS session's staging. A build that answers no
+        // peer's Interest (`interest-answer` off) stages none, as the subscriber plane does
+        // (`SubscriberPeer`'s `ignore_subscriber_interest`).
+        #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
         {
             let refused = self.local_tokens.dispatch_iteration_event(
                 event,
@@ -1175,27 +1457,18 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 .token_interest_chains_refused
                 .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
         }
-        #[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-get"))]
-        {
-            let gets = &requesters.liveliness_gets;
-            self.liveliness_subscribers
-                .dispatch_iteration_event_unclaimed(&mut peers.tokens, event, peer_table, &|id| {
-                    gets.has_pending(id)
-                });
-        }
-        #[cfg(all(feature = "liveliness-subscriber", not(feature = "liveliness-get")))]
-        self.liveliness_subscribers
-            .dispatch_iteration_event(&mut peers.tokens, event, peer_table);
-        #[cfg(feature = "liveliness-get")]
-        requesters
-            .liveliness_gets
-            .dispatch_iteration_event(event, peer_table);
-        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-        requesters
-            .replies
-            .dispatch_iteration_event(event, peer_table);
+        #[cfg(any(
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-get"
+        ))]
+        requesters.dispatch_iteration_event(event, peer_table);
         // Consumed only by the arms above, which a build with none of them lacks.
-        #[cfg(not(feature = "liveliness-get"))]
+        #[cfg(not(any(
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-get"
+        )))]
         let _ = &requesters;
         let _ = (&peers, event, others);
     }
@@ -1204,10 +1477,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// through its send path: the replies, the answers to its interests, the
     /// terminated-get prunes, and last the `Final`s, so every Reply for a request
     /// precedes the `Final` that ends it.
-    pub fn flush_pending<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn flush_pending<S, Q: RequesterTables, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -1219,6 +1492,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // would be a datagram of its own (see `ResponseSink::begin_burst`).
         let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(peers, actions);
         self.drain_get_prunes(requesters, actions);
         self.drain_query_finals(peers, actions);
@@ -1233,10 +1510,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// `peers.finals` its quota, and sends each when the last of them has, so no `Final`
     /// overtakes a reply. The replies it drains are one burst, as
     /// `flush_pending`'s are.
-    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn flush_pending_replies<S, Q: RequesterTables, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -1246,6 +1523,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         }
         let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
+        #[cfg(all(
+            feature = "interest-answer",
+            any(feature = "declare-subscriber", feature = "liveliness-token")
+        ))]
         self.drain_declare_replies(peers, actions);
         self.drain_get_prunes(requesters, actions);
         actions.end_burst(burst);
@@ -1253,11 +1534,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
-    pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
+    pub fn dispatch<S, Q: RequesterTables, T: Storage>(
         &mut self,
         cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         actions: &S,
     ) where
@@ -1290,16 +1571,39 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// count. A no-op without `liveliness-subscriber`.
     pub fn flush_liveliness_on_link_loss<T: Storage>(
         &mut self,
+        cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
     ) -> usize {
         #[cfg(feature = "liveliness-subscriber")]
         {
-            self.liveliness_subscribers
-                .flush_peer_tokens_on_link_loss(&mut peers.tokens)
+            let (_, subscribers) = self.tables.liveliness_mut();
+            match subscribers {
+                Some(subscribers) => {
+                    peers
+                        .tokens
+                        .flush_on_link_loss_while(subscribers, cx, &mut || true)
+                        .0
+                }
+                None => {
+                    peers
+                        .tokens
+                        .flush_on_link_loss_while(
+                            &mut crate::session_tables::AbsentTable::<
+                                <K::Tables<P> as LivelinessTables<
+                                    K::LivelinessSubscriber,
+                                    K::LivelinessSubscriberId,
+                                >>::LivelinessSubscribers,
+                            >::new(),
+                            cx,
+                            &mut || true,
+                        )
+                        .0
+                }
+            }
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
         {
-            let _ = peers;
+            let _ = (cx, peers);
             0
         }
     }
@@ -1309,10 +1613,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// none is left.
     pub fn flush_liveliness_on_link_loss_while<T: Storage>(
         &mut self,
+        cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
         room: &mut dyn FnMut() -> bool,
     ) -> bool {
-        self.flush_tokens_on_link_loss_while(&mut peers.tokens, room)
+        self.flush_tokens_on_link_loss_while(cx, &mut peers.tokens, room)
     }
 
     /// [`Self::flush_liveliness_on_link_loss_while`] of the tokens of a peer whose tables were let
@@ -1320,18 +1625,34 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// Whether none is left.
     pub fn flush_tokens_on_link_loss_while<T: Storage>(
         &mut self,
+        cx: &mut K::Delivery,
         tokens: &mut crate::declare::liveliness_subscriber::PeerTokens<T>,
         room: &mut dyn FnMut() -> bool,
     ) -> bool {
         #[cfg(feature = "liveliness-subscriber")]
         {
-            self.liveliness_subscribers
-                .flush_peer_tokens_on_link_loss_while(tokens, room)
-                .1
+            let (_, subscribers) = self.tables.liveliness_mut();
+            match subscribers {
+                Some(subscribers) => tokens.flush_on_link_loss_while(subscribers, cx, room).1,
+                None => {
+                    tokens
+                        .flush_on_link_loss_while(
+                            &mut crate::session_tables::AbsentTable::<
+                                <K::Tables<P> as LivelinessTables<
+                                    K::LivelinessSubscriber,
+                                    K::LivelinessSubscriberId,
+                                >>::LivelinessSubscribers,
+                            >::new(),
+                            cx,
+                            room,
+                        )
+                        .1
+                }
+            }
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
         {
-            let _ = (tokens, room);
+            let _ = (cx, tokens, room);
             true
         }
     }
@@ -1379,7 +1700,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 &mut peers.remote_queryables,
                 &|c| {
                     (c.locality.allows_local()
-                        && queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required))
+                        && queryables.is_some_and(|queryables| {
+                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                        }))
                         || others.answers(c)
                 },
             );
@@ -1437,7 +1760,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     }
 
     /// The answers to the peer's interests: the subscriber interest chains first,
-    /// then the liveliness ones, each batch's items before its terminating `Final`.
+    /// then the liveliness ones, each batch's items before its terminating `Final`. A build that
+    /// answers no Interest stages none and has no drain of them.
+    #[cfg(all(
+        feature = "interest-answer",
+        any(feature = "declare-subscriber", feature = "liveliness-token")
+    ))]
     #[inline(never)]
     pub(crate) fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
         &mut self,
@@ -1486,7 +1814,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         while !peers.pending_declares.is_empty() {
             let item = peers.pending_declares.remove(0);
             match item {
-                DeclResponseItem::Token {
+                crate::declare::local_token::DeclResponseItem::Token {
                     token_id,
                     interest_id,
                 } => {
@@ -1496,31 +1824,22 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                         sink.send_declare_token_reply(token_id, keyexpr, interest_id);
                     }
                 }
-                DeclResponseItem::Final { interest_id } => {
+                crate::declare::local_token::DeclResponseItem::Final { interest_id } => {
                     sink.send_declare_final_reply(interest_id)
                 }
             }
         }
-        #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
-        let _ = (peers, sink);
     }
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
     #[inline(never)]
-    pub(crate) fn drain_get_prunes<
-        S: LivelinessGetPrune,
-        R: ReplySink,
-        G: ReplySink,
-        Q: Storage,
-    >(
+    pub(crate) fn drain_get_prunes<S: LivelinessGetPrune, Q: RequesterTables>(
         &mut self,
-        requesters: &mut Requesters<R, G, Q>,
+        requesters: &mut Q,
         sink: &S,
     ) {
         #[cfg(feature = "liveliness-get")]
-        for interest_id in requesters.liveliness_gets.take_finalized() {
-            sink.prune_liveliness_get_interest(interest_id);
-        }
+        requesters.drain_prunes(sink);
         #[cfg(not(feature = "liveliness-get"))]
         let _ = (requesters, sink);
     }
@@ -1531,27 +1850,24 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 /// the peer's interests, a terminated get's prune. Asked first, so a drain with nothing to send
 /// opens no burst: closing one takes the lock of every conduit to send what it gathered, which
 /// every received Push, drained after as every record is, would pay each time.
-fn stages_replies<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
-    peers: &PeerTables<T>,
-    requesters: &Requesters<R, G, Q>,
-) -> bool {
+fn stages_replies<Q: RequesterTables, T: Storage>(peers: &PeerTables<T>, requesters: &Q) -> bool {
     #[allow(unused_mut)]
     let mut staged = false;
     #[cfg(feature = "query-queryable")]
     {
         staged |= !peers.replies.is_empty();
     }
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     {
         staged |= peers.subscribers.has_staged_sub_interest_replies();
     }
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
     {
         staged |= !peers.pending_declares.is_empty();
     }
     #[cfg(feature = "liveliness-get")]
     {
-        staged |= requesters.liveliness_gets.has_finalized();
+        staged |= requesters.has_finalized();
     }
     let _ = (peers, requesters);
     staged
@@ -1732,6 +2048,40 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec!["topic/a".to_string()]);
     }
 
+    /// A session that asks nothing holds its requesters as [`NoRequesters`], of no size, and the
+    /// fan delivers a peer's Push beside them as it does beside real ones: the matching key once,
+    /// another key not at all. Nothing is then staged for a drain to send.
+    #[test]
+    fn the_slot_fan_delivers_a_peers_push_beside_no_requesters() {
+        use crate::session_tables::KeyForm;
+        assert_eq!(core::mem::size_of::<NoRequesters>(), 0);
+        let mut observer = SlotObserverOf::<super::lent_tests::TableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = NoRequesters;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let into = seen.clone();
+        observer
+            .tables
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(move |s: &dyn SampleView| {
+                    into.lock().unwrap().push(s.keyexpr().to_string());
+                }),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+            NetworkMessage::Push(Box::new(push_literal("topic/b"))),
+        ]);
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut (), &mut peers, &mut requesters, event)
+        });
+        assert_eq!(*seen.lock().unwrap(), vec!["topic/a".to_string()]);
+        assert!(!stages_replies(&peers, &requesters));
+    }
+
     /// A delivery context that records the handle of each row it is handed and calls no row.
     #[derive(Default)]
     struct HandleLog(Vec<crate::session_tables::SubscriberHandle>);
@@ -1742,16 +2092,34 @@ mod tests {
             id: crate::session_tables::SubscriberHandle,
             _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
         ) {
             self.0.push(id);
         }
     }
 
+    /// The tables of these tests hold no liveliness subscriber: a row of no value is never told.
+    impl
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            HandleLog,
+            crate::session_tables::LivelinessSubscriberHandle,
+        > for NoSink
+    {
+        fn tell(
+            _cx: &mut HandleLog,
+            _id: crate::session_tables::LivelinessSubscriberHandle,
+            row: crate::sink::RowAccess<'_, NoSink>,
+            _sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
+        ) {
+            match *row.row() {}
+        }
+    }
+
     /// The tables of these tests hold no queryable: a row of no value is never asked.
     #[cfg(feature = "query-queryable")]
-    impl crate::query::QueryDelivery<NoSink, crate::session_tables::QueryableHandle> for HandleLog {
+    impl crate::query::QueryDelivered<HandleLog, crate::session_tables::QueryableHandle> for NoSink {
         fn ask(
-            &mut self,
+            _cx: &mut HandleLog,
             _id: crate::session_tables::QueryableHandle,
             row: crate::sink::RowAccess<'_, NoSink>,
             _query: &crate::query_sink::ProvenQuery<'_>,
@@ -1768,9 +2136,11 @@ mod tests {
         type Subscriber = BoxedSink;
         type SubscriberId = crate::session_tables::SubscriberHandle;
         type QueryableId = crate::session_tables::QueryableHandle;
+        type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
         type Delivery = HandleLog;
         type Tables<P: Storage> = SessionTables<super::lent_tests::BoxedRows, P>;
         type Queryable = NoSink;
+        type LivelinessSubscriber = NoSink;
         type Declared = NoSink;
         type Undeclared = NoSink;
     }
@@ -1815,11 +2185,17 @@ mod tests {
 
     /// The row of a queryable these tests declare: a callback the tables call only while they are
     /// held, which only a context asks.
-    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "query-queryable", feature = "liveliness-subscriber")
+    ))]
     #[derive(Debug)]
     struct AskedRow;
 
-    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "query-queryable", feature = "liveliness-subscriber")
+    ))]
     impl crate::row_callback::RowCallback for AskedRow {
         type Call = core::convert::Infallible;
         const READS_ROW_IN_PLACE: bool = false;
@@ -1846,6 +2222,10 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
+        type LivelinessPresence = crate::session_tables::Present;
+        type FilterPresence = crate::session_tables::Present;
+        type GetPresence = crate::session_tables::Present;
     }
 
     /// The callbacks of a table set whose queryables hold no callback.
@@ -1859,6 +2239,10 @@ mod tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
+        type LivelinessPresence = crate::session_tables::Present;
+        type FilterPresence = crate::session_tables::Present;
+        type GetPresence = crate::session_tables::Present;
     }
 
     /// A delivery context that records the handle of each queryable row it is asked through and
@@ -1874,20 +2258,39 @@ mod tests {
             _id: crate::session_tables::SubscriberHandle,
             _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
         ) {
         }
     }
 
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-    impl crate::query::QueryDelivery<AskedRow, crate::session_tables::QueryableHandle> for QueryLog {
+    impl crate::query::QueryDelivered<QueryLog, crate::session_tables::QueryableHandle> for AskedRow {
         fn ask(
-            &mut self,
+            cx: &mut QueryLog,
             id: crate::session_tables::QueryableHandle,
             _row: crate::sink::RowAccess<'_, AskedRow>,
             _query: &crate::query_sink::ProvenQuery<'_>,
             _responder: &mut crate::query::QueryResponder<'_>,
         ) {
-            self.0.push(id);
+            cx.0.push(id);
+        }
+    }
+
+    /// The tables of these tests hold no liveliness subscriber: a row of no value is never told.
+    #[cfg(all(feature = "query-queryable", feature = "alloc"))]
+    impl
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            QueryLog,
+            crate::session_tables::LivelinessSubscriberHandle,
+        > for NoSink
+    {
+        fn tell(
+            _cx: &mut QueryLog,
+            _id: crate::session_tables::LivelinessSubscriberHandle,
+            row: crate::sink::RowAccess<'_, NoSink>,
+            _sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
+        ) {
+            match *row.row() {}
         }
     }
 
@@ -1900,9 +2303,11 @@ mod tests {
         type Subscriber = BoxedSink;
         type SubscriberId = crate::session_tables::SubscriberHandle;
         type QueryableId = crate::session_tables::QueryableHandle;
+        type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
         type Delivery = QueryLog;
         type Tables<P: Storage> = SessionTables<AskedRows, P>;
         type Queryable = AskedRow;
+        type LivelinessSubscriber = NoSink;
         type Declared = NoSink;
         type Undeclared = NoSink;
     }
@@ -1917,9 +2322,11 @@ mod tests {
         type Subscriber = BoxedSink;
         type SubscriberId = crate::session_tables::SubscriberHandle;
         type QueryableId = crate::session_tables::QueryableHandle;
+        type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
         type Delivery = QueryLog;
         type Tables<P: Storage> = SessionTables<UnitRows, P>;
         type Queryable = ();
+        type LivelinessSubscriber = NoSink;
         type Declared = NoSink;
         type Undeclared = NoSink;
     }
@@ -1991,6 +2398,139 @@ mod tests {
         assert!(
             !peers.finals.is_empty(),
             "the routed query is owed its Final"
+        );
+    }
+
+    /// The callbacks of a table set whose liveliness subscribers a context tells: an [`AskedRow`]
+    /// for each.
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    enum TokenRows {}
+
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    impl RowCallbacks for TokenRows {
+        type Subscriber = BoxedSink;
+        type Queryable = NoSink;
+        type LivelinessSubscriber = AskedRow;
+        type Matching = NoSink;
+        type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
+        type LivelinessPresence = crate::session_tables::Present;
+        type FilterPresence = crate::session_tables::Present;
+        type GetPresence = crate::session_tables::Present;
+    }
+
+    /// A delivery context that records the handle of each liveliness subscriber's row it is told
+    /// through, and what it was told.
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    #[derive(Default)]
+    struct TokenLog(
+        Vec<(
+            crate::session_tables::LivelinessSubscriberHandle,
+            crate::declare::liveliness_sample::LivelinessSampleKind,
+        )>,
+    );
+
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    impl SampleDelivery<BoxedSink, crate::session_tables::SubscriberHandle> for TokenLog {
+        fn deliver(
+            &mut self,
+            _id: crate::session_tables::SubscriberHandle,
+            _row: crate::sink::RowAccess<'_, BoxedSink>,
+            _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
+        ) {
+        }
+    }
+
+    #[cfg(all(
+        feature = "liveliness-subscriber",
+        feature = "alloc",
+        feature = "query-queryable"
+    ))]
+    impl crate::query::QueryDelivered<TokenLog, crate::session_tables::QueryableHandle> for NoSink {
+        fn ask(
+            _cx: &mut TokenLog,
+            _id: crate::session_tables::QueryableHandle,
+            row: crate::sink::RowAccess<'_, NoSink>,
+            _query: &crate::query_sink::ProvenQuery<'_>,
+            _responder: &mut crate::query::QueryResponder<'_>,
+        ) {
+            match *row.row() {}
+        }
+    }
+
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    impl
+        crate::declare::liveliness_subscriber::LivelinessDelivered<
+            TokenLog,
+            crate::session_tables::LivelinessSubscriberHandle,
+        > for AskedRow
+    {
+        fn tell(
+            cx: &mut TokenLog,
+            id: crate::session_tables::LivelinessSubscriberHandle,
+            _row: crate::sink::RowAccess<'_, AskedRow>,
+            sample: crate::declare::liveliness_sample::LivelinessSample<'_>,
+        ) {
+            cx.0.push((id, sample.kind));
+        }
+    }
+
+    /// Liveliness subscribers kept in the session's one table set, told through a [`TokenLog`].
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    struct TokenSinks;
+
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    impl ObserverSinks for TokenSinks {
+        type Subscriber = BoxedSink;
+        type SubscriberId = crate::session_tables::SubscriberHandle;
+        type QueryableId = crate::session_tables::QueryableHandle;
+        type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
+        type Delivery = TokenLog;
+        type Tables<P: Storage> = SessionTables<TokenRows, P>;
+        type Queryable = NoSink;
+        type LivelinessSubscriber = AskedRow;
+        type Declared = NoSink;
+        type Undeclared = NoSink;
+    }
+
+    /// The slot fan tells a table set's liveliness subscriber a peer's token reaches through the
+    /// context it is handed, naming the row by its handle: the token's `Put` to the subscriber on
+    /// its key and to no other, and the link's loss as a `Delete` through the same context.
+    #[cfg(all(feature = "liveliness-subscriber", feature = "alloc"))]
+    #[test]
+    fn the_slot_fan_tells_a_liveliness_subscriber_through_the_context_it_is_handed() {
+        use crate::declare::liveliness_sample::LivelinessSampleKind;
+        use crate::session_tables::KeyForm;
+        let mut observer = SlotObserverOf::<TokenSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        let told = observer
+            .tables
+            .declare_liveliness_subscriber("t/a", false, KeyForm::default(), AskedRow)
+            .expect("a table of the build's bound has room");
+        observer
+            .tables
+            .declare_liveliness_subscriber("t/other", false, KeyForm::default(), AskedRow)
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![NetworkMessage::Declare(Box::new(
+            fx::declare_envelope_decl_token(fx::decl_token(5, 0, Some("t/a"))),
+        ))]);
+        let mut log = TokenLog::default();
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
+        });
+        assert_eq!(log.0, vec![(told.handle, LivelinessSampleKind::Put)]);
+        assert_eq!(
+            observer.flush_liveliness_on_link_loss(&mut log, &mut peers),
+            1
+        );
+        assert_eq!(
+            log.0,
+            vec![
+                (told.handle, LivelinessSampleKind::Put),
+                (told.handle, LivelinessSampleKind::Delete)
+            ]
         );
     }
 
@@ -2102,6 +2642,7 @@ mod tests {
     /// A drain with nothing staged opens no burst, whose close takes the lock of every conduit to
     /// send what it gathered: what follows every received Push, eight here, each burst-free. The
     /// CONTROL is a drain with an answer to the peer's interest staged, which opens one.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn a_drain_with_nothing_staged_opens_no_burst() {
         let mut f = fixture(false);
@@ -2213,6 +2754,10 @@ mod lent_tests {
         type LivelinessSubscriber = NoSink;
         type Matching = NoSink;
         type Reply = NoSink;
+        type QueryablePresence = crate::session_tables::Present;
+        type LivelinessPresence = crate::session_tables::Present;
+        type FilterPresence = crate::session_tables::Present;
+        type GetPresence = crate::session_tables::Present;
     }
 
     /// An observer whose subscriptions are kept in the session's one table set.
@@ -2222,9 +2767,11 @@ mod lent_tests {
         type Subscriber = BoxedSink;
         type SubscriberId = crate::session_tables::SubscriberHandle;
         type QueryableId = crate::session_tables::QueryableHandle;
+        type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
         type Delivery = ();
         type Tables<P: Storage> = SessionTables<BoxedRows, P>;
         type Queryable = NoSink;
+        type LivelinessSubscriber = NoSink;
         type Declared = NoSink;
         type Undeclared = NoSink;
     }
@@ -2353,6 +2900,7 @@ mod lent_tests {
             tables: RegistryRows {
                 subscribers: 1,
                 queryables: 1,
+                ..RegistryRows::default()
             },
             ..ObserverRows::default()
         };
@@ -2427,6 +2975,27 @@ mod lent_tests {
 
     fn reply_sink() -> BoxedReplySink {
         BoxedReplySink::new(|_reply: &dyn ReplyView| {}, |_rid: RequestId| {})
+    }
+
+    /// A session that asks nothing lends its requester side no byte of its arena, whatever rows
+    /// its plan states. The CONTROL is the requesters of a session that asks, lent the same rows,
+    /// which take bytes for them.
+    #[test]
+    fn no_requesters_take_no_byte_of_the_arena() {
+        let rows = RequesterRows {
+            queries: 2,
+            liveliness_gets: 0,
+        };
+        assert_eq!(NoRequesters::arena_bytes(rows), Some(0));
+        let mut none = arena(1 << 12);
+        let mut held = NoRequesters::lent(&mut none, keys(256), rows, &SessionLimits::defaults())
+            .expect("nothing to refuse");
+        held.clear();
+        assert_eq!(none.high_water(), 0);
+        assert!(
+            Lending::arena_bytes(rows).expect("small") > 0,
+            "CONTROL: the requesters of a session that asks take bytes for the rows"
+        );
     }
 
     /// Hold query `rid` pending in `requesters`, accepting a reply on any key.
@@ -2628,7 +3197,7 @@ mod lent_tests {
 
     /// A lent table answers a peer side of the build's profile: a subscription registered after
     /// the peer's FUTURE interest is staged for that peer when it reconciles.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     #[test]
     fn a_lent_table_stages_a_future_push_for_a_peer_of_another_policy() {
         let mut observer = lent_with(2);

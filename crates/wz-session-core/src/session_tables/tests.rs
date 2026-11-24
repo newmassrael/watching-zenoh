@@ -49,6 +49,10 @@ impl RowCallbacks for Latched {
     type LivelinessSubscriber = CClosure<u32>;
     type Matching = CClosure<u32>;
     type Reply = CClosure<u32>;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 /// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
@@ -76,6 +80,10 @@ impl RowCallbacks for Calls {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 type Tables = SessionTables<Calls>;
@@ -956,6 +964,150 @@ fn lent_tables_past_a_build_bound_are_refused() {
     ));
 }
 
+/// A table refused past its build bound leaves the tables after it rowless: the arena keeps the
+/// key expressions' table lent before the refusal, and lends nothing after it. The CONTROL is the
+/// same rows within the bound, which take every table's span.
+#[test]
+fn a_refused_table_leaves_the_tables_after_it_unlent() {
+    let within = small_rows();
+    let past = TableRows {
+        subscribers: caps::MAX_SUBSCRIPTIONS + 1,
+        ..small_rows()
+    };
+    let before = <Keyexprs<Lent>>::arena_bytes(past.keyexprs).unwrap();
+    let mut refused = arena(1 << 16);
+    assert!(SessionTables::<Calls, Lent>::lent(&mut refused, keys(64), &past).is_err());
+    assert_eq!(refused.high_water(), before);
+    let bytes = SessionTables::<Calls, Lent>::arena_bytes(&within).unwrap();
+    let mut whole = arena(bytes);
+    SessionTables::<Calls, Lent>::lent(&mut whole, keys(64), &within).unwrap();
+    assert_eq!(whole.high_water(), bytes, "CONTROL: every table is lent");
+}
+
+/// The rows of a session that keeps no queryable.
+struct NoQueryables;
+
+impl RowCallbacks for NoQueryables {
+    type Subscriber = u32;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+    type QueryablePresence = Absent;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
+}
+
+/// Tables that keep no queryable lend no table of them, find none and refuse one, handing its
+/// callback back. The CONTROL is the same rows on tables that keep queryables, which lend the
+/// queryables' table and take the declaration.
+#[test]
+fn tables_that_keep_no_queryable_lend_none_and_refuse_one() {
+    let rows = small_rows();
+    let kept = SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap();
+    let absent = SessionTables::<NoQueryables, Lent>::arena_bytes(&rows).unwrap();
+    assert_eq!(
+        kept - absent,
+        <Queryables<Calls, Lent>>::arena_bytes(rows.queryables).unwrap(),
+        "the queryables' table is all the difference"
+    );
+    let mut lent = arena(absent);
+    let mut tables =
+        SessionTables::<NoQueryables, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(lent.high_water(), absent);
+    assert!(tables.kept_queryables().is_none());
+    let refused = tables
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 7)
+    );
+    assert!(!tables.local_declares(
+        Plane::Queryables {
+            complete_required: false
+        },
+        "q"
+    ));
+    let mut whole = arena(kept);
+    let mut control = SessionTables::<Calls, Lent>::lent(&mut whole, keys(256), &rows).unwrap();
+    assert!(
+        control
+            .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+            .is_ok(),
+        "CONTROL: tables that keep queryables take one"
+    );
+}
+
+/// The rows of a session that keeps none of the kinds a build may leave out.
+struct NoneKept;
+
+impl RowCallbacks for NoneKept {
+    type Subscriber = u32;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+    type QueryablePresence = Absent;
+    type LivelinessPresence = Absent;
+    type FilterPresence = Absent;
+    type GetPresence = Absent;
+}
+
+/// Tables that keep none of the kinds a build may leave out lend the key expressions, the
+/// subscribers and the reply hold alone, and refuse a token, a liveliness subscriber, a write
+/// filter and a get, finding none of them. The CONTROL is the same rows on tables that keep every
+/// kind, which take each declaration.
+#[test]
+fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
+    let rows = small_rows();
+    let none = SessionTables::<NoneKept, Lent>::arena_bytes(&rows).unwrap();
+    let kept_alone = <Keyexprs<Lent>>::arena_bytes(rows.keyexprs).unwrap()
+        + <Subscribers<Calls, Lent>>::arena_bytes(rows.subscribers).unwrap()
+        + held_arena_bytes(rows.held_replies).unwrap();
+    assert_eq!(none, kept_alone, "the optional kinds take no byte");
+    let mut lent = arena(none);
+    let mut tables = SessionTables::<NoneKept, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(lent.high_water(), none);
+    assert_eq!(
+        tables.declare_token("t", KeyForm::default()),
+        Err(RegisterError::TableFull)
+    );
+    let refused = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), 3)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 3)
+    );
+    assert_eq!(
+        tables
+            .declare_write_filter(Plane::Subscribers, "w", false)
+            .unwrap_err(),
+        RegisterError::TableFull
+    );
+    let refused = tables
+        .begin_get(ReplyAcceptance::Any, 1, 10, 5)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 5)
+    );
+    assert_eq!(tables.tokens_for("t").count(), 0);
+    assert_eq!(tables.next_get_deadline(), None);
+    let mut whole = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let mut control = SessionTables::<Calls, Lent>::lent(&mut whole, keys(256), &rows).unwrap();
+    assert!(
+        control.declare_token("t", KeyForm::default()).is_ok(),
+        "CONTROL: tables that keep tokens take one"
+    );
+    assert!(control
+        .declare_write_filter(Plane::Subscribers, "w", false)
+        .is_ok());
+    assert!(control.begin_get(ReplyAcceptance::Any, 1, 10, 5).is_ok());
+}
+
 #[test]
 fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     let mut tables = Tables::new();
@@ -1085,6 +1237,10 @@ impl RowCallbacks for Sinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 #[test]
@@ -1429,6 +1585,10 @@ impl RowCallbacks for FrameSinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 /// The end of a plain frame is told to every subscriber, whatever it hears.
@@ -1470,6 +1630,7 @@ impl crate::sink::SampleDelivery<Counted, SubscriberHandle> for Handed {
         id: SubscriberHandle,
         row: RowAccess<'_, Counted>,
         _sample: &dyn crate::sink::SampleView,
+        _turn: crate::sink::FanOut,
     ) {
         row.row().hear();
         self.0.push(id);
@@ -1538,7 +1699,7 @@ fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
     assert_eq!(tables.epoch(), 0);
 }
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 #[test]
 fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
     use crate::pubsub::{SubInterestReply, SubscriberPeer};
@@ -1633,4 +1794,60 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
         assert!(tables.queryables.has_local_queryable("q/a", false));
         assert!(!tables.queryables.has_local_queryable("elsewhere", false));
     }
+}
+
+/// The table set's liveliness subscribers are told a peer's tokens by the registry's rule: a live
+/// token reaches every subscriber on a key it intersects, a historical one only those that asked
+/// for history; a subscriber is found by its Interest's id, and the responder's end of its history
+/// marks it.
+#[test]
+fn a_token_reaches_the_table_sets_liveliness_subscribers_by_the_registrys_rule() {
+    use crate::declare::liveliness_subscriber::LocalLivelinessSubscribers;
+    let mut tables = Tables::new();
+    tables
+        .declare_liveliness_subscriber("l/a", false, KeyForm::default(), 1)
+        .unwrap();
+    let history = tables
+        .declare_liveliness_subscriber("l/a", true, KeyForm::default(), 2)
+        .unwrap();
+    tables
+        .declare_liveliness_subscriber("other", true, KeyForm::default(), 3)
+        .unwrap();
+    let tell = |tables: &mut Tables, historical: bool| {
+        let mut told = Vec::new();
+        let fired = tables.liveliness_subscribers.fire_matching(
+            "l/a",
+            historical,
+            |_, row: RowAccess<'_, u32>| told.push(*row.row()),
+        );
+        assert_eq!(fired, told.len());
+        told
+    };
+    assert_eq!(tell(&mut tables, false), [1, 2]);
+    assert_eq!(tell(&mut tables, true), [2]);
+    let id = u64::from(
+        tables
+            .liveliness_subscribers()
+            .get(history.handle)
+            .unwrap()
+            .id(),
+    );
+    assert_eq!(tables.liveliness_subscribers.pattern_of(id), Some("l/a"));
+    assert_eq!(
+        tables
+            .liveliness_subscribers
+            .row_of(id)
+            .map(|(handle, _)| handle),
+        Some(history.handle)
+    );
+    let complete = |tables: &Tables| {
+        tables
+            .liveliness_subscribers()
+            .get(history.handle)
+            .unwrap()
+            .history_complete()
+    };
+    assert!(!complete(&tables));
+    tables.liveliness_subscribers.mark_history_complete(id);
+    assert!(complete(&tables));
 }

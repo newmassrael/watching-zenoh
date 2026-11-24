@@ -61,7 +61,7 @@ use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
 #[cfg(feature = "liveliness")]
-use crate::engine::LivelinessCallback;
+use crate::engine::LivelinessCall;
 use crate::engine::SubscriberCall;
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -69,6 +69,8 @@ use wz_capi_port::sync::Lock;
 #[cfg(feature = "query")]
 use wz_capi_port::ReplyCallback;
 use wz_session_core::bounded::Static;
+#[cfg(feature = "liveliness")]
+use wz_session_core::session_tables::LivelinessSubscriberHandle;
 use wz_session_core::session_tables::SubscriberHandle;
 
 /// The longest id of the clock that stamped a sample's timestamp the wire carries.
@@ -281,6 +283,7 @@ impl Span {
 }
 
 /// Whether `a` and `b` are the same bytes: the same place, or equal.
+#[cfg(feature = "liveliness")]
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && (ptr::eq(a.as_ptr(), b.as_ptr()) || a == b)
 }
@@ -322,6 +325,29 @@ impl Word {
     }
 }
 
+/// A sample as its view hands it, read once: what an offer that writes a record of its own places.
+struct Offered<'s> {
+    kind: SampleKind,
+    reliability: Reliability,
+    qos: Option<QosLevel>,
+    key: &'s [u8],
+    payload: &'s [u8],
+    rest: Parts<'s>,
+}
+
+impl<'s> Offered<'s> {
+    fn of(sample: &'s dyn SampleView) -> Self {
+        Self {
+            kind: sample.kind(),
+            reliability: sample.reliability(),
+            qos: sample.qos(),
+            key: sample.keyexpr().as_bytes(),
+            payload: sample.payload(),
+            rest: Parts::of(sample),
+        }
+    }
+}
+
 /// The parts of a sample, as a view hands them or as the table holds them.
 struct Parts<'s> {
     attachment: Option<&'s [u8]>,
@@ -347,27 +373,6 @@ impl<'s> Parts<'s> {
             || self.encoding.is_some()
             || self.timestamp.is_some()
             || self.source_info.is_some()
-    }
-
-    /// Whether `other` is the same parts, read where each lies.
-    fn same(&self, other: &Self) -> bool {
-        let bytes = |a: Option<&[u8]>, b: Option<&[u8]>| match (a, b) {
-            (Some(a), Some(b)) => same(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        bytes(self.attachment, other.attachment)
-            && match (self.encoding, other.encoding) {
-                (Some((a, x)), Some((b, y))) => a == b && bytes(x, y),
-                (None, None) => true,
-                _ => false,
-            }
-            && match (self.timestamp, other.timestamp) {
-                (Some((a, x)), Some((b, y))) => a == b && same(x, y),
-                (None, None) => true,
-                _ => false,
-            }
-            && self.source_info == other.source_info
     }
 }
 
@@ -468,7 +473,7 @@ enum Owed {
     Subscriber(SubscriberCall),
     /// A liveliness subscriber's.
     #[cfg(feature = "liveliness")]
-    Liveliness(LivelinessCallback),
+    Liveliness(LivelinessCall),
     /// A get's leg's.
     #[cfg(feature = "query")]
     Reply(Arc<ReplyCallback>),
@@ -486,9 +491,9 @@ impl Owed {
         }
     }
 
-    /// The callback, when it is a liveliness subscriber's.
+    /// The call, when it is of a liveliness subscriber's callback.
     #[cfg(feature = "liveliness")]
-    fn liveliness(&self) -> Option<&LivelinessCallback> {
+    fn liveliness(&self) -> Option<&LivelinessCall> {
         match self {
             Self::Liveliness(callback) => Some(callback),
             _ => None,
@@ -586,6 +591,9 @@ struct Table {
     longest_key: usize,
     /// The key written last, which the records on it that follow share.
     key: Option<Span>,
+    /// Whether the record written last is the one of the sample whose fan-out runs now: what a
+    /// later row of that fan-out joins. A record of no fan-out, or of one before, is joined by none.
+    fan: bool,
     /// The area the parts that lie nowhere the callbacks can read them are written into, and how
     /// much of it is written.
     area: NonNull<u8>,
@@ -697,28 +705,6 @@ impl Table {
         Some(span)
     }
 
-    /// The parts `rest` holds, read where each lies.
-    fn parts<'t>(&'t self, rest: Option<&'t Rest>) -> Parts<'t> {
-        let Some(rest) = rest else {
-            return Parts {
-                attachment: None,
-                encoding: None,
-                timestamp: None,
-                source_info: None,
-            };
-        };
-        Parts {
-            attachment: rest.attachment.map(|span| self.bytes(span)),
-            encoding: rest
-                .encoding
-                .map(|(id, schema)| (id, schema.map(|span| self.bytes(span)))),
-            timestamp: rest
-                .timestamp
-                .map(|(time, zid)| (time.get(), self.bytes(zid))),
-            source_info: rest.source_info.as_ref(),
-        }
-    }
-
     /// `parts` placed for the table.
     fn place_parts(
         &mut self,
@@ -763,6 +749,7 @@ impl Table {
         self.entries.clear();
         self.keys.clear();
         self.key = None;
+        self.fan = false;
         self.datagram = (ptr::null(), 0);
         self.lends = false;
         self.written = 0;
@@ -774,12 +761,31 @@ impl Table {
 #[cfg(feature = "local-subscriber")]
 pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS }, Static>;
 
-/// The rows whose last call ended after their subscriber was undeclared, by handle, for the session
+/// A row of the session's tables to let go of, whose last call ended after its entity was
+/// undeclared ([`Round::take_released`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LetGo {
+    /// A subscriber's row.
+    Subscriber(SubscriberHandle),
+    /// A liveliness subscriber's row.
+    #[cfg(feature = "liveliness")]
+    LivelinessSubscriber(LivelinessSubscriberHandle),
+}
+
+/// The rows waiting to be let go of: as many as the tables of the kinds whose calls the round
+/// ends hold.
+#[cfg(feature = "liveliness")]
+const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS + caps::MAX_LIVELINESS_SUBSCRIPTIONS;
+/// See the `liveliness` form.
+#[cfg(not(feature = "liveliness"))]
+const RELEASED_ROWS: usize = caps::MAX_SUBSCRIPTIONS;
+
+/// The rows whose last call ended after their entity was undeclared, by handle, for the session
 /// to let go of under its lock and drop after it ([`Round::take_released`]). Written by whoever
 /// ends a call: a delivery emptying the round with no lock of the session held, the session's own
 /// put after its calls, the session refusing a record under its lock.
 struct Released {
-    handles: Lock<BoundedVec<SubscriberHandle, { caps::MAX_SUBSCRIPTIONS }, Static>>,
+    handles: Lock<BoundedVec<LetGo, RELEASED_ROWS, Static>>,
     /// The rows not dropped yet: those `handles` holds and those taken from it whose drop has not
     /// ended ([`Releasing`]). A delivery that reads none takes no lock for them, and an
     /// undeclaration that waits for its row reads that no drop is under way.
@@ -796,19 +802,34 @@ impl Released {
 
     /// End `call`, its row kept for the session to let go of when it was the row's last call.
     fn end(&self, call: SubscriberCall) {
-        let Some(handle) = call.end() else {
-            return;
-        };
+        if let Some(handle) = call.end() {
+            self.keep(LetGo::Subscriber(handle));
+        }
+    }
+
+    /// [`Self::end`] for a call of a liveliness subscriber's callback.
+    #[cfg(feature = "liveliness")]
+    fn end_liveliness(&self, call: LivelinessCall) {
+        if let Some(handle) = call.end() {
+            self.keep(LetGo::LivelinessSubscriber(handle));
+        }
+    }
+
+    /// Keep `row`, whose last call ended, for the session to let go of.
+    fn keep(&self, row: LetGo) {
         let kept = self.handles.with(|handles| {
-            let kept = handles.push(handle).is_ok();
+            let kept = handles.push(row).is_ok();
             if kept {
                 self.owed.fetch_add(1, Ordering::AcqRel);
             }
             kept
         });
         // An undeclared row keeps its slot until it is let go of, so the rows waiting here are
-        // never more than a table of subscribers holds; one that found no room would keep its slot.
-        debug_assert!(kept, "the rows waiting to be let go of fit a table of them");
+        // never more than the tables of them hold; one that found no room would keep its slot.
+        debug_assert!(
+            kept,
+            "the rows waiting to be let go of fit the tables of them"
+        );
     }
 
     /// End what `owed` is: a call, by [`Self::end`]; any other callback is let go of here.
@@ -816,7 +837,7 @@ impl Released {
         match owed {
             Owed::Subscriber(call) => self.end(call),
             #[cfg(feature = "liveliness")]
-            Owed::Liveliness(callback) => drop(callback),
+            Owed::Liveliness(call) => self.end_liveliness(call),
             #[cfg(feature = "query")]
             Owed::Reply(callback) => drop(callback),
         }
@@ -844,12 +865,12 @@ impl Released {
 /// taker does once the row was dropped.
 pub(crate) struct Releasing<'r> {
     released: &'r Released,
-    handle: SubscriberHandle,
+    handle: LetGo,
 }
 
 impl Releasing<'_> {
     /// The row's handle.
-    pub(crate) fn handle(&self) -> SubscriberHandle {
+    pub(crate) fn handle(&self) -> LetGo {
         self.handle
     }
 }
@@ -959,6 +980,7 @@ impl Round {
             ptr::write(addr_of_mut!((*table).keys), rows.keys);
             ptr::write(addr_of_mut!((*table).longest_key), rows.longest_key);
             ptr::write(addr_of_mut!((*table).key), None);
+            ptr::write(addr_of_mut!((*table).fan), false);
             ptr::write(addr_of_mut!((*table).area), area);
             ptr::write(addr_of_mut!((*table).area_bytes), area_bytes);
             ptr::write(addr_of_mut!((*table).written), 0);
@@ -1017,6 +1039,7 @@ impl Round {
             keys: _,
             longest_key: _,
             key: _,
+            fan: _,
             area: _,
             area_bytes: _,
             written: _,
@@ -1106,12 +1129,19 @@ impl Round {
     }
 
     /// Hold `sample` for `call`, a call of a subscriber's callback begun on its row, read where it
-    /// lies when it lies in the datagram a link lends the step. A sample offered again for one more
-    /// subscriber is written once; what finds no room is counted, and its call ended.
+    /// lies when it lies in the datagram a link lends the step; `first` when `call` is the first
+    /// row of the sample's fan-out. A later row of the same fan-out joins the record the sample
+    /// was written in, so a sample offered to many subscribers is written once; what finds no
+    /// room is counted, and its call ended.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub(crate) unsafe fn offer_sample(&self, call: SubscriberCall, sample: &dyn SampleView) {
+    pub(crate) unsafe fn offer_sample(
+        &self,
+        call: SubscriberCall,
+        sample: &dyn SampleView,
+        first: bool,
+    ) {
         // The session's own put is handed the calls and holds nothing.
         #[cfg(feature = "local-subscriber")]
         // SAFETY: the caller's contract: written under the session's lock, which is held.
@@ -1126,7 +1156,8 @@ impl Round {
             debug_assert!(kept, "a session's subscribers fit the table of them");
             return;
         }
-        let holds_sender = holds_its_sender(sample.reliability(), sample.qos());
+        let sample = Offered::of(sample);
+        let holds_sender = holds_its_sender(sample.reliability, sample.qos);
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
@@ -1135,19 +1166,26 @@ impl Round {
             self.released.end(call);
             return;
         };
-        let call = match self.join_sample(table, call, sample) {
-            Ok(()) => {
-                self.filled(table);
-                return;
+        // A record is joined by the later rows of its own fan-out alone: a sample of the same
+        // bytes in another fan-out is a record of its own.
+        let call = if first {
+            table.fan = false;
+            call
+        } else {
+            match self.join_sample(table, call) {
+                Ok(()) => {
+                    self.filled(table);
+                    return;
+                }
+                Err(call) => call,
             }
-            Err(call) => call,
         };
         if !Self::takes(table, 1) {
             self.refuse(holds_sender);
             self.released.end(call);
             return;
         }
-        let Some((key, payload, rest)) = Self::place_sample(table, sample, lending) else {
+        let Some((key, payload, rest)) = Self::place_sample(table, &sample, lending) else {
             self.refuse(holds_sender);
             self.released.end(call);
             return;
@@ -1156,9 +1194,9 @@ impl Round {
         let entry = table.entries.push(Entry::owing_one(
             Held::Sample {
                 head: Head {
-                    kind: sample.kind(),
-                    reliability: sample.reliability(),
-                    qos: sample.qos(),
+                    kind: sample.kind,
+                    reliability: sample.reliability,
+                    qos: sample.qos,
                     key,
                     payload,
                 },
@@ -1167,7 +1205,10 @@ impl Round {
             first,
         ));
         let kept = match entry {
-            Ok(()) => self.owe_call(table, call),
+            Ok(()) => {
+                table.fan = true;
+                self.owe_call(table, call)
+            }
             Err(_) => {
                 self.released.end(call);
                 false
@@ -1193,38 +1234,29 @@ impl Round {
     /// room.
     fn place_sample(
         table: &mut Table,
-        sample: &dyn SampleView,
+        sample: &Offered<'_>,
         lending: Option<(*const u8, usize)>,
     ) -> Option<(Span, Span, Option<Rest>)> {
-        let key = table.place_key(sample.keyexpr().as_bytes(), lending)?;
-        let payload = table.place(sample.payload(), lending)?;
-        let rest = table.place_parts(&Parts::of(sample), lending)?;
+        let key = table.place_key(sample.key, lending)?;
+        let payload = table.place(sample.payload, lending)?;
+        let rest = table.place_parts(&sample.rest, lending)?;
         Some((key, payload, rest))
     }
 
-    /// Join `call` to the record `table` holds last when that is `sample` and no call of the same
-    /// row is owed it yet; the call back when it does not join.
-    fn join_sample(
-        &self,
-        table: &mut Table,
-        call: SubscriberCall,
-        sample: &dyn SampleView,
-    ) -> Result<(), SubscriberCall> {
+    /// Join `call` to the record `table` holds last when that is the record of the fan-out `call`
+    /// is a later row of and no call of the same row is owed it yet; the call back when it does not
+    /// join.
+    fn join_sample(&self, table: &mut Table, call: SubscriberCall) -> Result<(), SubscriberCall> {
         let Some(
             entry @ Entry {
-                what: Held::Sample { head, rest },
+                what: Held::Sample { .. },
                 ..
             },
         ) = table.entries.last()
         else {
             return Err(call);
         };
-        let joins = head.kind == sample.kind()
-            && head.reliability == sample.reliability()
-            && head.qos == sample.qos()
-            && same(table.bytes(head.key), sample.keyexpr().as_bytes())
-            && same(table.bytes(head.payload), sample.payload())
-            && table.parts(rest.as_ref()).same(&Parts::of(sample))
+        let joins = table.fan
             && !table
                 .owed(entry)
                 .iter()
@@ -1241,17 +1273,18 @@ impl Round {
         Ok(())
     }
 
-    /// Hold `sample`, a token's appearance or retraction, for `callback`, a liveliness
-    /// subscriber's, its key read where it lies or written into the table. Written once for the
-    /// liveliness subscribers it reaches one after the other, as a sample is; what finds no room
-    /// is counted with the records that hold their sender.
+    /// Hold `sample`, a token's appearance or retraction, for `call`, a call of a liveliness
+    /// subscriber's callback begun on its row, its key read where it lies or written into the
+    /// table. Written once for the liveliness subscribers it reaches one after the other, as a
+    /// sample is; what finds no room is counted with the records that hold their sender, and its
+    /// call ended.
     ///
     /// # Safety
     /// The caller holds the session's lock.
     #[cfg(feature = "liveliness")]
     pub(crate) unsafe fn offer_liveliness(
         &self,
-        callback: &LivelinessCallback,
+        call: LivelinessCall,
         sample: &LivelinessSample<'_>,
     ) {
         // SAFETY: the caller's contract.
@@ -1259,6 +1292,7 @@ impl Round {
         // SAFETY: the caller's contract.
         let Some(table) = (unsafe { self.writable() }) else {
             self.refuse(true);
+            self.released.end_liveliness(call);
             return;
         };
         let key = sample.keyexpr.as_bytes();
@@ -1281,14 +1315,11 @@ impl Round {
                     .owed(entry)
                     .iter()
                     .filter_map(Owed::liveliness)
-                    .any(|held| Arc::ptr_eq(held, callback));
+                    .any(|held| held.same_row(&call));
             if joins && Self::joins(table) {
-                if table
-                    .callbacks
-                    .push(Owed::Liveliness(Arc::clone(callback)))
-                    .is_err()
-                {
+                if let Err(full) = table.callbacks.push(Owed::Liveliness(call)) {
                     self.refuse(true);
+                    self.released.settle(full.0);
                     return;
                 }
                 if let Some(last) = table.entries.last_mut() {
@@ -1300,28 +1331,36 @@ impl Round {
         }
         if !Self::takes(table, 1) {
             self.refuse(true);
+            self.released.end_liveliness(call);
             return;
         }
         let Some(at) = table.place_key(key, lending) else {
             self.refuse(true);
+            self.released.end_liveliness(call);
             return;
         };
         let first = table.callbacks.len();
-        let kept = table
-            .entries
-            .push(Entry::owing_one(
-                Held::Liveliness {
-                    kind: sample.kind,
-                    key: at,
-                    token_id: Word::of(sample.token_id),
-                },
-                first,
-            ))
-            .is_ok()
-            && table
-                .callbacks
-                .push(Owed::Liveliness(Arc::clone(callback)))
-                .is_ok();
+        let entry = table.entries.push(Entry::owing_one(
+            Held::Liveliness {
+                kind: sample.kind,
+                key: at,
+                token_id: Word::of(sample.token_id),
+            },
+            first,
+        ));
+        let kept = match entry {
+            Ok(()) => match table.callbacks.push(Owed::Liveliness(call)) {
+                Ok(()) => true,
+                Err(full) => {
+                    self.released.settle(full.0);
+                    false
+                }
+            },
+            Err(_) => {
+                self.released.end_liveliness(call);
+                false
+            }
+        };
         debug_assert!(kept, "the table had the room its checks found");
         self.filled(table);
     }
@@ -1547,9 +1586,16 @@ impl Round {
         self.released.end(call);
     }
 
-    /// The next row whose last call ended after its subscriber was undeclared, for the session to
-    /// let go of (`SessionTables::release_subscriber`) under its lock and drop after it, and then
-    /// drop what this hands back.
+    /// End `call`, which the session's declaration made of a liveliness subscriber's history: its
+    /// row waits in [`Self::take_released`] when it was the row's last call.
+    #[cfg(feature = "liveliness")]
+    pub(crate) fn end_liveliness_call(&self, call: LivelinessCall) {
+        self.released.end_liveliness(call);
+    }
+
+    /// The next row whose last call ended after its entity was undeclared, for the session to let
+    /// go of (`SessionTables::release_subscriber` and its kin) under its lock and drop after it,
+    /// and then drop what this hands back.
     pub(crate) fn take_released(&self) -> Option<Releasing<'_>> {
         self.released.take()
     }
@@ -1613,8 +1659,8 @@ impl Round {
                         keyexpr: table.text(*key),
                         token_id: token_id.get(),
                     };
-                    for callback in owed.iter().filter_map(Owed::liveliness) {
-                        callback.call(sample);
+                    for call in owed.iter().filter_map(Owed::liveliness) {
+                        call.hand(sample);
                     }
                 }
                 #[cfg(feature = "query")]

@@ -209,7 +209,15 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// registry's membership consult) and fire each sink whose verdict
     /// FLIPPED, recording the new verdict. Returns the count fired —
     /// a same-verdict sweep fires nothing (pico transition-only).
+    #[inline]
     pub fn reevaluate(&mut self, has_matching: impl Fn(&K) -> bool) -> usize {
+        self.reevaluate_by(&has_matching)
+    }
+
+    /// [`Self::reevaluate`] over the consult as one type: every caller writes a closure of its
+    /// own, and the sweep is one body whatever the closure, not a copy for each.
+    #[inline(never)]
+    fn reevaluate_by(&mut self, has_matching: &dyn Fn(&K) -> bool) -> usize {
         let mut fired = 0;
         for watch in self.watches.iter_mut() {
             let now = has_matching(&watch.criterion);
