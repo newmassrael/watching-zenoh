@@ -454,6 +454,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     #[inline(always)]
     pub(super) fn dial_row(&self, at: usize) -> Result<DialRow<L::Dial, L::Pump>, OpenError> {
         let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
+        // A dial that answered has handed out all it held (the socket, the link's buffers, the
+        // program's link), and keeps only handles that own nothing, so it is let go of here,
+        // before its link is opened, with nothing to observe: every stack's dial takes those out
+        // as it answers (`Dialled`, `ip_stack::IpDial`, `app_link::AppDial`).
         Ok(match pending.poll() {
             None => DialRow::Pending(Dial::new(DialEndpoint::Listed(at), pending)),
             Some(answer) => DialRow::Answered(answer),
