@@ -110,6 +110,46 @@ impl<K> fmt::Debug for Handle<K> {
     }
 }
 
+/// A table's slots apart from its rows: how many it holds and where its live rows lie, read with
+/// one body for every table whatever its rows are ([`SlotMap::slots`]). A row is named by the bits
+/// of its handle ([`Handle::to_bits`]), so a caller that reads tables of several kinds in one
+/// order names a row of any of them by one value.
+#[derive(Clone, Copy, Debug)]
+pub struct Slots<'a> {
+    meta: &'a [Meta],
+    held: u16,
+}
+
+impl Slots<'_> {
+    /// The slots of a table a build keeps none of: no row.
+    pub const NONE: Slots<'static> = Slots { meta: &[], held: 0 };
+
+    /// How many slots hold a row, retired rows among them, as [`SlotMap::len`] counts them.
+    pub fn len(self) -> usize {
+        usize::from(self.held)
+    }
+
+    /// Whether no slot holds a row.
+    pub fn is_empty(self) -> bool {
+        self.held == 0
+    }
+
+    /// The rank among the live rows, in slot order, of the live row `row` names, `row` the bits
+    /// of its handle: [`SlotMap::rank_of`] of it. `None` when it names none.
+    pub fn rank_of(self, row: NonZeroU32) -> Option<usize> {
+        let handle = Handle::<()>::from_bits(row)?;
+        let at = Core::find(self.meta, handle.place(), handle.generation, false)?;
+        Some(Core::rank(self.meta, at))
+    }
+
+    /// The bits of the handle of the live row at `rank` in slot order: the row
+    /// [`SlotMap::nth_live`] finds.
+    pub fn nth_live(self, rank: usize) -> Option<NonZeroU32> {
+        let (at, generation) = Core::nth_live(self.meta, rank)?;
+        Handle::<()>::at(at, generation).map(Handle::to_bits)
+    }
+}
+
 /// A row pinned by a call of what it owns: handed back to [`SlotMap::unpin`] when the call has
 /// returned. Not copied, so each pin is given back once.
 #[must_use = "a pinned row stays in its slot until it is unpinned"]
@@ -547,6 +587,14 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn rank_of(&self, handle: Handle<K>) -> Option<usize> {
         let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
         Some(Core::rank(&self.meta, at))
+    }
+
+    /// The table's slots apart from its rows ([`Slots`]).
+    pub fn slots(&self) -> Slots<'_> {
+        Slots {
+            meta: &self.meta,
+            held: self.core.held,
+        }
     }
 
     /// The live row at `rank` in slot order, with its handle: the one [`Self::iter`] hands
