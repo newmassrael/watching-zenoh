@@ -15,7 +15,7 @@ use wz_session_core::placed::Placed;
 use wz_session_core::placed::PlacedRef;
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::SampleRef;
 
 #[cfg(feature = "query")]
 use crate::engine::LegId;
@@ -227,7 +227,7 @@ impl RoundCall for SubscriberCall {
 }
 
 impl SampleCall for SubscriberCall {
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         SubscriberCall::hand(self, sample);
     }
 }

@@ -152,8 +152,8 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleView};
-use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
+use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
+use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
@@ -1948,15 +1948,18 @@ impl SubscriberRow {
 
     /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
     /// begun: the one place a sample is handed to a subscriber's callback.
-    fn hand(&self, sample: &dyn SampleView) {
+    fn hand(&self, sample: &SampleRef<'_>) {
         if self.latch.retired() {
             return;
         }
-        if self.expose {
-            self.sink.call(sample);
+        let hidden;
+        let sample = if self.expose {
+            sample
         } else {
-            self.sink.call(&HiddenTimestamp(sample));
-        }
+            hidden = sample.without_timestamp();
+            &hidden
+        };
+        self.sink.call(sample);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
@@ -2045,7 +2048,7 @@ impl SubscriberCall {
     }
 
     /// Hand `sample` to the row's callback.
-    pub(crate) fn hand(&self, sample: &dyn SampleView) {
+    pub(crate) fn hand(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
         // not; nothing writes a row's sink or its timestamp choice after it is declared.
         unsafe { self.call.0.as_ref() }.hand(sample);
@@ -2089,9 +2092,19 @@ impl RoundDelivery {
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     fn deliver(
         &mut self,
-        _id: SubscriberHandle,
+        id: SubscriberHandle,
         row: RowAccess<'_, SubscriberRow>,
         sample: &dyn SampleView,
+        turn: FanOut,
+    ) {
+        self.deliver_ref(id, row, &SampleRef::of(sample), turn);
+    }
+
+    fn deliver_ref(
+        &mut self,
+        _id: SubscriberHandle,
+        row: RowAccess<'_, SubscriberRow>,
+        sample: &SampleRef<'_>,
         turn: FanOut,
     ) {
         // The row is read where it lies, shared with the calls of it a delivery makes on another
@@ -2104,7 +2117,7 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         // holds, as the round's writer must.
         unsafe {
             self.round
-                .offer_sample(SubscriberCall::new(call), sample, turn.is_first())
+                .offer_sample_ref(SubscriberCall::new(call), sample, turn.is_first())
         };
     }
 }
@@ -5417,6 +5430,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut reached = unsafe { self.samples.captured() };
         drop(core);
         let count = reached.len();
+        let sample = SampleRef::of(&sample);
         // A callback that steps the session from inside the put hands out nothing itself, as one
         // inside a delivery does; nor does an undeclare inside it wait for this call.
         self.deliveries.within(|_| {
