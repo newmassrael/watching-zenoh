@@ -258,9 +258,12 @@ impl SampleMarshal {
     /// is kept past the call is copied when it is kept: a clone of the payload ([`ByteBuf`]) and
     /// an owned sample ([`Self::deep_copy`]). Its cached views are unbound, as [`Self::new`]'s.
     ///
+    /// Nothing it holds is its own, so it is handed back not to be dropped: a delivery lets it go
+    /// without running the drop of a key, a payload, an attachment and an encoding that own none.
+    ///
     /// # Safety
-    /// The marshal is dropped before the borrow of `view` ends.
-    pub(crate) unsafe fn lent(view: &dyn SampleView) -> Self {
+    /// The marshal is let go before the borrow of `view` ends.
+    pub(crate) unsafe fn lent(view: &dyn SampleView) -> core::mem::ManuallyDrop<Self> {
         let mut marshal = Self::keyed(
             KeyText::Lent(view.keyexpr() as *const str),
             ByteBuf::lent(view.payload()),
@@ -269,7 +272,7 @@ impl SampleMarshal {
         if let Some(attachment) = view.attachment() {
             marshal.attachment = Some(ByteBuf::lent(attachment));
         }
-        marshal.with_metadata(view)
+        core::mem::ManuallyDrop::new(marshal.with_metadata(view))
     }
 
     /// [`Self::new`] for a key held as `keyexpr`.
@@ -670,7 +673,7 @@ pub(crate) fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
         Some(f) => f,
         None => return,
     };
-    // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+    // SAFETY: the marshal is let go at the end of this call, inside the borrow of `view`.
     let mut marshal = unsafe { SampleMarshal::lent(view) };
     // Bind AFTER the move out of `lent` — the marshal is at its final
     // address only here. See `SampleMarshal::bind`.
@@ -4095,7 +4098,7 @@ mod tests {
         marshal.bind();
         let kept = marshal.deep_copy().expect("room for the copy");
         let clone = marshal.payload.try_clone().expect("room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         assert_eq!(kept.keyexpr.as_str(), "demo/lent");
         assert_ne!(kept.keyexpr.as_str().as_ptr(), view.key.as_ptr());
         assert_eq!(kept.payload.as_slice(), b"payload");
@@ -4140,6 +4143,35 @@ mod tests {
         );
     }
 
+    /// The marshal a callback is handed holds nothing of its own: its key, payload, attachment and
+    /// encoding schema are read where the view holds them, which is what lets a delivery skip its
+    /// drop ([`SampleMarshal::lent`]). Turned red by a lent marshal that copies any of them,
+    /// which nothing would then let go.
+    #[test]
+    fn a_sample_handed_to_its_callback_holds_only_what_its_view_lends() {
+        let view = HeldView {
+            key: "demo/lends",
+            payload: b"payload",
+            attachment: b"attachment",
+        };
+        // SAFETY: the marshal is let go before `view`.
+        let marshal = unsafe { SampleMarshal::lent(&view) };
+        assert_eq!(marshal.keyexpr.as_str().as_ptr(), view.key.as_ptr());
+        assert_eq!(marshal.payload.as_slice().as_ptr(), view.payload.as_ptr());
+        let attachment = marshal.attachment.as_ref().expect("the view carried one");
+        assert_eq!(attachment.as_slice().as_ptr(), view.attachment.as_ptr());
+
+        let encoded = EncodedView { schema: b"utf8" };
+        // SAFETY: the marshal is let go before `encoded`.
+        let marshal = unsafe { SampleMarshal::lent(&encoded) };
+        let schema = marshal
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.view().schema)
+            .expect("the view carried a schema");
+        assert_eq!(schema.as_ptr(), encoded.schema.as_ptr());
+    }
+
     /// A sample taken from its callback is a copy of its own, written in its place and bound there:
     /// its key, payload and attachment read as the view's from bytes of its own, and the views it
     /// hands out point into it, not into the marshal it was copied from, which is gone by then.
@@ -4156,7 +4188,7 @@ mod tests {
         // SAFETY: a marshal this crate made and bound.
         let owned = unsafe { clone_sample_marshal(marshal.as_loaned()) }
             .expect("a place and room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         let copy = owned.cast::<SampleMarshal>();
         // SAFETY: the place the clone filled, live until it is let go of below.
         unsafe {
@@ -4222,7 +4254,7 @@ mod tests {
         assert!(!loaned.is_null(), "the sample carried an encoding");
         // SAFETY: the loaned encoding the accessor handed out, of the live marshal.
         let handle = unsafe { (*loaned).handle } as usize;
-        let start = &marshal as *const SampleMarshal as usize;
+        let start = &*marshal as *const SampleMarshal as usize;
         assert!(
             (start..start + core::mem::size_of::<SampleMarshal>()).contains(&handle),
             "the encoding lies in the marshal, not in a box of its own"
@@ -4236,7 +4268,7 @@ mod tests {
             "the schema is read where the view holds it, not copied"
         );
         let mut kept = marshal.deep_copy().expect("room for the copy");
-        drop(marshal);
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
         kept.bind();
         // SAFETY: the kept copy, bound at its final address.
         let kept_loaned = unsafe { z_sample_encoding(kept.as_loaned()) };
