@@ -1313,6 +1313,9 @@ pub const RETIRABLE_ROW_CELLS: &[&str] = &[
     "/first_byte",
     "/l2",
     "/name",
+    // Revision 81: the comments of the packet holding the first byte, read
+    // through the same packet map, which goes with the bytes.
+    "/packet_comments",
     // Revision 64: the walk's own facts go with the walk.
     "/transport_header",
     "/unnamed_extensions",

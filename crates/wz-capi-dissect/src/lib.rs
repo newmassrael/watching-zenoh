@@ -11243,6 +11243,10 @@ mod tests {
                     call_summary(&stream).expect("the summary door reads a pcap"),
                     call_summary(&unread_interface_capture())
                         .expect("the summary door reads a pcapng"),
+                    // And a section that carries a comment, the only shape that
+                    // puts an entry under `comments.sections`.
+                    call_summary(&commented_section_capture())
+                        .expect("the summary door reads a pcapng"),
                 ],
             ),
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
@@ -16868,6 +16872,39 @@ mod tests {
     /// A pcapng with an Ethernet interface and an interface on `LINKTYPE_USER0`
     /// (147), which this build does not decapsulate: two packets on the first
     /// and three on the second, interleaved.
+    fn commented_section_capture() -> Vec<u8> {
+        let file = wz_capture::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &[(0, 1_000, &[0u8; 4])]);
+        // The writer's Section Header Block is its first 28 bytes; this one is
+        // laid out from the format with one `opt_comment` in its option list.
+        let comment = b"bench A";
+        let mut body = 0x1A2B_3C4Du32.to_le_bytes().to_vec();
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&u64::MAX.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        body.extend_from_slice(comment);
+        body.push(0);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        let total = (12 + body.len()) as u32;
+        let mut out = 0x0A0D_0D0Au32.to_le_bytes().to_vec();
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&file[28..]);
+        out
+    }
+
+    /// The summary carries a section's comment beside the section it heads.
+    #[test]
+    fn a_section_comment_is_carried_in_the_summary() {
+        let json = call_summary(&commented_section_capture()).expect("the pcapng reads");
+        assert!(
+            json.contains("\"sections\":[{\"section\":0,\"text\":\"bench A\",\"utf8\":true}]"),
+            "{json}"
+        );
+    }
+
     fn unread_interface_capture() -> Vec<u8> {
         let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
         let own_record = [0xA5u8; 12];

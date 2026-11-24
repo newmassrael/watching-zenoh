@@ -1423,7 +1423,8 @@
  *     sequence replaced by U+FFFD. Nothing is trimmed or interpreted. `[]` for
  *     a packet with none, which every classic pcap record is. `null` when the
  *     packet is not in hand: `first_byte` is `null`, or the packet could not be
- *     re-read from the bytes this call was given. Only the packet holding the
+ *     re-read from the bytes this call was given, which includes a stream row
+ *     whose bytes the byte ceiling has since discarded. Only the packet holding the
  *     row's FIRST byte is read, so every row of a packet carries its comments
  *     and a packet that holds no row's first byte (a bare acknowledgement, a
  *     message's middle segment) is on no row: the summary's `comments` counts
@@ -8032,8 +8033,9 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *
  * A row whose message bytes the per-direction byte ceiling has since discarded
  * reads, if it is asked for again, as `declined` in place of its walk: /name,
- * /fields, /carried, /above_transport, /first_byte, /l2, /declined and, since
- * field-document revision 64, /transport_header and /unnamed_extensions swap. The
+ * /fields, /carried, /above_transport, /first_byte, /l2, /declined, since
+ * field-document revision 64 /transport_header and /unnamed_extensions, and since
+ * revision 81 /packet_comments (`null`: the packet is no longer in hand) swap. The
  * row you hold stays true -- the bytes were the message's when it was written --
  * so do not treat that `declined` as a correction. `seq`, the four coordinates,
  * `direction`, `offset_space`, `message_at`, `packet`, `sn` and the rest of

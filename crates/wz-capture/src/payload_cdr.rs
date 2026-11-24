@@ -476,6 +476,7 @@ mod tests {
     use super::*;
     use crate::payload::formats::FormatMap;
     use crate::ros_msg::DefinitionFile;
+    use alloc::string::ToString;
     use alloc::vec;
 
     fn set_of(files: &[(&str, &str)]) -> TypeSet {
