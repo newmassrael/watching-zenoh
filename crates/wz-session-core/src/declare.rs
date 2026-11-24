@@ -161,6 +161,19 @@ pub trait MatchingReport {}
 #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
 impl<T> MatchingReport for T {}
 
+/// Whether the remote-declaration tables of `M` can hold a matching watch: not where the sink type
+/// makes no value ([`matching::MatchingSink::WATCHES`]), so a holder hands such tables no consult
+/// of its own tables to re-evaluate a watch by.
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+pub const fn holds_watches<M: MatchingReport>() -> bool {
+    <M as matching::MatchingSink>::WATCHES
+}
+/// See the form with matching listeners: a build without them holds no watch.
+#[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+pub const fn holds_watches<M: MatchingReport>() -> bool {
+    false
+}
+
 /// The sink a table keeps when its holder names none: the heap closure where there are matching
 /// listeners, nothing where there are none.
 #[cfg(all(feature = "session-matching", feature = "alloc"))]

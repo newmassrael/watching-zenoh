@@ -1405,10 +1405,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 &mut peers.remote_subscribers,
                 event,
                 peer_table,
-                &|c| {
-                    (c.locality.allows_local()
-                        && subscribers.has_local_matching(c.keyexpr.as_str()))
-                        || others.subscribes(c)
+                if crate::declare::holds_watches::<M>() {
+                    &|c| {
+                        (c.locality.allows_local()
+                            && subscribers.has_local_matching(c.keyexpr.as_str()))
+                            || others.subscribes(c)
+                    }
+                } else {
+                    &|_| false
                 },
             );
         }
@@ -1419,12 +1423,17 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 &mut peers.remote_queryables,
                 event,
                 peer_table,
-                &|c| {
-                    (c.locality.allows_local()
-                        && queryables.is_some_and(|queryables| {
-                            queryables.has_local_queryable(c.keyexpr.as_str(), c.complete_required)
-                        }))
-                        || others.answers(c)
+                if crate::declare::holds_watches::<M>() {
+                    &|c| {
+                        (c.locality.allows_local()
+                            && queryables.is_some_and(|queryables| {
+                                queryables
+                                    .has_local_queryable(c.keyexpr.as_str(), c.complete_required)
+                            }))
+                            || others.answers(c)
+                    }
+                } else {
+                    &|_| false
                 },
             );
         }
@@ -1433,7 +1442,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             &mut peers.remote_queryables,
             event,
             peer_table,
-            &|c| others.answers(c),
+            if crate::declare::holds_watches::<M>() {
+                &|c| others.answers(c)
+            } else {
+                &|_| false
+            },
         );
         // A `Declare(DeclToken)` whose outer `interest_id` names a pending
         // liveliness GET belongs to that GET and to no observer plane (zenoh
@@ -1687,10 +1700,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             dropped =
                 dropped.saturating_add(self.remote_subscribers.flush_declarations_on_link_loss(
                     &mut peers.remote_subscribers,
-                    &|c| {
-                        (c.locality.allows_local()
-                            && subscribers.has_local_matching(c.keyexpr.as_str()))
-                            || others.subscribes(c)
+                    if crate::declare::holds_watches::<M>() {
+                        &|c| {
+                            (c.locality.allows_local()
+                                && subscribers.has_local_matching(c.keyexpr.as_str()))
+                                || others.subscribes(c)
+                        }
+                    } else {
+                        &|_| false
                     },
                 ));
         }
@@ -1704,13 +1721,19 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             dropped =
                 dropped.saturating_add(self.remote_queryables.flush_declarations_on_link_loss(
                     &mut peers.remote_queryables,
-                    &|c| {
-                        (c.locality.allows_local()
-                            && queryables.is_some_and(|queryables| {
-                                queryables
-                                    .has_local_queryable(c.keyexpr.as_str(), c.complete_required)
-                            }))
-                            || others.answers(c)
+                    if crate::declare::holds_watches::<M>() {
+                        &|c| {
+                            (c.locality.allows_local()
+                                && queryables.is_some_and(|queryables| {
+                                    queryables.has_local_queryable(
+                                        c.keyexpr.as_str(),
+                                        c.complete_required,
+                                    )
+                                }))
+                                || others.answers(c)
+                        }
+                    } else {
+                        &|_| false
                     },
                 ));
         }
@@ -1720,12 +1743,15 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "codec-declare"
         ))]
         {
-            dropped = dropped.saturating_add(
-                self.remote_queryables
-                    .flush_declarations_on_link_loss(&mut peers.remote_queryables, &|c| {
-                        others.answers(c)
-                    }),
-            );
+            dropped =
+                dropped.saturating_add(self.remote_queryables.flush_declarations_on_link_loss(
+                    &mut peers.remote_queryables,
+                    if crate::declare::holds_watches::<M>() {
+                        &|c| others.answers(c)
+                    } else {
+                        &|_| false
+                    },
+                ));
         }
         let _ = (&peers, others);
         dropped
