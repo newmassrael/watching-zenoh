@@ -291,10 +291,12 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     where
         T: Clone;
 
-    /// Append every element of `src` in one operation, all or nothing.
+    /// Append every element of `src` in one copy, all or nothing. `Copy`, so a fixed or lent
+    /// backing copies the slice whole where an element loop would be inlined, and vectorised, at
+    /// each caller.
     fn extend_from_slice(&mut self, src: &[T]) -> Result<(), CapacityFull<()>>
     where
-        T: Clone;
+        T: Copy;
 }
 
 /// The operations a [`BoundedString`] needs of the text a [`Storage`] policy
@@ -545,7 +547,7 @@ impl<T> SeqBacking<T> for Vec<T> {
 
     fn extend_from_slice(&mut self, src: &[T]) -> Result<(), CapacityFull<()>>
     where
-        T: Clone,
+        T: Copy,
     {
         Vec::extend_from_slice(self, src);
         Ok(())
@@ -624,9 +626,19 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
 
     fn extend_from_slice(&mut self, src: &[T]) -> Result<(), CapacityFull<()>>
     where
-        T: Clone,
+        T: Copy,
     {
-        heapless::Vec::extend_from_slice(self, src).map_err(|_| CapacityFull(()))
+        let len = self.len();
+        let Some(end) = append_end::<N>(len, src.len()) else {
+            return Err(CapacityFull(()));
+        };
+        // SAFETY: the values are written into the buffer's room past its length, checked above,
+        // and the length is set after them; `T: Copy` has no drop and is copied bitwise.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.as_mut_ptr().add(len), src.len());
+            self.set_len(end);
+        }
+        Ok(())
     }
 }
 
@@ -1277,18 +1289,22 @@ impl<T> SeqBacking<T> for LentSeq<T> {
 
     fn extend_from_slice(&mut self, src: &[T]) -> Result<(), CapacityFull<()>>
     where
-        T: Clone,
+        T: Copy,
     {
         self.refuse_unlent();
         if src.len() > self.room().wrapping_sub(self.len()) {
             return Err(CapacityFull(()));
         }
-        for value in src {
-            // Within the rows checked above, so every push is taken.
-            if self.push(value.clone()).is_err() {
-                break;
-            }
+        // SAFETY: the `src.len()` rows from `len` are rows this table was lent, checked above, and
+        // hold no value; `T: Copy` is copied bitwise. The new length is within `room`, a `u32`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr(),
+                self.base.as_ptr().add(self.len()),
+                src.len(),
+            );
         }
+        self.len = self.len().wrapping_add(src.len()) as u32;
         Ok(())
     }
 }
