@@ -107,6 +107,10 @@ pub mod slot;
 pub mod stream;
 #[cfg(windows)]
 pub mod windows;
+/// The host's TCP connections, clock and entropy as what the cooperative engine's WebSocket links
+/// open with.
+#[cfg(all(unix, feature = "ws"))]
+pub mod ws;
 // The Windows host's arithmetic, compiled where the tests run so that a Linux build checks it.
 #[cfg(any(windows, test))]
 mod windows_arith;

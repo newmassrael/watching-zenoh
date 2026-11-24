@@ -1117,8 +1117,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "sockets and a scouting window's sockets (`interfaces`, `multicast`, `scouting`), which "
         "the cooperative engine's `scout` and `group-host` open and this crate's own tests run; "
         "`serial` gates the host's ttys as serial lines (`serial`), which the cooperative engine's "
-        "serial links open and this crate's own tests run",
-        frozenset({"host-multicast", "serial", "session-slot"}),
+        "serial links open and this crate's own tests run; `ws` gates the opener of the "
+        "cooperative engine's WebSocket links over the host's TCP (`ws`), which this crate's own "
+        "tests run",
+        frozenset({"host-multicast", "serial", "session-slot", "ws"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -1561,7 +1563,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
     # three crate-root modules, the simple shape the axis names, so the row is excused only while
     # the axis could take it for free.
-    "wz-runtime-posix": frozenset({"host-multicast", "serial", "session-slot"}),
+    "wz-runtime-posix": frozenset({"host-multicast", "serial", "session-slot", "ws"}),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.
