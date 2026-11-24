@@ -186,6 +186,40 @@ impl<'a> PublishOptions<'a> {
         (kept, lent, attachment)
     }
 
+    /// These options with neither an encoding nor an attachment, copied, and the two read where they
+    /// lie: the encoding, the options' own or one they were lent, and the attachment. What a holder
+    /// takes that keeps the options past the call in room of its own, copying the encoding and the
+    /// attachment into it: nothing is allocated, since no field the copy keeps holds the heap and
+    /// an owned encoding is read rather than cloned.
+    pub fn lend_apart(
+        &self,
+    ) -> (
+        PublishOptions<'static>,
+        Option<EncodingRef<'_>>,
+        Option<&'a [u8]>,
+    ) {
+        let kept = PublishOptions {
+            allowed_destination: self.allowed_destination,
+            links: self.links,
+            admission_retry: self.admission_retry,
+            atomic_tx: self.atomic_tx,
+            reliability: self.reliability,
+            kind: self.kind,
+            timestamp: self.timestamp.clone(),
+            encoding: None,
+            source_info: self.source_info.clone(),
+            attachment: None,
+            qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.clone(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack: self.wire_ts_stack.clone(),
+            stamp_timestamp: self.stamp_timestamp,
+        };
+        let encoding = self.encoding.as_ref().map(|encoding| encoding.view());
+        (kept, encoding, self.attachment)
+    }
+
     /// These options with neither an encoding nor an attachment, and the two apart: the one split
     /// both ways of keeping options past their call make.
     fn apart(
@@ -963,6 +997,54 @@ mod plain_put_tests {
             .into_kept_parts();
         assert_eq!(encoding, None, "an encoding the options own is no holder's");
         assert_eq!(kept.encoding, Some(PublishEncoding::Owned(own)));
+    }
+
+    /// Options read apart from where they lie copy their fixed fields and lend both the encoding,
+    /// their own one included, and the attachment where they lie: the copy holds neither. Turned red
+    /// by an owned encoding cloned into the copy, or a copy that drops a field it keeps.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn options_read_apart_lend_their_encoding_and_attachment_where_they_lie() {
+        let own = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's', b'x']),
+        };
+        let attached = *b"attached";
+        let options = PublishOptions::put()
+            .with_encoding(own.clone())
+            .with_attachment(&attached);
+        let (kept, encoding, attachment) = options.lend_apart();
+        assert_eq!(kept.encoding, None, "the copy holds no encoding");
+        assert_eq!(kept.attachment, None, "the copy holds no attachment");
+        assert_eq!(kept.kind, options.kind);
+        assert_eq!(kept.qos, options.qos);
+        let read = encoding.expect("the options' own encoding is lent");
+        assert_eq!(read.packed_id, 4);
+        assert_eq!(
+            read.schema.map(<[u8]>::as_ptr),
+            own_schema_ptr(&options),
+            "the options' own schema, read where it lies"
+        );
+        assert_eq!(attachment.map(<[u8]>::as_ptr), Some(attached.as_ptr()));
+
+        let schema = *b"held/schema";
+        let held = EncodingRef {
+            packed_id: 7,
+            schema: Some(&schema),
+        };
+        let (_, lent, _) = PublishOptions::put().with_encoding_ref(held).lend_apart();
+        assert_eq!(lent, Some(held), "a lent encoding is lent on as it was");
+        let (_, none, nothing) = PublishOptions::put().lend_apart();
+        assert_eq!((none, nothing), (None, None));
+    }
+
+    /// Where the schema of the encoding `options` own lies.
+    #[cfg(feature = "pubsub-encoding")]
+    fn own_schema_ptr(options: &PublishOptions<'_>) -> Option<*const u8> {
+        match options.encoding.as_ref() {
+            Some(PublishEncoding::Owned(own)) => own.schema.as_deref().map(<[u8]>::as_ptr),
+            _ => None,
+        }
     }
 
     /// The constant the engine's tests read the build from is the answer of the function it
