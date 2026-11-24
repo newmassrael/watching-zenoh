@@ -1147,7 +1147,7 @@ unsafe fn declare_subscriber_state(
 
     // A closed session takes no declaration; the closure consumed above runs its drop.
     let handle = crate::session::open_session_handle(zs)?;
-    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?.to_owned();
+    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
     let engine = engine_of(handle);
     let slot = crate::object_slot::Slot::<AdvSubPlace>::take_entity(
         &engine,
@@ -1158,12 +1158,13 @@ unsafe fn declare_subscriber_state(
     // pico builds this subscriber from plain entities, each declaring and
     // naming its key the way its own entry point does — see
     // `crate::advanced_forms`. The caller's key is what they derive from.
-    let forms = Arc::new(PicoSubscriberForms::new(
-        &PicoSession::of(handle),
-        declared_of(keyexpr)
-            .map(DeclaredKeyexpr::share)
-            .unwrap_or_else(|| DeclaredKeyexpr::literal_only(&ke)),
-    ));
+    // A key the caller did not declare is kept in the session's key arena, as any object of the
+    // session keeps its key, so the subscriber's entities share its block and copy no text.
+    let base = match declared_of(keyexpr) {
+        Some(declared) => declared.share(),
+        None => DeclaredKeyexpr::literal_of_session(&engine, ke)?,
+    };
+    let forms = Arc::new(PicoSubscriberForms::new(&PicoSession::of(handle), base));
     let opts = advanced_subscriber_options(options).with_declaration_forms(forms);
     let session = crate::session::session_count(zs);
     let state = slot

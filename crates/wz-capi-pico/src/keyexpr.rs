@@ -263,6 +263,20 @@ impl DeclaredKeyexpr {
         }
     }
 
+    /// A key with no declaration, its text kept for an object of `shared`'s session
+    /// ([`KeyText::of_session`]): a block of the session's key arena when it keeps one, so a share
+    /// of it is one more holder of the block and not a copy. Refused as that is.
+    #[cfg(any(
+        feature = "advanced",
+        all(test, not(feature = "engine-tokio"), feature = "peer")
+    ))]
+    pub(crate) fn literal_of_session(shared: &Arc<Engine>, literal: &str) -> Result<Self, ZResult> {
+        Ok(Self {
+            literal: KeyText::of_session(shared, literal)?,
+            declaration: None,
+        })
+    }
+
     /// The literal key.
     pub(crate) fn literal(&self) -> &str {
         self.literal.as_str()
@@ -2240,6 +2254,27 @@ mod arena_key_tests {
             "every declaration went, and its block with it"
         );
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key with no declaration kept for the session's own object is a block of its key arena, and
+    /// a share of it another holder of the block, so neither copies the text; a key past the
+    /// session's `MAX_KEYEXPR_BYTES` is refused. Turned red by keeping it as a copy of its own.
+    #[test]
+    fn a_literal_of_the_session_is_a_block_and_so_is_its_share() {
+        let (session, engine) = listening();
+        let key = DeclaredKeyexpr::literal_of_session(&engine, "demo/adv/base").expect("room");
+        assert!(key.literal.is_session(), "the text is a block of the arena");
+        assert!(key.declaration_hold().is_none(), "nothing is declared");
+        let shared = key.share();
+        assert!(shared.literal.is_session(), "a share holds the block");
+        assert_eq!(shared.literal(), "demo/adv/base");
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            DeclaredKeyexpr::literal_of_session(&engine, &"k".repeat(longest + 1)).err(),
+            Some(Z_EINVAL)
+        );
+        drop((key, shared));
         close(session);
     }
 

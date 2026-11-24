@@ -41,6 +41,7 @@
 use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use core::fmt::Write as _;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -143,8 +144,8 @@ struct Shared<E: SessionEngine + ?Sized> {
     /// Set before the gets are cancelled, and never cleared: from then on nothing reaches the
     /// application's callback.
     closing: AtomicBool,
-    /// The key expression this subscriber subscribes to.
-    base_keyexpr: String,
+    /// The key expression this subscriber subscribes to, kept inline.
+    base_keyexpr: FixedKey,
     /// The destination of every get.
     dest: Locality,
     /// The timeout of every get, in milliseconds.
@@ -156,7 +157,7 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
     fn new(
         engine: Weak<E>,
         state: State,
-        base_keyexpr: String,
+        base_keyexpr: FixedKey,
         dest: Locality,
         timeout_ms: u32,
     ) -> Self {
@@ -170,6 +171,11 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
             dest,
             timeout_ms,
         }
+    }
+
+    /// The key expression this subscriber subscribes to.
+    fn base(&self) -> &str {
+        self.base_keyexpr.prefix()
     }
 
     fn is_closing(&self) -> bool {
@@ -337,7 +343,7 @@ unsafe fn on_reply<E: SessionEngine + ?Sized>(context: *mut c_void, reply: &dyn 
     }
     // `_anyke` opts out of the responder's reply-keyexpr guard, and this is the local half upstream
     // pairs it with.
-    if !wz_session_core::keyexpr_match::keyexpr_intersects(&shared.base_keyexpr, reply.keyexpr()) {
+    if !wz_session_core::keyexpr_match::keyexpr_intersects(shared.base(), reply.keyexpr()) {
         return;
     }
     // Recovered, not live: the get that produced this reply is the one in flight, so a gap here
@@ -545,7 +551,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// detection token when detection does. The order is the tokio runtime's.
     pub fn declare(
         engine: &Arc<E>,
-        keyexpr: impl Into<String>,
+        keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
     ) -> Result<Self, HostError> {
@@ -561,7 +567,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// [`Self::declare`] with one miss listener registered from the start, which never leaves.
     pub fn declare_with_miss_listener(
         engine: &Arc<E>,
-        keyexpr: impl Into<String>,
+        keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
         on_miss: impl FnMut(Miss) + Send + 'static,
@@ -582,7 +588,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
     /// lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for them.
     pub fn declare_with(
         engine: &Arc<E>,
-        keyexpr: impl Into<String>,
+        keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: OnSample,
         misses: MissHandlers,
@@ -601,6 +607,11 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         if engine.is_closed() {
             return Err(HostError::Refused("the session is closed"));
         }
+        let Some(base_keyexpr) = fixed_key(keyexpr.as_ref()) else {
+            return Err(HostError::Refused(
+                "the key expression is longer than a session stores",
+            ));
+        };
         let zid = engine.session_zid();
         let recovery = options.recovery;
         let retransmission = recovery.is_some();
@@ -621,11 +632,11 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         let shared = Arc::new(Shared::new(
             Arc::downgrade(engine),
             state,
-            keyexpr.into(),
+            base_keyexpr,
             dest,
             timeout_ms,
         ));
-        let base = shared.base_keyexpr.as_str();
+        let base = shared.base();
 
         // The live subscription.
         let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(base));
@@ -770,7 +781,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
 
     /// The key expression this subscriber subscribes to.
     pub fn keyexpr(&self) -> &str {
-        &self.shared.base_keyexpr
+        self.shared.base()
     }
 
     /// Whether the heartbeat channel is actually live: a request that the derived key made
@@ -1006,20 +1017,26 @@ fn end_unasked<E: SessionEngine + ?Sized>(shared: &Shared<E>, finish: Finish) {
     }
 }
 
-/// The key of one get, written where its issuer keeps it: as long as the longest key a session
-/// stores, so a key past it is one no session would send.
-type GetKey = FixedText<{ caps::MAX_KEYEXPR_BYTES }>;
+/// A key written where its holder keeps it (a subscriber's own, or one get's): as long as the
+/// longest key a session stores, so a key past it is one no session would send.
+type FixedKey = FixedText<{ caps::MAX_KEYEXPR_BYTES }>;
+
+/// `text` as a key kept inline, or `None` when it is longer than a session stores.
+fn fixed_key(text: &str) -> Option<FixedKey> {
+    let mut key = FixedKey::new();
+    key.write_str(text).is_ok().then_some(key)
+}
 
 /// The key of the startup get, `<base>/@adv/**`.
-fn history_key(base: &str) -> GetKey {
-    let mut key = GetKey::new();
+fn history_key(base: &str) -> FixedKey {
+    let mut key = FixedKey::new();
     crate::advanced_ke::write_history_get_ke(&mut key, base);
     key
 }
 
 /// The key of a get of one source's cache, `<base>/@adv/*/<zid>/<eid>/**`.
-fn recovery_key(base: &str, zid: &[u8], eid: u32) -> GetKey {
-    let mut key = GetKey::new();
+fn recovery_key(base: &str, zid: &[u8], eid: u32) -> FixedKey {
+    let mut key = FixedKey::new();
     crate::advanced_ke::write_recovery_get_ke(&mut key, base, zid, eid);
     key
 }
@@ -1028,7 +1045,7 @@ fn recovery_key(base: &str, zid: &[u8], eid: u32) -> GetKey {
 /// a get no session sends, and it is over before it starts.
 fn issue_get_on<E: SessionEngine + ?Sized>(
     shared: &Arc<Shared<E>>,
-    key: &GetKey,
+    key: &FixedKey,
     opts: &QueryOptionsOf<'_>,
     finish: Finish,
 ) {
@@ -1044,7 +1061,7 @@ fn issue_recovery_query<E: SessionEngine + ?Sized>(
     shared: &Arc<Shared<E>>,
     request: RecoveryRequest,
 ) {
-    let key = recovery_key(&shared.base_keyexpr, &request.zid, request.eid);
+    let key = recovery_key(shared.base(), &request.zid, request.eid);
     let parameters = GetParameters::recovery(request.from_sn, request.to_sn);
     let opts = get_options(shared, &parameters);
     issue_get_on(
@@ -1061,7 +1078,7 @@ fn issue_history_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let key = history_key(&shared.base_keyexpr);
+    let key = history_key(shared.base());
     let parameters = GetParameters::history(depth, age);
     issue_get_on(
         shared,
@@ -1079,7 +1096,7 @@ fn issue_late_publisher_query<E: SessionEngine + ?Sized>(
     depth: Option<usize>,
     age: Option<f64>,
 ) {
-    let key = recovery_key(&shared.base_keyexpr, &zid, eid);
+    let key = recovery_key(shared.base(), &zid, eid);
     let parameters = GetParameters::history(depth, age);
     let opts = get_options(shared, &parameters);
     issue_get_on(shared, &key, &opts, Finish::Recovery((zid, eid)));
