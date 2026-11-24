@@ -2058,16 +2058,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// Why [`Self::row_key`] refused `keyexpr`: longer than a row holds, or no room for it left in
-    /// the key arena.
-    fn key_refusal(&self, keyexpr: &str) -> Declined {
-        if self.keys.holds_key(keyexpr.len()) {
-            Declined::TableFull
-        } else {
-            Declined::KeyTooLong
-        }
-    }
-
     /// The dial role's face, which the session holds for its whole life.
     fn dial(&self) -> &Face<C, L> {
         &self.links.faces()[0]

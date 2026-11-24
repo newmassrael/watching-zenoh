@@ -332,6 +332,7 @@ pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoListener>;
 
 /// What the faces' peers declared, as the session's tables ask it (`PeerDeclarations`): the sets
 /// the faces hold, read apart from the application's tables, which the asking borrows to write.
+#[derive(Clone, Copy)]
 pub(super) struct Peers<'a> {
     sets: &'a [FaceTables],
     held: &'a [HeldSet],
@@ -342,14 +343,17 @@ pub(super) struct Peers<'a> {
     set_reads: &'a core::cell::Cell<usize>,
 }
 
-impl Peers<'_> {
-    /// The tables of every face, the dial role's first.
-    fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.held.iter().map(move |held| {
-            #[cfg(test)]
-            self.set_reads.set(self.set_reads.get() + 1);
-            &self.sets[held.at]
-        })
+impl<'a> Peers<'a> {
+    /// The set that lies at `at`, for a walk over the faces.
+    fn set(self, at: usize) -> &'a FaceTables {
+        #[cfg(test)]
+        self.set_reads.set(self.set_reads.get() + 1);
+        &self.sets[at]
+    }
+
+    /// The tables of every face, the dial role's first: the one walk over the faces there is.
+    pub(super) fn faces(self) -> impl Iterator<Item = &'a FaceTables> + 'a {
+        self.held.iter().map(move |held| self.set(held.at))
     }
 
     /// Whether any face's peer declared what `plane` counts on `keyexpr`: a subscriber, or a
@@ -609,18 +613,6 @@ impl Registry {
         self.pushes.1 += lookups;
     }
 
-    /// The set that lies at `at`, for a walk over the faces.
-    fn set(&self, at: usize) -> &FaceTables {
-        #[cfg(test)]
-        self.set_reads.set(self.set_reads.get() + 1);
-        &self.sets[at]
-    }
-
-    /// The tables of every face, the dial role's first.
-    pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.held.iter().map(move |held| self.set(held.at))
-    }
-
     /// Where the set face `id` holds lies among the sets, while the session holds the face.
     fn held_at(&self, id: FaceId) -> Option<usize> {
         self.held
@@ -635,7 +627,7 @@ impl Registry {
         feature = "declarations-synced-event"
     ))]
     pub(super) fn tables_of(&self, id: FaceId) -> Option<&FaceTables> {
-        self.held_at(id).map(|at| self.set(at))
+        self.held_at(id).map(|at| self.peers().set(at))
     }
 
     /// The tables of face `id`, while the session holds it, to write.
@@ -647,7 +639,7 @@ impl Registry {
     /// The pending gets of every face and, where the session answers its own gets, its own.
     #[cfg(feature = "query")]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
-        let gets = self.faces().map(|face| &face.gets);
+        let gets = self.peers().faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
         let gets = gets.chain(core::iter::once(&self.local));
         gets
@@ -1296,6 +1288,7 @@ mod tests {
     /// Where the sets the walk over the faces takes lie.
     fn walked(registry: &Registry) -> Vec<*const FaceTables> {
         registry
+            .peers()
             .faces()
             .map(|face| face as *const FaceTables)
             .collect()
@@ -2202,7 +2195,7 @@ mod tests {
             "CONTROL: sixteen sets were lent"
         );
         let before = held.registry.set_reads.get();
-        let faces = held.registry.faces();
+        let faces = held.registry.peers().faces();
         assert_eq!(faces.size_hint(), (3, Some(3)));
         assert_eq!(faces.count(), 3);
         assert_eq!(
