@@ -712,6 +712,44 @@ mod lent_handshake {
         assert!(link.sent.lock().expect("the sends").is_empty());
         assert_eq!(actions.tx_refusals().no_slot, 1, "the refusal is counted");
     }
+
+    /// A lend-only Open stages the bound the session decided where it writes the Open, so the
+    /// peer reads it off the OpenSyn, and an OpenSyn sent once the decision went to none carries
+    /// none. Turned red by a lend-only Open that leaves the bound unstaged, which no other step of
+    /// a lend-only session stages.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-frame",
+        feature = "session-unicast"
+    ))]
+    #[test]
+    fn a_lent_open_syn_carries_the_bound_the_session_decided() {
+        use crate::extbound::{peer_remote_bound_in, Bound};
+        use crate::inbound::{read_control, ExtChainRead};
+        let link = LendingLink::of_width(512);
+        let (actions, mut binding) = opener(&link);
+        binding.link_driver_open();
+        actions.fact_local_remote_bound(|slot| *slot = Some(Bound::South));
+        binding.send_open_syn();
+        actions.fact_local_remote_bound(|slot| *slot = None);
+        binding.send_open_syn();
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "both OpenSyns were sent");
+        let bound_of = |bytes: &[u8]| {
+            let (read, _) = read_control(bytes).expect("an Open the reader reads");
+            peer_remote_bound_in(read.chain().entries()).ok()
+        };
+        assert_eq!(
+            bound_of(sent[0].as_slice()),
+            Some(Some(Bound::South)),
+            "the bound the session decided"
+        );
+        assert_eq!(
+            bound_of(sent[1].as_slice()),
+            Some(None),
+            "a bound decided away is taken off the chain"
+        );
+    }
 }
 
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
@@ -960,7 +998,7 @@ mod facts_lock {
 
     /// The Open's origin is derived from the ring and the peer's zid read in one hold of the facts,
     /// and is none before the peer's zid is known.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     #[test]
     fn the_open_origin_reads_the_ring_and_the_zid_in_one_hold() {
         let (actions, _link) = bundle();
