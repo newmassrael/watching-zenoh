@@ -306,7 +306,8 @@ impl TcpLinkMtu {
         match self {
             Self::Widest => WIDEST as usize,
             Self::HalfMssMultiple => {
-                let mtu = WIDEST - if v6 { 60 } else { 40 };
+                // The IP and TCP headers the widest segment leaves room for: no underflow.
+                let mtu = WIDEST.saturating_sub(if v6 { 60 } else { 40 });
                 let half = match mss {
                     TcpMss::Read(mss) => mss / 2,
                     TcpMss::Failed => mtu / 2,
@@ -316,8 +317,8 @@ impl TcpLinkMtu {
                     return mtu as usize;
                 }
                 let mut multiple = half;
-                while multiple + half < mtu {
-                    multiple += half;
+                while let Some(next) = multiple.checked_add(half).filter(|&next| next < mtu) {
+                    multiple = next;
                 }
                 mtu.min(multiple) as usize
             }
@@ -420,11 +421,9 @@ impl KeepAliveConf {
         } else {
             self.per_lease as u64
         };
-        let interval = lease / per_lease;
-        if interval == 0 {
-            1
-        } else {
-            interval
+        match lease.checked_div(per_lease) {
+            Some(0) | None => 1,
+            Some(interval) => interval,
         }
     }
 }
