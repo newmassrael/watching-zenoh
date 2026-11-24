@@ -173,6 +173,11 @@
       "locked": true,
       "debt": null
     },
+    "subscriber-receive-composed": {
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
+    },
     "subscriber-receive-batch": {
       "allocs_per_round": 0,
       "locked": true,
