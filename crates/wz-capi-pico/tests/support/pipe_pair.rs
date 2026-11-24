@@ -33,7 +33,8 @@ use wz_capi_pico::app_transport::{
     wz_ext_transport_drop, wz_ext_transport_event, wz_ext_transport_loan, wz_ext_transport_move,
     wz_ext_transport_new, wz_ext_transport_received, wz_ext_transport_t, WZ_EXT_LINK_CLOSED,
     WZ_EXT_LINK_EVENT_CLOSED, WZ_EXT_LINK_EVENT_CONNECTED, WZ_EXT_LINK_EVENT_WRITABLE,
-    WZ_EXT_LINK_OK, WZ_EXT_LINK_STREAM_DIAL, WZ_EXT_LINK_STREAM_LISTEN, WZ_EXT_LINK_WOULD_BLOCK,
+    WZ_EXT_LINK_GROUP, WZ_EXT_LINK_OK, WZ_EXT_LINK_STREAM_DIAL, WZ_EXT_LINK_STREAM_LISTEN,
+    WZ_EXT_LINK_WOULD_BLOCK,
 };
 use wz_capi_pico::result::WZ_EXT_ERR_LINK_FULL;
 use wz_capi_pico::{
@@ -47,7 +48,8 @@ use wz_capi_pico::{
     z_queryable_move, z_queryable_options_default, z_queryable_options_t, z_reply_is_ok,
     z_session_drop, z_session_loan, z_session_loan_mut, z_session_move, z_subscriber_move,
     z_undeclare_queryable, z_undeclare_subscriber, z_view_keyexpr_from_str, z_view_keyexpr_loan,
-    z_view_keyexpr_t, zp_config_insert, ZResult, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_view_keyexpr_t, zp_config_insert, ZResult, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY,
+    Z_CONFIG_MODE_KEY, Z_OK,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -840,5 +842,227 @@ impl Pair {
         let dropped = wait_for(WAIT_BOUND, || pipe.drops.load(Ordering::SeqCst) == 2);
         let balanced = wait_for(WAIT_BOUND, || counts.balanced());
         (balanced, dropped)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Two sessions joined to one group over the program's transport.
+
+/// The group both members join, a UDP group on an interface, which the program carries.
+pub(crate) const GROUP: &CStr = c"udp/239.7.7.7:7447#iface=lan7";
+
+/// Where each member's datagrams come from, as the other member hears them. Synthetic.
+const MEMBER_SOURCES: [&CStr; 2] = [c"udp/192.0.2.10:7447", c"udp/192.0.2.11:7447"];
+
+/// The group as the program carries it: each member's transport and its link to the group.
+#[derive(Default)]
+pub(crate) struct Group {
+    /// Each member's owned transport, at a stable address, as an address; 0 once dropped.
+    owned: [AtomicUsize; 2],
+    /// Each member's group link, 0 while it has none.
+    links: [AtomicU64; 2],
+}
+
+impl Group {
+    fn loan(&self, member: usize) -> *const wz_ext_loaned_transport_t {
+        match self
+            .owned
+            .get(member)
+            .map_or(0, |owned| owned.load(Ordering::SeqCst))
+        {
+            0 => std::ptr::null(),
+            raw => unsafe { wz_ext_transport_loan(raw as *const wz_ext_owned_transport_t) },
+        }
+    }
+}
+
+struct MemberCtx {
+    group: Arc<Group>,
+    member: usize,
+}
+
+unsafe fn member_ctx<'a>(context: *mut c_void) -> &'a MemberCtx {
+    &*(context as *const MemberCtx)
+}
+
+unsafe extern "C" fn group_open(
+    context: *mut c_void,
+    link: wz_ext_link_t,
+    kind: wz_ext_link_kind_t,
+    locator: *const c_char,
+) -> wz_ext_link_result_t {
+    let ctx = member_ctx(context);
+    if kind != WZ_EXT_LINK_GROUP || CStr::from_ptr(locator) != GROUP {
+        return WZ_EXT_LINK_CLOSED;
+    }
+    ctx.group.links[ctx.member].store(link, Ordering::SeqCst);
+    WZ_EXT_LINK_OK
+}
+
+/// A member's datagram is handed to the other member as one from the sender's address. Best
+/// effort, as a datagram on a group is: one the other member cannot take now is lost.
+unsafe extern "C" fn group_send(
+    context: *mut c_void,
+    link: wz_ext_link_t,
+    data: *const u8,
+    len: usize,
+    written: *mut usize,
+) -> wz_ext_link_result_t {
+    let ctx = member_ctx(context);
+    if ctx.group.links[ctx.member].load(Ordering::SeqCst) != link {
+        return WZ_EXT_LINK_CLOSED;
+    }
+    let other = 1 - ctx.member;
+    let peer = ctx.group.links[other].load(Ordering::SeqCst);
+    if peer != 0 {
+        let _ = wz_ext_transport_received(
+            ctx.group.loan(other),
+            peer,
+            data,
+            len,
+            MEMBER_SOURCES[ctx.member].as_ptr(),
+        );
+    }
+    *written = len;
+    WZ_EXT_LINK_OK
+}
+
+unsafe extern "C" fn group_close(context: *mut c_void, link: wz_ext_link_t) {
+    let ctx = member_ctx(context);
+    let _ =
+        ctx.group.links[ctx.member].compare_exchange(link, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn group_drained(_context: *mut c_void, _link: wz_ext_link_t) {}
+
+unsafe extern "C" fn group_drop(context: *mut c_void) {
+    drop(Box::from_raw(context as *mut MemberCtx));
+}
+
+/// A member's transport over the group, owned at a stable address.
+fn make_member_transport(group: &Arc<Group>, member: usize) -> *mut wz_ext_owned_transport_t {
+    let context = Box::into_raw(Box::new(MemberCtx {
+        group: Arc::clone(group),
+        member,
+    })) as *mut c_void;
+    let calls = wz_ext_transport_t {
+        context,
+        open: Some(group_open),
+        send: Some(group_send),
+        close: Some(group_close),
+        drained: Some(group_drained),
+        drop: Some(group_drop),
+    };
+    let owned: *mut wz_ext_owned_transport_t =
+        Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
+    assert_eq!(unsafe { wz_ext_transport_new(owned, &calls) }, Z_OK);
+    group.owned[member].store(owned as usize, Ordering::SeqCst);
+    owned
+}
+
+/// A peer session joined to the group over `transport`.
+unsafe fn open_member(transport: *mut wz_ext_owned_transport_t) -> z_owned_session_t {
+    let mut cfg: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(z_config_default(&mut cfg), Z_OK);
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            Z_CONFIG_MODE_KEY,
+            c"peer".as_ptr()
+        ),
+        Z_OK
+    );
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            Z_CONFIG_LISTEN_KEY,
+            GROUP.as_ptr()
+        ),
+        Z_OK
+    );
+    assert_eq!(
+        wz_ext_config_transport(
+            z_config_loan_mut(&mut cfg),
+            wz_ext_transport_loan(transport)
+        ),
+        Z_OK
+    );
+    let mut session: z_owned_session_t = std::mem::zeroed();
+    assert_eq!(
+        z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+        Z_OK,
+        "a member joins the group over the program's transport"
+    );
+    session
+}
+
+/// Two members of one group: the sender puts, and the receiver's subscriber counts what it hears.
+pub(crate) struct GroupPair {
+    group: Arc<Group>,
+    pub(crate) counts: Arc<Counts>,
+    sender: Option<z_owned_session_t>,
+    receiver: Option<z_owned_session_t>,
+    subscriber: z_owned_subscriber_t,
+}
+
+impl GroupPair {
+    /// Both members joined and the receiver's subscriber declared, opened until a put of the
+    /// sender's is heard: the receiver has admitted the sender by its JOIN.
+    pub(crate) unsafe fn open() -> Self {
+        let group = Arc::new(Group::default());
+        let counts = Arc::new(Counts::default());
+        let receiver = open_member(make_member_transport(&group, 1));
+        let mut closure = sample_closure(&counts);
+        let mut subscriber: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            declare_subscriber(&receiver, DATA_KEY, &mut closure, &mut subscriber),
+            Z_OK
+        );
+        let sender = open_member(make_member_transport(&group, 0));
+        let pair = Self {
+            group,
+            counts,
+            sender: Some(sender),
+            receiver: Some(receiver),
+            subscriber,
+        };
+        let deadline = Instant::now() + WAIT_BOUND;
+        let heard = pair.counts.heard.load(Ordering::SeqCst);
+        while pair.counts.heard.load(Ordering::SeqCst) == heard {
+            assert!(
+                Instant::now() < deadline,
+                "no put crossed the group within {WAIT_BOUND:?}"
+            );
+            let mut bytes = payload();
+            let _ = put(pair.sender(), &mut bytes);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pair
+    }
+
+    pub(crate) fn sender(&self) -> &z_owned_session_t {
+        self.sender.as_ref().expect("the sending member is joined")
+    }
+}
+
+impl Drop for GroupPair {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = z_undeclare_subscriber(z_subscriber_move(&mut self.subscriber));
+            for session in [self.sender.take(), self.receiver.take()]
+                .into_iter()
+                .flatten()
+            {
+                close(session);
+            }
+            for member in 0..2 {
+                let raw = self.group.owned[member].swap(0, Ordering::SeqCst);
+                if raw != 0 {
+                    let owned = raw as *mut wz_ext_owned_transport_t;
+                    wz_ext_transport_drop(wz_ext_transport_move(owned));
+                    drop(Box::from_raw(owned));
+                }
+            }
+        }
     }
 }

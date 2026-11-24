@@ -3,8 +3,9 @@
 
 //! The action bundle built over a runtime of this crate's own, so the parts of it a non-default
 //! feature compiles in are read here and not only through a runtime crate's tests: the action
-//! counters (`action-trace`) and the egress admission of the replies a session sends
-//! (`reply-egress-gate`).
+//! counters (`action-trace`), the egress admission of the replies a session sends
+//! (`reply-egress-gate`), and what a peer's handshake records with the accepting role
+//! (`session-unicast-accept`) and without it.
 //!
 //! The runtime holds its state behind std locks and spawns nothing; the link counts what the
 //! session hands it and writes nowhere; the clock never moves. Nothing here opens a session, so
@@ -406,6 +407,80 @@ mod reply_egress_gate {
             link.written.load(Ordering::SeqCst),
             0,
             "CONTROL: a verdict sends nothing"
+        );
+    }
+}
+
+/// What the bundle records of a peer's InitSyn and OpenSyn. Those facts are the acceptor's: a
+/// build with the accepting role takes them as each message is read, and a build without it
+/// takes none, so what an initiator took off the InitAck stands.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+mod handshake_records {
+    use alloc::vec;
+
+    use wz_runtime_core::Runtime;
+
+    use super::{bundle, PlainRuntime};
+
+    const ACCEPTS: bool = cfg!(feature = "session-unicast-accept");
+
+    /// The InitSyn's zid where the cookie binds it and where the routing reads it, its role,
+    /// and its caps where the InitAck answers them.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn a_peer_init_syn_is_recorded_only_with_the_accepting_role() {
+        use wz_codecs::wire_const::{FLAG_T_INIT_S, PROTOCOL_VERSION, T_MID_INIT};
+        const ZID: [u8; 4] = [0xB0, 0xB1, 0xB2, 0xB3];
+        let (actions, _link) = bundle();
+        // Role peer (wire 1) and a 4-byte zid, then the size block: SN resolution, batch size.
+        let init_syn = vec![
+            FLAG_T_INIT_S | T_MID_INIT,
+            PROTOCOL_VERSION,
+            0x31,
+            ZID[0],
+            ZID[1],
+            ZID[2],
+            ZID[3],
+            0x00,
+            0x00,
+            0x00,
+        ];
+        actions
+            .handle_inbound(&init_syn)
+            .expect("the InitSyn decodes in either build");
+        let routed = PlainRuntime::with_mutex_mut(&actions.remote_peer_zid, |slot| *slot);
+        let bound = PlainRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot);
+        let caps =
+            PlainRuntime::with_mutex_mut(&actions.inbound_peer_init_caps, |slot| slot.is_some());
+        let expected = ACCEPTS.then_some(&ZID[..]);
+        assert_eq!(routed.as_deref(), expected, "the zid the routing reads");
+        assert_eq!(bound.as_deref(), expected, "the zid the cookie binds");
+        assert_eq!(
+            actions.peer_whatami_wire(),
+            ACCEPTS.then_some(1),
+            "the role"
+        );
+        assert_eq!(caps, ACCEPTS, "the caps the InitAck answers");
+    }
+
+    /// The OpenSyn's echoed cookie, which the admission checks. Its lease is taken by neither
+    /// build as it is read: only an admitted OpenSyn gives one.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn a_peer_open_syn_cookie_is_kept_only_with_the_accepting_role() {
+        use wz_codecs::wire_const::T_MID_OPEN;
+        let (actions, _link) = bundle();
+        // A lease of 5 ms, initial SN 0, and a 4-byte cookie.
+        let open_syn = vec![T_MID_OPEN, 0x05, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
+        actions
+            .handle_inbound(&open_syn)
+            .expect("the OpenSyn decodes in either build");
+        let kept =
+            PlainRuntime::with_mutex_mut(&actions.inbound_opensyn_cookie, |slot| slot.is_some());
+        assert_eq!(kept, ACCEPTS, "the echoed cookie");
+        assert!(
+            PlainRuntime::with_mutex_mut(&actions.peer_open_lease_ms, |slot| slot.is_none()),
+            "no lease is taken from an OpenSyn that was only read"
         );
     }
 }

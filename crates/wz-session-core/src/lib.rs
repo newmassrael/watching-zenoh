@@ -326,8 +326,6 @@ pub mod timestamp_visibility;
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,
 /// never cut short in silence) on the fixed one. Unconditional, like [`bounded`].
-// Totality debt TD-055 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod text_out;
 
 /// Fixed-memory step S9a — the id-keyed tables a PEER writes (its keyexpr
@@ -657,8 +655,6 @@ pub mod facilities;
 // Consumes the R311ns serial framing codecs (serial_envelope / cobs /
 // crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
 #[cfg(feature = "transport-link-serial")]
-// Totality debt TD-042 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod serial_link;
 
 // R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
@@ -725,8 +721,6 @@ pub mod handshake_stray;
 /// A session's own zid as a value that is one to sixteen bytes by construction.
 /// Ungated for the reason [`credential_identity`] is: it allocates nothing, and
 /// the fixed-memory profile keeps the same value in the session's storage.
-// Totality debt TD-088 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod session_zid;
 /// The zid a node derives from its address and listener ports under the `zid-derivation`
 /// policy's `address-ports` value. Ungated: pure arithmetic on values, no allocation.
@@ -1201,8 +1195,6 @@ pub mod tx_buf;
 /// itself (it is a pointer into memory the link owns) and is gated with
 /// `link`, the module that defines the link driver trait it borrows.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-065 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod tx_lease;
 
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
@@ -1236,8 +1228,6 @@ pub mod frame_encode;
         feature = "transport-keepalive"
     )
 ))]
-// Totality debt TD-098 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod handshake_encode;
 
 /// The handshake's transport messages as `handshake_encode` writes them and
@@ -2211,12 +2201,7 @@ pub mod session_timeouts;
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-004 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used, clippy::unreachable)]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
