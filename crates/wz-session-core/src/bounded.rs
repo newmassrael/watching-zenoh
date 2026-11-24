@@ -2605,8 +2605,9 @@ mod tests {
             })
             .expect("within the rows");
         }
-        v.truncate(2);
-        assert_eq!(seen.get(), 0b1100, "the rows cut off the end are dropped");
+        drop(v.pop());
+        drop(v.pop());
+        assert_eq!(seen.get(), 0b1100, "the rows taken off the end are dropped");
         drop(v);
         assert_eq!(seen.get(), 0b1111, "and the rest with the table");
     }

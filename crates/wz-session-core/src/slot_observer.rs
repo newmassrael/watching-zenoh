@@ -2897,6 +2897,7 @@ mod lent_tests {
             tables: RegistryRows {
                 subscribers: 1,
                 queryables: 1,
+                ..RegistryRows::default()
             },
             ..ObserverRows::default()
         };
