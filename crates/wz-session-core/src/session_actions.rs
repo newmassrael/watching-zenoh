@@ -2561,15 +2561,6 @@ pub struct SessionFacts {
     /// (the wz mirror of zenoh `TransportUnicastLowlatency`).
     #[cfg(feature = "transport-lowlatency")]
     pub is_lowlatency: bool,
-    /// R2539 — THIS node's region identity, the value staged onto every Init
-    /// this session sends (zenoh `RegionNameFsm::region_name`, the field its
-    /// `send_init_syn` and `send_init_ack` both return).
-    ///
-    /// `None` — no region identity — is the ordinary case and is what
-    /// upstream's own `Option` means: a node without one emits NO `0x8`
-    /// entry rather than an empty one, which is why
-    /// [`crate::extregion::RegionName`] cannot hold an empty string.
-    pub local_region: Option<crate::extregion::RegionName>,
     /// Item 751 — how THIS node's south is partitioned, which decides the bound
     /// this session announces for its peer on its own Open (zenoh's transport
     /// manager `bound_callback`, which the runtime builds from `gateway/south`).
@@ -2744,7 +2735,6 @@ fact_doors! {
     #[cfg(feature = "transport-lowlatency")]
     fact_is_lowlatency => is_lowlatency: bool,
     fact_negotiated_patch => handshake.negotiated_patch: Option<u8>,
-    fact_local_region => local_region: Option<crate::extregion::RegionName>,
     fact_peer_region => handshake.peer_region: Option<crate::extregion::RegionName>,
     fact_peer_remote_bound => handshake.peer_remote_bound: Option<crate::extbound::Bound>,
     fact_south_partition => south_partition: crate::region_partition::SouthPartition,
@@ -4237,15 +4227,16 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 }
 
 // R311dz-pre — bridge the observer's generic reply drain to the action
-// bundle. The inherent `send_response` / `send_response_final`
-// methods (below, in the `impl<R: SessionRuntime, T: TimeSource>` block) carry
-// the real encode + enqueue; these trait methods delegate to them so
-// The observer's reply drain (`flush_query_replies<S: ResponseSink>` and
-// the composing `flush_pending`) can drive any runtime's actions handle.
-// The delegating `self.send_response(..)` calls resolve to the inherent
-// methods (inherent shadows trait in method-call resolution), so there is
-// no recursion. The method set is empty in a build with neither response
-// codec, matching the trait's gated surface.
+// bundle. The inherent `send_response_final` method (below, in the
+// `impl<R: SessionRuntime, T: TimeSource>` block) carries the real encode +
+// enqueue; the trait method delegates to it so the observer's reply drain
+// (`flush_query_replies<S: ResponseSink>` and the composing `flush_pending`)
+// can drive any runtime's actions handle. The delegating call resolves to the
+// inherent method (inherent shadows trait in method-call resolution), so there
+// is no recursion. The owned `send_response` is inherent only: a holder of the
+// bundle as a `ResponseSink` links no encoder of the owned record. The method
+// set is empty in a build with neither response codec, matching the trait's
+// gated surface.
 //
 // R311lq — `SessionLinkActions` is the full-session bundle, so it
 // implements ALL THREE observer drain-sink concerns. They are separate
@@ -4295,10 +4286,6 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
 }
 
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn send_response(&self, response: ResponseOwned) {
-        self.send_response(response);
-    }
     // A staged reply is written as the codec's borrowed `Response` from the stage's own
     // row and encoded into the lent slot: no `QueryReply`, no `ResponseOwned`. Routed as
     // `dispatch_response` routes a response: on the band and with the express bit of the
@@ -5109,7 +5096,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
                     #[cfg(feature = "transport-lowlatency")]
                     is_lowlatency: false,
-                    local_region: None::<crate::extregion::RegionName>,
                     south_partition: crate::region_partition::SouthPartition::Auto,
                     // transport-qos — false until the AP layer offers it
                     // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
@@ -9326,54 +9312,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         true
     }
 
-    /// R2539 — give this session a region identity, or clear it.
-    ///
-    /// Separate from staging on purpose: zenoh holds the name on the FSM
-    /// (`RegionNameFsm::new(region_name)`, built once from config) and asks it
-    /// at every send, so the identity is a property of the node and the entry
-    /// is a property of the message. Staging at configure time would put the
-    /// InitAck's entry on a chain the acceptor has not begun.
-    pub fn set_local_region(&self, name: Option<crate::extregion::RegionName>) {
-        self.fact_local_region(|s| *s = name);
-    }
-
-    /// This node's region identity, `None` when it has none.
-    pub fn local_region(&self) -> Option<crate::extregion::RegionName> {
-        self.fact_local_region(|s| s.clone())
+    /// This node's region identity, `None` when it has none: the one the session was opened with
+    /// ([`SessionInitParams::region`]).
+    pub fn local_region(&self) -> Option<&crate::extregion::RegionName> {
+        self.params.region.as_ref()
     }
 
     /// The PEER's region identity as announced on its Init, `None` when it
     /// announced none or no Init has been admitted yet.
     pub fn peer_region(&self) -> Option<crate::extregion::RegionName> {
         self.fact_peer_region(|s| s.clone())
-    }
-
-    /// R2539 — stage (or remove) this role's `0x8` REGION-NAME entry from the
-    /// node's configured identity, at SEND time.
-    ///
-    /// Upstream returns `self.region_name.clone().map(name_to_ext)` from BOTH
-    /// `send_init_syn` and `send_init_ack`
-    /// (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
-    /// @ `fn send_init_syn`), so the
-    /// entry is present exactly when the node has an identity — and ABSENT,
-    /// not empty, when it does not. The removal arm is what makes that true
-    /// for a session whose identity was cleared after a first Init staged one.
-    ///
-    /// The entry takes its place in upstream's encode order wherever the other
-    /// stagers put theirs (`ext_chain::stage`, crate-private
-    /// and so not an intra-doc link from this `pub` item). A name that does not
-    /// encode leaves the chain as it was.
-    pub fn stage_local_region(&self, role: ExtChainRole) {
-        let entry = match self.local_region() {
-            Some(name) => match crate::extregion::encode_region_name_ext(&name) {
-                Ok(entry) => Some(entry),
-                Err(_) => return,
-            },
-            None => None,
-        };
-        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            crate::ext_chain::stage(chain, crate::ext_chain::StagedExt::RegionName, entry);
-        });
     }
 
     /// R2858 — admit the peer's `0x7` REMOTE-BOUND off an admitted Open, and
@@ -10150,11 +10098,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Some(qos_link) = offer.qos_link {
             self.set_qos_link_metadata(qos_link);
         }
-        // The region the node names itself, announced by each of its sessions in the Init.
-        if let Some(region) = offer.region {
-            self.set_local_region(region.name());
-        }
-
         Ok(())
     }
 
@@ -19464,13 +19407,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     crate::extshm::encode_shm_establishment_ext,
                 );
             }
-            // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
-            // Upstream's opener returns `self.region_name.clone()
-            // .map(name_to_ext)` from `send_init_syn`
-            // (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
-            // @ `fn send_init_syn`), so the entry is present exactly when
-            // the node has an identity and ABSENT when it does not.
-            a.stage_local_region(ExtChainRole::InitSyn);
             // Fixed-memory step S4 — under `tx-lend-only` the message is written
             // into a lent slot, or refused and counted; there is no vector.
             #[cfg(feature = "tx-lend-only")]
@@ -19663,16 +19599,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // slot was constructed with. The patch was the one that still was
             // — `min()` had run and only the wire did not know.
             a.stage_negotiated_patch(ExtChainRole::InitAck);
-            // R2539 — the `0x8` REGION-NAME entry, from THIS node's identity.
-            // Not a reflection and not a negotiation: upstream's acceptor
-            // returns its OWN `region_name` from `send_init_ack`
-            // (`io/zenoh-transport/src/unicast/establishment/ext/region_name.rs`
-            // @ `fn send_init_ack`), exactly as its opener does from
-            // `send_init_syn`, and the peer's announcement is only stored.
-            // Staged here rather than at construction so a node whose
-            // identity is set (or cleared) after the session exists still
-            // announces the current one.
-            a.stage_local_region(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

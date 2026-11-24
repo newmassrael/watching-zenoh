@@ -26,6 +26,7 @@ use core::str::FromStr;
 use wz_runtime_coop::group_transport::{GroupInterface, GroupRx, GroupSend, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
+use wz_session_core::text_out::AddrText;
 
 use crate::group::MulticastSocket;
 use crate::interfaces::{self, IfaceResolveError};
@@ -144,12 +145,15 @@ impl fmt::Display for PlanError {
             ),
             Self::NoHolder(address) => write!(
                 f,
-                "no interface holds {address}: a multicast link sends from an address of the \
-                 interface it leaves by"
+                "no interface holds {}: a multicast link sends from an address of the \
+                 interface it leaves by",
+                AddrText(IpAddr::V6(*address))
             ),
-            Self::Holder(address, e) => {
-                write!(f, "the interface of {address} could not be resolved: {e}")
-            }
+            Self::Holder(address, e) => write!(
+                f,
+                "the interface of {} could not be resolved: {e}",
+                AddrText(IpAddr::V6(*address))
+            ),
         }
     }
 }
@@ -535,7 +539,9 @@ impl Plan {
                         Ok(()) => {}
                         Err(e) if skip_refused_v4 => {
                             log::warn!(
-                                "wz: unable to join multicast group {g} on interface {on}: {e:?}"
+                                "wz: unable to join multicast group {} on interface {}: {e:?}",
+                                AddrText(IpAddr::V4(*g)),
+                                AddrText(IpAddr::V4(on))
                             );
                         }
                         Err(e) => return Err(e),
@@ -803,7 +809,10 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             Ok(()) => GroupSend::Sent,
             Err(e) if S::found_no_room(&e) => GroupSend::Full,
             Err(e) => {
-                log::warn!("group {}: its socket failed a send: {e:?}", self.group);
+                log::warn!(
+                    "group {}: its socket failed a send: {e:?}",
+                    AddrText(self.group)
+                );
                 GroupSend::Failed
             }
         }
@@ -849,7 +858,10 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             // Nothing queued, or a signal cut the read short: the next step reads again.
             Ok(None) => false,
             Err(e) => {
-                log::warn!("group {}: its socket failed a receive: {e:?}", self.group);
+                log::warn!(
+                    "group {}: its socket failed a receive: {e:?}",
+                    AddrText(self.group)
+                );
                 self.failed = true;
                 false
             }

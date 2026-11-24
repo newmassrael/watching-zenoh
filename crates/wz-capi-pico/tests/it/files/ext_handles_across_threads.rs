@@ -28,7 +28,6 @@ use wz_capi_pico::e2e_sender::*;
 use wz_capi_pico::instance_key::*;
 use wz_capi_pico::message_catalog::*;
 use wz_capi_pico::message_payload::*;
-use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{Z_ERR_OVERFLOW, Z_OK};
 
 /// How many threads share each handle, and how many calls each makes.
@@ -61,15 +60,27 @@ const PROFILE: &str = r#"{
 const VALUES: &str =
     r#"{"ident": {"app": 801, "msg": 99}, "cell": {"kind": 5}, "@address": 201986612}"#;
 
-const KEYED_SCHEMA: &str = r#"
-syntax = "proto3";
-package syn.thread;
-message Reading {
-  optional uint32 bay = 1;
-  sint32 tilt = 2;
-  bytes body = 3;
-}
-"#;
+/// The keyed message's schema, `thread.proto`, as `protoc --include_imports -o` compiles it:
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.thread;
+/// message Reading {
+///   optional uint32 bay = 1;
+///   sint32 tilt = 2;
+///   bytes body = 3;
+/// }
+/// ```
+const KEYED_SET: &[u8] = &[
+    0x0a, 0x74, 0x0a, 0x0c, 0x74, 0x68, 0x72, 0x65, 0x61, 0x64, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
+    0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x74, 0x68, 0x72, 0x65, 0x61, 0x64, 0x22, 0x50, 0x0a, 0x07,
+    0x52, 0x65, 0x61, 0x64, 0x69, 0x6e, 0x67, 0x12, 0x15, 0x0a, 0x03, 0x62, 0x61, 0x79, 0x18, 0x01,
+    0x20, 0x01, 0x28, 0x0d, 0x48, 0x00, 0x52, 0x03, 0x62, 0x61, 0x79, 0x88, 0x01, 0x01, 0x12, 0x12,
+    0x0a, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x11, 0x52, 0x04, 0x74, 0x69,
+    0x6c, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c,
+    0x52, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x42, 0x06, 0x0a, 0x04, 0x5f, 0x62, 0x61, 0x79, 0x62, 0x06,
+    0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 /// Two bays and two tilts: four instances, one a thread.
 const KEYED_DESCRIPTION: &str = r#"{
   "message": "syn.thread.Reading",
@@ -80,14 +91,24 @@ const KEYED_DESCRIPTION: &str = r#"{
   "report_interval_ms": 1000
 }"#;
 
-const PAYLOAD_SCHEMA: &str = r#"
-syntax = "proto3";
-package syn.thread;
-message Pose {
-  uint32 serial = 1;
-  string label = 5;
-}
-"#;
+/// The payload's schema, `syn/thread.proto`, as `protoc --include_imports -o` compiles it:
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.thread;
+/// message Pose {
+///   uint32 serial = 1;
+///   string label = 5;
+/// }
+/// ```
+const PAYLOAD_SET: &[u8] = &[
+    0x0a, 0x5c, 0x0a, 0x10, 0x73, 0x79, 0x6e, 0x2f, 0x74, 0x68, 0x72, 0x65, 0x61, 0x64, 0x2e, 0x70,
+    0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x74, 0x68, 0x72, 0x65, 0x61, 0x64,
+    0x22, 0x34, 0x0a, 0x04, 0x50, 0x6f, 0x73, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x73, 0x65, 0x72, 0x69,
+    0x61, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x06, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c,
+    0x12, 0x14, 0x0a, 0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52,
+    0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 
 const CATALOG: &str = include_str!("../../../../wz-app-frame/catalog/synthetic.json5");
 
@@ -231,12 +252,6 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
 
 #[test]
 fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
-    let name = CString::new("thread.proto").unwrap();
-    let text = CString::new(KEYED_SCHEMA).unwrap();
-    let files = [wz_ext_proto_file_t {
-        name: name.as_ptr(),
-        text: text.as_ptr(),
-    }];
     let description = CString::new(KEYED_DESCRIPTION).unwrap();
     const ROOM: usize = 32;
     let mut storage = vec![0u8; THREADS * ROOM];
@@ -247,10 +262,10 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
         options.storage_len = storage.len();
         options.value_capacity = ROOM;
         let mut keyer: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
-        let rc = wz_ext_instance_keyer_new(
+        let rc = wz_ext_instance_keyer_from_descriptor_set(
             &mut keyer,
-            files.as_ptr(),
-            files.len(),
+            KEYED_SET.as_ptr(),
+            KEYED_SET.len(),
             description.as_ptr(),
             &options,
             std::ptr::null_mut(),
@@ -338,21 +353,15 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
 #[test]
 fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
     let text = CString::new(CATALOG).unwrap();
-    let name = CString::new("syn/thread.proto").unwrap();
-    let schema_text = CString::new(PAYLOAD_SCHEMA).unwrap();
-    let files = [wz_ext_proto_file_t {
-        name: name.as_ptr(),
-        text: schema_text.as_ptr(),
-    }];
     unsafe {
         let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
         let rc = wz_ext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut());
         assert_eq!(rc, Z_OK, "the synthetic catalog is read");
         let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
-        let rc = wz_ext_payload_schema_new(
+        let rc = wz_ext_payload_schema_from_descriptor_set(
             &mut schema,
-            files.as_ptr(),
-            files.len(),
+            PAYLOAD_SET.as_ptr(),
+            PAYLOAD_SET.len(),
             std::ptr::null_mut(),
         );
         assert_eq!(rc, Z_OK, "the schema is read");

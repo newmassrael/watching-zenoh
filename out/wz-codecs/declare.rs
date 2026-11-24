@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::ext_entry::ExtEntryView;
 use super::decl_final::DeclFinalView;
 use super::decl_kexpr::DeclKexprView;
@@ -701,6 +701,21 @@ impl DeclareWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `Declare` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct DeclareWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for DeclareWalk {
+    type Entry<'b> = DeclareView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        DeclareView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `DeclareView` is what a decode of `Declare` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `Declare` holds it, an embedded body or a variant arm as its
@@ -734,25 +749,17 @@ impl<'a> Default for DeclareViewVariant<'a> {
     }
 }
 
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct DeclareExtensionsWalk;
-
-impl ListWalk<0> for DeclareExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type DeclareExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclareView<'a> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<Bounded<ListView<'a, DeclareExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
     pub body: DeclareViewVariant<'a>,
 }
 

@@ -287,15 +287,9 @@ fn qos_rides(qos: crate::sample::QosLevel) -> bool {
     }
 }
 
-/// How many bytes `SceSink::write_vle_u64` writes `value` in: seven data bits a byte for the
-/// first eight, and a ninth that carries its eight bits whole. A value of up to 56 significant bits
-/// takes one byte per seven of them (one for zero); a wider one takes the nine.
+// How many bytes `SceSink::write_vle_u64` writes a value in: the codec crate's one count.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-fn vle_len(value: u64) -> usize {
-    let bits = u64::BITS.saturating_sub(value.leading_zeros());
-    // At most 64 bits, so the quotient is at most ten and the cast keeps it.
-    (bits.saturating_add(6) / 7).clamp(1, 9) as usize
-}
+use wz_codecs::vle::zint_len as vle_len;
 
 /// A Del's header with no timestamp and no extension.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]

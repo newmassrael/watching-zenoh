@@ -758,6 +758,7 @@ impl NodeIdentity {
             policy: *policy,
             limits: *limits,
             cookie_signing_key: self.key.clone(),
+            region: None,
         }
     }
 }

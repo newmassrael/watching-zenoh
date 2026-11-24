@@ -107,6 +107,19 @@ pub enum ReassemblySlotState {
     Aborted = 4,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ReassemblySlotState {
+    pub const ID_Empty: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Empty as u16);
+    pub const ID_Receiving: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Receiving as u16);
+    pub const ID_Complete: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Complete as u16);
+    pub const ID_TimedOut: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::TimedOut as u16);
+    pub const ID_Aborted: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Aborted as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -127,6 +140,24 @@ pub enum ReassemblySlotEvent {
     SlotRelease = 7,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 8,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ReassemblySlotEvent {
+    pub const ID_CodecError: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::CodecError as u16);
+    pub const ID_FragmentDrop: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::FragmentDrop as u16);
+    pub const ID_FragmentLast: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::FragmentLast as u16);
+    pub const ID_FragmentMore: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::FragmentMore as u16);
+    pub const ID_FragmentOoo: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::FragmentOoo as u16);
+    pub const ID_ReassemblyTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ReassemblyTimeout as u16);
+    pub const ID_SlotEvict: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SlotEvict as u16);
+    pub const ID_SlotRelease: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SlotRelease as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -610,7 +641,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
 // SCE-MAP: reassembly_slot.scxml:94 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
     // §scxml-3.10.2: a <history>'s default transition content, run after its
@@ -624,7 +655,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 // SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -642,18 +673,20 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: reassembly_slot.scxml:94 :: _machine"]
 // SCE-MAP: reassembly_slot.scxml:94 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            ReassemblySlotState::Aborted => {
-                if event == ReassemblySlotEvent::SlotRelease {
+            ReassemblySlotState::ID_Aborted => {
+                if event == ReassemblySlotEvent::ID_SlotRelease {
                     {
                         // Aborted, transition 0
                         return Some(::sce_rust_runtime::TransitionId(11));
@@ -661,8 +694,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 }
                 None
             }
-            ReassemblySlotState::Complete => {
-                if event == ReassemblySlotEvent::SlotRelease {
+            ReassemblySlotState::ID_Complete => {
+                if event == ReassemblySlotEvent::ID_SlotRelease {
                     {
                         // Complete, transition 0
                         return Some(::sce_rust_runtime::TransitionId(9));
@@ -670,14 +703,14 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 }
                 None
             }
-            ReassemblySlotState::Empty => {
-                if event == ReassemblySlotEvent::FragmentMore {
+            ReassemblySlotState::ID_Empty => {
+                if event == ReassemblySlotEvent::ID_FragmentMore {
                     {
                         // Empty, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentLast {
+                if event == ReassemblySlotEvent::ID_FragmentLast {
                     {
                         // Empty, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
@@ -685,44 +718,44 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 }
                 None
             }
-            ReassemblySlotState::Receiving => {
-                if event == ReassemblySlotEvent::FragmentMore {
+            ReassemblySlotState::ID_Receiving => {
+                if event == ReassemblySlotEvent::ID_FragmentMore {
                     {
                         // Receiving, transition 0
                         return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentLast {
+                if event == ReassemblySlotEvent::ID_FragmentLast {
                     {
                         // Receiving, transition 1
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentOoo {
+                if event == ReassemblySlotEvent::ID_FragmentOoo {
                     {
                         // Receiving, transition 2
                         return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
-                if event == ReassemblySlotEvent::FragmentDrop {
+                if event == ReassemblySlotEvent::ID_FragmentDrop {
                     {
                         // Receiving, transition 3
                         return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
-                if event == ReassemblySlotEvent::SlotEvict {
+                if event == ReassemblySlotEvent::ID_SlotEvict {
                     {
                         // Receiving, transition 4
                         return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
-                if event == ReassemblySlotEvent::CodecError {
+                if event == ReassemblySlotEvent::ID_CodecError {
                     {
                         // Receiving, transition 5
                         return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
-                if event == ReassemblySlotEvent::ReassemblyTimeout {
+                if event == ReassemblySlotEvent::ID_ReassemblyTimeout {
                     {
                         // Receiving, transition 6
                         return Some(::sce_rust_runtime::TransitionId(8));
@@ -730,8 +763,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
                 }
                 None
             }
-            ReassemblySlotState::TimedOut => {
-                if event == ReassemblySlotEvent::SlotRelease {
+            ReassemblySlotState::ID_TimedOut => {
+                if event == ReassemblySlotEvent::ID_SlotRelease {
                     {
                         // TimedOut, transition 0
                         return Some(::sce_rust_runtime::TransitionId(10));

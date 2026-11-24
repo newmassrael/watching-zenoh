@@ -344,6 +344,21 @@ impl WireexprLocalWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `WireexprLocal` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct WireexprLocalWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprLocalWalk {
+    type Entry<'b> = WireexprLocalView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
+        WireexprLocalView::decode(_c, _a[0])
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
+}
+
 // `WireexprLocal` holds no bounded list, embedded body or variant, so a
 // view of it would hold what it holds. Its view is the codec itself under the
 // name every codec's view has, which lets a codec that embeds, lists or

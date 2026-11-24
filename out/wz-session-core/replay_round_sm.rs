@@ -97,6 +97,19 @@ pub enum ReplayRoundState {
     Live = 4,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ReplayRoundState {
+    pub const ID_Idle: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Idle as u16);
+    pub const ID_Asking: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Asking as u16);
+    pub const ID_Answering: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Answering as u16);
+    pub const ID_Abandoned: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Abandoned as u16);
+    pub const ID_Live: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Live as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -114,6 +127,21 @@ pub enum ReplayRoundEvent {
     ReplyArrived = 4,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 5,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl ReplayRoundEvent {
+    pub const ID_DeadlinePassed: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DeadlinePassed as u16);
+    pub const ID_HoldFull: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::HoldFull as u16);
+    pub const ID_PublisherAppeared: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::PublisherAppeared as u16);
+    pub const ID_QueriesDone: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::QueriesDone as u16);
+    pub const ID_ReplyArrived: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ReplyArrived as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -582,9 +610,9 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: replay_round.scxml:61 :: _machine"]
 // SCE-MAP: replay_round.scxml:61 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
-            ReplayRoundState::Abandoned => {
+            ReplayRoundState::ID_Abandoned => {
                 // SCE-MAP: replay_round.scxml:97 :: Abandoned :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -594,7 +622,7 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
             self.actions.abandon();
                 }
             }
-            ReplayRoundState::Answering => {
+            ReplayRoundState::ID_Answering => {
                 // SCE-MAP: replay_round.scxml:87 :: Answering :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -604,7 +632,7 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
             self.actions.progress();
                 }
             }
-            ReplayRoundState::Asking => {
+            ReplayRoundState::ID_Asking => {
                 // SCE-MAP: replay_round.scxml:76 :: Asking :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -614,7 +642,7 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
             self.actions.begin_round();
                 }
             }
-            ReplayRoundState::Live => {
+            ReplayRoundState::ID_Live => {
                 // SCE-MAP: replay_round.scxml:104 :: Live :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -639,7 +667,7 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
 // SCE-MAP: replay_round.scxml:61 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -657,18 +685,20 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: replay_round.scxml:61 :: _machine"]
 // SCE-MAP: replay_round.scxml:61 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            ReplayRoundState::Abandoned => {
-                if event == ReplayRoundEvent::PublisherAppeared {
+            ReplayRoundState::ID_Abandoned => {
+                if event == ReplayRoundEvent::ID_PublisherAppeared {
                     {
                         // Abandoned, transition 0
                         return Some(::sce_rust_runtime::TransitionId(11));
@@ -676,26 +706,26 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
                 }
                 None
             }
-            ReplayRoundState::Answering => {
-                if event == ReplayRoundEvent::ReplyArrived {
+            ReplayRoundState::ID_Answering => {
+                if event == ReplayRoundEvent::ID_ReplyArrived {
                     {
                         // Answering, transition 0
                         return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
-                if event == ReplayRoundEvent::QueriesDone {
+                if event == ReplayRoundEvent::ID_QueriesDone {
                     {
                         // Answering, transition 1
                         return Some(::sce_rust_runtime::TransitionId(8));
                     }
                 }
-                if event == ReplayRoundEvent::DeadlinePassed {
+                if event == ReplayRoundEvent::ID_DeadlinePassed {
                     {
                         // Answering, transition 2
                         return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
-                if event == ReplayRoundEvent::HoldFull {
+                if event == ReplayRoundEvent::ID_HoldFull {
                     {
                         // Answering, transition 3
                         return Some(::sce_rust_runtime::TransitionId(10));
@@ -703,26 +733,26 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
                 }
                 None
             }
-            ReplayRoundState::Asking => {
-                if event == ReplayRoundEvent::ReplyArrived {
+            ReplayRoundState::ID_Asking => {
+                if event == ReplayRoundEvent::ID_ReplyArrived {
                     {
                         // Asking, transition 0
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
-                if event == ReplayRoundEvent::QueriesDone {
+                if event == ReplayRoundEvent::ID_QueriesDone {
                     {
                         // Asking, transition 1
                         return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
-                if event == ReplayRoundEvent::DeadlinePassed {
+                if event == ReplayRoundEvent::ID_DeadlinePassed {
                     {
                         // Asking, transition 2
                         return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
-                if event == ReplayRoundEvent::HoldFull {
+                if event == ReplayRoundEvent::ID_HoldFull {
                     {
                         // Asking, transition 3
                         return Some(::sce_rust_runtime::TransitionId(6));
@@ -730,20 +760,20 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
                 }
                 None
             }
-            ReplayRoundState::Idle => {
-                if event == ReplayRoundEvent::PublisherAppeared {
+            ReplayRoundState::ID_Idle => {
+                if event == ReplayRoundEvent::ID_PublisherAppeared {
                     {
                         // Idle, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == ReplayRoundEvent::DeadlinePassed {
+                if event == ReplayRoundEvent::ID_DeadlinePassed {
                     {
                         // Idle, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
-                if event == ReplayRoundEvent::HoldFull {
+                if event == ReplayRoundEvent::ID_HoldFull {
                     {
                         // Idle, transition 2
                         return Some(::sce_rust_runtime::TransitionId(2));
@@ -751,8 +781,8 @@ impl<A: ReplayRoundActions + 'static> StatePolicy for ReplayRoundPolicy<A> {
                 }
                 None
             }
-            ReplayRoundState::Live => {
-                if event == ReplayRoundEvent::PublisherAppeared {
+            ReplayRoundState::ID_Live => {
+                if event == ReplayRoundEvent::ID_PublisherAppeared {
                     {
                         // Live, transition 0
                         return Some(::sce_rust_runtime::TransitionId(12));

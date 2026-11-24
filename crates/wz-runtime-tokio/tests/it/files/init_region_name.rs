@@ -76,10 +76,9 @@ async fn acceptor_answers(
 ) -> (Option<RegionName>, Option<RegionName>, Option<u8>) {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
-    if let Some(local) = local {
-        actions.set_local_region(Some(RegionName::new(local).expect("a valid fixture name")));
-    }
+    let mut params = fixture_session_init_params();
+    params.region = local.map(|local| RegionName::new(local).expect("a valid fixture name"));
+    let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     engine.process_event(E::InboundStart);

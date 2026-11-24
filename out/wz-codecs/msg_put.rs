@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::timestamp::TimestampView;
 use super::encoding::EncodingView;
 use super::ext_entry::ExtEntryView;
@@ -651,6 +651,21 @@ impl MsgPutWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `MsgPut` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct MsgPutWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutWalk {
+    type Entry<'b> = MsgPutView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        MsgPutView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `MsgPutView` is what a decode of `MsgPut` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `MsgPut` holds it, an embedded body or a variant arm as its
@@ -660,35 +675,19 @@ impl MsgPutWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `MsgPut::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct MsgPutExtensionsWalk;
+pub type MsgPutExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
-impl ListWalk<0> for MsgPutExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
-
+/// How `slices` reads its entries: the walk of every list of `ZbufSliceView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct MsgPutSlicesWalk;
-
-impl ListWalk<0> for MsgPutSlicesWalk {
-    type Entry<'b> = ZbufSliceView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ZbufSliceView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type MsgPutSlicesWalk = super::zbuf_slice::ZbufSliceWalk;
 
 /// The group `MsgPutExtensionsHas0x12` as `MsgPutView` holds it.
 #[allow(dead_code)]
-pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, MsgPutExtensionsWalk, 0>>, Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, super::ext_entry::ExtEntryWalk, 0>>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -764,7 +763,7 @@ impl<'a> MsgPutView<'a> {
             _out.encoding = None;
         }
         #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, MsgPutExtensionsWalk, 0>, { usize::MAX }, 1>>;
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.peek_slice(cursor.remaining())?;
             let mut _count: u32 = 0;
@@ -810,7 +809,7 @@ impl<'a> MsgPutView<'a> {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, MsgPutSlicesWalk, 0>, 4294967295>>;
+        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>>;
         if _has_extensions_18 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
             let _rest = cursor.peek_slice(cursor.remaining())?;

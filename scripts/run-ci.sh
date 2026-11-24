@@ -22062,6 +22062,30 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M pico multicast peer test on wz" 12 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+    # The legs of the switched-on arm again, against the cooperative engine's drop-in
+    # (`WZ_PICO_ENGINE=coop` names it, `target/wz-capi-pico-mcdecl-coop`), its features read off
+    # the same config.h with the engine changed (`wz_config.py --engine coop`), as Layer E builds
+    # each header arm for that engine: what a session tells a group and asks it, and each member's
+    # keyexprs read by that member's own declarations, are one behaviour on both engines.
+    # Upstream's peer test, whose four members number their keyexprs alike, is the leg that tells
+    # a session reading one member's key by another's. Each test is named exactly, and the count is
+    # guarded at 5.
+    local mcdecl_coop_features
+    mcdecl_coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
+        "$WZ_ARTIFACTS/target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h")" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico $mcdecl_coop_features \
+        --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl-coop" --quiet) || return 1
+    _runci_guarded_test "M pico multicast declarations on the cooperative engine" 5 \
+        env WZ_PICO_ENGINE=coop \
+        cargo test -p wz-integration-tests "${WZ_TEST_TARGET[@]}" \
+        -- --ignored --test-threads=1 --exact \
+        "${WZ_TEST_PREFIX}upstream_peer_multicast_test_with_multicast_declarations_passes_against_real_pico" \
+        "${WZ_TEST_PREFIX}upstream_peer_multicast_test_with_multicast_declarations_passes_against_wz_capi_pico" \
+        "${WZ_TEST_PREFIX}upstream_examples_with_multicast_declarations_declare_on_a_group_as_the_real_library_does" \
+        "${WZ_TEST_PREFIX}upstream_zpub_with_multicast_declarations_puts_on_a_group_as_the_real_library_does" \
+        "${WZ_TEST_PREFIX}a_filtered_zpub_on_wz_keeps_putting_to_the_multicast_member_that_stays" \
+        || return 1
     # Open-debt item 911 (found on the way) — what `z_open` returns when it cannot open, case by
     # case (a listen on a held port, a connect to a closed one, a scheme no link serves), on
     # both libraries; past the same pico guard, since it compiles a probe against the library.

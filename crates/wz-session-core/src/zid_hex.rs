@@ -73,10 +73,9 @@ pub fn same_zid(a: &[u8], b: &[u8]) -> bool {
 /// same text written into a buffer the caller holds.
 #[cfg(feature = "alloc")]
 pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
-    let id = u128::from_le_bytes(zid_to_le_array(zid));
-    let s = alloc::format!("{id:02x}");
-    let stripped = s.strip_prefix('0').unwrap_or(s.as_str());
-    stripped.into()
+    let mut hex = String::new();
+    write_zenoh_hex(zid, &mut hex);
+    hex
 }
 
 /// [`zid_to_zenoh_hex`] written into `out`, with no allocation of its own (fixed-memory
@@ -173,9 +172,9 @@ mod tests {
         assert_eq!(zid_to_zenoh_hex(&[0x01, 0x02]), "201");
     }
 
-    /// S9c -- the writer a node without a `String` uses prints what the string
-    /// form prints, for every width and for the ids whose first digit is 0 after the
-    /// pad (the case the string form's strip exists for).
+    /// S9c -- the writer a node without a `String` uses, and the string form written
+    /// through it, print uhlc's recipe (`{:02x}` of the id with one pad zero stripped),
+    /// for every width and for the ids whose first digit is 0 after the pad.
     #[cfg(feature = "alloc")]
     #[test]
     fn the_writer_prints_what_the_string_form_does() {
@@ -187,6 +186,10 @@ mod tests {
             let mut written = String::new();
             write_zenoh_hex(&zid, &mut written);
             assert_eq!(written, zid_to_zenoh_hex(&zid), "{zid:?}");
+            let id = u128::from_le_bytes(zid_to_le_array(&zid));
+            let padded = alloc::format!("{id:02x}");
+            let recipe = padded.strip_prefix('0').unwrap_or(padded.as_str());
+            assert_eq!(written, recipe, "{zid:?}");
         }
     }
 

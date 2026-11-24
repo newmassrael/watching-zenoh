@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::query_ext_entry::QueryExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -515,6 +515,21 @@ impl QueryWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `Query` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct QueryWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for QueryWalk {
+    type Entry<'b> = QueryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        QueryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `QueryView` is what a decode of `Query` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `Query` holds it, an embedded body or a variant arm as its
@@ -527,7 +542,7 @@ impl QueryWire {
 #[allow(dead_code)]
 pub struct QueryExtensionsWalk;
 
-impl ListWalk<1> for QueryExtensionsWalk {
+impl ::sce_forge_runtime::codec::ListWalk<1> for QueryExtensionsWalk {
     type Entry<'b> = QueryExtEntryView<'b>;
 
     fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
