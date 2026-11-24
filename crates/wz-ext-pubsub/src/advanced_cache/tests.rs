@@ -540,7 +540,7 @@ fn the_query_handler_reads_now_from_the_host_and_from_nothing_else() {
     }
     let clock = Arc::new(AtomicU64::new(100u64 << 32));
     let host_clock = Arc::clone(&clock);
-    let mut handler = store.query_handler(move || host_clock.load(Ordering::SeqCst));
+    let handler = store.query_handler(move || host_clock.load(Ordering::SeqCst));
     let asked = query(Some(b"_time=[now(-30s)..]"));
 
     let mut out = Rec::default();
