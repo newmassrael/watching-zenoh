@@ -1276,9 +1276,9 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// — without building a C handle it never hands out, and lets it keep them on a
 /// task, which a value holding raw pointers into its own storage cannot do.
 pub(crate) struct PlainPublisher {
-    shared: Arc<Engine>,
     /// R2962 — pico's write filter for this publisher: the Interest it asks its
-    /// peers, and the state that decides whether a put or delete is SENT.
+    /// peers, and the state that decides whether a put or delete is SENT. It holds the
+    /// session the publisher is declared in, which the publisher reaches through it.
     /// Declared BEFORE `key`, so it drops first: the Interest is retracted while
     /// the declaration it names still stands, which is upstream's order
     /// (`_z_undeclare_publisher` clears the filter, then the key).
@@ -1462,7 +1462,6 @@ impl PlainPublisher {
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid: filtered.eid,
-            shared: session.engine.clone(),
             filter: filtered.filter,
             key: filtered.key,
             wire: filtered.wire,
@@ -1483,7 +1482,8 @@ impl PlainPublisher {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
-        if self.shared.is_closed() {
+        let engine = self.filter.engine();
+        if engine.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
         let opts = opts.map(|opts| self.declared.apply(opts));
@@ -1495,7 +1495,7 @@ impl PlainPublisher {
             FilteredPut::Sent(sent) => publish_code(sent),
             // The filter let a bare put through and it is not plain on this node (no plain form
             // kept, a subscriber of the session, a group or a link that rewrites keys).
-            FilteredPut::NotPlain => publish_code(self.shared.publish_on_wire_all(
+            FilteredPut::NotPlain => publish_code(engine.publish_on_wire_all(
                 self.key.literal(),
                 &self.wire,
                 payload,
@@ -1564,7 +1564,7 @@ impl PublisherState {
     /// The SESSION's zid — the other half of that global id.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.core.shared.zid()
+        self.core.filter.engine().zid()
     }
 
     /// The cached borrow `z_publisher_keyexpr` hands back.

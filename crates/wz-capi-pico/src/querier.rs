@@ -63,7 +63,7 @@ use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{session_handle, z_loaned_session_t, Engine};
+use crate::session::{session_handle, z_loaned_session_t};
 use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 
 // --- options ---------------------------------------------------------------
@@ -245,9 +245,9 @@ impl GetShape {
 /// Behind a `z_owned_querier_t`: the declared keyexpr, the options every get
 /// through it inherits, and the session's engine to ask them on.
 pub(crate) struct QuerierState {
-    shared: Arc<Engine>,
     /// R2962 — pico's write filter for this querier, which decides whether a get
-    /// is SENT, and which its matching listeners are declared on and retracted with.
+    /// is SENT, and which its matching listeners are declared on and retracted with. It holds
+    /// the session the querier is declared in, which the querier reaches through it.
     /// Declared BEFORE `key` so it drops first, as the publisher's does.
     filter: WriteFilter,
     /// R2959 — the querier's key with the whole-key declaration pico makes
@@ -295,7 +295,7 @@ impl QuerierState {
     /// The SESSION's zid — the other half of that global id.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.shared.zid()
+        self.filter.engine().zid()
     }
 
     /// The cached borrow `z_querier_keyexpr` hands back.
@@ -433,7 +433,6 @@ pub unsafe extern "C" fn z_declare_querier(
         let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid: filtered.eid,
-            shared: session.engine,
             filter: filtered.filter,
             key: filtered.key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
@@ -532,7 +531,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // pico checks the session first, then the write filter, and on either refusal runs
         // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`); a
         // session on a multicast transport proceeds whatever the filter says.
-        if state.shared.is_closed() {
+        let engine = state.filter.engine();
+        if engine.is_closed() {
             drop(closure);
             return Z_ERR_SESSION_CLOSED;
         }
@@ -551,9 +551,9 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // encoding the querier was declared with.
         let ask = held.ask(params_in, state.shape, state.encoding.as_ref());
         issue_get(
-            &state.shared,
+            engine,
             state.key.literal(),
-            state.key.wire(Arc::as_ref(&state.shared)),
+            state.key.wire(Arc::as_ref(engine)),
             &ask,
             closure,
             token,
