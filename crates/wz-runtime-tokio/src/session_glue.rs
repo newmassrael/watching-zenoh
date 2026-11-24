@@ -2349,7 +2349,7 @@ mod tests {
     ///
     /// Eight-vector check across all `CloseReason` variants pins the
     /// reason discriminator byte. R311y839 — the header byte is
-    /// invariant HERE because `recording_actions()` is a single-link
+    /// invariant HERE because the fixture is a single-link
     /// session, not because the flag is hard-set: `_Z_FLAG_T_CLOSE_S`
     /// is derived per emit from the link set now, and this fixture's
     /// set is empty, which is the "this link IS the session" answer.
@@ -2359,8 +2359,8 @@ mod tests {
     /// R2389 — that "this link IS the session" reading was only half
     /// the question, and this fixture is on the other half: the scope is
     /// now derived from the PHASE first and the link set second, and
-    /// `recording_actions()` never drives a handshake, so its session
-    /// was never Established. The expected header is therefore the
+    /// `handshaking_actions_with_params` stands a bundle mid-handshake, so
+    /// its session was never Established. The expected header is therefore the
     /// LINK-scoped one — which is what zenoh puts on every
     /// pre-Established Close (`unicast/link.rs:103-114`). The
     /// vectors and this test's subject are untouched: the reason
@@ -2389,8 +2389,10 @@ mod tests {
             (CloseReason::ConnectionToSelf, 7u8),
         ] {
             // Close is a fixed 2-byte frame (no SN field), so the
-            // `recording_actions()` SSOT params are used verbatim.
-            let (actions, driver) = crate::test_fixtures::recording_actions();
+            // fixture's SSOT params are used verbatim.
+            let (actions, driver) = crate::test_fixtures::handshaking_actions_with_params(
+                wz_runtime_tokio_test_support::fixture_session_init_params(),
+            );
             assert_eq!(
                 actions.trace_snapshot().send_close_frame_with_reason,
                 0,
@@ -4152,7 +4154,7 @@ mod negotiated_mtu_tests {
             batch_size: 1024,
             ..fixture_session_init_params()
         };
-        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        let (actions, _driver) = crate::test_fixtures::handshaking_actions_with_params(params);
         assert_eq!(
             actions.negotiated_batch_mtu(),
             1024,
@@ -4161,6 +4163,7 @@ mod negotiated_mtu_tests {
         // Peer InitAck advertises 512 — a conforming reduction (< own 1024).
         let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 512);
         actions.handle_inbound(&wire).expect("parse InitAck");
+        actions.enter_established();
         assert_eq!(
             actions.negotiated_batch_mtu(),
             512,
@@ -4172,12 +4175,13 @@ mod negotiated_mtu_tests {
     fn negotiated_batch_mtu_zero_is_unset_sentinel() {
         // Own unset (0) -> 65535 wire ceiling, not a zero budget.
         let (actions, _driver) =
-            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+            crate::test_fixtures::handshaking_actions_with_params(fixture_session_init_params());
         assert_eq!(actions.negotiated_batch_mtu(), 65_535);
         // Peer 0 (an unconfigured wz peer advertises its params verbatim)
         // is the same sentinel: contributes the ceiling, not 0.
         let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 0);
         actions.handle_inbound(&wire).expect("parse InitAck");
+        actions.enter_established();
         assert_eq!(
             actions.negotiated_batch_mtu(),
             65_535,
@@ -4193,9 +4197,10 @@ mod negotiated_mtu_tests {
     #[test]
     fn peer_batch_reduction_fragments_oversize_put() {
         let (actions, driver) =
-            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+            crate::test_fixtures::handshaking_actions_with_params(fixture_session_init_params());
         let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 64);
         actions.handle_inbound(&wire).expect("parse InitAck");
+        actions.enter_established();
 
         let value: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
         actions
@@ -4235,6 +4240,7 @@ mod negotiated_mtu_tests {
             crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
         let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, BATCH as u16);
         actions.handle_inbound(&wire).expect("parse InitAck");
+        actions.enter_established();
         assert_eq!(actions.negotiated_batch_mtu(), BATCH);
         assert_eq!(actions.batch_envelope_bytes(), length);
 
@@ -4280,6 +4286,7 @@ mod negotiated_mtu_tests {
         );
         let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, BATCH as u16);
         actions.handle_inbound(&wire).expect("parse InitAck");
+        actions.enter_established();
         assert_eq!(
             actions.negotiated_tx_limits_for(Reliability::Reliable).0,
             BATCH - length
@@ -4326,6 +4333,7 @@ mod negotiated_mtu_tests {
         let (plain, _) =
             crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
         plain.handle_inbound(&wire).expect("parse InitAck");
+        plain.enter_established();
         assert_eq!(
             plain.negotiated_tx_limits_for(Reliability::BestEffort),
             plain.negotiated_tx_limits_for(Reliability::Reliable),
@@ -4387,7 +4395,7 @@ mod derived_initial_sn_tests {
     #[test]
     fn opensyn_announces_the_derived_origin_not_zero() {
         let (actions, _driver) =
-            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+            crate::test_fixtures::handshaking_actions_with_params(params_with_res2());
         actions
             .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
             .expect("parse InitAck");
@@ -4416,7 +4424,7 @@ mod derived_initial_sn_tests {
     #[test]
     fn openack_announces_the_derived_origin_not_zero() {
         let (actions, _driver) =
-            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+            crate::test_fixtures::handshaking_actions_with_params(params_with_res2());
         actions
             .handle_inbound(&craft_initsyn_wire())
             .expect("parse InitSyn");
@@ -4449,7 +4457,7 @@ mod derived_initial_sn_tests {
     #[test]
     fn the_announced_origin_is_the_first_minted_frame_sn() {
         let (actions, _driver) =
-            crate::test_fixtures::recording_actions_with_params(params_with_res2());
+            crate::test_fixtures::handshaking_actions_with_params(params_with_res2());
         actions
             .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
             .expect("parse InitAck");
@@ -4480,7 +4488,7 @@ mod derived_initial_sn_tests {
     fn two_peers_get_two_origins() {
         let announce_to = |peer_zid: &[u8]| {
             let (actions, _driver) =
-                crate::test_fixtures::recording_actions_with_params(params_with_res2());
+                crate::test_fixtures::handshaking_actions_with_params(params_with_res2());
             let mut wire = craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024);
             // Overwrite the crafted InitAck's 4-byte zid in place (offset 3:
             // header, version, cbyte, then the zid).
@@ -4509,7 +4517,7 @@ mod derived_initial_sn_tests {
     fn a_second_attempt_at_the_same_peer_derives_the_same_origin() {
         let attempt = || {
             let (actions, _driver) =
-                crate::test_fixtures::recording_actions_with_params(params_with_res2());
+                crate::test_fixtures::handshaking_actions_with_params(params_with_res2());
             actions
                 .handle_inbound(&craft_initack_wire_with_caps(&[], SN_RES_SEQ2_REQ2, 1024))
                 .expect("parse InitAck");
@@ -4531,7 +4539,7 @@ mod derived_initial_sn_tests {
     fn without_a_peer_zid_the_constructed_origin_still_encodes() {
         let mut params = params_with_res2();
         params.initial_sn = 41;
-        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        let (actions, _driver) = crate::test_fixtures::handshaking_actions_with_params(params);
         let wire = actions
             .encode_open_with_role(false, None, ExtChainRole::OpenSyn)
             .expect("encode OpenSyn");
@@ -4561,7 +4569,7 @@ mod rx_sn_gate_tests {
         use wz_session_wire_fixtures::craft_initack_wire;
 
         let (actions, _driver) =
-            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+            crate::test_fixtures::handshaking_actions_with_params(fixture_session_init_params());
         let mut engine = super::new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::OutboundStart);
@@ -5488,6 +5496,7 @@ mod batch_tx_tests {
             flush: std::sync::Mutex::new(None),
         });
         let actions = super::new_session_actions(link.clone(), params, TokioTime::new());
+        actions.enter_established();
         for i in 0..3u8 {
             actions
                 .send_push_literal("home/batching", &[i], /*reliable=*/ true)
@@ -5755,6 +5764,7 @@ mod link_priority_tests {
             crate::runtime_impl::TokioTime::new(),
         );
         assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.enter_established();
 
         let bg_actions = actions.clone();
         let background = std::thread::spawn(move || {
@@ -6057,8 +6067,8 @@ mod link_congestion_tests {
         assert_eq!(link.frames().len(), 1, "sent synchronously");
     }
 
-    /// A session over `link` whose first frame carries SN 7, so a frame's SN
-    /// is its second byte.
+    /// An established session over `link` whose first frame carries SN 7, so a
+    /// frame's SN is its second byte.
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         session_with_queue(
             link,
@@ -6074,20 +6084,34 @@ mod link_congestion_tests {
         link: Arc<CongestibleLink>,
         tx_queue: super::TxQueueConf,
     ) -> Arc<super::SessionLinkActions> {
+        let actions = handshaking_session_with_queue(link, tx_queue);
+        actions.enter_established();
+        actions
+    }
+
+    /// [`session_with_queue`] before establishment, for a test that drives the
+    /// handshake itself and reads the one queue shape its establishment hands the link.
+    fn handshaking_session_with_queue(
+        link: Arc<CongestibleLink>,
+        tx_queue: super::TxQueueConf,
+    ) -> Arc<super::SessionLinkActions> {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
         params.tx_queue = tx_queue;
         super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
     }
 
-    /// R2926 — a session whose batches hold 64 bytes, so a 300-byte payload
-    /// is a chain of fragments; its first frame carries SN 7.
+    /// R2926 — an established session whose batches hold 64 bytes, so a
+    /// 300-byte payload is a chain of fragments; its first frame carries SN 7.
     #[cfg(feature = "transport-fragmentation")]
     fn fragmenting_session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
         params.batch_size = 64;
-        super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+        let actions =
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
+        actions
     }
 
     /// R2926 — a DROPPABLE chain asks for room before each fragment against
@@ -6287,7 +6311,13 @@ mod link_congestion_tests {
     fn a_qos_session_shapes_its_link_with_a_queue_per_priority() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         let link = CongestibleLink::new();
-        let actions = session(link.clone());
+        let actions = handshaking_session_with_queue(
+            link.clone(),
+            super::TxQueueConf::of_snapshot(
+                &wz_session_core::policy::SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+        );
         assert!(actions.set_qos_offer(true), "qos offer applies");
         actions.negotiate_qos_against_peer(true);
         let mut engine = super::new_session_engine(&actions);
@@ -6463,6 +6493,7 @@ mod link_congestion_tests {
         params.tx_queue = tx_queue;
         let actions =
             super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
         let blocking = {
             let actions = Arc::clone(&actions);
             std::thread::spawn(move || {
@@ -6668,11 +6699,10 @@ mod link_congestion_tests {
                 &wz_session_core::limits::SessionLimits::BUILD,
             )
         };
-        check(super::new_session_actions(
-            link,
-            params,
-            crate::runtime_impl::TokioTime::new(),
-        ));
+        let actions =
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+        actions.enter_established();
+        check(actions);
     }
 
     /// `TX_EXPIRY_CLOSE_AFTER` with nothing stated: the session keeps itself through as many

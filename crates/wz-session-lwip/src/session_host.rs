@@ -167,15 +167,22 @@ where
     where
         F: EventSink + 'static,
     {
-        let Admission { driver, lane } = admission;
-        self.host
-            .open(driver, Some(lane), entropy, params, config, on_event)
+        let peer = admission.peer();
+        let (socket, lane) = admission.into_parts();
+        self.host.open_in(
+            |place| Admission::driver_in(socket, peer, place),
+            Some(lane),
+            entropy,
+            params,
+            config,
+            on_event,
+        )
     }
 
     /// Dial `target`'s peer over UDP: bind a socket on a port the stack picks (out of the pool
     /// the image declared, so a full pool is [`DialRefused::Link`]), then open the session over
-    /// it. The socket is bound before any table is claimed and is given back when one refuses;
-    /// the `InitSyn` leaves only once the session's task first runs.
+    /// it. The socket is bound only once the session table has a slot free, and is given back
+    /// when a later table refuses; the `InitSyn` leaves only once the session's task first runs.
     pub fn dial<F>(
         &self,
         links: &LwipLinks<L>,
@@ -190,11 +197,7 @@ where
     {
         let DialTarget { peer, expected_zid } = target;
         self.host.dial(
-            |out| {
-                links.bind_driver(0, peer).map(|driver| {
-                    out.write(driver);
-                })
-            },
+            |out| links.bind_driver_in(out, 0, peer),
             expected_zid,
             entropy,
             params,

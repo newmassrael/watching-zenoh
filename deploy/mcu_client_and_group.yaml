@@ -58,11 +58,13 @@ machines:
       pending_queries: 8
       tx_queue: 16
       # Per-session limits that name a constant the tree has today
-      # (tx_lend_slots is wz-session-lwip's LENT_MAX) or one a growable table
-      # makes unbounded on this profile (the rest). No code reads these numbers
-      # yet; `scripts/lib/deploy_sessions.py` is where each key is defined, and
-      # a session may lower any of them in its own `limits`, never raise one.
-      tx_lend_slots: 2
+      # (tx_lend_slots is wz-session-lwip's LENT_MAX: the outbound slots, each of
+      # the link's mtu, a link reserves in its session slot when it opens) or one
+      # a growable table makes unbounded on this profile (the rest). No code
+      # reads these numbers yet; `scripts/lib/deploy_sessions.py` is where each
+      # key is defined, and a session may lower any of them in its own
+      # `limits`, never raise one.
+      tx_lend_slots: 1
       peer_keyexpr_aliases: 16
       remote_decls: 16
       pending_replies: 8
