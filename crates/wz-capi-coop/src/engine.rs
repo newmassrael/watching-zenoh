@@ -894,6 +894,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
+    // Out of line: every hold of the session is let go through it.
+    #[inline(never)]
     fn drop(&mut self) {
         // Before the lock is let go of, which the guard's own drop does after this body.
         self.guard.0.keys.owner_lock_released();
@@ -1199,6 +1201,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
+    // Out of line, as [`CoopEngine::live`] is: every operation lets the session go through it.
+    #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the session's lock is held: `core` is let go after this body.
         unsafe { self.lane.seal() };
@@ -4146,7 +4150,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         })
     }
 
-    /// The session's state, for one operation. `None` once the session is closed.
+    /// The session's state, for one operation. `None` once the session is closed. Out of line:
+    /// every operation of the port takes the session through it, and one body takes the lock for
+    /// all of them.
+    #[inline(never)]
     fn live(&self) -> Option<LiveCore<'_, L, C>> {
         if self.closed.load(Ordering::Acquire) {
             return None;
