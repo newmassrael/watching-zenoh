@@ -282,44 +282,13 @@ mod tests {
     /// widens none) carries a snapshot of no byte.
     #[test]
     fn a_snapshot_holds_a_byte_only_for_a_policy_with_more_than_one_value() {
-        let held = [
-            MulticastLoopback::HELD,
-            TxNoProgressDeadline::HELD,
-            TxExpiryKeepsSession::HELD,
-            DeclarationSyncPacing::HELD,
-            DatagramFragmentPacing::HELD,
-            MulticastLinkRequiresIface::HELD,
-            ReliableGapReconnect::HELD,
-            EntityLinkRestriction::HELD,
-            TargetedQuery::HELD,
-            PublisherAdmissionRetry::HELD,
-            MultiRouteAtomicTx::HELD,
-            EntityTimestampOptIn::HELD,
-            ReplyAutoTimestamp::HELD,
-            SubscriberOverload::HELD,
-            KeySet::HELD,
-            SnResolution::HELD,
-            SupervisionAfterExpiry::HELD,
-            E2eSupervisionNotify::HELD,
-            ReplayReplyShape::HELD,
-            ReplayServeHoldsSends::HELD,
-            ReplayLiveBeforeAnswer::HELD,
-            EventRingFull::HELD,
-            ClockQualityStamping::HELD,
-            RoutingFaceDrive::HELD,
-            RoutingTableSharing::HELD,
-            ReassemblyPoolOverflow::HELD,
-            LinkTieOrder::HELD,
-            QueryUnanswerableFinal::HELD,
-            ZidDerivation::HELD,
-            HandshakeStrayMessage::HELD,
-            HandshakeCookie::HELD,
-            KeyWireForm::HELD,
-        ];
-        assert_eq!(
-            core::mem::size_of::<SessionPolicy>(),
-            held.iter().sum::<usize>()
-        );
+        // Counted over every policy the declaration states, so a policy added is counted with
+        // the others and no list here is kept by hand.
+        let held: usize = POLICIES
+            .iter()
+            .map(|policy| usize::from(policy.domain().iter().count() > 1))
+            .sum();
+        assert_eq!(core::mem::size_of::<SessionPolicy>(), held);
         assert_eq!(KeySet::HELD, KeySet::DOMAIN.held());
     }
 
