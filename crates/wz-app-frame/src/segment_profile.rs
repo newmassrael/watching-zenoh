@@ -157,15 +157,16 @@ impl Field {
     /// the whole header: the inverse of [`Self::read`]. Bits past the field's
     /// width are not written, so a caller that must not lose them checks
     /// [`Self::max_value`] first.
+    ///
+    /// The field is at most 8 bytes wide, so its bytes are a run of the
+    /// value's own bytes in the field's order: a copy, not a per-byte shift
+    /// loop, which the compiler vectorises for a length it cannot bound.
     pub fn write(&self, header: &mut [u8], value: u64) {
         let width = self.bytes;
         let bytes = &mut header[self.offset..self.offset + width];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            let shift = match self.order {
-                Order::Big => 8 * (width - 1 - i),
-                Order::Little => 8 * i,
-            };
-            *byte = (value >> shift) as u8;
+        match self.order {
+            Order::Big => bytes.copy_from_slice(&value.to_be_bytes()[8 - width..]),
+            Order::Little => bytes.copy_from_slice(&value.to_le_bytes()[..width]),
         }
     }
 }
@@ -714,5 +715,61 @@ pub mod synthetic {
         out.extend_from_slice(&check.to_be_bytes());
         out.extend_from_slice(chunk);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use super::{Field, Order};
+
+    /// Every byte distinct and the top bit set, so a byte out of place or a
+    /// sign carried down shows.
+    const VALUE: u64 = 0x8877_6655_4433_2211;
+
+    fn field(bytes: usize, order: Order) -> Field {
+        Field {
+            name: String::from("f"),
+            bytes,
+            offset: 1,
+            order,
+            equals: None,
+        }
+    }
+
+    #[test]
+    fn a_field_writes_its_bytes_in_its_order_and_reads_them_back() {
+        for order in [Order::Big, Order::Little] {
+            for width in 1..=8usize {
+                let f = field(width, order);
+                let mut header = [0xEEu8; 10];
+                f.write(&mut header, VALUE);
+                for (i, &byte) in header[1..1 + width].iter().enumerate() {
+                    let shift = match order {
+                        Order::Big => 8 * (width - 1 - i),
+                        Order::Little => 8 * i,
+                    };
+                    assert_eq!(
+                        byte,
+                        (VALUE >> shift) as u8,
+                        "{order:?} width {width} byte {i}"
+                    );
+                }
+                assert_eq!(
+                    header[0], 0xEE,
+                    "{order:?} width {width} wrote before the field"
+                );
+                assert!(
+                    header[1 + width..].iter().all(|&b| b == 0xEE),
+                    "{order:?} width {width} wrote past the field"
+                );
+                assert_eq!(
+                    f.read(&header),
+                    VALUE & f.max_value(),
+                    "{order:?} width {width}"
+                );
+            }
+        }
     }
 }
