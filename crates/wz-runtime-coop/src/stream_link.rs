@@ -31,6 +31,7 @@
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 use core::fmt::Debug;
+use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -538,9 +539,12 @@ enum Outbound<'a> {
     Bytes(&'a [&'a [u8]]),
 }
 
-/// The frames a stream link owes, oldest first, in a ring of [`OWED`] places.
+/// The frames a stream link owes, oldest first, in a ring of [`OWED`] places. Only the `len`
+/// places from `head` on hold a frame, each written by its push and read once by its pop, so the
+/// ring is made without writing a place: a link made in its cell writes none of them, and one
+/// dropped drops only what it still owes.
 struct OwedQueue {
-    places: [Option<Owed>; OWED],
+    places: [MaybeUninit<Owed>; OWED],
     head: usize,
     len: usize,
 }
@@ -548,7 +552,7 @@ struct OwedQueue {
 impl OwedQueue {
     const fn new() -> Self {
         Self {
-            places: [const { None }; OWED],
+            places: [const { MaybeUninit::uninit() }; OWED],
             head: 0,
             len: 0,
         }
@@ -567,7 +571,7 @@ impl OwedQueue {
         let Some(place) = self.places.get_mut(self.head.wrapping_add(self.len) % OWED) else {
             return Err(owed);
         };
-        *place = Some(owed);
+        place.write(owed);
         self.len = self.len.wrapping_add(1);
         Ok(())
     }
@@ -577,7 +581,10 @@ impl OwedQueue {
         if self.len == 0 {
             return None;
         }
-        self.places.get_mut(self.head)?.as_mut()
+        let place = self.places.get_mut(self.head)?;
+        // SAFETY: the ring holds a frame, and the oldest lies at `head`, written by its push and
+        // not yet read by a pop.
+        Some(unsafe { place.assume_init_mut() })
     }
 
     /// Take the oldest out.
@@ -585,11 +592,24 @@ impl OwedQueue {
         if self.len == 0 {
             return None;
         }
-        let owed = self.places.get_mut(self.head)?.take();
+        let place = self.places.get(self.head)?;
+        // SAFETY: as in `front_mut`; `head` moves past the place below, so nothing reads it again
+        // before a push writes it.
+        let owed = unsafe { place.assume_init_read() };
         // A place of the ring, and a length of one or more, checked above.
         self.head = self.head.wrapping_add(1) % OWED;
         self.len = self.len.wrapping_sub(1);
-        owed
+        Some(owed)
+    }
+}
+
+impl Drop for OwedQueue {
+    fn drop(&mut self) {
+        // What is still owed goes with the link. A frame held in a slot owns nothing, so a build
+        // whose frames all lie in slots has nothing to drop here.
+        if core::mem::needs_drop::<Owed>() {
+            while self.pop().is_some() {}
+        }
     }
 }
 
@@ -1068,6 +1088,9 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
 impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for StreamDriver<S, B, T>
 {
+    // Out of line where the link is reached through its table: the entries the trait derives from
+    // this one (`send_prioritized`, `send_urgent`) would each hold a copy of it.
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         let Ok(len) = u16::try_from(bytes.len()) else {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
@@ -1087,6 +1110,9 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // tried first, and one it does not take whole makes the frame after it ask again
     // (`send`). A link that still owes the stream part of a frame has room once that is
     // written: the wait for the stream to take bytes is what lets it be, within the message's wait.
+    // Out of line where the link is reached through its table, which the session asks through the
+    // entry the trait derives from this one (`wait_for_room_for`): two entries, one body.
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
         let wait_us = wait.wait_us();
         let owed_written = self.write_owed();
@@ -1358,6 +1384,55 @@ mod tests {
     use std::collections::VecDeque;
     use std::vec::Vec;
     use wz_session_core::link::LinkEndsText;
+
+    /// The ring of what a link owes keeps its frames oldest first across its end, refuses one past
+    /// its places and hands it back, and lends its oldest where it lies. Turned red by a ring that
+    /// reads a place no push wrote, or loses the order once it wraps.
+    #[test]
+    fn the_owed_ring_keeps_its_frames_in_order_across_its_end() {
+        let owed = |n: u32| Owed {
+            held: Held::Slot {
+                slot: TxSlot(n),
+                end: 0,
+            },
+            from: 0,
+        };
+        let slot_of = |owed: &Owed| owed.held_slot().map(|slot| slot.0);
+        let mut ring = OwedQueue::new();
+        assert!(ring.is_empty());
+        assert!(ring.front_mut().is_none());
+        assert!(ring.pop().is_none());
+        // Some frames in and out first, so the full ring lies across its end.
+        for n in 0..3 {
+            assert!(ring.push(owed(n)).is_ok());
+        }
+        for n in 0..3 {
+            assert_eq!(ring.pop().as_ref().and_then(slot_of), Some(n));
+        }
+        let places = u32::try_from(OWED).expect("a ring of a few places");
+        for n in 10..10 + places {
+            assert!(ring.push(owed(n)).is_ok(), "frame {n} has a place");
+        }
+        let refused = ring.push(owed(99)).err();
+        assert_eq!(
+            refused.as_ref().and_then(slot_of),
+            Some(99),
+            "one past the places comes back"
+        );
+        if let Some(front) = ring.front_mut() {
+            front.from = 5;
+        }
+        let first = ring.pop().expect("the oldest");
+        assert_eq!(
+            (slot_of(&first), first.from),
+            (Some(10), 5),
+            "the oldest was lent where it lies"
+        );
+        for n in 11..10 + places {
+            assert_eq!(ring.pop().as_ref().and_then(slot_of), Some(n));
+        }
+        assert!(ring.is_empty());
+    }
 
     /// What the test hands the driver to read, in the pieces the stream cuts it into, and what
     /// the driver wrote, one entry per write.

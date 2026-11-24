@@ -343,12 +343,18 @@ impl<T: TransportFaces> TransportState<T> {
     /// face added by the program each begin a dial.
     #[inline(never)]
     pub fn begin_dial(&self, endpoint: &str) -> Result<DialOf<T>, TransportRefusal> {
-        let to = parse_locator(endpoint).map_err(|refused| {
-            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
-        })?;
-        self.links.begin_dial(to).map_err(|refused| {
-            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
-        })
+        // Either refusal is the endpoint's, made in one place: the text and the cause are written
+        // into the answer once, whichever step refused.
+        let why = match parse_locator(endpoint) {
+            Ok(to) => match self.links.begin_dial(to) {
+                Ok(dial) => return Ok(dial),
+                Err(refused) => Refusal::Link(refused),
+            },
+            Err(refused) => Refusal::Locator(refused),
+        };
+        Err(TransportRefusal::Unreachable(EndpointRefusal::new(
+            endpoint, why,
+        )))
     }
 
     /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial
