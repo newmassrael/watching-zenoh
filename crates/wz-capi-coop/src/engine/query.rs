@@ -1060,7 +1060,8 @@ mod round_tests {
         let key = core::str::from_utf8(&datagram[..6]).expect("a key");
         let round = Round::leaked(4);
         let noting = Arc::new(Noting(Noted::default()));
-        let answering: Weak<dyn AnswersQueries> = Arc::downgrade(&noting);
+        // Made of the stand-in's own type, then unsized where the round takes it.
+        let answering: Weak<Noting> = Arc::downgrade(&noting);
         round.answer_queries_with(answering);
         let (row, handle) = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.

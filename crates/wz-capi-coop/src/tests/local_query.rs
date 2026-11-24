@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, QblId, QueryHolder, QueryableSink, Refusal, ReplyCallback,
-    SessionDrive, SessionEngine, WireKey,
+    FilterPlane, HeldQuery, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
@@ -359,7 +359,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
             .declare_matching_listener(
                 plane,
                 "demo/lq/x",
-                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
                 count_local,
             )
             .expect("a session with rows left declares");
