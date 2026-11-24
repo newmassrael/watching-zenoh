@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+#[cfg(any(feature = "alloc", not(feature = "session-fixed-storage")))]
 use zeroize::Zeroizing;
 
 /// Cryptographic key for the anti-amplification cookie MAC.
@@ -52,7 +53,7 @@ use zeroize::Zeroizing;
 ///
 /// Where the session's storage is fixed at its open (`session-fixed-storage`,
 /// which `session-slot` and the C library's cooperative presets turn on)
-/// the bytes are an array of `SIGNING_KEY_MAX` held in the key itself, and a
+/// the bytes are an array of `SIGNING_KEY_MAX` held in the key itself (`KeyBlock`), and a
 /// key longer than that is stored as its SHA-256, which is the same key to HMAC:
 /// RFC 2104 defines a key longer than the block as that key hashed.
 #[derive(Clone)]
@@ -60,7 +61,7 @@ pub struct SigningKey {
     #[cfg(not(feature = "session-fixed-storage"))]
     bytes: Zeroizing<Vec<u8>>,
     #[cfg(feature = "session-fixed-storage")]
-    bytes: Zeroizing<[u8; SIGNING_KEY_MAX]>,
+    bytes: KeyBlock,
     #[cfg(feature = "session-fixed-storage")]
     len: usize,
 }
@@ -103,6 +104,47 @@ pub const SIGNING_KEY_BYTES: usize = 32;
 /// block, which is also the longest key HMAC uses as it stands.
 #[cfg(feature = "session-fixed-storage")]
 pub const SIGNING_KEY_MAX: usize = 64;
+
+/// The bytes of a key held in the key itself, wiped when they go. The wipe is `zeroize`'s
+/// guarantee, a volatile store of zero over every byte the compiler may not drop or move past
+/// the fence after it, made a word at a time: `zeroize` stores an array of bytes a byte at a
+/// time, which the compiler cannot merge, and spells out a store for each byte of the block.
+#[cfg(feature = "session-fixed-storage")]
+#[derive(Clone)]
+#[repr(C, align(8))]
+struct KeyBlock([u8; SIGNING_KEY_MAX]);
+
+// The block is a whole number of words, and a drawn key lies in it.
+#[cfg(feature = "session-fixed-storage")]
+const _: () = assert!(
+    SIGNING_KEY_MAX % core::mem::size_of::<usize>() == 0
+        && core::mem::align_of::<usize>() <= 8
+        && SIGNING_KEY_BYTES <= SIGNING_KEY_MAX
+);
+
+#[cfg(feature = "session-fixed-storage")]
+impl KeyBlock {
+    /// A block of zeros.
+    const ZERO: Self = Self([0; SIGNING_KEY_MAX]);
+
+    /// Store zero over every byte of the block, a word at a time.
+    fn wipe(&mut self) {
+        let words = self.0.as_mut_ptr().cast::<usize>();
+        for at in 0..SIGNING_KEY_MAX / core::mem::size_of::<usize>() {
+            // SAFETY: the block is aligned to 8, at least a word's alignment, and is a whole
+            // number of words long, so word `at` lies in it, aligned, and is the block's alone.
+            unsafe { core::ptr::write_volatile(words.add(at), 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "session-fixed-storage")]
+impl Drop for KeyBlock {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
 
 impl SigningKey {
     /// R311y820 — draw a fresh key from the §2.5 plugin-tier entropy port
@@ -148,14 +190,11 @@ impl SigningKey {
             source.try_fill_bytes(&mut bytes)?;
             Ok(Self { bytes })
         }
+        // The key is drawn where it is kept: the block wipes itself on the `?`.
         #[cfg(feature = "session-fixed-storage")]
         {
-            let mut drawn = Zeroizing::new([0u8; SIGNING_KEY_BYTES]);
-            source.try_fill_bytes(drawn.as_mut_slice())?;
-            let mut bytes = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
-            for (to, from) in bytes.iter_mut().zip(drawn.iter()) {
-                *to = *from;
-            }
+            let mut bytes = KeyBlock::ZERO;
+            source.try_fill_bytes(&mut bytes.0[..SIGNING_KEY_BYTES])?;
             Ok(Self {
                 bytes,
                 len: SIGNING_KEY_BYTES,
@@ -215,8 +254,8 @@ impl SigningKey {
                 digest = Sha256::digest(bytes);
                 digest.as_slice()
             };
-            let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
-            for (to, from) in out.iter_mut().zip(key) {
+            let mut out = KeyBlock::ZERO;
+            for (to, from) in out.0.iter_mut().zip(key) {
                 *to = *from;
             }
             Ok(Self {
@@ -250,7 +289,10 @@ impl SigningKey {
         {
             // The key's length never passes the block it is held in; were it to, the
             // whole block, zero-padded, is the same key to HMAC (RFC 2104).
-            self.bytes.get(..self.len).unwrap_or(self.bytes.as_slice())
+            self.bytes
+                .0
+                .get(..self.len)
+                .unwrap_or(self.bytes.0.as_slice())
         }
     }
 }
@@ -725,6 +767,30 @@ mod tests {
         let mac_a = compute_hmac_sha256_full(a.as_slice(), b"probe");
         let mac_b = compute_hmac_sha256_full(b.as_slice(), b"probe");
         assert_ne!(mac_a, mac_b, "two drawn keys must not MAC alike");
+    }
+
+    /// A block's wipe stores zero over every byte of it. Turned red by a wipe a word count short
+    /// of the block, or one that stores a byte where it means a word.
+    #[cfg(feature = "session-fixed-storage")]
+    #[test]
+    fn a_key_blocks_wipe_zeroes_every_byte() {
+        let mut block = KeyBlock([0xa5; SIGNING_KEY_MAX]);
+        block.wipe();
+        assert_eq!(block.0, [0u8; SIGNING_KEY_MAX]);
+    }
+
+    /// A key drawn where it is kept is the key of the bytes drawn: it MACs as the key made from
+    /// the same bytes does. Turned red by a draw that lands anywhere but the key's first bytes.
+    #[test]
+    fn a_drawn_key_macs_as_the_bytes_drawn() {
+        let drawn = SigningKey::from_entropy(&mut Counting(0)).expect("counting source fills");
+        let mut bytes = [0u8; SIGNING_KEY_BYTES];
+        let _ = crate::entropy::EntropySource::try_fill_bytes(&mut Counting(0), &mut bytes);
+        let made = SigningKey::from_slice(&bytes).expect("a key of the floor's length");
+        assert_eq!(
+            cookie_payload_tag(&drawn, b"probe"),
+            cookie_payload_tag(&made, b"probe")
+        );
     }
 
     #[test]
