@@ -2400,6 +2400,35 @@ fn refuse_as_decoded<'a>(
     }
 }
 
+/// The refusals [`collect_handshake_ext_chain`] answers for the chain of the handshake message
+/// `mid` that `walked` yields, with nothing kept where keeping copies: a build whose chain is a
+/// vector judges each entry where it lies ([`crate::ext_chain::check_ext_chain`], the same lend
+/// that is the one step of keeping an entry that refuses), and the slot profile, whose chain is
+/// storage of the message's own and bounded, keeps it as the decode does, since its bound is a
+/// refusal of its own.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "codec-frame",
+    feature = "codec-close",
+    feature = "storage-profile"
+))]
+fn judge_stepped_chain<'a>(
+    mid: u8,
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<(), InboundParseError> {
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    {
+        let _ = mid;
+        crate::ext_chain::check_ext_chain(walked)
+    }
+    #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+    {
+        let mut extensions = ExtChainOwned::new();
+        collect_handshake_ext_chain(mid, walked, &mut extensions)
+    }
+}
+
 /// Where the Close, the KeepAlive or the transport OAM at the front of `bytes` ends, read by its
 /// document's view with the refusals [`parse_inbound_consuming`] answers for it, and none of it
 /// decoded into an owned message: the walk of a group datagram asks only how far to step past a
@@ -2417,21 +2446,17 @@ pub(crate) fn control_extent(bytes: &[u8]) -> Option<Result<usize, InboundParseE
     let read = match mid {
         wire_const::T_MID_CLOSE => extent_of(bytes, |cursor| {
             let view = TransportCloseView::decode(cursor)?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            judge_stepped_chain(
                 wire_const::T_MID_CLOSE,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )
         }),
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => extent_of(bytes, |cursor| {
             let view = TransportKeepAliveView::decode(cursor)?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            judge_stepped_chain(
                 wire_const::T_MID_KEEP_ALIVE,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )
         }),
         // The owned decode of an OAM is the heap profile's (`parse_unit_into`): a build without

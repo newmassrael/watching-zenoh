@@ -293,8 +293,6 @@ pub mod link_cells;
 // sockets under a cooperative loop, as the datagram link is: a platform supplies the socket
 // (`stream_link::StreamSocket`), and the batch framing and the driver are here.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-200 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stream_link;
 
 // The two links above as one network stack: a dial names its protocol, and the stack opens that
@@ -313,6 +311,14 @@ pub mod ip_stack;
     target_has_atomic = "ptr"
 ))]
 pub mod faces;
+// The decisions of a face's life as a value, beside the faces whose links the executor holds.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod face_life;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket

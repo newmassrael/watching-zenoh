@@ -623,27 +623,25 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
 // The Init and the Open are written by `handshake_encode` (the lend-only Open's
 // chain by `encode_held_chain_into`), so the chain is written here for the vector
-// form above and for the tests that hold the two forms to each other.
-#[cfg(any(
-    all(
-        feature = "alloc",
-        any(
-            feature = "session-extauth",
-            all(
-                test,
-                feature = "codec-init-body",
-                feature = "codec-open-body",
-                feature = "codec-close",
-                feature = "codec-frame"
-            ),
-            all(
-                test,
-                feature = "tx-lend-only",
-                any(feature = "codec-init-body", feature = "codec-open-body")
-            )
+// form above and for the tests that hold the two forms to each other: gated as the
+// vector form is, which the tests below read beside it.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "session-extauth",
+        all(
+            test,
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-close",
+            feature = "codec-frame"
+        ),
+        all(
+            test,
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body")
         )
-    ),
-    all(test, feature = "codec-init-body", feature = "codec-open-body")
+    )
 ))]
 pub(crate) fn encode_ext_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,

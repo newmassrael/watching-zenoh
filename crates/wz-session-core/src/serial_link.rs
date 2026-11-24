@@ -105,6 +105,35 @@ pub const SERIAL_FLAG_RESET: u8 = 0x04;
 /// so this byte is an unambiguous frame boundary.
 pub const SERIAL_EOP: u8 = 0x00;
 
+/// The INIT frame of no payload, as [`encode_frame`] writes it: the header, a
+/// zero length and the CRC32 of nothing (zero), COBS-stuffed into one block of
+/// seven bytes, then the EOP. Fixed bytes, so the handshake has no encode to
+/// refuse; a test holds them to the encoder.
+const INIT_FRAME: [u8; 9] = [
+    0x02,
+    SERIAL_FLAG_INIT,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    SERIAL_EOP,
+];
+
+/// The INIT|ACK frame of no payload, laid out as [`INIT_FRAME`] is.
+const INIT_ACK_FRAME: [u8; 9] = [
+    0x02,
+    SERIAL_FLAG_INIT | SERIAL_FLAG_ACK,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    0x01,
+    SERIAL_EOP,
+];
+
 // ─── frame encode / decode ───
 
 /// A decoded serial frame: the control `header` byte and the recovered
@@ -477,16 +506,12 @@ impl SerialHandshake {
     /// INIT frame (`_z_connect_serial` line 257-259); the responder
     /// emits nothing until it observes the peer's INIT. Also the
     /// re-drive entry point after a [`HandshakeStep::Throttle`]. The
-    /// `Option` expresses ONLY that role asymmetry — encoding an INIT of
-    /// empty payload is infallible (well within MTU), so it is `.expect`-ed
-    /// rather than folded into `None` (which would alias an impossible
-    /// encode failure with "responder is silent").
+    /// `Option` expresses ONLY that role asymmetry: the INIT is a frame of
+    /// fixed bytes ([`INIT_FRAME`]), so there is no encode failure to alias
+    /// with "responder is silent".
     pub fn open(&self) -> Option<Vec<u8>> {
         match self.role {
-            SerialRole::Initiator => Some(
-                encode_frame(SERIAL_FLAG_INIT, &[])
-                    .expect("INIT frame (empty payload) is always within MTU"),
-            ),
+            SerialRole::Initiator => Some(INIT_FRAME.to_vec()),
             SerialRole::Responder => None,
         }
     }
@@ -513,11 +538,9 @@ impl SerialHandshake {
             }
             SerialRole::Responder => {
                 if has_flag(header, SERIAL_FLAG_INIT) && !has_flag(header, SERIAL_FLAG_ACK) {
-                    // INIT|ACK of empty payload is infallible (within MTU),
-                    // same as the initiator's INIT in `open`.
-                    let ack = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[])
-                        .expect("INIT|ACK frame (empty payload) is always within MTU");
-                    HandshakeStep::EmitAndConnect(ack)
+                    // INIT|ACK of no payload is a frame of fixed bytes, as the
+                    // initiator's INIT in `open` is.
+                    HandshakeStep::EmitAndConnect(INIT_ACK_FRAME.to_vec())
                 } else {
                     HandshakeStep::Failed
                 }
@@ -540,6 +563,15 @@ fn has_flag(header: u8, flag: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fixed_handshake_frames_are_what_the_encoder_writes() {
+        assert_eq!(encode_frame(SERIAL_FLAG_INIT, &[]), Ok(INIT_FRAME.to_vec()));
+        assert_eq!(
+            encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]),
+            Ok(INIT_ACK_FRAME.to_vec())
+        );
+    }
     use alloc::vec;
 
     // ─── frame byte-parity ───

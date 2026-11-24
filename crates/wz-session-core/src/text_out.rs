@@ -257,9 +257,15 @@ pub fn write_parts<W: TextOut + ?Sized>(out: &mut W, parts: &[LogPart<'_>]) {
             LogPart::U64(n) => out.push_u64(n),
             LogPart::Hex32(n) => {
                 const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                // The eight digits after `0x`, most significant first.
+                const SHIFTS: [u32; 8] = [28, 24, 20, 16, 12, 8, 4, 0];
                 let mut text = *b"0x00000000";
-                for (at, digit) in text[2..].iter_mut().enumerate() {
-                    *digit = DIGITS[((n >> (28 - 4 * at)) & 0xf) as usize];
+                for (digit, shift) in text.iter_mut().skip(2).zip(SHIFTS) {
+                    // A nibble names one of the sixteen digits.
+                    *digit = DIGITS
+                        .get(((n >> shift) & 0xf) as usize)
+                        .copied()
+                        .unwrap_or(b'0');
                 }
                 // The bytes are `0x` and ASCII hex digits, so they are valid text.
                 if let Ok(text) = core::str::from_utf8(&text) {
