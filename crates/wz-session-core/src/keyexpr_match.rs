@@ -212,6 +212,8 @@ pub struct KeyFacts {
 impl KeyFacts {
     /// The facts of `text`: the SCE `algorithm` document `sources/algorithms/key_facts.scxml`,
     /// whose record is `key_facts_schema.scxml`.
+    // Out of line: the tables, the matching and the queries read a key's facts in many places,
+    // and each inlined the generated walk.
     #[inline(never)]
     pub fn of(text: &str) -> Self {
         let facts = generated::key_facts::key_facts(
