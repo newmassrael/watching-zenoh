@@ -10532,7 +10532,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 if let Some(cookie) = init.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                        crate::session_init_params::store_session_bytes(slot, cookie);
                     });
                 }
                 // R311kb — capture the InitAck's sizing caps too: the
@@ -10601,7 +10601,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
                 R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                    *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                    crate::session_init_params::store_session_bytes(slot, cookie);
                 });
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
                 // here, because the admission predicate needs it. The RX SN
@@ -12551,7 +12551,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let mut emitted = 0usize;
         let mut deadline = deadline;
-        while plan.remaining_fragments() > 0 {
+        // A chain abandoned once some of it is on the wire ends in one place: the stop fragment
+        // at the SN the abandoned fragment would have had, reserved first unless the fragment
+        // reserved it already, and the answer the abandon gives.
+        let (stop_sn, reserve_stop, abandoned) = loop {
+            if plan.remaining_fragments() == 0 {
+                return Ok(UnicastPush::Pushed);
+            }
             // Read the SN BEFORE drawing, so it names the fragment
             // this iteration is about to send — which is also the SN
             // the stop fragment takes if the draw fails, keeping the
@@ -12575,18 +12581,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
-                    self.outbound_frame_sn.reserve_next(priority, reliable);
                     // (A stop marker the link lends no slot for is lost, and the
                     // peer's staged chain with it: there is nothing more to send
                     // it on a profile that has no heap frame to fall back to.)
-                    let _ = self.send_fragment(
-                        batch,
-                        &crate::frame_encode::FragmentSpan::stop(this_sn),
-                        body,
-                        reliable,
-                        ext_qos,
-                    );
-                    return Ok(UnicastPush::Congested);
+                    break (this_sn, true, Ok(UnicastPush::Congested));
                 }
             }
             if !self.take_fragment_tx_credit() {
@@ -12608,23 +12606,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // is outside its pool for the same reason). It does
                 // spend an SN, which zenoh's receive-side `SeqNum::roll`
                 // requires of every accepted transport message.
-                self.outbound_frame_sn.reserve_next(priority, reliable);
-                let _ = self.send_fragment(
-                    batch,
-                    &crate::frame_encode::FragmentSpan::stop(this_sn),
-                    body,
-                    reliable,
-                    ext_qos,
-                );
-                return Err(SendWireError::FragmentTxBudgetExhausted);
+                break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
             }
-            let span = match plan.next_span() {
-                Some(span) => span,
-                // `remaining_fragments() > 0` and `next_span() == None`
-                // are the same predicate negated, so this arm is
-                // unreachable; breaking rather than panicking keeps the
-                // no_std profiles free of a formatter.
-                None => break,
+            // `remaining_fragments() > 0` and `next_span() == None` are the same predicate
+            // negated, so the `None` arm is unreachable; answering rather than panicking keeps
+            // the no_std profiles free of a formatter.
+            let Some(span) = plan.next_span() else {
+                return Ok(UnicastPush::Pushed);
             };
             if emitted > 0 {
                 self.outbound_frame_sn.reserve_next(priority, reliable);
@@ -12643,21 +12631,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // what it staged, and the message is refused, counted.
             #[cfg(feature = "tx-lend-only")]
             if let Err(refused) = self.send_fragment(batch, &span, body, reliable, ext_qos) {
-                if emitted > 0 {
-                    let _ = self.send_fragment(
-                        batch,
-                        &crate::frame_encode::FragmentSpan::stop(this_sn),
-                        body,
-                        reliable,
-                        ext_qos,
-                    );
+                if emitted == 0 {
+                    return Err(refused);
                 }
-                return Err(refused);
+                break (this_sn, false, Err(refused));
             }
             emitted = emitted.saturating_add(1);
             deadline.next_fragment();
+        };
+        if reserve_stop {
+            self.outbound_frame_sn.reserve_next(priority, reliable);
         }
-        Ok(UnicastPush::Pushed)
+        let _ = self.send_fragment(
+            batch,
+            &crate::frame_encode::FragmentSpan::stop(stop_sn),
+            body,
+            reliable,
+            ext_qos,
+        );
+        abandoned
     }
 
     /// Put ONE fragment of a chain on its conduit's link: written straight into
