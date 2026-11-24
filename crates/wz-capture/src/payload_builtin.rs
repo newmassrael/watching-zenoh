@@ -33,7 +33,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::payload::formats::{MessagePaths, PayloadField, PayloadFormat, PayloadFormatError};
+use crate::payload::formats::{
+    MessagePaths, PayloadField, PayloadFormat, PayloadFormatError, TypedValue,
+};
 
 /// The protobuf WIRE FORMAT, walked without a schema.
 ///
@@ -403,6 +405,12 @@ impl PayloadFormat for Json {
         Some(&["application/json", "text/json"])
     }
 
+    /// JSON says each value's kind on the wire, so every row carries its type
+    /// and a leaf its typed value (`crate::payload::walk_json`).
+    fn reads_types(&self) -> bool {
+        true
+    }
+
     fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
         if payload.is_empty() {
             // Same answer `Protobuf` gives, for the same reason: an empty
@@ -479,6 +487,12 @@ impl PayloadFormat for Cbor {
         Some(&["application/cbor"])
     }
 
+    /// CBOR says each data item's major type on the wire, so every row carries
+    /// its type and an item that holds one value its typed value.
+    fn reads_types(&self) -> bool {
+        true
+    }
+
     fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
         if payload.is_empty() {
             // The answer `Json` and `Protobuf` both give: an empty payload is
@@ -505,6 +519,123 @@ impl PayloadFormat for Cbor {
     }
 }
 
+/// Text in UTF-8, read as one value.
+///
+/// What a publisher that declared a text encoding sent (`text/plain`,
+/// `zenoh/string`, and every table entry `crate::payload::shape_of` calls
+/// text): no structure is claimed beyond the encoding, so the payload is one
+/// row at the document root `$`, its value the text as the CBOR walk shows a
+/// text string, and its typed value a JSON string. An empty payload is the
+/// empty string, which a text encoding can say.
+///
+/// Bytes that are not UTF-8 are refused at the offset of the first byte that
+/// is not, the way the payload plane's verdict places it: a sequence broken by
+/// a byte inside the payload is malformed there, and one the payload ends in
+/// the middle of is a truncation.
+pub struct Text;
+
+/// The table names whose declared shape is UTF-8 text. Kept honest by
+/// `the_text_builtin_claims_exactly_the_shapes_this_crate_calls_text`.
+const TEXT_ENCODINGS: &[&str] = &[
+    "zenoh/string",
+    "text/plain",
+    "application/yaml",
+    "text/yaml",
+    "text/json5",
+    "application/openmetrics-text",
+    "application/xml",
+    "application/x-www-form-urlencoded",
+    "text/html",
+    "text/xml",
+    "text/css",
+    "text/javascript",
+    "text/markdown",
+    "text/csv",
+    "application/sql",
+    "application/json-patch+json",
+    "application/json-seq",
+    "application/jsonpath",
+    "application/jwt",
+    "application/soap+xml",
+    "application/yang",
+];
+
+impl PayloadFormat for Text {
+    fn name(&self) -> &str {
+        "text"
+    }
+
+    fn encodings(&self) -> Option<&[&str]> {
+        Some(TEXT_ENCODINGS)
+    }
+
+    fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        let text = core::str::from_utf8(payload).map_err(|e| match e.error_len() {
+            None => PayloadFormatError::Truncated(e.valid_up_to()),
+            Some(_) => PayloadFormatError::Malformed {
+                at: e.valid_up_to(),
+                why: String::from("not UTF-8, which the text encoding requires"),
+            },
+        })?;
+        Ok(alloc::vec![PayloadField {
+            path: String::from(crate::payload::JSON_ROOT_PATH),
+            name: None,
+            value: format!("text {text:?}"),
+            start: 0,
+            end: payload.len(),
+            typed: Some(TypedValue {
+                ty: Some(String::from("string")),
+                json: Some(crate::proto_decode_json::text_json(text)),
+                enum_number: None,
+            }),
+        }])
+    }
+
+    /// The one value is a string, which the encoding says.
+    fn reads_types(&self) -> bool {
+        true
+    }
+}
+
+/// The format token of an ENCODING RULE, `<keyexpr>=encoding`: a rule that
+/// reads a sample by the built-in its own declared encoding names
+/// ([`chosen_by_encoding`]), and only where no other rule covers the key.
+pub const ENCODING_TOKEN: &str = "encoding";
+
+/// What an encoding rule points at in a map: the token, and no decoder of its
+/// own. The format a sample is read with is chosen from the sample's declared
+/// encoding when the rule is consulted ([`chosen_by_encoding`]), so asked to
+/// read bytes with no encoding beside them this format has nothing to read
+/// them with.
+pub struct ByEncoding;
+
+impl PayloadFormat for ByEncoding {
+    fn name(&self) -> &str {
+        ENCODING_TOKEN
+    }
+
+    fn decode(&self, _payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        Err(PayloadFormatError::NotThisFormat)
+    }
+}
+
+/// The built-in a declared encoding names: the first of [`BUILTIN_NAMES`]
+/// whose [`PayloadFormat::encodings`] holds `name`, or `None` for an
+/// encoding no built-in reads (`zenoh/bytes`, `application/octet-stream`,
+/// `application/cdr`, an image). The sets are disjoint, which
+/// `no_two_builtins_claim_one_encoding` holds, so the order decides nothing.
+pub fn chosen_by_encoding(name: &str) -> Option<&'static dyn PayloadFormat> {
+    BUILTIN_NAMES
+        .iter()
+        .copied()
+        .filter_map(builtin)
+        .find(|format| {
+            format
+                .encodings()
+                .is_some_and(|claimed| claimed.contains(&name))
+        })
+}
+
 /// The format a name selects, or `None` for a name this build has no
 /// decoder for.
 ///
@@ -516,18 +647,176 @@ pub fn builtin(name: &str) -> Option<&'static dyn PayloadFormat> {
         "cbor" => Some(&Cbor),
         "json" => Some(&Json),
         "protobuf" => Some(&Protobuf),
+        "text" => Some(&Text),
         _ => None,
     }
 }
 
 /// Every built-in name, for the usage text and for a refusal that can say
 /// what IS available.
-pub const BUILTIN_NAMES: &[&str] = &["cbor", "json", "protobuf"];
+pub const BUILTIN_NAMES: &[&str] = &["cbor", "json", "protobuf", "text"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The text built-in claims exactly the table entries this crate calls
+    /// text, derived from `shape_of` as the JSON and CBOR built-ins' claims
+    /// are, so an entry the table gains lands here or reds here.
+    #[test]
+    fn the_text_builtin_claims_exactly_the_shapes_this_crate_calls_text() {
+        use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
+        let mut shaped: Vec<&str> = ENCODING_ID_TO_STR
+            .iter()
+            .copied()
+            .filter(|name| {
+                matches!(
+                    crate::payload::shape_of(name),
+                    crate::payload::Shape::Utf8Text
+                )
+            })
+            .collect();
+        shaped.sort_unstable();
+        assert!(shaped.contains(&"text/plain") && shaped.contains(&"zenoh/string"));
+        let mut claimed: Vec<&str> = Text.encodings().expect("text names its encodings").to_vec();
+        claimed.sort_unstable();
+        assert_eq!(claimed, shaped);
+    }
+
+    /// An encoding rule picks the built-in by the sample's encoding, so two
+    /// built-ins claiming one encoding would make the pick an accident of the
+    /// list's order.
+    #[test]
+    fn no_two_builtins_claim_one_encoding() {
+        let mut claimed: Vec<&str> = BUILTIN_NAMES
+            .iter()
+            .copied()
+            .filter_map(builtin)
+            .flat_map(|format| format.encodings().unwrap_or(&[]).iter().copied())
+            .collect();
+        let all = claimed.len();
+        claimed.sort_unstable();
+        claimed.dedup();
+        assert_eq!(claimed.len(), all, "{claimed:?}");
+    }
+
+    #[test]
+    fn a_declared_encoding_chooses_the_builtin_that_claims_it_and_no_other() {
+        for (encoding, chosen) in [
+            ("application/json", Some("json")),
+            ("text/json", Some("json")),
+            ("application/cbor", Some("cbor")),
+            ("application/protobuf", Some("protobuf")),
+            ("text/plain", Some("text")),
+            ("zenoh/string", Some("text")),
+            ("application/yaml", Some("text")),
+            ("zenoh/bytes", None),
+            ("application/octet-stream", None),
+            ("application/cdr", None),
+            ("image/png", None),
+            ("no/such-encoding", None),
+        ] {
+            assert_eq!(
+                chosen_by_encoding(encoding).map(|format| format.name()),
+                chosen,
+                "{encoding}"
+            );
+        }
+        assert_eq!(ByEncoding.name(), ENCODING_TOKEN);
+        assert_eq!(
+            ByEncoding.decode(b"{}"),
+            Err(PayloadFormatError::NotThisFormat)
+        );
+    }
+
+    #[test]
+    fn the_text_builtin_reads_utf8_as_one_typed_string_and_refuses_the_rest() {
+        let rows = Text.decode("h\u{e9} \"x\"".as_bytes()).expect("UTF-8");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "$");
+        assert_eq!(rows[0].value, "text \"h\u{e9} \\\"x\\\"\"");
+        assert_eq!((rows[0].start, rows[0].end), (0, 7));
+        let typed = rows[0].typed.as_ref().expect("a typed value");
+        assert_eq!(typed.ty.as_deref(), Some("string"));
+        assert_eq!(typed.json.as_deref(), Some("\"h\u{e9} \\\"x\\\"\""));
+        assert!(Text.reads_types());
+
+        let empty = Text.decode(b"").expect("the empty string");
+        assert_eq!(empty[0].value, "text \"\"");
+        assert_eq!(
+            Text.decode(b"ab\xffcd"),
+            Err(PayloadFormatError::Malformed {
+                at: 2,
+                why: String::from("not UTF-8, which the text encoding requires"),
+            })
+        );
+        assert_eq!(
+            Text.decode(b"ab\xc3"),
+            Err(PayloadFormatError::Truncated(2))
+        );
+    }
+
+    /// Every JSON value carries its kind as its type, and a leaf its value in
+    /// the mapping a schema's typed value uses: an integer past 2^53 - 1 is
+    /// its digits in a string.
+    #[test]
+    fn json_rows_carry_their_kind_and_their_leaves_a_typed_value() {
+        let body = br#"{"t":21.5,"big":9007199254740993,"s":"x","b":true,"z":null,"a":[1]}"#;
+        let rows = Json.decode(body).expect("a JSON document");
+        let typed: Vec<(&str, Option<&str>, Option<&str>)> = rows
+            .iter()
+            .map(|f| {
+                let t = f.typed.as_ref().expect("every JSON row is typed");
+                (f.path.as_str(), t.ty.as_deref(), t.json.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            typed,
+            vec![
+                ("$", Some("object"), None),
+                ("$.t", Some("number"), Some("21.5")),
+                ("$.big", Some("number"), Some("\"9007199254740993\"")),
+                ("$.s", Some("string"), Some("\"x\"")),
+                ("$.b", Some("bool"), Some("true")),
+                ("$.z", Some("null"), Some("null")),
+                ("$.a", Some("array"), None),
+                ("$.a.0", Some("number"), Some("1")),
+            ]
+        );
+        assert!(Json.reads_types());
+    }
+
+    /// Every CBOR data item carries its kind, and an item holding one value
+    /// that value; `undefined` has a kind and no value.
+    #[test]
+    fn cbor_rows_carry_their_kind_and_their_leaves_a_typed_value() {
+        // [-1, 1.5, h'ff00', true, null, undefined]
+        let body = [
+            0x86, 0x20, 0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0, 0x42, 0xff, 0x00, 0xf5, 0xf6, 0xf7,
+        ];
+        let rows = Cbor.decode(&body).expect("a CBOR array");
+        let typed: Vec<(Option<&str>, Option<&str>)> = rows
+            .iter()
+            .map(|f| {
+                let t = f.typed.as_ref().expect("every CBOR row is typed");
+                (t.ty.as_deref(), t.json.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            typed,
+            vec![
+                (Some("array"), None),
+                (Some("number"), Some("-1")),
+                (Some("number"), Some("1.5")),
+                (Some("bytes"), Some("\"/wA=\"")),
+                (Some("bool"), Some("true")),
+                (Some("null"), Some("null")),
+                (Some("undefined"), None),
+            ]
+        );
+        assert!(Cbor.reads_types());
+    }
 
     /// R311y873 — EVERY BUILT-IN NAMES ITS ENCODINGS, and every name it gives
     /// is one the wire table answers to.

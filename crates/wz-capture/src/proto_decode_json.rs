@@ -122,6 +122,36 @@ pub(crate) fn value_json(value: &Value) -> Option<String> {
     }
 }
 
+/// An integer's typed value as JSON text, by the integer rule
+/// [`write_integer`] keeps: the typed value of a payload format whose wire
+/// says a value is an integer (CBOR, CDR) is written as a schema's is.
+pub(crate) fn integer_json(v: i128) -> String {
+    let mut out = JsonOut::default();
+    write_integer(v, &mut out);
+    out.finish()
+}
+
+/// A floating-point typed value as JSON text, by [`write_float`]'s rule.
+pub(crate) fn float_json(v: f64) -> String {
+    let mut out = JsonOut::default();
+    write_float(v, v, &mut out);
+    out.finish()
+}
+
+/// A text typed value as a JSON string.
+pub(crate) fn text_json(text: &str) -> String {
+    let mut out = JsonOut::default();
+    out.text(text);
+    out.finish()
+}
+
+/// A bytes typed value as a JSON string of standard base64 with padding.
+pub(crate) fn bytes_json(bytes: &[u8]) -> String {
+    let mut out = JsonOut::default();
+    write_base64(bytes, &mut out);
+    out.finish()
+}
+
 /// The value itself, by the JSON mapping the module doc states.
 fn write_scalar<W: DocOut>(value: &Value, out: &mut W) {
     match value {
@@ -228,6 +258,20 @@ impl fmt::Display for Base64<'_> {
 mod tests {
     use super::*;
     use alloc::string::ToString;
+
+    /// The four typed-value writers the payload formats share spell what the
+    /// schema's listing spells for the same value.
+    #[test]
+    fn the_shared_typed_value_writers_follow_the_mapping() {
+        assert_eq!(integer_json(-3), "-3");
+        assert_eq!(integer_json(1 << 53), "\"9007199254740992\"");
+        assert_eq!(integer_json(-(1 << 60)), "\"-1152921504606846976\"");
+        assert_eq!(float_json(0.5), "0.5");
+        assert_eq!(float_json(f64::NAN), "\"NaN\"");
+        assert_eq!(float_json(f64::NEG_INFINITY), "\"-Infinity\"");
+        assert_eq!(text_json("a \"b\""), "\"a \\\"b\\\"\"");
+        assert_eq!(bytes_json(&[0xff, 0x00]), "\"/wA=\"");
+    }
 
     fn rendered(f: impl Fn(&mut String)) -> String {
         let mut out = String::new();

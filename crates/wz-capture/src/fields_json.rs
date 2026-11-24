@@ -10379,6 +10379,36 @@ mod tests {
             crate::report::write_comment(&crate::pcapng::Comment::of(b"note"), out);
             out.close_array();
         }));
+        // Revision 82 — how a format was chosen, each word on a decoding that
+        // read the payload and on one that was refused, an encoding schema
+        // present on one and absent on the other.
+        for chosen_by in crate::payload_decode::ChosenBy::ALL {
+            let decoded = crate::payload_decode::PayloadDecoding::Decoded {
+                keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
+                format: String::from("json"),
+                fields: Vec::new(),
+                despite_encoding: None,
+                typed: true,
+                schema: None,
+                chosen_by,
+                encoding_schema: Some(String::from("pkg.Reading")),
+            };
+            let refused = crate::payload_decode::PayloadDecoding::Refused {
+                keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
+                format: String::from("text"),
+                why: String::from("byte 0: not UTF-8"),
+                chosen_by,
+                encoding_schema: None,
+            };
+            for decoding in [decoded, refused] {
+                arms.push(members(|out| {
+                    out.key("payload_decode");
+                    write_decoding(&decoding, out);
+                }));
+            }
+        }
         // Revision 74 — every `open_syn` and `open_ack` word, on a context.
         {
             use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
@@ -12181,6 +12211,8 @@ mod tests {
                     despite_encoding: None,
                     typed: false,
                     schema: None,
+                    chosen_by: crate::payload_decode::ChosenBy::Rule,
+                    encoding_schema: None,
                 },
                 &mut out,
             );
@@ -12360,7 +12392,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 113] = [
+        let live: [(&str, &str, Vec<&'static str>); 114] = [
             // The node a `payload` range is the span of: the walk over the
             // closed set its writer's word comes from.
             (
@@ -12438,6 +12470,12 @@ mod tests {
             // 80).
             (rev::FIELDS, "qtype", crate::dns::QueryType::names()),
             (rev::FIELDS, "rcode", crate::dns::Rcode::names()),
+            // How a payload's format was chosen (revision 82).
+            (
+                rev::FIELDS,
+                "chosen_by",
+                crate::payload_decode::ChosenBy::names(),
+            ),
             (rev::FIELDS, "phase", PhaseWord::names()),
             // The band's NAME is `Priority::name`, an exhaustive match over the
             // eight variants; `from_wire` is total over the 3-bit field, so the
@@ -15748,6 +15786,83 @@ mod tests {
             .map(|s| s.revision)
             .min();
         assert_eq!(arrived, Some(67), "the key arrived with its revision");
+    }
+
+    /// Revision 82 — A PUBLISHER'S OWN ENCODING CHOOSES THE FORMAT WHERE NO
+    /// RULE COVERS THE KEY. Under one encoding rule, an `application/json`
+    /// sample is read into fields whose number leaf carries its typed value, and
+    /// the decoding says the encoding chose it and names the encoding's schema;
+    /// a `text/plain` sample is one string; a sample whose encoding names no
+    /// built-in, and one that declared none, are covered by no rule. A key rule
+    /// wins over the encoding rule whichever is declared first.
+    #[test]
+    fn a_declared_encoding_chooses_the_format_where_no_rule_covers_the_key() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload::tests_support as build;
+        let records = [
+            build::push_with_encoding(
+                "demo/json",
+                Some((encoding_id("application/json"), Some("pkg.Reading"))),
+                br#"{"t":21.5}"#,
+            ),
+            build::push_with_encoding("demo/text", Some((encoding_id("text/plain"), None)), b"hi"),
+            build::push_with_encoding(
+                "demo/raw",
+                Some((encoding_id("application/octet-stream"), None)),
+                b"\x01",
+            ),
+            build::push_with_encoding("demo/plain", None, b"xyz"),
+        ];
+        let (d, file, _) = one_frame_per_record(&records);
+
+        let mut map = FormatMap::new();
+        map.declare("**=encoding").expect("an encoding rule");
+        let run = Declarations::new(&map);
+        let doc = fields_json(&d, &file, None, Some(&run));
+        for expected in [
+            "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/json\",\
+             \"matched_rule\":{\"index\":0,\"pattern\":\"**\"},\"typed\":true,\
+             \"schema\":null,\"despite_encoding\":null,\"format\":\"json\"",
+            "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
+             \"chosen_by\":\"encoding\",\"encoding_schema\":\"pkg.Reading\"}",
+            "\"format\":\"text\",\"fields\":[{\"path\":\"$\",\"name\":null,\
+             \"value\":\"text \\\"hi\\\"\"",
+            "\"type\":\"string\",\"typed_value\":\"hi\",\"enum_number\":null}],\
+             \"chosen_by\":\"encoding\",\"encoding_schema\":null}",
+            "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/raw\",\
+             \"matched_rule\":null}",
+            "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/plain\",\
+             \"matched_rule\":null}",
+        ] {
+            assert_eq!(doc.matches(expected).count(), 1, "{expected}\n{doc}");
+        }
+
+        for (rules, at) in [
+            ("**=encoding\ndemo/json=json", 1),
+            ("demo/json=json\n**=encoding", 0),
+        ] {
+            let mut map = FormatMap::new();
+            map.declare_all(rules).expect("two rules");
+            let run = Declarations::new(&map);
+            let doc = fields_json(&d, &file, None, Some(&run));
+            let ruled = alloc::format!(
+                "\"keyexpr\":\"demo/json\",\"matched_rule\":{{\"index\":{at},\
+                 \"pattern\":\"demo/json\"}}"
+            );
+            assert_eq!(doc.matches(ruled.as_str()).count(), 1, "{rules}\n{doc}");
+            assert_eq!(
+                doc.matches("\"chosen_by\":\"rule\",\"encoding_schema\":\"pkg.Reading\"}")
+                    .count(),
+                1,
+                "{rules}\n{doc}"
+            );
+            assert_eq!(
+                doc.matches("\"chosen_by\":\"encoding\",\"encoding_schema\":null}")
+                    .count(),
+                1,
+                "the text sample is still chosen by its encoding: {rules}\n{doc}"
+            );
+        }
     }
 
     /// A row whose key does not resolve still names its payload.

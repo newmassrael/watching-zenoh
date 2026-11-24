@@ -4663,8 +4663,12 @@ int main(void) {
      * retires.
      * 81: each row gains `packet_comments` and each capture interface
      * `comments`, the pcapng comments of the packet holding the row's first
-     * byte and of the interface. Four keys arrive; no family. */
-    revisioned[2].revision = 81;
+     * byte and of the interface. Four keys arrive; no family.
+     * 82: a decoding that applied a format gains `chosen_by` and
+     * `encoding_schema`: whether a rule or the sample's declared encoding
+     * chose it. Two keys and one family arrive; a json or cbor decoding is
+     * now typed. */
+    revisioned[2].revision = 82;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

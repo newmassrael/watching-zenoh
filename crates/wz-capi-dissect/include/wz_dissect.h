@@ -1802,7 +1802,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":81,"key":"kind","values":[...],
+ *     {"name":"fields","revision":82,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -1841,6 +1841,7 @@
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields check passenger
+ * @carries fields chosen_by passenger
  * @carries fields client passenger
  * @carries fields completed passenger
  * @carries fields control passenger
@@ -4165,7 +4166,9 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * A `decoded` block then carries
  *
  *     `typed`   true when the fields were read by a type: a body schema whose
- *               files are declared, or a described record (#name=layout)
+ *               files are declared, a described record (#name=layout), or
+ *               (field-document revision 82) a `json`, `cbor` or `text`
+ *               reading, whose wire says each value's type
  *     `schema`  the body schema the rule names, or `null`. With `typed` it
  *               tells three cases apart: none named; named and read; named
  *               and not read, because the text carries no schema file
@@ -4305,6 +4308,59 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * can prove false must not veto the rule. Always present, never omitted: a
  * consumer that had to test for the key would read its absence as "nothing
  * was overridden", which is the assumption the field exists to stop.
+ *
+ * READ BY THE SAMPLE'S OWN ENCODING (field-document revision 82, row_facts
+ * 22). A rule whose format is the word `encoding`,
+ *
+ *     demo/sensor=encoding       an ENCODING RULE
+ *
+ * reads a sample by the built-in its declared encoding names: `json` for
+ * `application/json` and `text/json`, `cbor` for `application/cbor`,
+ * `protobuf` (the walk of the wire) for `application/protobuf`, and `text`
+ * for `text/plain`, `zenoh/string` and every other entry of the encoding
+ * table whose bytes are UTF-8 text. It is consulted ONLY for a key no other
+ * rule covers, in whichever order the lines are written: your rule for a key
+ * is your statement about it and always wins, and a label that vetoes your
+ * rule is not overridden by it. A sample that declared no encoding, an id
+ * this build cannot name, or an encoding no built-in reads (`zenoh/bytes`,
+ * `application/octet-stream`, `application/cdr`) is `no_rule` under it.
+ * Nothing is read by its encoding without such a line, as nothing is decoded
+ * without a rule; one line whose pattern covers every key turns it on for a
+ * whole capture. The word is not a format: a definition may not take it, and
+ * wz_dissect_readable_surfaces does not list it.
+ *
+ * Every `decoded` and `refused` block carries, after its other keys,
+ *
+ *     `chosen_by`        `rule` when a rule covering the key named the
+ *                        format; `encoding` when an encoding rule read the
+ *                        sample by its declared encoding, `matched_rule`
+ *                        then naming the encoding rule
+ *     `encoding_schema`  the schema suffix of the sample's declared encoding
+ *                        (what follows its `;`, as `pkg.Reading` in
+ *                        `application/protobuf;pkg.Reading`), the name a
+ *                        publisher gives its message type; `null` when it
+ *                        declared none, or one that is not UTF-8 (the carried
+ *                        entry's `payload.schema_hex` holds that one)
+ *
+ * The `text` format reads a payload as one UTF-8 string: one field, path `$`,
+ * its `value` the text quoted, its `type` `string` and its `typed_value`
+ * the string. Bytes that are not UTF-8 are a `refused` block whose `why`
+ * names the first byte that is not; an empty payload is the empty string.
+ *
+ * TYPED JSON AND CBOR, at the same revision. A `json` or `cbor` decoding is
+ * `typed`, and every entry of its `fields` carries `type`: `object`,
+ * `array`, `string`, `number`, `bool` or `null` for JSON; for CBOR
+ * `number` (an integer or a float), `string`, `bytes`, `array`, `map`,
+ * `tag`, `bool`, `null`, `undefined` or `simple`. An entry holding one
+ * value carries it as `typed_value` in the mapping a schema's typed value
+ * uses: a number (its digits in a string past 2^53 - 1; "NaN", "Infinity" and
+ * "-Infinity" for a CBOR float that is one), a string, true or false, null,
+ * and standard base64 for CBOR bytes. A container, a tag, an indefinite-length
+ * CBOR string, `undefined` and an unassigned simple value have a `type` and
+ * a `null` `typed_value`. Plot a JSON or CBOR leaf from `typed_value` as
+ * you would a schema's, and never parse `value`.
+ *
+ * @values fields chosen_by
  *
  * WHICH RULE WON, at field-document revision 28. The states that asked your
  * rules (`decoded`, `refused`, `encoding_mismatch` and `no_rule`) carry
@@ -6530,7 +6586,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  * Writes {"link_types":"0 NULL, 1 ETHERNET, …",
  *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
  *         "payload_field_types":"u8, i8, u16le, …",
- *         "payload_formats":["cbor","json","protobuf"]}
+ *         "payload_formats":["cbor","json","protobuf","text"]}
  *
  * Revision 5 -- `payload_formats` is the list of payload formats this build
  * decodes without a declared layout, by name, in the order the build lists
@@ -6548,7 +6604,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":81,"key":"state",
+ *     "value_families":[{"name":"fields","revision":82,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -8293,6 +8349,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @values row_facts body
  * @values row_facts carried_state
  * @values row_facts check
+ * @values row_facts chosen_by
  * @values row_facts client
  * @values row_facts completed
  * @values row_facts control
@@ -8345,6 +8402,7 @@ int wz_dissect_live_field_values_since_window(wz_dissect_live *h,
  * @carries row_facts body passenger
  * @carries row_facts carried_state discriminant
  * @carries row_facts check passenger
+ * @carries row_facts chosen_by passenger
  * @carries row_facts client passenger
  * @carries row_facts completed passenger
  * @carries row_facts control passenger

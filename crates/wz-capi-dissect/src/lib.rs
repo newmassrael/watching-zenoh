@@ -584,7 +584,7 @@ pub unsafe extern "C" fn wz_dissect_record_layout(out: *mut usize, cap: usize) -
 /// ```json
 /// {"link_types":"0 NULL, 1 ETHERNET, …",
 ///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
-///  "payload_formats":["cbor","json","protobuf"]}
+///  "payload_formats":["cbor","json","protobuf","text"]}
 /// ```
 ///
 /// (The document also carries `payload_field_types`, `value_families` and
@@ -14726,6 +14726,40 @@ mod tests {
         );
     }
 
+    /// Field document 82 — A JSON PUBLISHER IS READ WITH NO KEY RULE: one
+    /// encoding rule, and a sample declaring `application/json` comes back
+    /// decoded as json, chosen by its encoding, its number leaf carrying a
+    /// typed value. With no encoding rule the same capture asks for nothing.
+    #[test]
+    fn a_json_publisher_is_read_by_its_encoding_with_no_key_rule() {
+        const JSON: u32 = 5;
+        let file = capture_declaring(JSON, br#"{"t":21.5}"#);
+        let decoded =
+            call_fields_with_payloads(&file, 0, "demo/**=encoding").expect("the capture reads");
+        assert!(
+            decoded.contains(
+                "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
+                 \"typed\":true,\"schema\":null,\
+                 \"despite_encoding\":null,\"format\":\"json\""
+            ),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains("\"path\":\"$.t\",\"name\":null,\"value\":\"number 21.5\""),
+            "{decoded}"
+        );
+        assert!(
+            decoded.contains(
+                "\"type\":\"number\",\"typed_value\":21.5,\"enum_number\":null}],\
+                 \"chosen_by\":\"encoding\",\"encoding_schema\":null}"
+            ),
+            "{decoded}"
+        );
+        let unasked = call_fields_with_payloads(&file, 0, "").expect("the capture reads");
+        assert!(!unasked.contains("\"chosen_by\""), "{unasked}");
+    }
+
     /// R311y914 (open-debt item 433) — A CBOR TOPIC CAN BE DECODED THROUGH THE
     /// ABI, and a cbor LABEL no longer silences the rule.
     ///
@@ -14755,7 +14789,7 @@ mod tests {
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
                  \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
-                 \"typed\":false,\"schema\":null,\
+                 \"typed\":true,\"schema\":null,\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \

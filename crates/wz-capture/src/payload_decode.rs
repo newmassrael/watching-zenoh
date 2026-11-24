@@ -372,6 +372,27 @@ impl<'a> Declarations<'a> {
         Some((matched.rule, matched.format))
     }
 
+    /// The format a sample is read with when no rule covers its key and an
+    /// ENCODING RULE does ([`FormatMap::encoding_rule_for`]): the built-in its
+    /// `declared` encoding names, with the encoding rule as the rule that won.
+    /// `None` when no encoding rule covers the key, and when the sample
+    /// declared no encoding, an id this build cannot name, or one no built-in
+    /// reads (`zenoh/bytes`, `application/cdr`): the rule then chose nothing
+    /// and is not marked applied for it.
+    pub fn encoding_rule_for_keyexpr(
+        &self,
+        keyexpr: &str,
+        declared: Encoding<'_>,
+    ) -> Option<(MatchedRule, &'a dyn PayloadFormat)> {
+        let Encoding::Known { name, .. } = declared else {
+            return None;
+        };
+        let matched = self.map.encoding_rule_for(keyexpr)?;
+        let format = crate::payload::formats::chosen_by_encoding(name)?;
+        self.record_applied(matched.id);
+        Some((matched.rule, format))
+    }
+
     /// The declarations this run reads by, for a plane that reads the capture
     /// by them without keeping this run's ledger (the selector's verdicts).
     pub(crate) fn map(&self) -> &'a FormatMap<'a> {
@@ -1359,6 +1380,38 @@ impl<'a> KeyexprAt<'a> {
     }
 }
 
+/// How the format a payload was read with was chosen: the `chosen_by` word
+/// of a decoding that names a `format`.
+///
+/// A CLOSED pair, bound to [`Self::word`]'s exhaustive match and walked by
+/// [`Self::ALL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChosenBy {
+    /// A rule covering the key named the format.
+    Rule,
+    /// No rule covered the key, an encoding rule did, and the sample's own
+    /// declared encoding named the built-in that read it.
+    Encoding,
+}
+
+impl ChosenBy {
+    /// Every word, in declaration order.
+    pub const ALL: [Self; 2] = [Self::Rule, Self::Encoding];
+
+    /// The word the documents write.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Encoding => "encoding",
+        }
+    }
+
+    /// Every word, for a test that holds the declared vocabulary to it.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        Self::ALL.iter().map(|chosen| chosen.word()).collect()
+    }
+}
+
 /// What became of one message's payload under the declarations in force.
 ///
 /// # Why every non-decode is a named answer rather than silence
@@ -1424,6 +1477,14 @@ pub enum PayloadDecoding {
         /// apart: no schema named, a schema named and read, and a schema named
         /// whose files the declarations do not carry.
         schema: Option<String>,
+        /// How the format was chosen: by the rule that covers the key, or by
+        /// the sample's declared encoding under an encoding rule.
+        chosen_by: ChosenBy,
+        /// The schema suffix of the encoding the sample declared (what follows
+        /// its `;`), when it is UTF-8: what a publisher names its message type
+        /// by. `None` when the sample declared no schema, or one that is not
+        /// UTF-8 (the row's carried entry spells that one in hex).
+        encoding_schema: Option<String>,
     },
     /// R311y873 — the sample's OWN declared encoding contradicts the rule, so
     /// the format was never applied.
@@ -1481,6 +1542,10 @@ pub enum PayloadDecoding {
         format: String,
         /// What it said.
         why: String,
+        /// How the format was chosen, as on [`Self::Decoded`].
+        chosen_by: ChosenBy,
+        /// The declared encoding's schema suffix, as on [`Self::Decoded`].
+        encoding_schema: Option<String>,
     },
     /// R2170 (open-debt item 546) — THE PAYLOAD SLOT HELD AN SHM DESCRIPTOR, so
     /// the data this record refers to never crossed this wire.
@@ -1637,6 +1702,8 @@ impl PayloadDecoding {
                 rule: Self::placeholder_rule(),
                 format: String::new(),
                 why: String::new(),
+                chosen_by: ChosenBy::Rule,
+                encoding_schema: None,
             },
             Self::Refused { .. } => Self::Decoded {
                 keyexpr: String::new(),
@@ -1646,6 +1713,8 @@ impl PayloadDecoding {
                 despite_encoding: None,
                 typed: false,
                 schema: None,
+                chosen_by: ChosenBy::Rule,
+                encoding_schema: None,
             },
             // R2170 (open-debt item 546) — the chain grew by one, and it had
             // to: the walk's length is compared against `STATES`, so an eighth
@@ -2516,6 +2585,19 @@ fn schema_hex(declared: Encoding<'_>) -> Option<String> {
     Some(hex)
 }
 
+/// The schema suffix of a declared encoding when it is UTF-8, and `None` for
+/// every other declaration: what a decoding reports as `encoding_schema`.
+fn encoding_schema(declared: Encoding<'_>) -> Option<String> {
+    let Encoding::Known {
+        schema: Some(schema),
+        ..
+    } = declared
+    else {
+        return None;
+    };
+    core::str::from_utf8(schema).ok().map(String::from)
+}
+
 /// Apply the mapping to the MESSAGE a split transfer joined, whose last piece
 /// `record` carried: the key's own rule over `joined`, with spans relative to
 /// the joined message (it is in no other coordinate space), under the encoding
@@ -2655,9 +2737,17 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
     }
     // The rule that won comes out of the comparison that picked the format, so
     // what the row reports and what decoded it cannot be two different rules.
-    let Some((rule, format)) = map.rule_for_keyexpr(&keyexpr) else {
-        return PayloadDecoding::NoRule(keyexpr);
+    // A key no rule covers is read by its own declared encoding where an
+    // encoding rule covers it; the judgement below then finds the label agrees
+    // with the format, because the label chose it.
+    let (rule, format, chosen_by) = match map.rule_for_keyexpr(&keyexpr) {
+        Some((rule, format)) => (rule, format, ChosenBy::Rule),
+        None => match map.encoding_rule_for_keyexpr(&keyexpr, declared) {
+            Some((rule, format)) => (rule, format, ChosenBy::Encoding),
+            None => return PayloadDecoding::NoRule(keyexpr),
+        },
     };
+    let encoding_schema = encoding_schema(declared);
     // R311y873 — the sender's claim is checked BEFORE the decoder runs, which
     // is this crate's own rule (`payload.rs`'s opening) finally reaching the
     // field layer. Before the decode and not after it, because a decoder that
@@ -2755,6 +2845,8 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
                 schema: format
                     .body_schema()
                     .map(|schema| String::from(schema.message)),
+                chosen_by,
+                encoding_schema,
             }
         }
         Err(why) => {
@@ -2770,6 +2862,8 @@ pub fn decode_payload_parts(parts: PayloadParts<'_>, map: &Declarations<'_>) -> 
                 rule,
                 format: format.name().to_string(),
                 why,
+                chosen_by,
+                encoding_schema,
             }
         }
     }
@@ -2872,6 +2966,8 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
             rule,
             format,
             why,
+            chosen_by,
+            encoding_schema,
         } => {
             out.key("keyexpr");
             out.text(keyexpr);
@@ -2881,6 +2977,7 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
             out.text(format);
             out.key("why");
             out.text(why);
+            write_choice(*chosen_by, encoding_schema.as_deref(), out);
         }
         PayloadDecoding::Decoded {
             keyexpr,
@@ -2890,6 +2987,8 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
             despite_encoding,
             typed,
             schema,
+            chosen_by,
+            encoding_schema,
         } => {
             out.key("keyexpr");
             out.text(keyexpr);
@@ -2961,9 +3060,21 @@ pub fn write_decoding<W: DocOut>(decoding: &PayloadDecoding, out: &mut W) {
                 out.close_map();
             }
             out.close_array();
+            write_choice(*chosen_by, encoding_schema.as_deref(), out);
         }
     }
     out.close_map();
+}
+
+/// The two keys that close a decoding which applied a format: `chosen_by`,
+/// the [`ChosenBy`] word, and `encoding_schema`, the declared encoding's
+/// schema suffix or `null`. After every other key, so the keys a reader
+/// already reads keep their places.
+fn write_choice<W: DocOut>(chosen_by: ChosenBy, encoding_schema: Option<&str>, out: &mut W) {
+    out.key("chosen_by");
+    out.text(chosen_by.word());
+    out.key("encoding_schema");
+    out.opt_text(encoding_schema);
 }
 
 /// The rule that won, as the object every place that names one writes: the
@@ -3324,12 +3435,16 @@ mod tests {
                 despite_encoding,
                 typed,
                 schema,
+                chosen_by,
+                encoding_schema,
             } => {
                 assert_eq!(keyexpr, "demo/a");
                 assert_eq!(rule, demo_rule(), "the one rule declared won");
                 assert_eq!(format, "json");
-                assert!(!typed, "a JSON walk knows no schema type");
+                assert!(typed, "JSON says each value's kind");
                 assert_eq!(schema, None);
+                assert_eq!(chosen_by, ChosenBy::Rule);
+                assert_eq!(encoding_schema, None);
                 assert_eq!(
                     despite_encoding, None,
                     "the label and the bytes agree, so nothing was overridden"
@@ -3345,6 +3460,70 @@ mod tests {
                 );
             }
             other => panic!("a JSON rule over a JSON publisher must decode: {other:?}"),
+        }
+    }
+
+    /// An ENCODING RULE reads a key no rule covers by the built-in the sample's
+    /// own encoding names and says so; a refusal there is placed at the byte
+    /// the encoding broke. It chooses nothing for an encoding no built-in reads,
+    /// and is then not marked applied. A key rule that covers the key wins, and
+    /// a label that vetoes it is not rescued by the encoding rule.
+    #[test]
+    fn an_encoding_rule_reads_by_the_samples_encoding_only_where_no_rule_covers() {
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let mut map = FormatMap::new();
+        map.declare("**=encoding").expect("an encoding rule");
+
+        let run = Declarations::new(&map);
+        match decode_payload(&put_declaring(ENC_PROTOBUF, &[0x08, 0x2a]), &run, at) {
+            PayloadDecoding::Decoded {
+                format,
+                chosen_by,
+                rule,
+                ..
+            } => {
+                assert_eq!(format, "protobuf");
+                assert_eq!(chosen_by, ChosenBy::Encoding);
+                assert_eq!(rule.pattern, "**");
+            }
+            other => panic!("a protobuf label chooses the protobuf walk: {other:?}"),
+        }
+        match decode_payload(&put_declaring(ENC_TEXT_PLAIN, b"ok\xffno"), &run, at) {
+            PayloadDecoding::Refused {
+                format,
+                why,
+                chosen_by,
+                encoding_schema,
+                ..
+            } => {
+                assert_eq!(format, "text");
+                assert_eq!(why, "byte 2: not UTF-8, which the text encoding requires");
+                assert_eq!(chosen_by, ChosenBy::Encoding);
+                assert_eq!(encoding_schema, None);
+            }
+            other => panic!("a text label over bytes that are not UTF-8 is refused: {other:?}"),
+        }
+        assert!(run.unused().is_empty(), "the rule chose a format");
+
+        let run = Declarations::new(&map);
+        assert_eq!(
+            decode_payload(&put_declaring(ENC_ZENOH_BYTES, b"x"), &run, at),
+            PayloadDecoding::NoRule(String::from("demo/a"))
+        );
+        assert_eq!(run.unused().len(), 1, "the rule chose nothing");
+
+        let mut ruled = FormatMap::new();
+        ruled
+            .declare_all("**=encoding\ndemo/**=json")
+            .expect("two rules");
+        let run = Declarations::new(&ruled);
+        match decode_payload(&put_declaring(ENC_TEXT_PLAIN, br#"{"a":1}"#), &run, at) {
+            PayloadDecoding::EncodingMismatch { format, rule, .. } => {
+                assert_eq!(format, "json");
+                assert_eq!(rule.pattern, "demo/**");
+            }
+            other => panic!("the key rule wins and its veto stands: {other:?}"),
         }
     }
 
@@ -4547,6 +4726,8 @@ mod tests {
                 rule: demo_rule(),
                 format: String::from("protobuf"),
                 why: String::from("these bytes are not this format"),
+                chosen_by: ChosenBy::Rule,
+                encoding_schema: None,
             },
             PayloadDecoding::EncodingMismatch {
                 keyexpr: String::from("demo/\"quoted\""),
