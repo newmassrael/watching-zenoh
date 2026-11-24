@@ -351,6 +351,11 @@ pub struct FaceLinkRow {
     pub mtu: u16,
     /// The endpoint the session joined the group by, for a member of a joined group.
     pub group_endpoint: Option<GroupRowText>,
+    /// How many rows of faces that came or went after this one the session kept for no watcher,
+    /// its queue of them full ([`crate::caps::MAX_FACE_WATCH_ROWS`]): told with this row, once,
+    /// so a watcher knows that what it holds of the faces may miss them. `0` in a row of the
+    /// faces that stand, and in a row told while nothing was lost after it.
+    pub lost_after: usize,
 }
 
 impl FaceLinkRow {
@@ -376,6 +381,7 @@ impl FaceLinkRow {
             kind: link.kind,
             mtu: link.mtu,
             group_endpoint,
+            lost_after: 0,
         })
     }
 
@@ -395,6 +401,7 @@ impl FaceLinkRow {
             kind: None,
             mtu: 0,
             group_endpoint: None,
+            lost_after: 0,
         }
     }
 
@@ -538,6 +545,7 @@ impl FaceLinkRow {
             kind,
             mtu,
             group_endpoint: None,
+            lost_after: 0,
         })
     }
 }
@@ -573,6 +581,7 @@ impl FaceLinkRow {
             kind: Some(LinkKind::Udp),
             mtu: 0,
             group_endpoint: Some(GroupRowText::of(endpoint)),
+            lost_after: 0,
         })
     }
 }

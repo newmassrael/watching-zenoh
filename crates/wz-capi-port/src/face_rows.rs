@@ -27,7 +27,8 @@ pub fn rows_of_snapshots(sink: FaceRowSink) -> FaceEventSink {
 /// snapshot, from its first row on, and handed on at its last. What an engine that tells rows
 /// answers a watch of snapshots with; what a row does not hold reads as not known in the snapshot
 /// ([`LinkSnapshot::of_row`]). A row met with no face begun, whose face's first row was not
-/// seen, is let go of, and so is its face.
+/// seen, is let go of, and so is its face. Rows lost after a row ([`FaceLinkRow::lost_after`])
+/// are not told: a watcher of snapshots, as zenoh's, has no event that says it missed one.
 pub fn snapshots_of_rows(sink: FaceEventSink) -> FaceRowSink {
     let gathering: Mutex<Option<FaceSnapshot>> = Mutex::new(None);
     Arc::new(move |kind: FaceEventKind, row: &FaceLinkRow| {

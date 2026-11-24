@@ -10,10 +10,10 @@
 //! to a watcher that came after it, which reads the faces that stand for its history, as
 //! zenoh-pico's listener does.
 //!
-//! The queue's rows are reserved with the first watch, as many as the plane was made to hold, so
-//! a face told while it is watched is queued and handed out with nothing allocated. A burst past
-//! them, which only a watcher that holds the delivery while the faces turn over reaches, grows
-//! the queue rather than lose a row a listener's view of the faces rests on.
+//! The queue's rows are reserved when the plane is made, which an engine does at its open, so a
+//! program that watches only after the open is told its faces with nothing allocated. A row that
+//! finds every row held is not kept, and the queue does not grow for it: the rows lost are counted
+//! on the last row kept ([`FaceLinkRow::lost_after`]), which tells each watcher of them once.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -34,37 +34,40 @@ struct Watchers {
 pub struct FacePlane<K: LockFamily> {
     watchers: K::Lock<Watchers>,
     events: K::Lock<VecDeque<(FaceEventKind, FaceLinkRow)>>,
-    /// The rows the queue holds without growing, reserved with the first watch.
+    /// The rows the queue holds, reserved when the plane was made; it never holds more.
     room: usize,
 }
 
 impl<K: LockFamily> Default for FacePlane<K> {
-    /// A plane whose queue reserves no row: each row queued may grow it.
+    /// A plane whose queue holds the build's rows ([`crate::caps::MAX_FACE_WATCH_ROWS`]).
     fn default() -> Self {
-        Self::with_room(0)
+        Self::with_room(crate::caps::MAX_FACE_WATCH_ROWS)
     }
 }
 
 impl<K: LockFamily> FacePlane<K> {
-    /// A plane whose queue holds `room` rows without growing, reserved when something first
-    /// watches: a session nobody watches holds none of them.
+    /// A plane whose queue holds `room` rows, reserved here: a watch that comes after the plane
+    /// was made, and every row told within them, allocates nothing for the queue. A plane of no
+    /// room keeps no row and has none to tell a loss with, so an engine makes one of at least one.
     pub fn with_room(room: usize) -> Self {
         Self {
             watchers: K::new(Watchers {
                 last: 0,
                 sinks: Vec::new(),
             }),
-            events: K::new(VecDeque::new()),
+            events: K::new(VecDeque::with_capacity(room)),
             room,
         }
     }
 
+    /// The rows the queue holds between two hand-outs.
+    pub fn room(&self) -> usize {
+        self.room
+    }
+
     /// Tell `sink` each row of a face event from now on, under the id that stops it: from 1, one
-    /// past the last watcher's. The queue's rows are reserved here, with the watch.
+    /// past the last watcher's.
     pub fn watch(&self, sink: FaceRowSink) -> u64 {
-        K::with(&self.events, |events| {
-            events.reserve(self.room.saturating_sub(events.len()));
-        });
         K::with(&self.watchers, |watchers| {
             watchers.last = watchers.last.wrapping_add(1);
             watchers.sinks.push((watchers.last, sink));
@@ -87,9 +90,16 @@ impl<K: LockFamily> FacePlane<K> {
     }
 
     /// Queue a row of a face event for the watchers, to be handed out with the session's other
-    /// deliveries.
+    /// deliveries. A row that finds the queue's room held is let go of and counted on the last
+    /// row queued, which tells the watchers of it with that row ([`FaceLinkRow::lost_after`]).
     pub fn happened(&self, kind: FaceEventKind, row: FaceLinkRow) {
-        K::with(&self.events, |events| events.push_back((kind, row)));
+        K::with(&self.events, |events| {
+            if events.len() < self.room {
+                events.push_back((kind, row));
+            } else if let Some((_, last)) = events.back_mut() {
+                last.lost_after = last.lost_after.saturating_add(1);
+            }
+        });
     }
 
     /// The next row to hand out, in the order they happened.
@@ -199,6 +209,7 @@ mod tests {
             kind: None,
             mtu: 0,
             group_endpoint: None,
+            lost_after: 0,
         }
     }
 
@@ -277,19 +288,20 @@ mod tests {
         assert_eq!(*told.lock().unwrap(), [1, 3]);
     }
 
-    /// The queue's rows are reserved with the first watch, as many as the plane was made to hold,
-    /// and rows queued and handed out within them do not grow it: what lets a face told while it
-    /// is watched take no memory of the heap. Turned red by a watch that reserves nothing, whose
-    /// first row grows the queue.
+    /// The queue's rows are reserved when the plane is made, before anything watches, and rows
+    /// queued and handed out within them do not grow it: what lets a program that watches only
+    /// after the open be told its faces with no memory of the heap. Turned red by rows reserved
+    /// with the first watch instead, which a watch after the open would allocate.
     #[test]
-    fn the_rows_a_plane_holds_are_reserved_with_the_first_watch() {
+    fn the_rows_a_plane_holds_are_reserved_when_it_is_made() {
         let plane = FacePlane::<StdLocks>::with_room(4);
         let reserved = || StdLocks::with(&plane.events, |events| events.capacity());
-        assert_eq!(reserved(), 0, "a plane nobody watches holds no row");
+        let room = reserved();
+        assert!(room >= 4, "the rows are reserved with the plane: {room}");
+        assert_eq!(plane.room(), 4);
         let told = Arc::default();
         plane.watch(counting(&told));
-        let room = reserved();
-        assert!(room >= 4, "the rows are reserved with the watch: {room}");
+        assert_eq!(reserved(), room, "the watch reserves nothing more");
         for zid in 0..4 {
             plane.happened(FaceEventKind::Up, row(zid));
         }
@@ -300,6 +312,39 @@ mod tests {
             "rows within the room do not grow the queue"
         );
         assert_eq!(told.load(Ordering::Relaxed), 4);
+    }
+
+    /// Rows past the queue's room are let go of, the queue not grown for them, and counted on the
+    /// last row kept, which tells each watcher once how many were lost after it; a row queued once
+    /// there is room again tells none. Turned red by a queue that grows past its room (every row
+    /// told, none lost), by a loss counted on no row, or by a count told again with a later row.
+    #[test]
+    fn rows_past_the_room_are_lost_and_told_once_with_the_last_row_kept() {
+        let plane = FacePlane::<StdLocks>::with_room(2);
+        let reserved = || StdLocks::with(&plane.events, |events| events.capacity());
+        let room = reserved();
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let into = Arc::clone(&told);
+        plane.watch(Arc::new(move |_, row: &FaceLinkRow| {
+            into.lock().unwrap().push((row.zid[0], row.lost_after));
+        }));
+        for zid in 1..=5 {
+            plane.happened(FaceEventKind::Up, row(zid));
+        }
+        assert_eq!(reserved(), room, "the queue does not grow past its room");
+        while plane.hand_out_next() {}
+        assert_eq!(
+            *told.lock().unwrap(),
+            [(1, 0), (2, 3)],
+            "the two rows kept, the last telling the three lost after it"
+        );
+        plane.happened(FaceEventKind::Down, row(6));
+        assert!(plane.hand_out_next());
+        assert_eq!(
+            told.lock().unwrap().last().copied(),
+            Some((6, 0)),
+            "the loss is told once"
+        );
     }
 
     /// A report through `()` is never watched and keeps nothing; through a plane it is queued,

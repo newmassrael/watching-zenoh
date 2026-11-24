@@ -288,6 +288,129 @@ fn a_face_lost_is_told_to_a_watcher_of_its_rows_with_nothing_allocated() {
     );
 }
 
+/// A session watched only after its open, whose faces turn over past the rows its queue holds
+/// between two deliveries, tells its watcher the rows it kept and, once, how many it lost, with no
+/// memory of the heap: the rows were reserved at the open, and a row past them is counted on the
+/// last row kept rather than grown into. The watch itself takes its own entry in the list of
+/// watchers and nothing for the queue. Turned red by rows reserved with the first watch (the watch
+/// allocates them too), by a queue that grows past its room (an allocation, and every row told),
+/// or by a loss told with no row or with two.
+#[cfg(feature = "connectivity")]
+#[test]
+fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_nothing_allocated() {
+    use wz_capi_port::SessionEngine;
+    use wz_session_core::caps;
+    use wz_session_core::face::{FaceEventKind, FaceLinkRow, RowText};
+
+    let router = Router::start(CatchAll::None);
+    let engine = CoopEngine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        config(&router),
+    )
+    .expect("the session opens");
+    let plane = engine.face_plane();
+    let room = plane.room();
+    assert!(
+        (1..=caps::MAX_FACE_WATCH_ROWS).contains(&room),
+        "the queue holds at least one row and no more than the build's: {room}"
+    );
+
+    let told = Arc::new(AtomicUsize::new(0));
+    let losses = Arc::new(AtomicUsize::new(0));
+    let lost = Arc::new(AtomicUsize::new(0));
+    let sink = {
+        let (told, losses, lost) = (told.clone(), losses.clone(), lost.clone());
+        Arc::new(move |_kind: FaceEventKind, row: &FaceLinkRow| {
+            told.fetch_add(1, Ordering::SeqCst);
+            if row.lost_after > 0 {
+                losses.fetch_add(1, Ordering::SeqCst);
+                lost.fetch_add(row.lost_after, Ordering::SeqCst);
+            }
+        })
+    };
+    let watching = counted(|| {
+        assert!(
+            SessionEngine::watch_face_rows(&*engine, sink).is_ok(),
+            "an open session watches its faces"
+        );
+    });
+    assert_eq!(
+        watching, 1,
+        "the watch takes its entry in the list of watchers and nothing for the queue"
+    );
+
+    let row = |first: u8| FaceLinkRow {
+        zid: [first; 16],
+        whatami: 1,
+        is_qos: false,
+        is_multicast: false,
+        is_shm: false,
+        link: 0,
+        links: 1,
+        src: RowText::of("tcp/127.0.0.1:1"),
+        dst: RowText::of("tcp/127.0.0.1:2"),
+        kind: None,
+        mtu: 0,
+        group_endpoint: None,
+        lost_after: 0,
+    };
+    let past = 3;
+    let rows: Vec<FaceLinkRow> = (0..room + past).map(|_| row(1)).collect();
+    let allocations = counted(|| {
+        for made in rows {
+            plane.happened(FaceEventKind::Up, made);
+        }
+        while plane.hand_out_next() {}
+    });
+    assert_eq!(
+        allocations, 0,
+        "rows past the queue's room take no memory of the heap"
+    );
+    assert_eq!(told.load(Ordering::SeqCst), room, "the rows kept are told");
+    assert_eq!(
+        (losses.load(Ordering::SeqCst), lost.load(Ordering::SeqCst)),
+        (1, past),
+        "the rows lost are told once, with the last row kept"
+    );
+
+    plane.happened(FaceEventKind::Down, row(0));
+    assert!(plane.hand_out_next());
+    assert_eq!(
+        (told.load(Ordering::SeqCst), losses.load(Ordering::SeqCst)),
+        (room + 1, 1),
+        "a row queued once there is room again tells no loss"
+    );
+}
+
+/// A session reserves two rows for each face it may hold, its going and its coming back, its
+/// groups' members among them, and never more than the build's rows. Turned red by a session that
+/// reserves the build's rows whatever it holds, or one past them for a session of many faces.
+#[cfg(feature = "connectivity")]
+#[test]
+fn a_session_reserves_the_rows_its_faces_turn_over_in_up_to_the_builds() {
+    use crate::engine::face_event_rows;
+    use wz_session_core::caps;
+
+    let most = caps::MAX_FACE_WATCH_ROWS;
+    assert_eq!(
+        face_event_rows(0, 0),
+        most.min(2),
+        "the dial role's face, going and coming back"
+    );
+    assert_eq!(
+        face_event_rows(0, 1),
+        most.min(2 * (1 + caps::MAX_GROUP_MEMBERS)),
+        "each member of a group is a face"
+    );
+    assert_eq!(
+        face_event_rows(usize::MAX, 1),
+        most,
+        "no more than the build's rows"
+    );
+}
+
 /// A source whose config counts its endpoints and whose texts are `'static`: what an ABI that
 /// keeps its texts in a form of its own hands an open.
 struct Written {
