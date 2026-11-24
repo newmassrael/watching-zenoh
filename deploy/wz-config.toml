@@ -1473,6 +1473,24 @@ abis = ["core", "pico"]
 implies = ["unstable-api", "message-catalog"]
 help = "The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors)."
 
+# The doors that read a payload's schema from the `.proto` text a program hands over when it runs,
+# beside the message payloads and the instance keys, over wz-app-frame's text reader (its tokenizer,
+# parser and linker). Without it those doors read a schema only from the FileDescriptorSet protoc
+# compiled the files into when the program was built, and no text reader is linked. Off by default
+# and off in the release package: neither zenoh-pico nor zenoh-c has such doors, and a device
+# program compiles its schema. A build that reads the text a person hands over turns it on. The
+# pico ABI's doors are wz_ext_* and part of its unstable surface; it turns neither capability whose
+# doors it adds on.
+[[capability]]
+id = "proto-text"
+kconfig = "WZ_CAP_PROTO_TEXT"
+default = "off"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "The message payload and instance key doors that read a schema from .proto text at run time (wz_ext_payload_schema_new, wz_ext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled."
+
 [[capability]]
 id = "app-transport"
 kconfig = "WZ_CAP_APP_TRANSPORT"
@@ -4660,9 +4678,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
-# catalog read a description with no session, and a program makes a keyer before it opens one; no
-# SessionLimits is in reach.
+# Read from the build: the keyer is no entity of a session. The doors that make a keyer
+# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# description with no session, and a program makes a keyer before it opens one; no SessionLimits is
+# in reach.
 read = "build"
 wire = "none"
 help = '''
@@ -4690,9 +4709,10 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: the keyer is no entity of a session. `wz_ext_instance_keyer_new` and the
-# catalog read a description with no session, and a program makes a keyer before it opens one; no
-# SessionLimits is in reach.
+# Read from the build: the keyer is no entity of a session. The doors that make a keyer
+# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# description with no session, and a program makes a keyer before it opens one; no SessionLimits is
+# in reach.
 read = "build"
 wire = "none"
 help = '''

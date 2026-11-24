@@ -617,8 +617,12 @@ pub mod platform;
 #[cfg(wz_process_pools)]
 mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
-// that read a schema: the instance keys' and the message payloads'.
-#[cfg(any(feature = "instance-key", feature = "message-payload"))]
+// that read a schema from its text: the instance keys' and the message payloads', in a build that
+// links the text reader.
+#[cfg(all(
+    feature = "proto-text",
+    any(feature = "instance-key", feature = "message-payload")
+))]
 #[cfg(not(wz_additional_apart))]
 pub mod proto_file;
 pub mod pubsub;

@@ -3,7 +3,8 @@
 //
 //! The payload of a catalog message through the `wz_ext_payload_schema_*` and
 //! `wz_ext_message_payload_*` doors, driven as a C program drives them: a schema read from the
-//! program's `.proto` text, a payload made for a message of the catalog, values set at paths, the
+//! descriptor set `protoc` compiled the program's `.proto` file into (and, with `proto-text`,
+//! from the file's text), a payload made for a message of the catalog, values set at paths, the
 //! bytes encoded into the program's buffer, decoded into another payload and read back.
 //!
 //! What the payload does with a path, a value and the bytes is the model tests' of `wz-app-frame`'s
@@ -20,6 +21,7 @@ use std::ops::{Deref, DerefMut};
 
 use wz_capi_pico::message_catalog::*;
 use wz_capi_pico::message_payload::*;
+#[cfg(feature = "proto-text")]
 use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{
     ZResult, WZ_EXT_ERR_PAYLOAD_ABSENT, WZ_EXT_ERR_PAYLOAD_PATH, WZ_EXT_ERR_PAYLOAD_RANGE,
@@ -36,6 +38,8 @@ const CATALOG: &str = include_str!("../../../../wz-app-frame/catalog/synthetic.j
 const POSE: usize = 0;
 const POSE_KEY: &str = "demo/catalog/pose";
 
+/// The schema of these tests, as the program writes it in `syn/door.proto`.
+#[cfg(feature = "proto-text")]
 const SCHEMA: &str = r#"
 syntax = "proto3";
 package syn.door;
@@ -64,6 +68,38 @@ message Pose {
   optional uint64 stamp = 10;
 }
 "#;
+
+/// `SCHEMA` as `protoc --include_imports -o` compiles it from `syn/door.proto`: the
+/// `FileDescriptorSet` a program builds into itself.
+const SCHEMA_SET: &[u8] = &[
+    0x0a, 0xa0, 0x03, 0x0a, 0x0e, 0x73, 0x79, 0x6e, 0x2f, 0x64, 0x6f, 0x6f, 0x72, 0x2e, 0x70, 0x72,
+    0x6f, 0x74, 0x6f, 0x12, 0x08, 0x73, 0x79, 0x6e, 0x2e, 0x64, 0x6f, 0x6f, 0x72, 0x22, 0x23, 0x0a,
+    0x05, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x12, 0x0c, 0x0a, 0x01, 0x78, 0x18, 0x01, 0x20, 0x01, 0x28,
+    0x11, 0x52, 0x01, 0x78, 0x12, 0x0c, 0x0a, 0x01, 0x79, 0x18, 0x02, 0x20, 0x01, 0x28, 0x11, 0x52,
+    0x01, 0x79, 0x22, 0xa1, 0x02, 0x0a, 0x04, 0x50, 0x6f, 0x73, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x73,
+    0x65, 0x72, 0x69, 0x61, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x06, 0x73, 0x65, 0x72,
+    0x69, 0x61, 0x6c, 0x12, 0x16, 0x0a, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74, 0x18, 0x02, 0x20,
+    0x01, 0x28, 0x05, 0x52, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74, 0x12, 0x16, 0x0a, 0x06, 0x77,
+    0x65, 0x69, 0x67, 0x68, 0x74, 0x18, 0x03, 0x20, 0x01, 0x28, 0x01, 0x52, 0x06, 0x77, 0x65, 0x69,
+    0x67, 0x68, 0x74, 0x12, 0x10, 0x0a, 0x03, 0x6c, 0x69, 0x74, 0x18, 0x04, 0x20, 0x01, 0x28, 0x08,
+    0x52, 0x03, 0x6c, 0x69, 0x74, 0x12, 0x14, 0x0a, 0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x18, 0x05,
+    0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x12, 0x12, 0x0a, 0x04, 0x62,
+    0x6c, 0x6f, 0x62, 0x18, 0x06, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6c, 0x6f, 0x62, 0x12,
+    0x22, 0x0a, 0x04, 0x74, 0x6f, 0x6e, 0x65, 0x18, 0x07, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x0e, 0x2e,
+    0x73, 0x79, 0x6e, 0x2e, 0x64, 0x6f, 0x6f, 0x72, 0x2e, 0x54, 0x6f, 0x6e, 0x65, 0x52, 0x04, 0x74,
+    0x6f, 0x6e, 0x65, 0x12, 0x27, 0x0a, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x18, 0x08, 0x20,
+    0x01, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x73, 0x79, 0x6e, 0x2e, 0x64, 0x6f, 0x6f, 0x72, 0x2e, 0x50,
+    0x6f, 0x69, 0x6e, 0x74, 0x52, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x12, 0x23, 0x0a, 0x04,
+    0x70, 0x61, 0x74, 0x68, 0x18, 0x09, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x73, 0x79, 0x6e,
+    0x2e, 0x64, 0x6f, 0x6f, 0x72, 0x2e, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x52, 0x04, 0x70, 0x61, 0x74,
+    0x68, 0x12, 0x19, 0x0a, 0x05, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x18, 0x0a, 0x20, 0x01, 0x28, 0x04,
+    0x48, 0x00, 0x52, 0x05, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x88, 0x01, 0x01, 0x42, 0x08, 0x0a, 0x06,
+    0x5f, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x2a, 0x33, 0x0a, 0x04, 0x54, 0x6f, 0x6e, 0x65, 0x12, 0x0d,
+    0x0a, 0x09, 0x54, 0x4f, 0x4e, 0x45, 0x5f, 0x4e, 0x4f, 0x4e, 0x45, 0x10, 0x00, 0x12, 0x0d, 0x0a,
+    0x09, 0x54, 0x4f, 0x4e, 0x45, 0x5f, 0x57, 0x41, 0x52, 0x4d, 0x10, 0x01, 0x12, 0x0d, 0x0a, 0x09,
+    0x54, 0x4f, 0x4e, 0x45, 0x5f, 0x43, 0x4f, 0x4c, 0x44, 0x10, 0x02, 0x62, 0x06, 0x70, 0x72, 0x6f,
+    0x74, 0x6f, 0x33,
+];
 
 type Owned = wz_ext_owned_message_payload_t;
 
@@ -125,8 +161,24 @@ fn catalog() -> wz_ext_owned_message_catalog_t {
     }
 }
 
-/// A schema of the one file `body`, or the code and the reason it was refused with.
-fn schema(body: &[u8]) -> Result<wz_ext_owned_payload_schema_t, (ZResult, String)> {
+/// A schema of the descriptor set `set`, or the code and the reason it was refused with.
+fn schema(set: &[u8]) -> Result<wz_ext_owned_payload_schema_t, (ZResult, String)> {
+    unsafe {
+        let mut this: wz_ext_owned_payload_schema_t = std::mem::zeroed();
+        let mut refusal: z_owned_string_t = std::mem::zeroed();
+        let rc = wz_ext_payload_schema_from_descriptor_set(
+            &mut this,
+            set.as_ptr(),
+            set.len(),
+            &mut refusal,
+        );
+        made_schema(this, rc, &mut refusal)
+    }
+}
+
+/// A schema of the one file `body` read as text, or the code and the reason it was refused with.
+#[cfg(feature = "proto-text")]
+fn schema_text(body: &[u8]) -> Result<wz_ext_owned_payload_schema_t, (ZResult, String)> {
     let name = text("syn/door.proto");
     let mut file = body.to_vec();
     file.push(0);
@@ -138,18 +190,28 @@ fn schema(body: &[u8]) -> Result<wz_ext_owned_payload_schema_t, (ZResult, String
         let mut this: wz_ext_owned_payload_schema_t = std::mem::zeroed();
         let mut refusal: z_owned_string_t = std::mem::zeroed();
         let rc = wz_ext_payload_schema_new(&mut this, files.as_ptr(), files.len(), &mut refusal);
-        let why = take(&mut refusal);
-        if rc == Z_OK {
-            assert!(why.is_empty(), "a schema read leaves no refusal: {why}");
-            assert!(wz_ext_internal_payload_schema_check(&this));
-            Ok(this)
-        } else {
-            assert!(
-                !wz_ext_internal_payload_schema_check(&this),
-                "a refused schema leaves the null state"
-            );
-            Err((rc, why))
-        }
+        made_schema(this, rc, &mut refusal)
+    }
+}
+
+/// The schema a door wrote with `rc`, held to the door's contract: a schema and no refusal, or
+/// the gravestone and the code with its reason.
+unsafe fn made_schema(
+    this: wz_ext_owned_payload_schema_t,
+    rc: ZResult,
+    refusal: &mut z_owned_string_t,
+) -> Result<wz_ext_owned_payload_schema_t, (ZResult, String)> {
+    let why = take(refusal);
+    if rc == Z_OK {
+        assert!(why.is_empty(), "a schema read leaves no refusal: {why}");
+        assert!(wz_ext_internal_payload_schema_check(&this));
+        Ok(this)
+    } else {
+        assert!(
+            !wz_ext_internal_payload_schema_check(&this),
+            "a refused schema leaves the null state"
+        );
+        Err((rc, why))
     }
 }
 
@@ -340,7 +402,7 @@ fn drop_catalog(c: &mut wz_ext_owned_message_catalog_t) {
 #[test]
 fn a_payload_of_a_catalog_message_keeps_its_key_and_its_schema() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
     unsafe {
         let key = wz_ext_message_payload_key_expr(loan(&p));
@@ -360,24 +422,41 @@ fn a_payload_of_a_catalog_message_keeps_its_key_and_its_schema() {
 
 #[test]
 fn a_schema_or_a_payload_that_cannot_be_made_is_refused_by_code() {
-    let (rc, why) = schema(b"syntax = \"proto3\";\nmessage Broken {\n").expect_err("refused");
-    assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
-    assert!(
-        why.contains("syn/door.proto"),
-        "the diagnostic names the file: {why}"
+    let (rc, why) = schema(&[0xFF, 0xFE]).expect_err("refused");
+    assert_eq!(
+        rc, Z_ERR_CONFIG_INVALID_VALUE,
+        "bytes that are no descriptor set"
     );
-    assert_eq!(schema(&[0xFF, 0xFE]).expect_err("refused").0, Z_EINVAL);
+    assert!(!why.is_empty(), "the refusal says why");
+    let (rc, _) = schema(&SCHEMA_SET[..SCHEMA_SET.len() - 1]).expect_err("refused");
+    assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE, "a descriptor set cut short");
     unsafe {
         let mut this: wz_ext_owned_payload_schema_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_payload_schema_new(&mut this, std::ptr::null(), 1, std::ptr::null_mut()),
+            wz_ext_payload_schema_from_descriptor_set(
+                &mut this,
+                std::ptr::null(),
+                1,
+                std::ptr::null_mut()
+            ),
             Z_ERR_NULL,
-            "a null file list with a count"
+            "null bytes with a length"
+        );
+        assert!(!wz_ext_internal_payload_schema_check(&this));
+        assert_eq!(
+            wz_ext_payload_schema_from_descriptor_set(
+                std::ptr::null_mut(),
+                SCHEMA_SET.as_ptr(),
+                SCHEMA_SET.len(),
+                std::ptr::null_mut()
+            ),
+            Z_ERR_NULL,
+            "no slot for the schema"
         );
     }
 
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let (rc, _) = payload(&c, 9, &s, "syn.door.Pose").expect_err("refused");
     assert_eq!(rc, Z_ERR_INVALID, "a message the catalog has not");
     let (rc, why) = payload(&c, POSE, &s, "syn.door.Nope").expect_err("refused");
@@ -412,7 +491,7 @@ fn a_schema_or_a_payload_that_cannot_be_made_is_refused_by_code() {
 #[test]
 fn values_set_by_path_encode_to_their_bytes_and_decode_back() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
     assert_eq!(set_uint(&p, "serial", 150), Z_OK);
     assert_eq!(set_int(&p, "offset", -2), Z_OK);
@@ -510,7 +589,7 @@ fn values_set_by_path_encode_to_their_bytes_and_decode_back() {
 #[test]
 fn each_refusal_is_its_own_code_and_leaves_its_sentence() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
     assert_eq!(set_int(&p, "nosuch", 1), WZ_EXT_ERR_PAYLOAD_PATH);
     let why = refusal_of(&p);
@@ -568,7 +647,7 @@ fn each_refusal_is_its_own_code_and_leaves_its_sentence() {
 #[test]
 fn a_null_argument_or_a_gravestone_is_refused() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
     let serial = text("serial");
     let bad = [0xFFu8, 0];
@@ -605,7 +684,7 @@ fn a_null_argument_or_a_gravestone_is_refused() {
 #[test]
 fn a_list_is_counted_and_an_element_cleared() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
     assert_eq!(set_int(&p, "path[0].x", 1), Z_OK);
     assert_eq!(set_int(&p, "path[1].x", 2), Z_OK);
@@ -632,7 +711,7 @@ fn a_list_is_counted_and_an_element_cleared() {
 #[test]
 fn a_payload_holds_what_its_storage_was_sized_for_and_refuses_past_it() {
     let mut c = catalog();
-    let mut s = schema(SCHEMA.as_bytes()).expect("the schema reads");
+    let mut s = schema(SCHEMA_SET).expect("the schema reads");
 
     assert_eq!(wz_ext_message_payload_storage_size(0, 0), 0);
     assert_eq!(wz_ext_message_payload_storage_size(0, 9), 9);
@@ -712,4 +791,36 @@ fn a_payload_holds_what_its_storage_was_sized_for_and_refuses_past_it() {
     drop_payload(&mut one);
     drop_schema(&mut s);
     drop_catalog(&mut c);
+}
+
+// The text door, in a build that links the text reader: the same schema read from the file the
+// descriptor set was compiled from, and the refusals of its text.
+#[cfg(feature = "proto-text")]
+#[test]
+fn a_schema_read_from_its_text_is_the_compiled_one_and_its_refusals_are_codes() {
+    let mut c = catalog();
+    let mut s = schema_text(SCHEMA.as_bytes()).expect("the text reads");
+    let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
+    assert_eq!(set_uint(&p, "serial", 150), Z_OK);
+    assert_eq!(set_string(&p, "label", "hi"), Z_OK);
+    assert_eq!(encoded(&p), [0x08, 0x96, 0x01, 0x2a, 0x02, b'h', b'i']);
+    drop_payload(&mut p);
+    drop_schema(&mut s);
+    drop_catalog(&mut c);
+
+    let (rc, why) = schema_text(b"syntax = \"proto3\";\nmessage Broken {\n").expect_err("refused");
+    assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
+    assert!(
+        why.contains("syn/door.proto"),
+        "the diagnostic names the file: {why}"
+    );
+    assert_eq!(schema_text(&[0xFF, 0xFE]).expect_err("refused").0, Z_EINVAL);
+    unsafe {
+        let mut this: wz_ext_owned_payload_schema_t = std::mem::zeroed();
+        assert_eq!(
+            wz_ext_payload_schema_new(&mut this, std::ptr::null(), 1, std::ptr::null_mut()),
+            Z_ERR_NULL,
+            "a null file list with a count"
+        );
+    }
 }

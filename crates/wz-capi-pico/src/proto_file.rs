@@ -4,7 +4,9 @@
 //! `wz_ext_proto_file_t`: one `.proto` file as a program hands it to a door that reads a schema,
 //! the instance keys' (`crate::instance_key`) and the message payloads'
 //! (`crate::message_payload`), and the one reading of a list of them into the schema reader's
-//! files. Declared in `wz_ext.h` with the instance keys, which had it first.
+//! files. Declared in `wz_ext.h` with the instance keys, which had it first. A build reads a
+//! schema from text only with `proto-text`, which links the text reader; without it a schema is
+//! read from the `FileDescriptorSet` `protoc` compiled it into, and no file is handed over.
 
 use alloc::vec::Vec;
 use core::ffi::c_char;

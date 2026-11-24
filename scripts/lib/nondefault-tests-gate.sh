@@ -507,8 +507,10 @@ transport-link-unixpipe,transport-link-ws|"
     # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
     # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
-    # below.
+    # below. Alone the schema is read from a compiled descriptor set; with `proto-text` the file
+    # also reads it from text and holds that door's refusals.
     "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
+    "wz-capi-pico|hook|message-payload,proto-text|--test=message_payload_doors"
     # The object pools (`wz_ext_object_pool_*`): the unit tests of the doors, of the pools' plan and
     # layout, which the tokio engine has only with the doors, and of the place an object is taken
     # from, and the file that reserves, exhausts, reuses and
@@ -539,8 +541,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,
-    # refuses a receiver kept per sender, and reads a report of drops back as an event.
+    # refuses a receiver kept per sender, and reads a report of drops back as an event; with
+    # `proto-text`, a keyer made from the schema's text as well as from its descriptor set.
     "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,proto-text|--test=instance_key_doors"
     "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback

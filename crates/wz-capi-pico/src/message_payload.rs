@@ -5,12 +5,15 @@
 //! and read field by field from C, under `.proto` files the program hands over when it runs.
 //!
 //! A host program that reads its deployment's message catalog and schema at run time has no code
-//! generated for its messages. It makes a SCHEMA once from its `.proto` files, then a PAYLOAD for a
+//! generated for its messages. It makes a SCHEMA once, from the `FileDescriptorSet` `protoc`
+//! compiled its `.proto` files into when it was built, or, in a build with `proto-text`, from the
+//! files' text itself, then a PAYLOAD for a
 //! message of the catalog, naming the message type of the schema the payload is; it sets values at
 //! field paths (`origin.x`, `path[2].y`), encodes the protobuf bytes to put on the message's key,
 //! decodes the bytes a sample carries and reads values back at paths. The paths, the values each
 //! field takes, what reads as absent and how the bytes are written are
-//! [`wz_app_frame::message_payload`]'s; the schema is read by the one `.proto` reader.
+//! [`wz_app_frame::message_payload`]'s; the schema is read by `wz-app-frame`'s descriptor reader,
+//! or its `.proto` text reader, into the same tables.
 //!
 //! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `message-payload` capability implies `unstable-api` and
@@ -51,6 +54,7 @@ use core::ptr::NonNull;
 
 use wz_app_frame::message_payload::{Entry, Given, Got, Payload, Refusal, Storage, Wanted};
 use wz_app_frame::proto_decode::SchemaSet;
+use wz_app_frame::proto_types::ProtoDiagnostic;
 use wz_app_frame::proto_write::Narrowing;
 
 use crate::abi::z_owned_string_t;
@@ -61,6 +65,7 @@ use crate::ffi::{guard_val, guarded};
 use crate::message_catalog::{
     wz_ext_loaned_message_catalog_t, wz_ext_message_catalog_entry, wz_ext_message_entry_t,
 };
+#[cfg(feature = "proto-text")]
 use crate::proto_file::{proto_files, wz_ext_proto_file_t};
 use crate::result::{
     ZResult, WZ_EXT_ERR_PAYLOAD_ABSENT, WZ_EXT_ERR_PAYLOAD_PATH, WZ_EXT_ERR_PAYLOAD_RANGE,
@@ -380,8 +385,66 @@ unsafe fn get_at<T: Copy>(
     })
 }
 
+/// Write a schema the reader read to `this_`, or its diagnostic to `refusal`.
+///
+/// # Safety
+/// `this_` is writable and holds the gravestone; `refusal` is null or writable.
+unsafe fn adopt_schema(
+    this_: *mut wz_ext_owned_payload_schema_t,
+    read: Result<SchemaSet, ProtoDiagnostic>,
+    refusal: *mut z_owned_string_t,
+) -> ZResult {
+    match read {
+        Ok(schema) => {
+            (*this_).handle = Box::into_raw(Box::new(Arc::new(schema))).cast::<c_void>();
+            Z_OK
+        }
+        Err(why) => {
+            write_refusal(refusal, &why.to_string());
+            Z_ERR_CONFIG_INVALID_VALUE
+        }
+    }
+}
+
+/// Read the `len` bytes at `bytes`, a `FileDescriptorSet` (what `protoc --include_imports -o`
+/// writes for the program's `.proto` files when it is built), into a schema, written to `this_`.
+///
+/// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
+/// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, why the bytes are refused, naming
+/// the file when the problem is in one.
+///
+/// Returns `Z_OK`; `Z_ERR_NULL` for a null `this_`, or a null `bytes` with a length;
+/// `_Z_ERR_CONFIG_INVALID_VALUE` for bytes the descriptor reader refuses.
+///
+/// # Safety
+/// `this_` is null or writable; `bytes` is null or readable for `len` bytes; `refusal` is null or
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_ext_payload_schema_from_descriptor_set(
+    this_: *mut wz_ext_owned_payload_schema_t,
+    bytes: *const u8,
+    len: usize,
+    refusal: *mut z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        clear_refusal(refusal);
+        if this_.is_null() {
+            return Z_ERR_NULL;
+        }
+        (*this_).handle = core::ptr::null_mut();
+        if bytes.is_null() && len != 0 {
+            return Z_ERR_NULL;
+        }
+        adopt_schema(
+            this_,
+            SchemaSet::from_descriptor_set(bytes_arg(bytes, len)),
+            refusal,
+        )
+    })
+}
+
 /// Read every `.proto` file of `files` (each with what it imports) into a schema, written to
-/// `this_`.
+/// `this_`. In a build with `proto-text`, which links the text reader.
 ///
 /// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
 /// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, the schema reader's diagnostic: the
@@ -394,6 +457,7 @@ unsafe fn get_at<T: Copy>(
 /// # Safety
 /// `this_` is null or writable; `files` is null or readable for `file_count` entries, each holding
 /// NUL-terminated C strings; `refusal` is null or writable.
+#[cfg(feature = "proto-text")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_payload_schema_new(
     this_: *mut wz_ext_owned_payload_schema_t,
@@ -411,15 +475,7 @@ pub unsafe extern "C" fn wz_ext_payload_schema_new(
             Ok(proto) => proto,
             Err(code) => return code,
         };
-        let schema = match SchemaSet::read(&proto) {
-            Ok(schema) => schema,
-            Err(why) => {
-                write_refusal(refusal, &why.to_string());
-                return Z_ERR_CONFIG_INVALID_VALUE;
-            }
-        };
-        (*this_).handle = Box::into_raw(Box::new(Arc::new(schema))).cast::<c_void>();
-        Z_OK
+        adopt_schema(this_, SchemaSet::read(&proto), refusal)
     })
 }
 

@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! Instance keys through the `wz_ext_instance_keyer_*` doors, driven as a C program drives them: a
-//! keyer made over the program's `.proto` text and a description, payloads indexed, the last value
+//! keyer made over the descriptor set `protoc` compiled the program's `.proto` file into (and,
+//! with `proto-text`, over the file's text) and a description, payloads indexed, the last value
 //! of each instance copied back out of the program's storage, and, with the end-to-end doors, a
 //! frame judged and a payload protected in the stream of its instance.
 //!
@@ -17,6 +18,7 @@
 use std::ffi::CString;
 
 use wz_capi_pico::instance_key::*;
+#[cfg(feature = "proto-text")]
 use wz_capi_pico::proto_file::wz_ext_proto_file_t;
 use wz_capi_pico::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
@@ -27,6 +29,8 @@ use wz_capi_pico::{
     z_string_loan, z_string_move,
 };
 
+/// The schema of these tests, as the program writes it in `door.proto`.
+#[cfg(feature = "proto-text")]
 const SCHEMA: &str = r#"
 syntax = "proto3";
 package syn.door;
@@ -36,6 +40,19 @@ message Reading {
   bytes body = 3;
 }
 "#;
+
+/// `SCHEMA` as `protoc --include_imports -o` compiles it from `door.proto`: the
+/// `FileDescriptorSet` a program builds into itself.
+const SCHEMA_SET: &[u8] = &[
+    0x0a, 0x70, 0x0a, 0x0a, 0x64, 0x6f, 0x6f, 0x72, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x08,
+    0x73, 0x79, 0x6e, 0x2e, 0x64, 0x6f, 0x6f, 0x72, 0x22, 0x50, 0x0a, 0x07, 0x52, 0x65, 0x61, 0x64,
+    0x69, 0x6e, 0x67, 0x12, 0x15, 0x0a, 0x03, 0x62, 0x61, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d,
+    0x48, 0x00, 0x52, 0x03, 0x62, 0x61, 0x79, 0x88, 0x01, 0x01, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x69,
+    0x6c, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x11, 0x52, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x12, 0x12,
+    0x0a, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6f,
+    0x64, 0x79, 0x42, 0x06, 0x0a, 0x04, 0x5f, 0x62, 0x61, 0x79, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74,
+    0x6f, 0x33,
+];
 
 /// Three bays and two tilts: six instances, the tilt varying fastest.
 const DESCRIPTION: &str = r#"{
@@ -89,11 +106,32 @@ unsafe fn take(out: &mut z_owned_string_t) -> String {
     text
 }
 
-/// A keyer over `schema` and `description`, with `options`.
+/// A keyer over the descriptor set `set` and `description`, with `options`.
 unsafe fn keyer(
-    schema: &str,
+    set: &[u8],
     description: &str,
     options: Option<&wz_ext_instance_keyer_options_t>,
+) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
+    let description = CString::new(description).unwrap();
+    let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+    let mut refusal: z_owned_string_t = std::mem::zeroed();
+    let options = options.map_or(std::ptr::null(), |o| o as *const _);
+    let rc = wz_ext_instance_keyer_from_descriptor_set(
+        &mut this,
+        set.as_ptr(),
+        set.len(),
+        description.as_ptr(),
+        options,
+        &mut refusal,
+    );
+    made_keyer(this, rc, &mut refusal)
+}
+
+/// A keyer over the text `schema` of `door.proto` and `description`, with no last values.
+#[cfg(feature = "proto-text")]
+unsafe fn keyer_text(
+    schema: &str,
+    description: &str,
 ) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
     let name = CString::new("door.proto").unwrap();
     let text = CString::new(schema).unwrap();
@@ -104,16 +142,25 @@ unsafe fn keyer(
     let description = CString::new(description).unwrap();
     let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
     let mut refusal: z_owned_string_t = std::mem::zeroed();
-    let options = options.map_or(std::ptr::null(), |o| o as *const _);
     let rc = wz_ext_instance_keyer_new(
         &mut this,
         files.as_ptr(),
         files.len(),
         description.as_ptr(),
-        options,
+        std::ptr::null(),
         &mut refusal,
     );
-    let reason = take(&mut refusal);
+    made_keyer(this, rc, &mut refusal)
+}
+
+/// The keyer a door wrote with `rc`, held to the door's contract: a keyer and no refusal, or the
+/// gravestone and the code with its reason.
+unsafe fn made_keyer(
+    this: wz_ext_owned_instance_keyer_t,
+    rc: ZResult,
+    refusal: &mut z_owned_string_t,
+) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
+    let reason = take(refusal);
     if rc == Z_OK {
         assert!(
             reason.is_empty(),
@@ -180,7 +227,7 @@ fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_progr
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 16;
-        let k = keyer(SCHEMA, DESCRIPTION, Some(&options)).expect("made");
+        let k = keyer(SCHEMA_SET, DESCRIPTION, Some(&options)).expect("made");
         let mut instances = 0usize;
         assert_eq!(
             wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&k), &mut instances),
@@ -230,7 +277,7 @@ fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_progr
 #[test]
 fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
     unsafe {
-        let k = keyer(SCHEMA, DESCRIPTION, None).expect("made");
+        let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         let outside = index(&k, &reading(30, 4, b""), 5_000);
         assert_eq!(outside.status, WZ_EXT_INSTANCE_KEY_NOT_LISTED);
         assert_eq!(outside.field, 1, "the tilt");
@@ -297,12 +344,16 @@ fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
 #[test]
 fn a_keyer_is_refused_by_a_code_and_a_reason() {
     unsafe {
-        let (rc, reason) = keyer("message {", DESCRIPTION, None).unwrap_err();
+        let (rc, reason) = keyer(&[0xFF, 0xFE], DESCRIPTION, None).unwrap_err();
         assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
+        assert!(reason.starts_with("schema"), "{reason}");
+        let (rc, reason) =
+            keyer(&SCHEMA_SET[..SCHEMA_SET.len() - 1], DESCRIPTION, None).unwrap_err();
+        assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE, "a descriptor set cut short");
         assert!(reason.starts_with("schema"), "{reason}");
 
         let (rc, reason) = keyer(
-            SCHEMA,
+            SCHEMA_SET,
             r#"{"message": "syn.door.Nothing", "fields": []}"#,
             None,
         )
@@ -311,7 +362,7 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
         assert!(reason.starts_with("description: /message"), "{reason}");
 
         let (rc, reason) = keyer(
-            SCHEMA,
+            SCHEMA_SET,
             r#"{"message": "syn.door.Reading", "fields": [{"path": "body", "values": [1]}]}"#,
             None,
         )
@@ -328,20 +379,22 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 4;
-        let (rc, reason) = keyer(SCHEMA, DESCRIPTION, Some(&options)).unwrap_err();
+        let (rc, reason) = keyer(SCHEMA_SET, DESCRIPTION, Some(&options)).unwrap_err();
         assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
         assert!(reason.starts_with("storage"), "{reason}");
 
         options.storage = std::ptr::null_mut();
         assert_eq!(
-            keyer(SCHEMA, DESCRIPTION, Some(&options)).unwrap_err().0,
+            keyer(SCHEMA_SET, DESCRIPTION, Some(&options))
+                .unwrap_err()
+                .0,
             Z_ERR_NULL
         );
 
         let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
         let description = CString::new(DESCRIPTION).unwrap();
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            wz_ext_instance_keyer_from_descriptor_set(
                 &mut this,
                 std::ptr::null(),
                 1,
@@ -350,25 +403,32 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
                 std::ptr::null_mut()
             ),
             Z_ERR_NULL,
-            "a null file list with a count"
+            "null bytes with a length"
+        );
+        assert_eq!(
+            wz_ext_instance_keyer_from_descriptor_set(
+                &mut this,
+                SCHEMA_SET.as_ptr(),
+                SCHEMA_SET.len(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            Z_ERR_NULL,
+            "no description"
         );
         let bad = [0xFFu8, 0];
-        let name = CString::new("door.proto").unwrap();
-        let files = [wz_ext_proto_file_t {
-            name: name.as_ptr(),
-            text: bad.as_ptr().cast(),
-        }];
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            wz_ext_instance_keyer_from_descriptor_set(
                 &mut this,
-                files.as_ptr(),
-                1,
-                description.as_ptr(),
+                SCHEMA_SET.as_ptr(),
+                SCHEMA_SET.len(),
+                bad.as_ptr().cast(),
                 std::ptr::null(),
                 std::ptr::null_mut()
             ),
             Z_EINVAL,
-            "a file that is not UTF-8"
+            "a description that is not UTF-8"
         );
         assert!(!wz_ext_internal_instance_keyer_check(&this));
 
@@ -401,7 +461,7 @@ fn the_last_value_of_an_instance_is_set_by_the_program() {
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 4;
-        let k = keyer(SCHEMA, DESCRIPTION, Some(&options)).expect("made");
+        let k = keyer(SCHEMA_SET, DESCRIPTION, Some(&options)).expect("made");
         let loan = wz_ext_instance_keyer_loan(&k);
         assert_eq!(
             wz_ext_instance_keyer_set_last(loan, 0, b"dflt".as_ptr(), 4),
@@ -423,7 +483,7 @@ fn the_last_value_of_an_instance_is_set_by_the_program() {
         );
         drop_keyer(k);
 
-        let without = keyer(SCHEMA, DESCRIPTION, None).expect("made");
+        let without = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         assert_eq!(
             wz_ext_instance_keyer_set_last(
                 wz_ext_instance_keyer_loan(&without),
@@ -444,7 +504,7 @@ fn the_last_value_of_an_instance_is_set_by_the_program() {
 fn a_report_of_drops_is_an_event_of_the_nodes_log() {
     use wz_capi_pico::event_log::*;
     unsafe {
-        let k = keyer(SCHEMA, DESCRIPTION, None).expect("made");
+        let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         // A tilt in no list, reported at once as the first drop.
         let key = index(&k, &reading(12, 9, b""), 0);
         assert_eq!(key.reported, 1);
@@ -593,8 +653,8 @@ mod streams {
     #[test]
     fn the_receiver_judges_two_instances_apart_through_the_stream_number() {
         unsafe {
-            let tx_keyer = keyer(SCHEMA, DESCRIPTION, None).expect("made");
-            let rx_keyer = keyer(SCHEMA, DESCRIPTION, None).expect("made");
+            let tx_keyer = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
+            let rx_keyer = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
             let mut tx = sender(6);
             let mut rx = receiver(&indexed(6)).expect("made");
             let first = reading(12, -3, b"a");
@@ -683,7 +743,7 @@ mod streams {
     #[test]
     fn a_receiver_kept_per_sender_is_refused_by_the_judging_door() {
         unsafe {
-            let k = keyer(SCHEMA, DESCRIPTION, None).expect("made");
+            let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
             let mut tx = sender(6);
             let (_, frame, _, _) = protect(&k, &tx, &reading(44, 5, b""));
             let mut options = indexed(6);
@@ -709,5 +769,62 @@ mod streams {
             wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut tx));
             drop_keyer(k);
         }
+    }
+}
+
+// The text door, in a build that links the text reader: a keyer over the file the descriptor set
+// was compiled from, which makes the same instances, and the refusals of its text.
+#[cfg(feature = "proto-text")]
+#[test]
+fn a_keyer_made_from_the_schemas_text_is_the_compiled_ones() {
+    unsafe {
+        let k = keyer_text(SCHEMA, DESCRIPTION).expect("made");
+        let mut instances = 0usize;
+        assert_eq!(
+            wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&k), &mut instances),
+            Z_OK
+        );
+        assert_eq!(instances, 6);
+        let key = index(&k, &reading(44, 5, b""), 0);
+        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 5));
+        drop_keyer(k);
+
+        let (rc, reason) = keyer_text("message {", DESCRIPTION).unwrap_err();
+        assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
+        assert!(reason.starts_with("schema"), "{reason}");
+
+        let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+        let description = CString::new(DESCRIPTION).unwrap();
+        assert_eq!(
+            wz_ext_instance_keyer_new(
+                &mut this,
+                std::ptr::null(),
+                1,
+                description.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            Z_ERR_NULL,
+            "a null file list with a count"
+        );
+        let bad = [0xFFu8, 0];
+        let name = CString::new("door.proto").unwrap();
+        let files = [wz_ext_proto_file_t {
+            name: name.as_ptr(),
+            text: bad.as_ptr().cast(),
+        }];
+        assert_eq!(
+            wz_ext_instance_keyer_new(
+                &mut this,
+                files.as_ptr(),
+                1,
+                description.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            Z_EINVAL,
+            "a file that is not UTF-8"
+        );
+        assert!(!wz_ext_internal_instance_keyer_check(&this));
     }
 }
