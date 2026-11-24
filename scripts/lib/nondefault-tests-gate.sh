@@ -688,10 +688,11 @@ transport-link-unixpipe,transport-link-ws|"
     # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
     # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
     "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
-    # And with the lent-only receive the C library's final build selects (`rx-lent-only`): a
-    # member's datagram is read where it lies and its records lent, its declarations scoped by the
-    # member and its departure's retractions lent, and no table is handed an owned record.
-    "wz-capi-coop|hook|app-transport,group,rx-lent-only|tests::group::"
+    # And with the lent-only receive the C library's final build selects (the session core's
+    # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
+    # declarations scoped by the member and its departure's retractions lent, and no table is handed
+    # an owned record.
+    "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
@@ -713,13 +714,14 @@ transport-link-unixpipe,transport-link-ws|"
     # receive): a Push and a get's reply read where the link's buffer holds them reach the
     # subscriber and the get. `query` is the get's.
     "wz-capi-coop|hook|query|tests::in_place::"
-    # The same with the lent-only receive the C library's final build selects (`rx-lent-only`): what
-    # the engine's links carry is delivered lent, with no owned projection to fall back on.
-    "wz-capi-coop|hook|query,rx-lent-only|tests::in_place::"
-    # The crate's whole suite in the C library's final receive and send (`rx-lent-only` with
-    # `tx-lend-only`): the router stand-in lends its links send slots, so a lend-only session
-    # answers it; 130 passed on a build host (2026-11-23).
-    "wz-capi-coop|hook|rx-lent-only,tx-lend-only|"
+    # The same with the lent-only receive the C library's final build selects (the session core's
+    # `rx-lent-only`): what the engine's links carry is delivered lent, with no owned projection to
+    # fall back on.
+    "wz-capi-coop|hook|query,wz-session-core/rx-lent-only|tests::in_place::"
+    # The crate's whole suite in the C library's final receive and send (the session core's
+    # `rx-lent-only` with `tx-lend-only`): the router stand-in lends its links send slots, so a
+    # lend-only session answers it; 130 passed on a build host (2026-11-23).
+    "wz-capi-coop|hook|wz-session-core/rx-lent-only,tx-lend-only|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

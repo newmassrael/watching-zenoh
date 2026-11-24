@@ -435,24 +435,7 @@ pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
 }
 
 /// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
-/// one place that open decides them. The snapshot the ABI resolved and states in the config
-/// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
-/// handed can put in it (`round::holding_a_read`).
-#[cfg(not(feature = "rx-lent-only"))]
-pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
-    crate::round::holding_a_read::<
-        { caps::PICO_UNICAST_BATCH_BYTES },
-        { caps::PICO_FRAG_MAX_BYTES },
-        { caps::MAX_KEYEXPR_BYTES },
-        { caps::MAX_SUBSCRIPTIONS },
-        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-    >(config.limits)
-}
-
-/// The session limits a session [`CoopEngine::open`] opens from `config` holds its tables to: the
-/// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is, in a
-/// build that keeps no delivery area to lengthen (`rx-lent-only`).
-#[cfg(feature = "rx-lent-only")]
+/// snapshot the ABI resolved and states in the config ([`CoopConfig::limits`]), as it is.
 pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     config.limits
 }
@@ -732,12 +715,9 @@ struct SessionLent {
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the delivery lane's area, the engine's record of the session's own
-/// declarations, the key arena, and the ends of its legs, their callbacks and the session's note
-/// of each leg pending.
+/// (`SessionRows::lent_from`): the engine's record of the session's own declarations, the key
+/// arena, and the ends of its legs, their callbacks and the session's note of each leg pending.
 struct StateTables {
-    #[cfg(not(feature = "rx-lent-only"))]
-    lane: LentByteCells,
     filters: FilterRows,
     interests: InterestRows,
     matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
@@ -760,8 +740,6 @@ impl SessionRows {
         #[cfg(feature = "query")]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            #[cfg(not(feature = "rx-lent-only"))]
-            lane: lend.byte_cells(self.lane_bytes(), 1),
             filters: lend.table(entities.filters().unwrap_or(usize::MAX)),
             interests: lend.table(entities.interests().unwrap_or(usize::MAX)),
             matches: lend.table(entities.matching_listeners),
@@ -808,8 +786,6 @@ fn lend_session(
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
     let StateTables {
-        #[cfg(not(feature = "rx-lent-only"))]
-        lane,
         filters,
         interests,
         matches,
@@ -830,19 +806,12 @@ fn lend_session(
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
-    #[cfg(not(feature = "rx-lent-only"))]
-    let claimed = plan.claim_lane_and_handle(lane, handle)?;
-    #[cfg(feature = "rx-lent-only")]
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
         .map(|cells| CacheSpan::claimed(cells, plan.session().cache_bytes()))
         .transpose()?;
     let ClaimedPlaces {
-        #[cfg(not(feature = "rx-lent-only"))]
-        lane_area,
-        #[cfg(not(feature = "rx-lent-only"))]
-        lane_bytes,
         handle: handle_place,
     } = claimed;
     let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
@@ -860,11 +829,6 @@ fn lend_session(
         held_replies,
         LegRows::over(leg_rows),
     ));
-    // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
-    // and given back only when the session is let go, after its last delivery; the round's
-    // tables are let go of before it (`Round::let_go`, in the engine's drop).
-    #[cfg(not(feature = "rx-lent-only"))]
-    let round_rows = unsafe { round_rows.writing_into(lane_area, lane_bytes) };
     let mut samples = Round::shared_over(round_rows);
     // The round is not shared yet: it reads the keys a peer's aliases keep in the session's key
     // arena where they lie.
@@ -2900,17 +2864,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let admitted = Admitted::default();
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it.
-        #[cfg(not(feature = "rx-lent-only"))]
-        let record_room = crate::round::read_room::<
-            { caps::PICO_FRAG_MAX_BYTES },
-            { caps::MAX_KEYEXPR_BYTES },
-            { caps::MAX_SUBSCRIPTIONS },
-            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-        >(
-            usize::from(self.config.batch_size),
-            &resolve_limits(&self.config),
-        );
-        #[cfg(feature = "rx-lent-only")]
         let record_room = crate::round::read_room::<
             { caps::MAX_SUBSCRIPTIONS },
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
@@ -3620,17 +3573,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the round of deliveries has the
         // room one record of the group's batch can take (decision Q4), as a link is.
-        #[cfg(not(feature = "rx-lent-only"))]
-        let record_room = crate::round::read_room::<
-            { caps::PICO_FRAG_MAX_BYTES },
-            { caps::MAX_KEYEXPR_BYTES },
-            { caps::MAX_SUBSCRIPTIONS },
-            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
-        >(
-            usize::from(params.batch_size),
-            &resolve_limits(&self.config),
-        );
-        #[cfg(feature = "rx-lent-only")]
         let record_room = crate::round::read_room::<
             { caps::MAX_SUBSCRIPTIONS },
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
@@ -3895,8 +3837,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn retract_owed(&mut self) {
         let round = Arc::clone(&self.lane);
         let record_room = crate::round::ReadRoom {
-            #[cfg(not(feature = "rx-lent-only"))]
-            bytes: 0,
             // A token's record owes a callback to each liveliness subscriber the session admits.
             callbacks: crate::round::session_liveliness::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
                 &resolve_limits(&self.config),
