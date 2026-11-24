@@ -328,7 +328,8 @@ where
 /// it accepts on is a datagram link (a stream listener is not written yet). Each link allocates
 /// its receive buffer when it opens, a datagram link's sized to the largest datagram and a stream
 /// link's to the largest batch with its length, and lends the session `tx_slots` buffers of
-/// `tx_capacity` bytes to encode its frames into (by default one, as long as its receive buffer). A session that lends the stack its tables
+/// `tx_capacity` bytes to encode its frames into, at least the slots its session needs and by default
+/// each as long as its receive buffer (`HeapTx::for_link`). A session that lends the stack its tables
 /// ([`SessionLinks::lend_buffers`]) has every link claim its buffers there instead, and none
 /// allocate. A multicast group is joined by the host's joiner `G` ([`IpLinks::with_groups`]);
 /// links given none join no group.
@@ -522,8 +523,8 @@ where
     }
 
     /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into, as
-    /// a datagram stack's do: `bytes` is the batch the sessions negotiate, and a session that
-    /// batches holds one slot open while it encodes into another, so it needs two.
+    /// a datagram stack's do: `bytes` is the batch the sessions negotiate, and a link holds at
+    /// least the slots its session needs whatever `slots` says (`HeapTx::for_link`).
     #[must_use]
     pub fn with_tx_buffers(mut self, slots: usize, bytes: usize) -> Self {
         self.shape.tx_slots = slots;

@@ -44,8 +44,8 @@ pub struct ZephyrLinks {
 
 impl ZephyrLinks {
     /// Links bound on the node's own address `local`, each with a receive
-    /// buffer that holds the largest UDP datagram and one buffer as long to
-    /// encode frames into.
+    /// buffer that holds the largest UDP datagram and the buffers its session
+    /// needs to encode frames into, each as long.
     pub fn new(local: impl Into<IpAddr>) -> Self {
         Self {
             local: local.into(),
@@ -58,8 +58,8 @@ impl ZephyrLinks {
     /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into,
     /// allocated once with the link: a frame then costs no allocation, and the link states the
     /// largest frame it carries (these `bytes`) and the largest batch it receives (its receive
-    /// buffer). `bytes` is the batch the sessions negotiate; a session that batches holds one slot
-    /// open while it encodes the next message into another, so it needs two.
+    /// buffer). `bytes` is the batch the sessions negotiate; a link holds at least the slots its
+    /// session needs whatever `slots` says (`HeapTx::for_link`).
     pub fn with_tx_buffers(mut self, slots: usize, bytes: usize) -> Self {
         self.tx_slots = slots;
         self.tx_capacity = bytes;

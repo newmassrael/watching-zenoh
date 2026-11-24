@@ -44,7 +44,7 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEnds, LinkRoom, LinkSendOutcome, LostCause, RoomAnswer,
-    RoomWait, TxSlot, TxSlotGrant, DEFAULT_LINK_MTU, STREAM_BATCH_LENGTH_BYTES,
+    RoomWait, TxSlot, TxSlotGrant, DEFAULT_LINK_MTU, SESSION_TX_SLOTS, STREAM_BATCH_LENGTH_BYTES,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -492,7 +492,7 @@ enum Front {
 }
 
 /// The most frames a stream link owes its stream at once: one for each slot its book can lend.
-const OWED: usize = u8::BITS as usize;
+const OWED: usize = crate::link_storage::LENT_SLOTS;
 
 /// How long a service turn waits for room to write, in microseconds.
 const SERVICE_WAIT_US: u64 = SERVICE_WAIT_MS as u64 * 1_000;
@@ -949,7 +949,17 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
     // bytes takes the steps of a lent one, and what the stream does not take of it is owed in its
     // slot as theirs is.
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
-        crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT)
+        let sent = crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT);
+        // A link that owes its stream nothing has every slot out with the session, which holds one
+        // for each of its conduits at most: one that lends the slots its session needs has one
+        // more for this frame.
+        debug_assert!(
+            sent != LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+                || self.owes()
+                || self.tx.slots() < SESSION_TX_SLOTS,
+            "a stream link that lends its session's slots and owes nothing had none for a frame"
+        );
+        sent
     }
 
     // The room is the stream's: the session asks before it builds a frame, and a stream that
@@ -2777,6 +2787,69 @@ mod tests {
                 actions.take_congestion_close(),
                 "the session's close is staged for its loop"
             );
+        }
+
+        /// Two conduits alternate reliable messages in one window over a stream link that holds
+        /// the slots its session needs (`HeapTx::for_link`): every message reaches the stream
+        /// once, each conduit's in the order it was sent, as before the link sent its bytes
+        /// through its slots. Turned red by a link that holds fewer slots than its session needs
+        /// (`HeapTx::for_link` without its `max`), whose frames are refused for want of one.
+        #[cfg(all(feature = "transport-qos", feature = "transport-batching"))]
+        #[test]
+        fn two_conduits_alternating_on_a_stream_lose_no_message() {
+            use wz_session_core::link::STREAM_BATCH_LENGTH_BYTES;
+            let runtime = CoopRuntime::new(Stopped);
+            let link = crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
+                Pipe::default(),
+                STREAM_RX_CAPACITY,
+                HeapTx::for_link(0, 0, 1024 + STREAM_BATCH_LENGTH_BYTES),
+            ));
+            let sink = link.clone().into_sink();
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
+            assert!(
+                actions.set_qos_offer(true),
+                "the session carries a conduit for each priority"
+            );
+            let payloads: Vec<Vec<u8>> = (0..6u8).map(|n| std::vec![0xE0 | n; 4]).collect();
+            actions.batch_start().expect("a window opens");
+            for (n, payload) in payloads.iter().enumerate() {
+                let priority = if n % 2 == 0 {
+                    Priority::Data
+                } else {
+                    Priority::DataHigh
+                };
+                actions
+                    .send_push_literal_qos("home/two", payload, true, priority)
+                    .expect("a push");
+            }
+            actions.batch_stop().expect("the window closes");
+            let wire = link.socket.writes.borrow().concat();
+            let at = |payload: &[u8]| {
+                wire.windows(payload.len())
+                    .position(|bytes| bytes == payload)
+            };
+            for payload in &payloads {
+                assert_eq!(
+                    wire.windows(payload.len())
+                        .filter(|bytes| *bytes == payload.as_slice())
+                        .count(),
+                    1,
+                    "{payload:?} reaches the stream once"
+                );
+            }
+            for lane in 0..2 {
+                let order: Vec<usize> = payloads
+                    .iter()
+                    .skip(lane)
+                    .step_by(2)
+                    .filter_map(|payload| at(payload.as_slice()))
+                    .collect();
+                assert_eq!(order.len(), 3, "conduit {lane} sent all three");
+                assert!(
+                    order.windows(2).all(|pair| pair[0] < pair[1]),
+                    "conduit {lane} leaves in the order it was sent: {order:?}"
+                );
+            }
         }
     }
 }

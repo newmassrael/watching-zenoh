@@ -355,7 +355,8 @@ fn reply_key_of(
 /// core the engine under test is built with, so a lend-only build (`tx-lend-only`) gives it the
 /// send that has no heap frame to fall back on: a frame with no slot free is not sent, the InitAck
 /// included. Two, because the stand-in's session batches and holds one slot open while it encodes
-/// into another; a link given none holds one.
+/// into another; a link holds at least the slots its session needs whatever it is given
+/// (`SESSION_TX_SLOTS`).
 const ROUTER_TX_SLOTS: usize = 2;
 
 /// The host's links the router stand-in accepts on: each lends its session [`ROUTER_TX_SLOTS`]
@@ -914,7 +915,8 @@ fn until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) {
 
 /// The router stand-in's link lends its session two slots of the stand-in's whole batch, which a
 /// lend-only session that batches needs. The CONTROL is the host's links as they come, which lend
-/// one slot as long as their receive buffer and refuse a second while it is out.
+/// the slots their session needs (`SESSION_TX_SLOTS`), each as long as their receive buffer, and
+/// none past them while those are out.
 #[test]
 fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
     use wz_session_core::qos::Priority;
@@ -940,21 +942,27 @@ fn the_router_stand_ins_link_lends_its_session_a_slot_of_its_batch() {
     let OpenedLink { sink: plain, .. } = PosixLinks::new(LOOPBACK, PosixTcpDial)
         .open_acceptor(0)
         .expect("bind a plain end");
-    let one = plain
-        .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
-        .expect("CONTROL: a link given no storage lends one slot");
-    assert_eq!(
-        plain.tx_slot_storage(one.slot).1,
-        plain.link_rx_capacity(),
-        "CONTROL: as long as its receive buffer"
-    );
+    let held = [(); wz_session_core::link::SESSION_TX_SLOTS].map(|()| {
+        plain
+            .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
+            .expect("CONTROL: a link given no storage lends its session's slots")
+    });
+    for grant in &held {
+        assert_eq!(
+            plain.tx_slot_storage(grant.slot).1,
+            plain.link_rx_capacity(),
+            "CONTROL: each as long as its receive buffer"
+        );
+    }
     assert!(
         plain
             .tx_slot_acquire(usize::from(batch), Priority::DEFAULT)
             .is_none(),
-        "CONTROL: and no second while it is out"
+        "CONTROL: and none past them while they are out"
     );
-    plain.tx_slot_abort(one.slot);
+    for grant in held {
+        plain.tx_slot_abort(grant.slot);
+    }
 }
 
 /// A session opens to the router, knows it as a router, declares a subscriber the router sees,

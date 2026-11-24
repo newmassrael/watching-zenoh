@@ -54,7 +54,7 @@ use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEnds, LinkSendOutcome, TxSlot, TxSlotGrant,
-    DEFAULT_LINK_MTU,
+    DEFAULT_LINK_MTU, SESSION_TX_SLOTS,
 };
 #[cfg(feature = "session-unicast-accept")]
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
@@ -385,7 +385,8 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     /// node that runs several links at once sizes to the batch it negotiates,
     /// rather than to the largest datagram UDP can carry ([`UDP_RX_CAPACITY`]).
     /// A datagram longer than that is truncated by the stack, which the session
-    /// reads as a bad frame.
+    /// reads as a bad frame. It lends its session the slots it needs, each of the
+    /// receive buffer's length ([`HeapTx::for_link`]).
     pub fn acceptor_with_capacity(socket: S, rx_capacity: usize) -> Self {
         Self::acceptor_in(
             socket,
@@ -593,7 +594,16 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
     // The bytes are copied into a slot the link lends and sent as one, so the socket's send has
     // one caller. UDP is unreliable; the session's reliable channel recovers a drop.
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
-        crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT)
+        let sent = crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT);
+        // A datagram link keeps no slot past its send, so every slot out is with the session,
+        // which holds one for each of its conduits at most: a link that lends the slots its
+        // session needs has one more for this frame.
+        debug_assert!(
+            sent != LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+                || self.tx.slots() < SESSION_TX_SLOTS,
+            "a datagram link that lends its session's slots had none for a frame"
+        );
+        sent
     }
 
     // The session encodes a frame straight into the driver's own storage, and the socket reads it
@@ -2348,19 +2358,27 @@ mod tests {
         );
     }
 
+    /// A driver given no storage lends its session the slots it needs, each as long as what its
+    /// buffer receives, and none past them while they are out. Turned red by a driver that lends
+    /// fewer (`HeapTx::for_link` without its `max`).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
-    fn a_driver_given_no_storage_lends_one_slot_of_what_its_buffer_receives() {
+    fn a_driver_given_no_storage_lends_its_sessions_slots_of_what_its_buffer_receives() {
         let link = UdpDriver::acceptor_with_capacity(Loop::default(), 64);
-        let grant = link
-            .tx_slot_acquire(10, Priority::Data)
-            .expect("the one slot");
-        assert_eq!(link.tx_slot_storage(grant.slot).1, 64);
+        let held = [(); SESSION_TX_SLOTS].map(|()| {
+            link.tx_slot_acquire(10, Priority::Data)
+                .expect("a slot its session needs")
+        });
+        for grant in &held {
+            assert_eq!(link.tx_slot_storage(grant.slot).1, 64);
+        }
         assert!(
             link.tx_slot_acquire(10, Priority::Data).is_none(),
-            "no second while it is out"
+            "none past them while they are out"
         );
-        link.tx_slot_abort(grant.slot);
+        for grant in held {
+            link.tx_slot_abort(grant.slot);
+        }
         assert_eq!(link.link_mtu(), 64, "the bound is the slot");
         assert_eq!(
             link.link_rx_capacity(),
