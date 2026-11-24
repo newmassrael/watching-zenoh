@@ -1377,13 +1377,14 @@ fn release_keyexpr<P: Storage>(
     keyexprs: &mut Keyexprs<P>,
     handle: KeyexprHandle,
 ) -> Option<ExprId> {
-    let row = keyexprs.get_mut(handle)?;
+    let mut entry = keyexprs.entry(handle)?;
+    let row = entry.get_mut()?;
     row.holds = row.holds.saturating_sub(1);
     if row.holds > 0 {
         return None;
     }
     let id = row.id;
-    let _ = keyexprs.remove(handle);
+    let _ = entry.remove();
     Some(id)
 }
 
@@ -1396,15 +1397,16 @@ fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
     handle: Handle<K>,
     hand: impl FnOnce(R) -> T,
 ) -> Option<Undeclared<T>> {
-    let (id, prefix, idle) = table
-        .get(handle)
+    let mut entry = table.entry(handle)?;
+    let (id, prefix, idle) = entry
+        .get()
         .map(|row| (row.entity_id(), row.key_prefix(), row.retire()))?;
     // A row a call of which runs is kept, retired, for the call that ends last to let go of
     // (`release_*`).
-    if !idle {
-        let _held = table.pin(handle)?;
+    if !(idle || entry.pin()) {
+        return None;
     }
-    let removal = table.remove(handle)?;
+    let removal = entry.remove()?;
     let keyexpr = prefix.and_then(|prefix| release_keyexpr(keyexprs, prefix));
     Some(Undeclared {
         id,
@@ -1688,8 +1690,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// on the wire. An entity that named its key by it names it whole from here on
     /// ([`Self::wire_of`]).
     pub fn retract_keyexpr(&mut self, handle: KeyexprHandle) -> Option<ExprId> {
-        let id = self.keyexprs.get(handle)?.id;
-        let _ = self.keyexprs.remove(handle);
+        let entry = self.keyexprs.entry(handle)?;
+        let id = entry.get()?.id;
+        let _ = entry.remove();
         Some(id)
     }
 
@@ -2052,14 +2055,14 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Let go of one hold of the Interest `handle` names: its id when that was the last, for its
     /// Final to go on the wire.
     fn release_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
-        let interests = self.kept_interests_mut()?;
-        let row = interests.get_mut(handle)?;
+        let mut entry = self.kept_interests_mut()?.entry(handle)?;
+        let row = entry.get_mut()?;
         row.holds = row.holds.saturating_sub(1);
         if row.holds > 0 {
             return None;
         }
         let id = row.id;
-        let _ = interests.remove(handle);
+        let _ = entry.remove();
         Some(id)
     }
 
@@ -2322,11 +2325,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: MatchingListenerHandle,
     ) -> Option<Removal<Matching<F>>> {
-        let matching = self.kept_matching_mut()?;
-        if !matching.get(handle)?.callback.retire() {
-            let _held = matching.pin(handle)?;
+        let mut entry = self.kept_matching_mut()?.entry(handle)?;
+        if !(entry.get()?.callback.retire() || entry.pin()) {
+            return None;
         }
-        matching.remove(handle)
+        entry.remove()
     }
 
     /// The key a matching listener reads: its Interest's, or its filter's when that asks nothing.
@@ -2590,10 +2593,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.held.forget(handle);
         let gets =
             <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)?;
-        if !gets.get(handle)?.callback.retire() {
-            let _held = gets.pin(handle)?;
+        let mut entry = gets.entry(handle)?;
+        if !(entry.get()?.callback.retire() || entry.pin()) {
+            return None;
         }
-        gets.remove(handle)
+        entry.remove()
     }
 
     #[cfg(feature = "storage-profile")]
