@@ -420,52 +420,9 @@ where
     }
 }
 
-/// The bytes the codec runtime writes `value` in as a VLE (`write_vle_u64`): seven data bits a
-/// byte for the first eight, and a ninth that carries its eight bits whole. A `u16` or a `u32`
-/// takes the bytes of its `u64` form, as [`TxSink`] writes it. Counted from the value's width,
-/// so a caller has no loop to unroll to the widest count.
-pub const fn vle_len(value: u64) -> usize {
-    let bits = u64::BITS - value.leading_zeros();
-    let len = (bits + 6) / 7;
-    if len == 0 {
-        1
-    } else if len > 9 {
-        9
-    } else {
-        len as usize
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The count is the bytes the sink writes, at each width a VLE changes at and at the ninth
-    /// byte that carries eight bits whole. Turned red by a count that runs past nine bytes or
-    /// counts zero as no byte.
-    #[test]
-    fn the_vle_length_is_the_bytes_the_sink_writes() {
-        let mut compared = 0usize;
-        for value in [
-            0u64,
-            0x7F,
-            0x80,
-            0x3FFF,
-            0x4000,
-            u64::from(u16::MAX),
-            u64::from(u32::MAX),
-            (1 << 56) - 1,
-            1 << 56,
-            u64::MAX,
-        ] {
-            let mut storage = [0u8; 16];
-            let mut buf = SliceTxBuf::new(&mut storage);
-            TxSink::over(&mut buf).write_vle_u64(value).expect("room");
-            assert_eq!(vle_len(value), buf.len(), "{value:#x}");
-            compared += 1;
-        }
-        assert_eq!(compared, 10);
-    }
 
     #[test]
     fn a_slice_buffer_is_a_prefix_of_what_was_written() {

@@ -899,26 +899,16 @@ pub fn encode_frame_with_push_qos(
 // reassembly dispatcher requires the chunk SNs to be consecutive (it aborts a
 // chain on `fragment.ooo`), so the caller draws the SN block atomically.
 
-/// Base-128 VLE byte width of `sn` — the offset math the fragmentation
-/// body-slice uses to locate a FRAME's network-message tail behind the
-/// 1-byte header + `VLE(sn)` prefix that [`encode_frame_envelope`] wrote.
-/// Mirrors the encoder's emit loop exactly; it IS the wire format, not
-/// consumer-tunable logic.
-///
-/// cfg = fragmentation only (R311ko): the codec-agnostic
-/// [`multicast_frame_or_fragments`] body-slice joined the unicast
-/// `emit_frame_or_fragments` as a consumer, so the former wire-emit
-/// codec union (R311jq) no longer bounds where the symbol is live —
-/// any fragmentation build slices.
+// Base-128 VLE byte width of an SN: the offset math the fragmentation body-slice uses to locate
+// a FRAME's network-message tail behind the 1-byte header + `VLE(sn)` prefix that
+// `encode_frame_envelope` wrote, by the codec crate's one count of the encoder's bytes.
+//
+// cfg = fragmentation only (R311ko): the codec-agnostic `multicast_frame_or_fragments`
+// body-slice joined the unicast `emit_frame_or_fragments` as a consumer, so the former
+// wire-emit codec union (R311jq) no longer bounds where the symbol is live: any fragmentation
+// build slices.
 #[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
-fn vle_width(sn: u64) -> usize {
-    let (mut width, mut v) = (1usize, sn);
-    while v >= 0x80 {
-        v >>= 7;
-        width = width.saturating_add(1);
-    }
-    width
-}
+use wz_codecs::vle::zint_len as vle_width;
 
 /// R311kq — the network-message body of an already-encoded outbound
 /// `T_MID_FRAME`: the tail behind the 1-byte header + `VLE(sn)` prefix

@@ -34,13 +34,20 @@ pub const VLE_LEN: usize = 9;
 
 /// How many bytes the VLE encoding of `v` occupies (pico `_z_zint_len`,
 /// `src/protocol/codec.c:100-130`).
-pub fn zint_len(v: u64) -> usize {
-    for n in 1..=8u32 {
-        if v >> (7 * n) == 0 {
-            return n as usize;
-        }
+///
+/// Counted from the value's width with no loop: a ladder of a constant number of rungs is unrolled
+/// at each caller, and this count is the one every writer of the session core sizes a VLE by. The
+/// clamp is the ninth rung, which takes the last eight bits whole.
+pub const fn zint_len(v: u64) -> usize {
+    let bits = u64::BITS - v.leading_zeros();
+    let len = (bits + 6) / 7;
+    if len == 0 {
+        1
+    } else if len as usize > VLE_LEN {
+        VLE_LEN
+    } else {
+        len as usize
     }
-    VLE_LEN
 }
 
 /// Write the VLE encoding of `v` into `out`, returning the byte count.

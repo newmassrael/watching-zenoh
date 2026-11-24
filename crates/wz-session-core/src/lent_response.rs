@@ -49,8 +49,8 @@ use crate::lent_control::with_z;
 use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
 use crate::sample::QosLevel;
 // Every integer here is written as the codec runtime writes a `u64`: a `u16` or a `u32` ends on
-// its own data before the narrower width's cap could bind, so one rule serves every width.
-use crate::tx_buf::vle_len;
+// its own data before the narrower width's cap could bind, so one count serves every width.
+use wz_codecs::vle::zint_len as vle_len;
 
 /// The `Response` envelope header of a reply that names its keyexpr inline:
 /// `N_MID_RESPONSE | N` (a suffix follows the id). The `M` flag derives from the

@@ -17,6 +17,7 @@
 //! last envelope extension, written by its one writer (`ts_stack::TsStack::write`).
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
+use wz_codecs::vle::zint_len as vle_len;
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{body_eid, ext_identity, EXT_ENC_Z64, EXT_FLAG_Z};
@@ -25,7 +26,6 @@ use crate::query_parts::{GetParts, QueryParts};
 use crate::reply_stage::EncodingParts;
 use crate::request_routing_context::TIMEOUT_EXT_ID;
 use crate::sample::{QosLevel, SourceInfo};
-use crate::tx_buf::vle_len;
 use crate::wireexpr_build::NAMED_FLAG;
 
 /// `_Z_MID_N_REQUEST` with `M`: the key's id is in the sender's mapping, as the owned builder's
