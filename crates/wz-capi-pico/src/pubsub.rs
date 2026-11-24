@@ -1394,37 +1394,52 @@ impl PublisherQos {
 
 impl PlainPublisher {
     /// Declare a publisher on `keyexpr` that sends with `declared`, for a composite that holds it
-    /// itself: `declare_entity` with a key of its own.
+    /// itself: `declare_entity_at` with a key of its own.
     #[cfg(feature = "advanced")]
     pub(crate) fn declare(
         session: &PicoSession,
         keyexpr: &str,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
-        let entity = Self::declare_entity(session, keyexpr, None, &declared)?;
+        let mut entity = core::mem::MaybeUninit::<FilteredKey>::uninit();
+        // SAFETY: room for one, which a refusal leaves holding none.
+        let entity = unsafe {
+            Self::declare_entity_at(entity.as_mut_ptr(), session, keyexpr, None, &declared)?;
+            entity.assume_init()
+        };
         Ok(Self { entity, declared })
     }
 
-    /// Declare what a publisher on `keyexpr` stands on: its key's declaration, then the write
-    /// filter that names it — pico's order in `z_declare_publisher` — with the plain way a put
-    /// that brings nothing of its own is sent, worked out from `declared`.
+    /// Declare what a publisher on `keyexpr` stands on, written at `at`: its key's declaration,
+    /// then the write filter that names it — pico's order in `z_declare_publisher` — with the
+    /// plain way a put that brings nothing of its own is sent, worked out from `declared`.
+    /// Refused, nothing is written there.
     ///
     /// `existing` is the caller's own key when it is already a declaration
     /// (`declared_of`), which is shared rather than declared again. `declared` is
     /// what the publisher then sends every sample with.
-    fn declare_entity(
+    ///
+    /// # Safety
+    /// `at` is valid for the write of a `FilteredKey` and holds none.
+    unsafe fn declare_entity_at(
+        at: *mut FilteredKey,
         session: &PicoSession,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         declared: &PublisherQos,
-    ) -> Result<FilteredKey, ZResult> {
-        let filtered = FilteredKey::declare(
-            session,
-            FilterPlane::Subscribers,
-            keyexpr,
-            existing,
-            declared.counts_local(),
-        )?;
+    ) -> Result<(), ZResult> {
+        // SAFETY: the caller's; written whole when it answers, which is when it is read.
+        let filtered = unsafe {
+            FilteredKey::declare_at(
+                at,
+                session,
+                FilterPlane::Subscribers,
+                keyexpr,
+                existing,
+                declared.counts_local(),
+            )?;
+            &*at
+        };
         // How a put that brings nothing of its own is sent plain, worked out once from the QoS it
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         let wire = &filtered.wire;
@@ -1438,7 +1453,7 @@ impl PlainPublisher {
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
         );
-        Ok(filtered)
+        Ok(())
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the
@@ -3130,19 +3145,26 @@ pub unsafe extern "C" fn z_declare_publisher(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let entity =
-            match PlainPublisher::declare_entity(session, ke, declared_of(keyexpr), &declared) {
-                Ok(entity) => entity,
-                Err(rc) => return rc,
-            };
-        // What can be refused is declared above; the publisher is made where it lies, so the
-        // declared entity is moved once, into its place.
-        let state = slot.fill_in_place(|at: *mut PublisherState| {
-            at.write(PublisherState {
-                core: PlainPublisher { entity, declared },
-                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            })
-        });
+        // The publisher is declared where it lies, so its key and filter are not moved through
+        // the stack on their way; a refusal gives the place back with nothing in it.
+        let declare = |at: *mut PublisherState| -> Result<(), ZResult> {
+            let plain = core::ptr::addr_of_mut!((*at).core);
+            PlainPublisher::declare_entity_at(
+                core::ptr::addr_of_mut!((*plain).entity),
+                session,
+                ke,
+                declared_of(keyexpr),
+                &declared,
+            )?;
+            core::ptr::addr_of_mut!((*plain).declared).write(declared);
+            core::ptr::addr_of_mut!((*at).loaned_keyexpr)
+                .write(z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0));
+            Ok(())
+        };
+        let state = match slot.try_fill_in_place(declare) {
+            Ok(state) => state,
+            Err(rc) => return rc,
+        };
         (*state).bind();
         *publisher = z_owned_publisher_t {
             handle: state as *mut c_void,
