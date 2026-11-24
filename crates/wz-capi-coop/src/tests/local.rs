@@ -113,14 +113,18 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let (subscriber, count) = subscribe(&engine, "demo/l/same", Locality::SessionLocal);
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/l/other",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
     let same = loop {
         let listener = engine
-            .declare_matching_listener(
-                FilterPlane::Subscribers,
-                "demo/l/other",
-                Arc::new(|_: bool| {}),
-                false,
-            )
+            .declare_matching_listener(filter, Arc::new(|_: bool| {}))
             .expect("a session with rows left declares");
         assert!(
             listener <= u64::from(subscriber),
@@ -149,21 +153,17 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let heard = |log: &Arc<Mutex<Vec<bool>>>| log.lock().unwrap().clone();
-    let listen = |count_local: bool| {
+    let listen = |filter: wz_capi_port::FilterId| {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
         let id = engine
             .declare_matching_listener(
-                FilterPlane::Subscribers,
-                "demo/l/x",
+                filter,
                 Arc::new(move |matching| into.lock().unwrap().push(matching)),
-                count_local,
             )
             .expect("a session with rows left declares");
         (id, log)
     };
-    let (_, counting) = listen(true);
-    let (_, blind) = listen(false);
     let filter = |count_local: bool| {
         engine
             .declare_write_filter(
@@ -181,6 +181,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
+    // Each listener counts what its filter counts.
+    let (_, counting) = listen(counting_filter);
+    let (_, blind) = listen(blind_filter);
     // One Interest on the key serves the two listeners and the two filters: the session holds
     // one per plane and key.
     until(&engine, "the router to see the Interest", || {

@@ -116,9 +116,16 @@ fn the_close_lets_go_of_every_rows_callback() {
     declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
     let sink: MatchingSink = Arc::new(|_matching: bool| {});
     let alive = Arc::downgrade(&sink);
-    assert!(engine
-        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
-        .is_ok());
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/drop/m",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
+    assert!(engine.declare_matching_listener(filter, sink).is_ok());
     assert_eq!(engine.subscriber_rows(), 1);
     assert!(
         alive.upgrade().is_some(),
@@ -165,9 +172,16 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let listen = |sink: MatchingSink| {
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
-    };
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/drop/m",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
+    let listen = |sink: MatchingSink| engine.declare_matching_listener(filter, sink);
 
     let undeclared: MatchingSink = Arc::new(|_matching: bool| {});
     let undeclared_alive = Arc::downgrade(&undeclared);

@@ -54,10 +54,10 @@
 //!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): the key expressions it declares
-//!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
-//!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
-//!   Interests those filters and listeners hold open, at most one for each of them;
+//!   link ([`EntityRows`]), every one a row of the session's one table set: the key expressions it
+//!   declares (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`)
+//!   and queriers (`MAX_QUERIERS`), the Interests those filters hold open, at most one for each
+//!   of them, and the matching listeners declared on them (`MAX_MATCHING_LISTENERS`);
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
@@ -121,7 +121,7 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
+use crate::engine::{CoopTables, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -184,8 +184,8 @@ const OWED_ROWS: usize = (cfg!(all(
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
 /// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): the session's
-/// one table set, write filters, matching listeners, interests and the key arena.
-const ENTITY_ROWS: usize = 5;
+/// one table set and the key arena.
+const ENTITY_ROWS: usize = 2;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
@@ -443,20 +443,6 @@ impl EntityRows {
             EntityKind::Token => self.tokens,
             EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
             EntityKind::Querier => self.queriers,
-        }
-    }
-
-    /// The rows of the write filters' one table: a publisher's and a querier's each.
-    pub const fn filters(&self) -> Option<usize> {
-        self.publishers.checked_add(self.queriers)
-    }
-
-    /// The rows of the Interests the session holds open: a write filter or a matching listener
-    /// opens at most one, and one that finds its key already asked opens none.
-    pub const fn interests(&self) -> Option<usize> {
-        match self.filters() {
-            Some(filters) => filters.checked_add(self.matching_listeners),
-            None => None,
         }
     }
 }
@@ -820,31 +806,12 @@ impl ArenaPlan {
 
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) -> Result<(), ArenaRefused> {
-        let rows = self.entities;
-        // The session's one table set, holding the kinds moved onto it so far.
+        // The session's one table set, holding every kind of the session's own declarations.
         self.put(
             "session tables",
             "MAX_DECLARED_KEYEXPRS",
             1,
             CoopTables::arena_bytes(&self.tables()).ok_or(ArenaRefused::TooLarge)?,
-        )?;
-        self.put(
-            "write filters",
-            "MAX_PUBLISHERS + MAX_QUERIERS",
-            rows.filters().ok_or(ArenaRefused::TooLarge)?,
-            EntryBytes::FILTER,
-        )?;
-        self.put(
-            "matching listeners",
-            "MAX_MATCHING_LISTENERS",
-            rows.matching_listeners,
-            EntryBytes::MATCH,
-        )?;
-        self.put(
-            "interests",
-            "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
-            rows.interests().ok_or(ArenaRefused::TooLarge)?,
-            EntryBytes::INTEREST,
         )?;
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
@@ -884,6 +851,12 @@ impl ArenaPlan {
             queryables: self.entities.queryables,
             tokens: self.entities.tokens,
             liveliness_subscribers: self.entities.liveliness_subscribers,
+            // Each under its build's bound, so the sum is no wider than a row count.
+            write_filters: self
+                .entities
+                .publishers
+                .saturating_add(self.entities.queriers),
+            matching_listeners: self.entities.matching_listeners,
             ..TableRows::default()
         }
     }

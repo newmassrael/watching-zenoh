@@ -358,21 +358,17 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
     let plane = FilterPlane::Queryables {
         complete_required: false,
     };
-    let listen = |count_local: bool| {
+    let listen = |filter: wz_capi_port::FilterId| {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
         engine
             .declare_matching_listener(
-                plane,
-                "demo/lq/x",
+                filter,
                 Arc::new(move |matching| into.lock().unwrap().push(matching)),
-                count_local,
             )
             .expect("a session with rows left declares");
         log
     };
-    let counting = listen(true);
-    let blind = listen(false);
     let filter = |count_local: bool| {
         engine
             .declare_write_filter(
@@ -390,6 +386,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
+    // Each listener counts what its filter counts.
+    let counting = listen(counting_filter);
+    let blind = listen(blind_filter);
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });

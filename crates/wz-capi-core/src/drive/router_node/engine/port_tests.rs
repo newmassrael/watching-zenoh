@@ -567,12 +567,19 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
 
     let told: Arc<Mutex<Vec<bool>>> = Arc::default();
     let sink = Arc::clone(&told);
-    let listener = engine
-        .declare_matching_listener(
+    let filter = engine
+        .declare_write_filter(
             FilterPlane::Subscribers,
             "wz/port/match/a",
-            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
+            &WireKey::literal(),
+            None,
             false,
+        )
+        .expect("a node holds every write filter it is asked for");
+    let listener = engine
+        .declare_matching_listener(
+            filter,
+            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
         )
         .expect("a node holds every matching listener it is asked for");
     assert_eq!(

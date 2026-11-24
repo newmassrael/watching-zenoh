@@ -11,8 +11,8 @@
 //! subscribers and the Interests, the queryables, the tokens and the liveliness subscribers'
 //! Interests. The place of an entry is its kind's offset in that order plus its index in the list,
 //! so a declaration or a retraction that is made while the replay goes on asks the cursor what to
-//! do about the peer, and every list's push and remove goes through it (`announce` and
-//! `retract`).
+//! do about the peer, and every list's push and remove goes through it (`announce_with` and
+//! `retract_at`).
 //!
 //! Without the `declaration-sync-pacing` policy the replay is one turn of the whole sequence, as
 //! zenoh-pico's client reopens (`vendor/zenoh-pico/src/net/session.c` @
@@ -37,7 +37,7 @@ use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 #[cfg(feature = "queryable")]
 use wz_session_core::session_tables::QueryableHandle;
-use wz_session_core::session_tables::{KeyexprHandle, SubscriberHandle};
+use wz_session_core::session_tables::{InterestHandle, KeyexprHandle, SubscriberHandle};
 #[cfg(feature = "liveliness")]
 use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
 use wz_session_mcu::dial::McuActions;
@@ -198,7 +198,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         match kind {
             Kind::Keyexpr => super::tables(&self.registry).keyexprs().len(),
             Kind::Subscriber => super::tables(&self.registry).subscribers().len(),
-            Kind::Interest => self.interests.len(),
+            Kind::Interest => super::tables(&self.registry)
+                .interests()
+                .iter()
+                .filter(|(_, row)| row.asked())
+                .count(),
             #[cfg(feature = "queryable")]
             Kind::Queryable => super::tables(&self.registry).queryables().len(),
             #[cfg(feature = "liveliness")]
@@ -215,11 +219,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .take_while(|&&earlier| earlier != kind)
             .map(|&earlier| self.len_of(earlier))
             .sum()
-    }
-
-    /// The place a declaration of `kind` stored next takes in the replay's order.
-    fn end_of(&self, kind: Kind) -> usize {
-        self.start_of(kind) + self.len_of(kind)
     }
 
     /// How many declarations the session holds, which is how many a replay owes.
@@ -254,7 +253,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     });
                     told
                 }
-                Kind::Interest => self.interests[left].send(actions),
+                Kind::Interest => {
+                    let tables = super::tables(&self.registry);
+                    let row = tables
+                        .interests()
+                        .iter()
+                        .filter(|(_, row)| row.asked())
+                        .nth(left);
+                    let told = row.map_or(true, |(_, row)| {
+                        super::matching::send_interest(
+                            actions,
+                            row.id(),
+                            row.kind(),
+                            row.key().as_str(),
+                            tables.wire_of(row.key()),
+                            row.aggregate(),
+                        )
+                    });
+                    told
+                }
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
                     let tables = super::tables(&self.registry);
@@ -355,14 +372,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         announce_on(self.links.faces_mut(), place, on_refusal, send, undo)
     }
 
-    /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
-    /// that a link refused is counted as told, and the peer learns it when the session declares
-    /// over a new link.
-    pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
-        let place = self.end_of(kind);
-        self.announce_with(place, OnRefusal::Forget, send, |_| {});
-    }
-
     /// The place in the replay's order of the subscriber `handle` names, the one past the last for
     /// a handle that names none: its rank in the table's slot order, which the replay tells them
     /// in.
@@ -376,7 +385,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.start_of(Kind::Subscriber) + rank
     }
 
-    /// Tell each face that is up of the subscriber `handle` names, as [`Self::announce`] tells a
+    /// Tell each face that is up of the subscriber `handle` names, as [`Self::announce_with`] tells a
     /// declaration: the row is the declaration itself, so the tables stored it before any link is
     /// told of it, and each link is told from the row.
     pub(super) fn announce_subscriber(&mut self, handle: SubscriberHandle) {
@@ -413,7 +422,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.start_of(Kind::Queryable) + rank
     }
 
-    /// Tell each face that is up of the queryable `handle` names, as [`Self::announce`] tells a
+    /// Tell each face that is up of the queryable `handle` names, as [`Self::announce_with`] tells a
     /// declaration: the row is the declaration itself, so the tables stored it before any link is
     /// told of it, and each link is told from the row.
     #[cfg(feature = "queryable")]
@@ -430,6 +439,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     tables
                         .named(row.key())
                         .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                });
+                told
+            },
+            |_| {},
+        );
+    }
+
+    /// The place in the replay's order of the Interest `handle` names, the one past the last for a
+    /// handle that names none: its rank among the Interests that are sent, in the table's slot
+    /// order, which the replay tells them in. One that is not sent has no place.
+    pub(super) fn interest_place(&self, handle: InterestHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let asked = || tables.interests().iter().filter(|(_, row)| row.asked());
+        let rank = asked()
+            .position(|(held, _)| held == handle)
+            .unwrap_or_else(|| asked().count());
+        self.start_of(Kind::Interest) + rank
+    }
+
+    /// Tell each face that is up of the Interest `handle` names, as [`Self::announce_with`] tells a
+    /// declaration: the row is the Interest itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    pub(super) fn announce_interest(&mut self, handle: InterestHandle) {
+        let place = self.interest_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                let tables = super::tables(registry);
+                let told = tables.interests().get(handle).is_some_and(|row| {
+                    super::matching::send_interest(
+                        actions,
+                        row.id(),
+                        row.kind(),
+                        row.key().as_str(),
+                        tables.wire_of(row.key()),
+                        row.aggregate(),
+                    )
                 });
                 told
             },
@@ -474,7 +523,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.start_of(Kind::Token) + rank
     }
 
-    /// Tell each face that is up of the token `handle` names, as [`Self::announce`] tells a
+    /// Tell each face that is up of the token `handle` names, as [`Self::announce_with`] tells a
     /// declaration: the row is the declaration itself, so the tables stored it before any link is
     /// told of it, and each link is told from the row.
     #[cfg(feature = "liveliness")]
@@ -513,7 +562,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Ask each face that is up for what the liveliness subscriber `handle` names asks, as
-    /// [`Self::announce`] tells a declaration: the row is the subscriber itself, so the tables
+    /// [`Self::announce_with`] tells a declaration: the row is the subscriber itself, so the tables
     /// stored it before any link is asked, and each link is asked from the row.
     #[cfg(feature = "liveliness")]
     pub(super) fn announce_liveliness(&mut self, handle: LivelinessSubscriberHandle) {
@@ -536,13 +585,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             },
             |_| {},
         );
-    }
-
-    /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
-    /// over ([`Self::retract_at`]). Call it once, before the removal.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<SessionHandle<C>> {
-        let place = self.start_of(kind) + index;
-        self.retract_at(place)
     }
 
     /// The declaration at `place` in the replay's order is about to be removed: the links to

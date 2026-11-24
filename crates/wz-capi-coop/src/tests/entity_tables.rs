@@ -174,8 +174,17 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     assert_eq!(rows.queriers, 4);
     assert_eq!(rows.matching_listeners, 5);
     assert_eq!(rows.keyexprs, 6);
-    assert_eq!(rows.filters(), Some(7));
-    assert_eq!(rows.interests(), Some(12));
+    assert_eq!(
+        plan.tables().write_filters,
+        7,
+        "a publisher's and a querier's filter each, rows of the session's one table set"
+    );
+    assert_eq!(
+        plan.tables().interests(),
+        7,
+        "an Interest for each filter at most; a listener holds its filter's"
+    );
+    assert_eq!(plan.tables().matching_listeners, 5);
     let count = |part: &str| {
         plan.rows()
             .iter()
@@ -230,9 +239,13 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     );
     assert_eq!(count("session tables"), Some(1));
     assert_eq!(plan.tables().keyexprs, 6);
-    assert_eq!(count("write filters"), Some(7));
-    assert_eq!(count("matching listeners"), Some(5));
-    assert_eq!(count("interests"), Some(12));
+    for part in ["write filters", "matching listeners", "interests"] {
+        assert_eq!(
+            count(part),
+            None,
+            "{part}: rows of the session's one table set, none of the engine's own"
+        );
+    }
 }
 
 /// The subscribers' table at its limit refuses one more: no id, its callback let go of with the
@@ -383,16 +396,18 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     );
 }
 
-/// The matching listeners' table at its limit refuses one more as a full table, before its Interest
-/// is asked; its sink goes with the refusal.
+/// The matching listeners' table at its limit refuses one more as a full table, asking nothing: a
+/// listener holds its filter's Interest; its sink goes with the refusal.
 #[test]
 fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/m/1").expect("a publisher's row is free");
     let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
     let first = engine
-        .declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false)
+        .declare_matching_listener(publisher, first_sink)
         .expect("a row is free");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
@@ -401,8 +416,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
 
     let refused_sink: MatchingSink = Arc::new(|_matching: bool| {});
     let held = Arc::downgrade(&refused_sink);
-    let refused =
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
+    let refused = engine.declare_matching_listener(publisher, refused_sink);
     assert_eq!(refused, Err(Refusal::TableFull));
     assert!(
         held.upgrade().is_none(),
@@ -414,10 +428,51 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     engine.undeclare_matching_listener(first);
     let again: MatchingSink = Arc::new(|_matching: bool| {});
     assert!(
-        engine
-            .declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false)
-            .is_ok(),
+        engine.declare_matching_listener(publisher, again).is_ok(),
         "the row the undeclaration gave back takes the next listener"
+    );
+}
+
+/// A matching listener goes with its filter: undeclaring the filter lets go of its listener's sink
+/// once, and the listener's id names nothing after. The CONTROL is the listener held while its
+/// filter stands.
+#[test]
+fn a_matching_listener_goes_with_its_filter() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let publisher =
+        filter(&engine, FilterPlane::Subscribers, "demo/m/f").expect("a publisher's row is free");
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(dropped.clone());
+    let sink: MatchingSink = Arc::new(move |_matching: bool| {
+        let _held = &guard;
+    });
+    let listener = engine
+        .declare_matching_listener(publisher, sink)
+        .expect("a row is free");
+    settle(&engine);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "CONTROL: the listener is held while its filter stands"
+    );
+    engine.undeclare_write_filter(publisher);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the filter's listener went with it"
+    );
+    engine.undeclare_matching_listener(listener);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "and its id names nothing after"
+    );
+    let orphan: MatchingSink = Arc::new(|_matching: bool| {});
+    assert_eq!(
+        engine.declare_matching_listener(publisher, orphan),
+        Err(Refusal::Closed),
+        "a filter that went holds no listener"
     );
 }
 
@@ -596,12 +651,6 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         filter(&engine, FilterPlane::Subscribers, past),
         Err(Refusal::KeyTooLong)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
-    assert_eq!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
-        Err(Refusal::KeyTooLong),
-        "a listener on the key is refused for its length"
-    );
     settle(&engine);
     assert_eq!(
         dropped.load(Ordering::SeqCst),
@@ -645,11 +694,10 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
         declare_subscriber(&engine, "demo/k/3", &dropped),
         Err(Refusal::TableFull)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
     assert_eq!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
+        filter(&engine, FilterPlane::Subscribers, "demo/k/3"),
         Err(Refusal::TableFull),
-        "a key of the bound with no room left in the arena is refused as a full table"
+        "a filter's key of the bound with no room left in the arena is refused as a full table"
     );
     settle(&engine);
     assert_eq!(

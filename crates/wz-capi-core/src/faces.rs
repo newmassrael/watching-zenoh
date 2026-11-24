@@ -316,6 +316,8 @@ struct FilterEntry {
     /// the facts it is sent from and the declaration naming its whole key. `None` sends it the
     /// general way.
     plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    /// The matching listeners declared on the filter, undeclared with it.
+    listeners: Vec<MatchId>,
 }
 
 /// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
@@ -1388,6 +1390,7 @@ impl RowCallbacks for CoreRows {
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
+    type WriteFilter = ();
 }
 
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
@@ -6288,6 +6291,36 @@ impl SharedSession {
         self.declare_plane_matching_listener(FilterPlane::Subscribers, keyexpr, sink, false)
     }
 
+    /// The matching listener of write filter `filter`: it counts what the filter counts, its
+    /// plane, its key and the session's own entities where the filter counts them
+    /// ([`Self::declare_plane_matching_listener`]), and goes with the filter. `None`, `sink` let
+    /// go of, when the session holds no such filter.
+    pub fn declare_filter_matching_listener(
+        &self,
+        filter: FilterId,
+        sink: MatchingSink,
+    ) -> Option<MatchId> {
+        let watched = {
+            let guard = self.lock();
+            let entry = guard.filters.iter().find(|e| e.id == filter)?;
+            (entry.plane, entry.keyexpr.clone(), entry.count_local)
+        };
+        let (plane, keyexpr, count_local) = watched;
+        let id = self.declare_plane_matching_listener(plane, keyexpr, sink, count_local);
+        // Recorded on its filter, which takes it when it goes; a filter undeclared meanwhile
+        // leaves it to be retracted here.
+        let kept = {
+            let mut guard = self.lock();
+            let entry = guard.filters.iter_mut().find(|e| e.id == filter);
+            entry.map(|entry| entry.listeners.push(id)).is_some()
+        };
+        if !kept {
+            self.undeclare_matching_listener(id);
+            return None;
+        }
+        Some(id)
+    }
+
     /// The matching listener of everything else: it counts what a write filter on `plane`
     /// counts — the subscribers, or the queryables (only complete ones when `plane` requires
     /// it) — and, with `count_local`, the session's own too: zenoh-pico's matching status
@@ -6678,6 +6711,7 @@ impl SharedSession {
             #[cfg(target_has_atomic = "64")]
             cache: None,
             plain: None,
+            listeners: Vec::new(),
         });
         Some(id)
     }
@@ -6690,10 +6724,11 @@ impl SharedSession {
     /// drop reaches the face's session and its link.
     pub fn undeclare_write_filter(&self, id: FilterId) {
         let mut dropped = Vec::new();
+        let mut listeners = Vec::new();
         {
             let mut guard = self.lock();
             if let Some(pos) = guard.filters.iter().position(|e| e.id == id) {
-                guard.filters.remove(pos);
+                listeners = guard.filters.remove(pos).listeners;
             }
             for face in guard.faces.values_mut() {
                 if let Some(hold) = face.filters.remove(&id) {
@@ -6704,6 +6739,10 @@ impl SharedSession {
             Self::end_filter_on_groups(&mut guard, id);
         }
         drop(dropped);
+        // Its matching listeners go with it, each retracted as an undeclared one is.
+        for listener in listeners {
+            self.undeclare_matching_listener(listener);
+        }
     }
 
     /// Whether write filter `id` keeps a put, a delete or a get from being sent: it says
@@ -6850,6 +6889,9 @@ impl SharedSession {
             let mut guard = self.lock();
             if let Some(pos) = guard.matches.iter().position(|e| e.id == id) {
                 entry = Some(guard.matches.remove(pos));
+            }
+            for filter in guard.filters.iter_mut() {
+                filter.listeners.retain(|listener| *listener != id);
             }
             // R2580 — the plane's watch too, now that it has one.
             for face in guard.declaration_targets() {
