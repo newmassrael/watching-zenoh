@@ -2423,3 +2423,38 @@ fn a_listeners_callback_is_reached_by_its_handle_until_it_goes() {
         Some(3)
     );
 }
+
+/// A value of a kept kind is held as itself; one of a kind not kept is refused.
+#[test]
+fn a_record_of_a_kept_kind_holds_its_value_and_one_not_kept_is_refused() {
+    let kept = <Present as Presence>::record(7_u64).expect("kept");
+    assert_eq!(*<Present as Presence>::read(&kept), 7);
+    assert_eq!(<Present as Presence>::take(kept), 7);
+    assert!(<Absent as Presence>::record(7_u64).is_none());
+    assert!(<Present as Presence>::KEPT && !<Absent as Presence>::KEPT);
+}
+
+/// A variant that holds a record of a kind not kept takes no room: the enum is as small as its
+/// other variant alone, which a kept kind's record outgrows.
+#[test]
+fn a_variant_of_a_kind_not_kept_takes_no_room() {
+    enum Owes<K: Presence> {
+        Call(&'static u8),
+        Other(K::Record<[u64; 2]>),
+    }
+    impl<K: Presence> Owes<K> {
+        fn first(&self) -> u64 {
+            match self {
+                Self::Call(byte) => u64::from(**byte),
+                Self::Other(other) => K::read(other)[0],
+            }
+        }
+    }
+    let both = [Owes::<Present>::Call(&3), Owes::<Present>::Other([5, 6])];
+    assert_eq!(both.iter().map(Owes::first).collect::<Vec<_>>(), [3, 5]);
+    assert_eq!(
+        core::mem::size_of::<Owes<Absent>>(),
+        core::mem::size_of::<&u8>()
+    );
+    assert!(core::mem::size_of::<Owes<Present>>() > core::mem::size_of::<&u8>());
+}
