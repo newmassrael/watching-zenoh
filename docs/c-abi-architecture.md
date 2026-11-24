@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-219) and holds the register's lint cells (29) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (18) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -271,7 +271,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
-| TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
 | TD-168 | `wz-capi-pico` | `connectivity` | `indexing_slicing`, `arithmetic_side_effects` | 8 | in flight |
 | TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
@@ -289,22 +288,19 @@ since it matches the result's cases itself. The hand-written module holds no sit
 paid by the generator (step 7), with an accessor that answers an `Option` or none for a case
 nothing reads.
 
-TD-137 (`held_list::one_entry`) is an `unreachable!` behind a fallible constructor: the
-bounds of a one-entry list are checked when the build is compiled, but `Bounded::new` answers an
-`Option` all the same. A `Result` there would spread a failure that cannot happen into every
-infallible declaration builder, so the row waits for a constructor whose type proves it: a
-`Bounded::one` in SCE's forge runtime that checks a capacity of one or more in a `const` and
-cannot fail. That is a change to SCE, reviewed by an SCE session, and a pin move here; the row
-leaves with them. TD-099 (`lent_control`) waits on the same change: `chain_of` is the
-fixed-capacity twin of `one_entry`, and `NamedKeyexpr::entry` holds a body of at most
-`NAMED_KEYEXPR_BYTES` as a slice of the `ZBuf`'s u32 bound, which a constructor from a list
-whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves.
+SCE's forge runtime makes a list whose bounds the build checks with constructors that cannot
+fail: `Bounded::one` for a list of one entry, `Bounded::proven` for an array, and
+`Bounded::widened` for a list held within bounds as narrow or narrower, each checking its bounds
+in a `const`. `held_list::one_entry` is `Bounded::one`. TD-099 (`lent_control`) is paid by
+the same constructors: `chain_of` is the fixed-capacity twin of `one_entry`, and
+`NamedKeyexpr::entry` holds a body of at most `NAMED_KEYEXPR_BYTES` as a slice of the `ZBuf`'s
+u32 bound, which a buffer held within the smaller bound proves through `Bounded::widened`.
 TD-031 (`lent_push::put_with_qos`) is the same list: the one QoS entry of a Push's outer chain,
-whose bounds are one entry or more, held through `Bounded::new` from a `heapless::Vec`; the
-same constructor pays it, and the rest of the module is total.
+whose bounds are one entry or more, held through `Bounded::new` from a `heapless::Vec`;
+`Bounded::one` pays it, and the rest of the module is total.
 TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen bytes by its
-constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
-constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
+constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: a zid that
+holds its bytes within those bounds lends them with no check. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
 through `Bounded::new`, over a sink that cannot refuse.
 

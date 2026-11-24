@@ -69,15 +69,11 @@ pub fn held<E, const MAX: usize, const MIN: usize>(
     Bounded::new(list).ok_or(CodecError::LengthOutOfRange)
 }
 
-/// The list of the one entry `entry`, which every declared bound holds.
+/// The list of the one entry `entry`, which every declared bound holds: the build refuses a
+/// bound of no entry, or one whose fewest is more than one.
 #[cfg(feature = "alloc")]
 pub fn one_entry<E, const MAX: usize, const MIN: usize>(entry: E) -> Bounded<Vec<E>, MAX, MIN> {
-    const { assert!(MAX >= 1, "a list of one entry needs a bound of one or more") };
-    const { assert!(MIN <= 1, "a list of one entry holds at most one entry") };
-    match Bounded::new(alloc::vec![entry]) {
-        Some(list) => list,
-        None => unreachable!("the bounds are checked when this is compiled"),
-    }
+    Bounded::one(entry)
 }
 
 /// Run `edit` on the chain as the growable list it is, and hold what it leaves.
@@ -149,6 +145,12 @@ mod tests {
         })
         .expect("an empty chain is dropped, not refused");
         assert_eq!(chain.entries(), None);
+    }
+
+    #[test]
+    fn a_list_of_one_entry_holds_that_entry_alone() {
+        let chain: Option<Bounded<Vec<u8>, 1, 1>> = Some(one_entry(7));
+        assert_eq!(chain.entries(), Some(&[7][..]));
     }
 
     #[test]
