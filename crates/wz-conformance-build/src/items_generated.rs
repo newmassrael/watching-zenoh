@@ -146,7 +146,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     (
         "MAX_ENCODING_SCHEMA_BYTES",
         "WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES",
-        256,
+        255,
     ),
     ("CONFIG_ENTRIES", "WZ_LIMIT_CONFIG_ENTRIES", 32),
     ("MAX_SCOUT_HELLOS", "WZ_LIMIT_MAX_SCOUT_HELLOS", 16),

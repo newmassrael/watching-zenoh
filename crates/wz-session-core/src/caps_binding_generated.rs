@@ -350,7 +350,7 @@ pub const HELD_ENCODINGS: LimitBinding = LimitBinding {
 pub const MAX_ENCODING_SCHEMA_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Local),
-    range: Some((0, 65535)),
+    range: Some((0, 255)),
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Build),

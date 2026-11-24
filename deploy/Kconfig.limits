@@ -297,16 +297,17 @@ config WZ_LIMIT_HELD_ENCODINGS
 
 config WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES
 	int "MAX_ENCODING_SCHEMA_BYTES"
-	range 0 65535
+	range 0 255
 	default 32 if WZ_LIMITS_ZENOH_PICO
-	default 256
+	default 255
 	help
 	  The longest schema, in bytes, an encoding a program of the pico C ABI builds
 	  may carry, and the room each place that keeps an encoding to send it later
 	  holds for one: a slot of the pool of encodings, and a publication handed on to
 	  the next holder of a session. A longer schema is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY, never cut short. A schema a peer sends is read
-	  where it lies and is not bound by this. At most 65,535.
+	  where it lies and is not bound by this. At most 255, the longest schema a
+	  message carries.
 
 config WZ_LIMIT_CONFIG_ENTRIES
 	int "CONFIG_ENTRIES"
