@@ -36,14 +36,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// A place in a source file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pos {
-    /// 1-based line.
-    pub line: u32,
-    /// 1-based byte column within the line.
-    pub col: u32,
-}
+pub use crate::proto_types::Pos;
 
 /// A lexical or syntactic refusal, with the place it is blamed on.
 #[derive(Clone, Debug, PartialEq, Eq)]

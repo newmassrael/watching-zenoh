@@ -82,8 +82,9 @@ use crate::e2e_profile::{describe, optional, read_json, DocError, Pointer};
 use crate::e2e_receiver::{ReceiveError, Receiver, Status, Verdict};
 use crate::e2e_stream_sender::{Protected, SendError, StreamSender, Written};
 use crate::proto_decode::{AtPath, Item, SchemaMessage, SchemaSet, MAX_DECODE_DEPTH};
-use crate::proto_parse::{Label, ScalarKind, Syntax};
-use crate::proto_schema::{FieldKind, Msg, ProtoDiagnostic, ProtoFile};
+#[cfg(feature = "proto-text")]
+use crate::proto_schema::ProtoFile;
+use crate::proto_types::{FieldKind, Label, Msg, ProtoDiagnostic, ScalarKind, Syntax};
 
 /// How long the reports of drops are apart when the description does not say.
 pub const DEFAULT_REPORT_INTERVAL_MS: u64 = 1_000;
@@ -299,12 +300,29 @@ impl Keyer {
     ///
     /// The schema's diagnostic, the description's refusal at its path, or a
     /// limit the description exceeds.
+    #[cfg(feature = "proto-text")]
     pub fn new(
         files: &[ProtoFile<'_>],
         description: &str,
         limits: Limits,
     ) -> Result<Self, NewError> {
         let schema = SchemaSet::read(files).map_err(NewError::Schema)?;
+        Self::with_schema(schema, description, limits)
+    }
+
+    /// A keyer of the message the description names, over a schema already read
+    /// (from `.proto` text, or from the descriptor `protoc` compiled it into),
+    /// within the build's `limits`.
+    ///
+    /// # Errors
+    ///
+    /// The description's refusal at its path, or a limit the description
+    /// exceeds.
+    pub fn with_schema(
+        schema: SchemaSet,
+        description: &str,
+        limits: Limits,
+    ) -> Result<Self, NewError> {
         let doc = read_json(description).map_err(NewError::Description)?;
         let root = Pointer::text("");
         let entries = root.object(&doc).map_err(NewError::Description)?;
