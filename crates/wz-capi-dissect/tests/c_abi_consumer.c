@@ -4830,8 +4830,10 @@ int main(void) {
      * nothing retires.
      * 84: a `decoded` payload block gains `type_hash`, the ROS type hash of
      * a `cdr` rule's type and `null` otherwise. A key arrives; nothing
-     * retires. */
-    revisioned[2].revision = 84;
+     * retires.
+     * 85: every flow gains `unrowed_comments`, the comments of its packets
+     * that begin no row. A key arrives; nothing retires. */
+    revisioned[2].revision = 85;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

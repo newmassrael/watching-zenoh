@@ -1429,9 +1429,30 @@
  *     and a packet that holds no row's first byte (a bare acknowledgement, a
  *     message's middle segment) is on no row: the summary's `comments` counts
  *     every commented packet, so a reader can tell the capture has comments
- *     without walking the rows.
+ *     without walking the rows. Such a packet's comments are its flow's
+ *     `unrowed_comments` (below).
  *
  * Per FLOW, beside `flow`:
+ *
+ *   "unrowed_comments":[{"packet":N,"comments":[{"text":..,"utf8":bool}]}]|null
+ *
+ *     (field-document revision 85, row_facts 25) The comments of every packet
+ *     of the flow whose pcapng block carries one and which carries the first
+ *     byte of none of the flow's messages this library holds: a bare
+ *     acknowledgement, a segment holding the middle or only the length prefix
+ *     of a message, a datagram that decoded to nothing, the packet of an lz4
+ *     batch (its messages name no packet). In packet order; `packet` is the
+ *     number a row's `first_byte.packet` uses, and each comment is as in
+ *     `packet_comments`. With the rows' `packet_comments` every comment on a
+ *     packet of the flow is carried exactly once. Which packets carry a first
+ *     byte is read off the messages held, not off the rows a cap or a window
+ *     writes, so every document of one capture lists the same; a message a
+ *     retention ceiling gave up no longer holds its packet. A packet is the
+ *     flow's when it decapsulates to the flow's addresses and ports; a piece of
+ *     a fragmented IP datagram is no flow's and is in no list (the summary
+ *     counts it). `[]` when there is none; `null` when the bytes this call was
+ *     given could not be read again (`capture_reread` false). Written last in
+ *     the flow's object.
  *
  *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
  *              "compression":bool|null,"qos":bool|null,"patch":N|null,
