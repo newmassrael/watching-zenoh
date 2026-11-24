@@ -328,8 +328,7 @@ where
 /// it accepts on is a datagram link (a stream listener is not written yet). Each link allocates
 /// its receive buffer when it opens, a datagram link's sized to the largest datagram and a stream
 /// link's to the largest batch with its length, and lends the session `tx_slots` buffers of
-/// `tx_capacity` bytes to encode its frames into (none by default: the session then builds each
-/// frame in a buffer of its own). A session that lends the stack its tables
+/// `tx_capacity` bytes to encode its frames into (by default one, as long as its receive buffer). A session that lends the stack its tables
 /// ([`SessionLinks::lend_buffers`]) has every link claim its buffers there instead, and none
 /// allocate. A multicast group is joined by the host's joiner `G` ([`IpLinks::with_groups`]);
 /// links given none join no group.

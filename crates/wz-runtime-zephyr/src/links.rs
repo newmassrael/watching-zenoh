@@ -44,8 +44,8 @@ pub struct ZephyrLinks {
 
 impl ZephyrLinks {
     /// Links bound on the node's own address `local`, each with a receive
-    /// buffer that holds the largest UDP datagram and no buffer of its own to
-    /// encode frames into (the session builds each in a buffer it allocates).
+    /// buffer that holds the largest UDP datagram and one buffer as long to
+    /// encode frames into.
     pub fn new(local: impl Into<IpAddr>) -> Self {
         Self {
             local: local.into(),
@@ -104,7 +104,7 @@ impl SessionLinks for ZephyrLinks {
         let driver = CellRc::boxed(ZephyrUdpDriver::acceptor_with_buffers(
             socket,
             self.rx_capacity,
-            HeapTx::new(self.tx_slots, self.tx_capacity),
+            HeapTx::for_link(self.tx_slots, self.tx_capacity, self.rx_capacity),
         ));
         Ok(OpenedLink {
             sink: driver.clone().into_sink(),
@@ -125,7 +125,7 @@ impl SessionLinks for ZephyrLinks {
             socket,
             to.at,
             self.rx_capacity,
-            HeapTx::new(self.tx_slots, self.tx_capacity),
+            HeapTx::for_link(self.tx_slots, self.tx_capacity, self.rx_capacity),
         ));
         Ok(OpenedLink {
             sink: driver.clone().into_sink(),

@@ -387,12 +387,21 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     /// A datagram longer than that is truncated by the stack, which the session
     /// reads as a bad frame.
     pub fn acceptor_with_capacity(socket: S, rx_capacity: usize) -> Self {
-        Self::acceptor_in(socket, vec![0u8; rx_capacity], HeapTx::new(0, 0))
+        Self::acceptor_in(
+            socket,
+            vec![0u8; rx_capacity],
+            HeapTx::for_link(0, 0, rx_capacity),
+        )
     }
 
     /// [`Self::initiator`] with a receive buffer of `rx_capacity` bytes.
     pub fn initiator_with_capacity(socket: S, peer: SocketAddr, rx_capacity: usize) -> Self {
-        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], HeapTx::new(0, 0))
+        Self::initiator_in(
+            socket,
+            peer,
+            vec![0u8; rx_capacity],
+            HeapTx::for_link(0, 0, rx_capacity),
+        )
     }
 }
 
@@ -2310,10 +2319,18 @@ mod tests {
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
-    fn a_driver_with_no_storage_lends_nothing_and_receives_what_its_buffer_holds() {
+    fn a_driver_given_no_storage_lends_one_slot_of_what_its_buffer_receives() {
         let link = UdpDriver::acceptor_with_capacity(Loop::default(), 64);
-        assert!(link.tx_slot_acquire(10, Priority::Data).is_none());
-        assert_eq!(link.link_mtu(), DEFAULT_LINK_MTU);
+        let grant = link
+            .tx_slot_acquire(10, Priority::Data)
+            .expect("the one slot");
+        assert_eq!(link.tx_slot_storage(grant.slot).1, 64);
+        assert!(
+            link.tx_slot_acquire(10, Priority::Data).is_none(),
+            "no second while it is out"
+        );
+        link.tx_slot_abort(grant.slot);
+        assert_eq!(link.link_mtu(), 64, "the bound is the slot");
         assert_eq!(
             link.link_rx_capacity(),
             64,

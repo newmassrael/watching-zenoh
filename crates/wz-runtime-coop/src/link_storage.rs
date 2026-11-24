@@ -127,9 +127,8 @@ impl RxStore for PooledRx {
 /// encode a frame into (`BoxedLinkDriver::tx_slot_acquire`), so the frame is written once, where
 /// the socket reads it, and no buffer is allocated for it.
 ///
-/// A driver whose storage is empty (a `HeapTx` of no bytes) lends nothing: the session builds
-/// each frame in a buffer of its own (the heap) and hands the bytes to `send_blocking`. A driver
-/// with storage lends it, and its link then also states the frames it carries
+/// Every link of this crate has storage to lend: a link opened with none given holds one slot as
+/// long as its receive buffer (`HeapTx::for_link`). Its link states the frames it carries
 /// (`BoxedLinkDriver::link_mtu`, `link_rx_capacity`), because its buffers are the bound. The
 /// storage is a buffer of a table the image declares ([`ByteBuf`], the fixed-memory profile's,
 /// whose sessions have no heap to build a frame on) or buffers the link allocated once (`HeapTx`,
@@ -205,8 +204,8 @@ impl TxStore for ByteBuf {
 
 /// The heap profile's outbound storage: `slots` buffers of `slot_len` bytes, allocated together
 /// when the link is made and never again, so the frames of the link are encoded into them and a
-/// frame costs no allocation. Of no bytes it lends nothing, which is the link as it was before the
-/// profile lent.
+/// frame costs no allocation. Of no bytes it lends nothing, which a link's storage, made by
+/// [`Self::for_link`], never is.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub struct HeapTx {
     cells: Vec<core::cell::UnsafeCell<u8>>,
@@ -221,6 +220,21 @@ impl HeapTx {
         Self {
             cells: (0..len).map(|_| core::cell::UnsafeCell::new(0)).collect(),
             slot_len,
+        }
+    }
+
+    /// The storage of a link whose receive buffer is `rx_len` bytes: `slots` slots of `slot_len`
+    /// bytes, or one slot as long as the receive buffer for a link given none (either 0). A slot of
+    /// that length holds any frame the session sends: its batch is at most the one it negotiated,
+    /// which is at most the one it advertised, which the receive buffer bounds
+    /// (`BoxedLinkDriver::link_rx_capacity`). So the frames a link given no storage carries are
+    /// the ones it carried before it lent any, and it sends them from storage it holds since it
+    /// was opened.
+    pub fn for_link(slots: usize, slot_len: usize, rx_len: usize) -> Self {
+        if slots == 0 || slot_len == 0 {
+            Self::new(1, rx_len)
+        } else {
+            Self::new(slots, slot_len)
         }
     }
 }
@@ -670,7 +684,8 @@ impl TxStore for TxBuffer {
 /// The buffers of a heap profile's link that opens now: claimed from its session's tables when the
 /// session lent some, and refused as exhausted when they have none left, so a session whose tables
 /// are full opens no link; otherwise allocated, a receive buffer of `rx` bytes and `tx_slots`
-/// slots of `tx_len` bytes (none lends nothing, and the session builds its frames itself).
+/// slots of `tx_len` bytes, or one slot of `rx` bytes when none is asked for
+/// ([`HeapTx::for_link`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) fn heap_link_buffers(
     lent: Option<&LinkTables>,
@@ -687,7 +702,7 @@ pub(crate) fn heap_link_buffers(
         }
         None => Ok((
             RxBuffer::Owned(alloc::vec![0u8; rx]),
-            TxBuffer::Owned(HeapTx::new(tx_slots, tx_len)),
+            TxBuffer::Owned(HeapTx::for_link(tx_slots, tx_len, rx)),
         )),
     }
 }
@@ -1078,6 +1093,29 @@ mod tests {
             "its own stays"
         );
         assert!(!none.lends(), "a link of no slots lends nothing");
+    }
+
+    /// A link given no outbound storage holds one slot as long as its receive buffer, and one
+    /// given slots holds those. Turned red by a link given none that lends nothing
+    /// (`HeapTx::for_link` returning `Self::new(slots, slot_len)` whatever it was given), or by
+    /// one whose single slot is shorter than the batch its receive buffer lets it advertise.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_given_no_outbound_storage_holds_one_slot_as_long_as_its_receive_buffer() {
+        for (slots, slot_len) in [(0, 0), (0, 32), (2, 0)] {
+            let tx = HeapTx::for_link(slots, slot_len, 64);
+            assert_eq!(
+                (tx.slots(), tx.slot_len()),
+                (1, 64),
+                "given {slots} slots of {slot_len}"
+            );
+            assert!(tx.lends());
+        }
+        let given = HeapTx::for_link(2, 32, 64);
+        assert_eq!((given.slots(), given.slot_len()), (2, 32));
+        let (rx, tx) = heap_link_buffers(None, 48, 0, 0).expect("allocated");
+        assert!(matches!(rx, RxBuffer::Owned(_)));
+        assert_eq!((tx.slots(), tx.slot_len()), (1, 48));
     }
 
     /// Tables lent a group receive table hand it on, each buffer claimed once until given back,
