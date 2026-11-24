@@ -2126,11 +2126,15 @@ mod in_place {
                 &mut dispatcher,
                 &mut reasm,
                 &local,
-                &datagram,
-                from,
-                1_000,
-                resume,
-                true,
+                wz_session_core::multicast_rx::GroupDatagram {
+                    bytes: &datagram,
+                    src: from,
+                    now_ms: 1_000,
+                },
+                wz_session_core::multicast_rx::GroupWalk {
+                    resume,
+                    may_stop: true,
+                },
                 host,
                 &(),
             )
@@ -2168,11 +2172,15 @@ mod in_place {
             &mut dispatcher,
             &mut reasm,
             &local,
-            &datagram,
-            from,
-            1_000,
-            None,
-            false,
+            wz_session_core::multicast_rx::GroupDatagram {
+                bytes: &datagram,
+                src: from,
+                now_ms: 1_000,
+            },
+            wz_session_core::multicast_rx::GroupWalk {
+                resume: None,
+                may_stop: false,
+            },
             &mut whole,
             &(),
         );
