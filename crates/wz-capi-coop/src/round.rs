@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, TableLender};
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -577,20 +577,12 @@ impl RoundRows {
     /// the records, the callbacks, the keys. Refused past the build's bound of a table or past what
     /// the arena has left.
     pub(crate) fn lent(arena: &mut Arena, counts: RoundRowCounts) -> Result<Self, LendRefused> {
-        let mut lend = TableLender::new(arena);
-        let rows = Self::lent_from(&mut lend, counts);
-        lend.finish().map(|()| rows)
-    }
-
-    /// [`Self::lent`] by `lend`, which keeps the first refusal of the tables it lends: tables of no
-    /// rows once one is refused.
-    pub(crate) fn lent_from(lend: &mut TableLender<'_>, counts: RoundRowCounts) -> Self {
-        Self {
-            records: lend.table(counts.records),
-            callbacks: lend.table(counts.callbacks),
-            keys: lend.table(counts.key_bytes()),
+        Ok(Self {
+            records: arena.lend(counts.records)?,
+            callbacks: arena.lend(counts.callbacks)?,
+            keys: arena.lend(counts.key_bytes())?,
             longest_key: counts.longest_key,
-        }
+        })
     }
 }
 

@@ -526,33 +526,6 @@ pub struct PeerPoolCounts {
     pub interests: crate::row_pool::RowCounts,
 }
 
-/// The pools a lend refused leaves: none, every table that would take rows of them refusing every
-/// item as a full one does.
-impl Default for PeerPools {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "peer-row-pools")]
-            aliases: RowSource::default(),
-            #[cfg(feature = "peer-row-pools")]
-            subscribers: RowSource::default(),
-            #[cfg(feature = "peer-row-pools")]
-            queryables: RowSource::default(),
-            #[cfg(feature = "peer-row-pools")]
-            tokens: RowSource::default(),
-            #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
-            sub_repeats: RowSource::default(),
-            #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
-            queryable_repeats: RowSource::default(),
-            #[cfg(all(
-                feature = "declare-subscriber",
-                feature = "interest-answer",
-                feature = "peer-row-pools"
-            ))]
-            interests: crate::pubsub::InterestRows::default(),
-        }
-    }
-}
-
 impl PeerPools {
     /// Nothing to lend: a build without `peer-row-pools` keeps what the peers write inline in each
     /// face's tables.

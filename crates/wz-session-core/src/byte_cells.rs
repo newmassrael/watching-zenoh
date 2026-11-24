@@ -125,14 +125,6 @@ impl LentByteCells {
     /// of the cells' bytes.
     pub const FLAG_BYTES: usize = core::mem::size_of::<Cell<bool>>();
 
-    /// A table of no buffer: what a lend refused hands its table ([`crate::bounded::TableLender`]),
-    /// which lends nothing and reads no byte.
-    pub(crate) const fn unlent() -> Self {
-        // SAFETY: a table of no cell reads no flag and no byte, so dangling pointers, aligned for
-        // their types, are all it needs.
-        unsafe { Self::over(NonNull::dangling(), NonNull::dangling(), 0, 0) }
-    }
-
     /// The table whose `count` flags are at `taken` and whose `count` cells of `size` bytes each
     /// are at `bytes`, one after the other.
     ///

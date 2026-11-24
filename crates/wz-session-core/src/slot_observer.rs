@@ -37,7 +37,7 @@
 // forms, so they, and what only they name, sit behind `alloc`.
 use core::mem::MaybeUninit;
 
-use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage, TableLender};
+use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::decl_sink::{DeclSink, UndeclSink};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
@@ -1183,48 +1183,6 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
         };
         observer.limit_to(limits);
         Ok(observer)
-    }
-
-    /// [`Self::lent`] by `lend`, which keeps the first refusal of the tables it lends, the keys kept
-    /// in the key arena `keys` holds: an observer of tables of no rows once one is refused, which
-    /// whoever asked for it gives up whole with the rest of what `lend` lent.
-    pub fn lent_from(
-        lend: &mut TableLender<'_>,
-        keys: crate::key_arena::LentKeys,
-        rows: ObserverRows<<K::Tables<Lent> as LentTables>::Rows>,
-        limits: &crate::limits::SessionLimits,
-    ) -> Self
-    where
-        K::Tables<Lent>: LentTables + Default,
-    {
-        #[cfg(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        ))]
-        let watchers = lend.lend_with(|_| Self::decl_watcher_rows(limits));
-        let mut observer = Self {
-            tables: lend.lend_keyed(keys, |arena, keys| {
-                LentTables::lend(arena, keys, rows.tables)
-            }),
-            #[cfg(feature = "switchboard")]
-            switchboard: SwitchboardRegistry::new(),
-            #[cfg(feature = "declare-subscriber")]
-            remote_subscribers: lend
-                .lend_with(|arena| RemoteSubscriberTable::lent(arena, watchers)),
-            #[cfg(feature = "declare-queryable")]
-            remote_queryables: lend.lend_with(|arena| RemoteQueryableTable::lent(arena, watchers)),
-            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
-            matching: core::marker::PhantomData,
-            #[cfg(feature = "liveliness-token")]
-            liveliness: lend.lend_with(|arena| LivelinessRegistry::lent(arena, watchers)),
-            #[cfg(feature = "liveliness-token")]
-            local_tokens: lend.lend_keyed(keys, |arena, keys| {
-                LocalTokenRegistry::lent(arena, keys, rows.local_tokens)
-            }),
-        };
-        observer.limit_to(limits);
-        observer
     }
 
     /// How many rows [`Self::lent`] lends each declaration watcher list under `limits`: the

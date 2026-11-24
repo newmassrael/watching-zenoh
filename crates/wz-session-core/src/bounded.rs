@@ -1464,91 +1464,6 @@ impl<'a> TableLender<'a> {
         T::default()
     }
 
-    /// A table of `rows` rows of `T`, at most the build's ceiling `N`, as [`Arena::lend`] lends
-    /// one; a table of no rows, which takes no value, once a table is refused, this one among them.
-    pub fn table<T, const N: usize>(&mut self, rows: usize) -> BoundedVec<T, N, Lent> {
-        const {
-            assert!(
-                core::mem::align_of::<T>() <= ARENA_ALIGN,
-                "a row of a lent table asks for more alignment than an arena's spans start on"
-            )
-        };
-        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
-        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
-        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
-        // (asserted above).
-        unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
-    }
-
-    /// A table of `count` buffers of `size` bytes, as [`Arena::lend_byte_cells`] lends one; a
-    /// table of no buffer once a table is refused, this one among them.
-    pub fn byte_cells(&mut self, size: usize, count: usize) -> LentByteCells {
-        if self.refused.is_none() {
-            match self.arena.lend_byte_cells(size, count) {
-                Ok(cells) => return cells,
-                Err(why) => self.refused = Some(why),
-            }
-        }
-        LentByteCells::unlent()
-    }
-
-    /// A key arena of `bytes` bytes of blocks, as [`Arena::lend_keys`] lends one, as the tables
-    /// that keep their keys in it hold it; no arena, which keeps no key, once a table is refused,
-    /// this one among them. [`Self::finish_keys`] hands back the arena itself.
-    pub fn keys(
-        &mut self,
-        bytes: usize,
-        longest: crate::limits::MaxKeyexprBytesHeld,
-    ) -> crate::key_arena::LentKeys {
-        if self.refused.is_none() {
-            match self.arena.lend_keys(bytes, longest) {
-                Ok(keys) => return crate::key_arena::LentKeys::from(keys),
-                Err(why) => self.refused = Some(why),
-            }
-        }
-        crate::key_arena::LentKeys::default()
-    }
-
-    /// The table `lend` lends from the arena with the key arena `keys` holds; the table of no rows
-    /// when it is refused, when a table before it was, or when `keys` holds no arena.
-    pub fn lend_keyed<T: Default>(
-        &mut self,
-        keys: crate::key_arena::LentKeys,
-        lend: impl FnOnce(&mut Arena, crate::key_arena::KeySpace) -> Result<T, LendRefused>,
-    ) -> T {
-        match keys.space() {
-            Some(space) => self.lend_with(|arena| lend(arena, space)),
-            None => {
-                self.refuse_unkeyed();
-                T::default()
-            }
-        }
-    }
-
-    /// Keep a refusal for a table that needs a key arena and was handed none, unless one is kept.
-    fn refuse_unkeyed(&mut self) {
-        if self.refused.is_none() {
-            let left = self.arena.bytes().saturating_sub(self.arena.high_water());
-            self.refused = Some(LendRefused::Exhausted { asked: None, left });
-        }
-    }
-
-    /// The first refusal, if a table was refused, else the key arena `keys` holds: the one
-    /// [`Self::keys`] lent, which a lend that refused nothing always holds.
-    pub fn finish_keys(
-        mut self,
-        keys: crate::key_arena::LentKeys,
-    ) -> Result<crate::key_arena::KeySpace, LendRefused> {
-        if keys.space().is_none() {
-            self.refuse_unkeyed();
-        }
-        self.finish()?;
-        keys.space().ok_or(LendRefused::Exhausted {
-            asked: None,
-            left: 0,
-        })
-    }
-
     /// The first refusal, if a table was refused.
     pub fn finish(self) -> Result<(), LendRefused> {
         match self.refused {
@@ -2159,45 +2074,6 @@ mod tests {
         // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
         // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every lent table.
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
-    }
-
-    /// A lender keeps its first refusal for every kind of table it lends: after it a table of
-    /// rows, a table of buffers and a key arena are each lent nothing, the arena lends no byte
-    /// more, and `finish_keys` hands the first refusal back. The CONTROL is the same three lent
-    /// with nothing refused, which take their bytes and hand the key arena back.
-    #[test]
-    fn a_lender_lends_no_kind_of_table_after_its_first_refusal() {
-        let longest = crate::limits::SessionLimits::defaults().max_keyexpr_bytes_held();
-        let mut whole = arena_of(1 << 12);
-        let mut lend = TableLender::new(&mut whole);
-        let rows: BoundedVec<u32, 4, Lent> = lend.table(4);
-        let cells = lend.byte_cells(8, 2);
-        let keys = lend.keys(64, longest);
-        assert!(
-            lend.finish_keys(keys).is_ok(),
-            "CONTROL: nothing is refused"
-        );
-        assert_eq!(rows.free_slots(), 4);
-        assert!(cells.claim().is_some());
-        assert!(whole.high_water() > 0);
-
-        let mut short = arena_of(1 << 12);
-        let mut lend = TableLender::new(&mut short);
-        let past: BoundedVec<u32, 4, Lent> = lend.table(5);
-        let rows: BoundedVec<u32, 4, Lent> = lend.table(4);
-        let cells = lend.byte_cells(8, 2);
-        let keys = lend.keys(64, longest);
-        assert!(matches!(
-            lend.finish_keys(keys),
-            Err(LendRefused::OverCeiling {
-                rows: 5,
-                ceiling: 4
-            })
-        ));
-        assert_eq!(short.high_water(), 0);
-        assert_eq!((past.free_slots(), rows.free_slots()), (0, 0));
-        assert!(cells.claim().is_none());
-        assert!(keys.space().is_none());
     }
 
     /// A table of each policy with room for its `N`, for the algorithm to run on: the growable

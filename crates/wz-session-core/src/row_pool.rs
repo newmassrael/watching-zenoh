@@ -1288,14 +1288,6 @@ pub struct RowSource<K: RowKind> {
     _kind: PhantomData<*const K>,
 }
 
-/// A source that hands out no rows: what a lend refused leaves its tables, which refuse every
-/// item as full ones do.
-impl<K: RowKind> Default for RowSource<K> {
-    fn default() -> Self {
-        Self::of(RawSource::Own(None))
-    }
-}
-
 impl<K: RowKind> RowSource<K> {
     fn of(raw: RawSource) -> Self {
         Self {
