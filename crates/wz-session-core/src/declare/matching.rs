@@ -64,6 +64,11 @@ pub trait MatchingSink {
     /// contract above remains exactly for hand-installed sinks on the
     /// raw registries.
     fn on_matching_changed(&mut self, matching: bool);
+
+    /// Whether a value of this sink can be made. A sink type of none (an uninhabited enum) never
+    /// holds a watch, so a list of it is never walked, and the consult a re-evaluation would ask
+    /// of the session's own tables is left out of the build ([`crate::declare::holds_watches`]).
+    const WATCHES: bool = true;
 }
 
 /// Heap matching-closure type backing [`BoxedMatchingSink`].
@@ -211,6 +216,9 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// a same-verdict sweep fires nothing (pico transition-only).
     #[inline]
     pub fn reevaluate(&mut self, has_matching: impl Fn(&K) -> bool) -> usize {
+        if !C::WATCHES {
+            return 0;
+        }
         self.reevaluate_by(&has_matching)
     }
 
@@ -324,5 +332,27 @@ mod tests {
         assert_eq!(list.reevaluate(|k| k == "home/a"), 1);
         assert_eq!(*log_a.lock().unwrap(), vec![true]);
         assert!(log_b.lock().unwrap().is_empty());
+    }
+
+    /// A sink type of no value holds no watch: its re-evaluation asks no consult, and its tables
+    /// are handed none ([`crate::declare::holds_watches`]), while a sink that makes values is
+    /// re-evaluated. Turned red by a sink of no value that keeps the default.
+    #[test]
+    fn a_sink_of_no_value_holds_no_watch() {
+        enum Never {}
+        impl MatchingSink for Never {
+            fn on_matching_changed(&mut self, _matching: bool) {
+                match *self {}
+            }
+
+            const WATCHES: bool = false;
+        }
+        let mut never: MatchingWatchList<Never, String> = MatchingWatchList::new();
+        assert_eq!(never.reevaluate(|_| unreachable!("no consult is asked")), 0);
+        assert!(!crate::declare::holds_watches::<Never>());
+        assert!(
+            crate::declare::holds_watches::<BoxedMatchingSink>(),
+            "CONTROL: a boxed sink watches"
+        );
     }
 }

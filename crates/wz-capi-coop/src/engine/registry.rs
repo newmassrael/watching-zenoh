@@ -367,6 +367,8 @@ impl MatchingSink for NoWatch {
     fn on_matching_changed(&mut self, _matching: bool) {
         match *self {}
     }
+
+    const WATCHES: bool = false;
 }
 
 /// What the application registered on the session: its tables' rows lent from the session's
