@@ -22,6 +22,7 @@ use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+use wz_session_core::sample::SourceInfo;
 
 use super::get::{ask, settle, Leg};
 use super::{open, until, CatchAll, Command, Engine, Router};
@@ -702,5 +703,33 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
         walks() - before,
         1,
         "a get that leaves no row waiting walks no table"
+    );
+}
+
+/// A get for the session alone whose body the codec refuses (a source info that names no zid) asks
+/// none of the session's queryables, and its Final comes inside the call, as for a get no queryable
+/// matched. CONTROL: the same get with a source info that names a zid is answered.
+#[test]
+fn a_get_whose_body_the_codec_refuses_asks_no_own_queryable_and_ends() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    answering(&engine, "demo/lq/**", Locality::Any, b"any");
+
+    let refused = get_for(Locality::SessionLocal).with_source_info(SourceInfo::default());
+    let (issued, leg) = ask(&engine, "demo/lq/a", &refused, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let leg = leg.lock().unwrap();
+    assert!(leg.ended, "the Final came inside the get");
+    assert!(leg.replies.is_empty(), "no queryable was asked");
+    drop(leg);
+
+    let named = get_for(Locality::SessionLocal).with_source_info(SourceInfo::new(&[0x5a], 1, 2));
+    let (issued, leg) = ask(&engine, "demo/lq/a", &named, None, None, None);
+    assert_eq!(issued, Ok(1));
+    assert_eq!(
+        leg.lock().unwrap().replies.len(),
+        1,
+        "CONTROL: the queryable answered"
     );
 }

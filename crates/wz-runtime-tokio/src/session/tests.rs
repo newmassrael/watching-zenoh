@@ -12513,6 +12513,74 @@ fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
     assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
 }
 
+/// A query for the session alone whose loopback body the codec refuses (a source info that
+/// names no zid) is refused whole before anything is sent: the caller gets the refusal, no
+/// queryable of the session is called and no pending entry is left. CONTROL: the same query with
+/// a source info that names a zid is answered by the queryable.
+#[cfg(all(
+    feature = "declare-queryable",
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-source-info"
+))]
+#[test]
+fn a_loopback_query_whose_body_the_codec_refuses_is_refused_whole() {
+    use crate::sample::SourceInfo;
+
+    let (session, driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let _q = session.declare_queryable(
+        "home/temp",
+        QueryableOptions::default(),
+        move |_query, responder| {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"22.5");
+        },
+    );
+    let frames = driver.frame_count();
+    let refused = session.query(
+        "home/temp",
+        QueryOptions::get()
+            .with_allowed_destination(Locality::SessionLocal)
+            .with_source_info(SourceInfo::default()),
+        |_| {},
+        |_| {},
+    );
+    assert!(
+        matches!(refused, Err(QueryAliasError::ExceedsCapacity)),
+        "the codec's refusal is the caller's"
+    );
+    assert_eq!(fired.load(Ordering::SeqCst), 0, "no queryable was called");
+    assert_eq!(
+        session.observer().lock().unwrap().face_ref().replies.len(),
+        0,
+        "a refused query leaves no pending entry",
+    );
+    assert_eq!(driver.frame_count(), frames, "nothing was sent");
+
+    let replies = Arc::new(AtomicUsize::new(0));
+    let r = replies.clone();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_source_info(SourceInfo::new(&[0x5a], 1, 2)),
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        )
+        .expect("CONTROL: a source info that names a zid is carried");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "CONTROL: the queryable ran"
+    );
+    assert_eq!(replies.load(Ordering::SeqCst), 1, "CONTROL: its reply came");
+}
+
 #[cfg(all(
     feature = "codec-declare",
     feature = "declare-keyexpr",

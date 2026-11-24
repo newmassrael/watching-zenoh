@@ -1005,8 +1005,6 @@ pub mod publish_options;
 /// `wz-runtime-tokio`, which re-exports it, so a session on any runtime asks with one set of
 /// rules.
 #[cfg(feature = "alloc")]
-// Totality debt TD-108 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod query_options;
 
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a

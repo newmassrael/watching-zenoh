@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (29) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (28) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -272,7 +272,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing` | 1 | open |
-| TD-108 | `wz-session-core` | `query_options` | `expect_used` | 3 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `unreachable` | 1 | generated |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
@@ -322,10 +321,7 @@ TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen by
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse. TD-108
-(`query_options::loopback_query`) builds the loopback's Query body (`QueryBuilder`), whose
-bounded copies answer a `Result`: a value form moves its callers in the cooperative engine and
-the tokio session, and is made with them.
+through `Bounded::new`, over a sink that cannot refuse.
 
 The transmit buffer names its refusal (`TxBuf::Error`, `CodecError` for every buffer today). A body
 a send hands its dispatch can refuse its own message (a key or a payload past its protocol bound),
