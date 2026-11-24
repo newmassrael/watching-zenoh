@@ -164,7 +164,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             .declared
             .try_clone()
             .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
-        let publisher = PlainPublisher::declare(&self.session, keyexpr, None, declared)
+        let publisher = PlainPublisher::declare(&self.session, keyexpr, declared)
             .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.entity_id(),
@@ -215,7 +215,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         keyexpr: &str,
         _sporadic: bool,
     ) -> Result<PlainPublisher, AdvancedPublisherError> {
-        PlainPublisher::declare(&self.session, keyexpr, None, PublisherQos::pico_default())
+        PlainPublisher::declare(&self.session, keyexpr, PublisherQos::pico_default())
             .map_err(|code| Self::refusal("beacon publisher", code))
     }
 

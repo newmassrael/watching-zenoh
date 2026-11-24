@@ -1276,32 +1276,16 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// — without building a C handle it never hands out, and lets it keep them on a
 /// task, which a value holding raw pointers into its own storage cannot do.
 pub(crate) struct PlainPublisher {
-    /// R2962 — pico's write filter for this publisher: the Interest it asks its
-    /// peers, and the state that decides whether a put or delete is SENT. It holds the
-    /// session the publisher is declared in, which the publisher reaches through it.
-    /// Declared BEFORE `key`, so it drops first: the Interest is retracted while
-    /// the declaration it names still stands, which is upstream's order
-    /// (`_z_undeclare_publisher` clears the filter, then the key).
-    filter: WriteFilter,
-    /// R2959 — the publisher's key WITH the declaration pico makes for it:
-    /// `_z_declare_publisher` runs `_z_declared_keyexpr_declare` on the key
+    /// The publisher's key WITH the declaration pico makes for it
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &publisher->_key, keyexpr),`),
-    /// and every put then rides the declared id. Dropping the state drops the
-    /// key, which retracts the declaration AFTER the publisher itself is gone —
-    /// upstream's order.
-    key: DeclaredKeyexpr,
-    /// The key as every put and delete of this publisher names it on the wire, made once at
-    /// declare: the declaration's id and the rest of the key are fixed for as long as `key` holds
-    /// the declaration. After the filter, as `key` is, so the declaration it keeps is retracted
-    /// after the filter's Interest.
-    wire: WireKey,
-    /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
-    /// allocated ONCE at declare from the session's entity counter. See
-    /// `SharedSession::next_entity_id` for why it is allocated rather than
-    /// derived. Only the unstable API reports it, so only `unstable-api` keeps it.
-    #[cfg(feature = "unstable-api")]
-    eid: wz_session_core::wire_id::EntityId,
+    /// the key as every put and delete names it on the wire, the `eid` half of the global id
+    /// `z_publisher_id` reports, and pico's write filter, which decides whether a put or delete
+    /// is SENT and holds the session the publisher reaches through it. Held whole as it was
+    /// declared, so nothing of it is moved field by field on the way to the publisher's place;
+    /// its filter drops before its key, which is upstream's order (`_z_undeclare_publisher`
+    /// clears the filter, then the key).
+    entity: FilteredKey,
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
     declared: PublisherQos,
@@ -1429,18 +1413,31 @@ impl PublisherQos {
 }
 
 impl PlainPublisher {
-    /// Declare a publisher on `keyexpr`: its key's declaration, then the write
-    /// filter that names it — pico's order in `z_declare_publisher`.
+    /// Declare a publisher on `keyexpr` that sends with `declared`, for a composite that holds it
+    /// itself: `declare_entity` with a key of its own.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn declare(
+        session: &PicoSession,
+        keyexpr: &str,
+        declared: PublisherQos,
+    ) -> Result<Self, ZResult> {
+        let entity = Self::declare_entity(session, keyexpr, None, &declared)?;
+        Ok(Self { entity, declared })
+    }
+
+    /// Declare what a publisher on `keyexpr` stands on: its key's declaration, then the write
+    /// filter that names it — pico's order in `z_declare_publisher` — with the plain way a put
+    /// that brings nothing of its own is sent, worked out from `declared`.
     ///
     /// `existing` is the caller's own key when it is already a declaration
     /// (`declared_of`), which is shared rather than declared again. `declared` is
     /// what the publisher then sends every sample with.
-    pub(crate) fn declare(
+    fn declare_entity(
         session: &PicoSession,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
-        declared: PublisherQos,
-    ) -> Result<Self, ZResult> {
+        declared: &PublisherQos,
+    ) -> Result<FilteredKey, ZResult> {
         let filtered = FilteredKey::declare(
             session,
             FilterPlane::Subscribers,
@@ -1461,14 +1458,7 @@ impl PlainPublisher {
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
         );
-        Ok(Self {
-            #[cfg(feature = "unstable-api")]
-            eid: filtered.eid,
-            filter: filtered.filter,
-            key: filtered.key,
-            wire: filtered.wire,
-            declared,
-        })
+        Ok(filtered)
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the
@@ -1488,7 +1478,10 @@ impl PlainPublisher {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
-        let engine = self.filter.engine();
+        let FilteredKey {
+            filter, key, wire, ..
+        } = &self.entity;
+        let engine = filter.engine();
         if engine.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
@@ -1496,10 +1489,7 @@ impl PlainPublisher {
             self.declared.apply(opts);
             &*opts
         });
-        match self
-            .filter
-            .publish(self.key.literal(), &self.wire, payload, opts)
-        {
+        match filter.publish(key.literal(), wire, payload, opts) {
             FilteredPut::Suppressed => Z_OK,
             FilteredPut::Sent(sent) => publish_code(sent),
             // The filter let a bare put through and it is not plain on this node (no plain form
@@ -1507,12 +1497,7 @@ impl PlainPublisher {
             FilteredPut::NotPlain => {
                 let mut bare = put_options();
                 self.declared.apply(&mut bare);
-                publish_code(engine.publish_on_wire_all(
-                    self.key.literal(),
-                    &self.wire,
-                    payload,
-                    &bare,
-                ))
+                publish_code(engine.publish_on_wire_all(key.literal(), wire, payload, &bare))
             }
         }
     }
@@ -1520,26 +1505,26 @@ impl PlainPublisher {
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "advanced")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
-        self.eid
+        self.entity.eid
     }
 
     /// The publisher's key with its declaration.
     #[cfg(feature = "advanced")]
     pub(crate) fn key(&self) -> &DeclaredKeyexpr {
-        &self.key
+        &self.entity.key
     }
 
     /// pico's matching status of the publisher: whether its write filter has a match
     /// (`!_z_write_filter_active`).
     pub(crate) fn filter_matches(&self) -> bool {
-        !self.filter.active()
+        !self.entity.filter.active()
     }
 
     /// The publisher's write filter: its matching listeners are declared on it
     /// ([`WriteFilter::declare_matching_listener`]), and it retracts them when the publisher
     /// goes, as pico's filter takes its callbacks with it at `z_undeclare_publisher`.
     pub(crate) fn filter(&self) -> &WriteFilter {
-        &self.filter
+        &self.entity.filter
     }
 }
 
@@ -1560,7 +1545,7 @@ impl PublisherState {
     /// Point the cached view at this state's own keyexpr. MUST run only once
     /// the state sits at its FINAL address (i.e. after `Box::new`).
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.core.key.loaned();
+        self.loaned_keyexpr = self.core.entity.key.loaned();
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
@@ -1571,13 +1556,13 @@ impl PublisherState {
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
-        self.core.eid
+        self.core.entity.eid
     }
 
     /// The SESSION's zid — the other half of that global id.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.core.filter.engine().zid()
+        self.core.entity.filter.engine().zid()
     }
 
     /// The cached borrow `z_publisher_keyexpr` hands back.
@@ -3097,13 +3082,18 @@ pub unsafe extern "C" fn z_declare_publisher(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let core = match PlainPublisher::declare(&session, ke, declared_of(keyexpr), declared) {
-            Ok(core) => core,
-            Err(rc) => return rc,
-        };
-        let state = slot.fill(PublisherState {
-            core,
-            loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+        let entity =
+            match PlainPublisher::declare_entity(&session, ke, declared_of(keyexpr), &declared) {
+                Ok(entity) => entity,
+                Err(rc) => return rc,
+            };
+        // What can be refused is declared above; the publisher is made where it lies, so the
+        // declared entity is moved once, into its place.
+        let state = slot.fill_in_place(|at: *mut PublisherState| {
+            at.write(PublisherState {
+                core: PlainPublisher { entity, declared },
+                loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            })
         });
         (*state).bind();
         *publisher = z_owned_publisher_t {
