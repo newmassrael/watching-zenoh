@@ -448,7 +448,7 @@ fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::Source
 // short-circuits to None so a `codec-request` subset that does not compose
 // querier values carries no value decode path.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-fn extract_query_value_parts(query: &QueryOwned) -> Option<(u32, Option<&[u8]>, &[u8])> {
+fn extract_query_value_parts(query: &QueryOwned) -> Option<crate::encoding::ValueParts<'_>> {
     #[cfg(not(feature = "query-value"))]
     {
         let _ = query;
@@ -3079,7 +3079,7 @@ struct QueryProjection<'q> {
     /// and schema, and its payload. A build with no heap does not project a query's value: its
     /// encoding is an owned hint, and the queryables of such a build (the admin space) read none.
     #[cfg(feature = "alloc")]
-    plain_value: Option<(u32, Option<&'q [u8]>, &'q [u8])>,
+    plain_value: Option<crate::encoding::ValueParts<'q>>,
     /// The value held as shareable bytes: un-swapped out of shared memory, or a
     /// range of a frame the link lent. Preferred over `plain_value` when present.
     #[cfg(feature = "alloc")]
@@ -3918,12 +3918,12 @@ where
     #[cfg(all(feature = "alloc", feature = "query-value"))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
         Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
-        None => plain_value.map(|(packed_id, schema, payload)| {
+        None => plain_value.map(|parts| {
             let hint = crate::sample::EncodingHint {
-                packed_id,
-                schema: schema.map(<[u8]>::to_vec),
+                packed_id: parts.packed_id,
+                schema: parts.schema.map(<[u8]>::to_vec),
             };
-            (hint, payload)
+            (hint, parts.payload)
         }),
     };
     // The plain value's encoding where it lies, which a holder that keeps the query past its
@@ -3932,7 +3932,7 @@ where
     #[cfg(all(feature = "alloc", feature = "query-value"))]
     let lent_encoding = plain_value
         .filter(|_| unswapped_value.is_none())
-        .map(|(packed_id, schema, _)| (packed_id, schema));
+        .map(|parts| (parts.packed_id, parts.schema));
     #[cfg(all(feature = "alloc", not(feature = "query-value")))]
     let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
         let _ = plain_value;

@@ -137,7 +137,7 @@ pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
 /// ([`decode_query_value_ext_parts_in`]).
 pub fn decode_query_value_ext_parts<E: ExtEntryView>(
     extensions: &[E],
-) -> Option<(u32, Option<&[u8]>, &[u8])> {
+) -> Option<crate::encoding::ValueParts<'_>> {
     decode_query_value_ext_parts_in(extensions)
 }
 
@@ -146,7 +146,7 @@ pub fn decode_query_value_ext_parts<E: ExtEntryView>(
 /// ([`crate::encoding::split_value_body_parts`]).
 pub fn decode_query_value_ext_parts_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     extensions: impl IntoIterator<Item = T>,
-) -> Option<(u32, Option<&'c [u8]>, &'c [u8])> {
+) -> Option<crate::encoding::ValueParts<'c>> {
     let bytes =
         crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
             .plain_zbuf_in()?;
@@ -248,22 +248,26 @@ mod tests {
             schema: Some(b"json".to_vec()),
         };
         let chain = [encode_query_value_ext::<Wire>(&enc, b"payload-bytes").unwrap()];
-        let (packed_id, schema, payload) =
+        let parts =
             decode_query_value_ext_parts(&chain).expect("schema-encoding value ext decodes");
-        assert_eq!(packed_id, 0x0B);
-        assert_eq!(schema, Some(&b"json"[..]));
-        assert_eq!(payload, b"payload-bytes");
+        assert_eq!(parts.packed_id, 0x0B);
+        assert_eq!(parts.schema, Some(&b"json"[..]));
+        assert_eq!(parts.payload, b"payload-bytes");
         let body = match &chain[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => z.value.as_bytes().as_ptr_range(),
             _ => panic!("expected ExtZbuf body"),
         };
-        let schema = schema.unwrap().as_ptr_range();
+        let schema = parts.schema.unwrap().as_ptr_range();
         assert!(body.start <= schema.start && schema.end <= body.end);
 
         let plain = [encode_query_value_ext::<Wire>(&default_encoding(), b"hi").unwrap()];
         assert_eq!(
             decode_query_value_ext_parts_in(&plain[..]),
-            Some((0, None, &b"hi"[..]))
+            Some(crate::encoding::ValueParts {
+                packed_id: 0,
+                schema: None,
+                payload: &b"hi"[..],
+            })
         );
     }
 
