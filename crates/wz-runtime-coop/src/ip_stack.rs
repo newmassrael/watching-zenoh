@@ -328,6 +328,10 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups> {
     tls: L,
     groups: G,
     shape: LinkShape,
+    /// The rows every udp port of these links keeps its peers in, when the session lent some
+    /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
+    #[cfg(feature = "udp-listen")]
+    ports: Option<Rc<core::cell::RefCell<crate::udp_link::PortBook>>>,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
 
@@ -421,6 +425,8 @@ where
             tls: NoDial,
             groups: NoGroups,
             shape: LinkShape::default(),
+            #[cfg(feature = "udp-listen")]
+            ports: None,
             datagrams: core::marker::PhantomData,
         }
     }
@@ -444,6 +450,8 @@ where
             tls,
             groups: self.groups,
             shape: self.shape,
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports,
             datagrams: self.datagrams,
         }
     }
@@ -457,6 +465,8 @@ where
             tls: self.tls,
             groups,
             shape: self.shape,
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports,
             datagrams: self.datagrams,
         }
     }
@@ -608,6 +618,15 @@ where
         self.shape.cells = Some(cells);
     }
 
+    /// Every udp port these links listen on from now on keeps its peers and their datagrams in
+    /// `rows`, which the ports share.
+    #[cfg(feature = "udp-listen")]
+    fn lend_port_rows(&mut self, rows: crate::udp_link::PortRows) {
+        self.ports = Some(Rc::new(core::cell::RefCell::new(
+            crate::udp_link::PortBook::of(Some(rows)),
+        )));
+    }
+
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
     /// it, then its handshake), and each is asked for its stream later (`PendingStream`); a
     /// datagram link has no connection to wait for. A stream link's buffers are claimed as a
@@ -652,9 +671,15 @@ where
                 // A session that lent its ports a table of datagram slots has the port read into
                 // them, and a port that finds none free to read into is not opened; without the
                 // table the port reads into memory of its own.
+                let book = self.ports.clone().unwrap_or_else(|| {
+                    Rc::new(core::cell::RefCell::new(crate::udp_link::PortBook::of(
+                        None,
+                    )))
+                });
                 let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
-                    Some(table) => UdpPort::lent(socket, table).ok_or(LinkOpenError::Exhausted)?,
-                    None => UdpPort::new(socket, self.shape.datagram_rx),
+                    Some(table) => UdpPort::lent_in_book(socket, table, &book)
+                        .ok_or(LinkOpenError::Exhausted)?,
+                    None => UdpPort::in_book(socket, self.shape.datagram_rx, &book),
                 };
                 Ok(Box::new(IpUdpListener {
                     port: Rc::new(port),
