@@ -579,8 +579,6 @@ pub mod get;
 // `targeted-query` policy is off.
 #[cfg(feature = "query")]
 pub mod get_to_peer;
-// Totality debt TD-176 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable, clippy::arithmetic_side_effects)]
 pub mod handlers;
 // The pico internals the unstable arm's headers call from code clang emits into every program
 // that includes them (`_z_pending_query_cancellation_data_clear`).
