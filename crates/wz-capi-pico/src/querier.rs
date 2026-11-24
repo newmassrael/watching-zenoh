@@ -588,19 +588,22 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             source_info,
         };
         let token = token.or_else(|| Some(state.cancel.clone()));
+        let ask = crate::get::GetAsk {
+            parameters: params_in,
+            target: state.target,
+            consolidation: state.consolidation,
+            timeout_ms: state.timeout_ms,
+            accept_replies: state.accept_replies,
+            payload: payload.as_ref(),
+            attachment: attachment.as_ref(),
+            qos: state.qos,
+            value_meta,
+        };
         issue_get(
             &state.shared,
             state.key.literal(),
             state.key.wire(Arc::as_ref(&state.shared)),
-            params_in,
-            state.target,
-            state.consolidation,
-            state.timeout_ms,
-            state.accept_replies,
-            payload,
-            attachment,
-            state.qos,
-            value_meta,
+            &ask,
             closure,
             token,
             None,

@@ -970,19 +970,20 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 /// `unsafe impl Sync for CReplyClosure` above for what each arm means for the
 /// reply callback.
 ///
-/// The parameters, the value, its encoding and the attachment are lent for the call, read where
+/// The parameters are `parameters`, the ones the get transmits ([`transmit_parameters`] of
+/// `ask`'s). They, the value, its encoding and the attachment are lent for the call, read where
 /// the caller and the moved objects hold them, so a get copies none of them.
-#[allow(clippy::too_many_arguments)]
-fn get_options<'a>(
-    target: z_query_target_t,
-    consolidation: z_consolidation_mode_t,
-    parameters: &'a [u8],
-    timeout_ms: u64,
-    payload: Option<&'a crate::bytes::ByteBuf>,
-    attachment: Option<&'a crate::bytes::ByteBuf>,
-    qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta<'a>,
-) -> QueryOptionsOf<'a> {
+fn get_options<'a>(ask: &GetAsk<'a>, parameters: &'a [u8]) -> QueryOptionsOf<'a> {
+    let GetAsk {
+        target,
+        consolidation,
+        timeout_ms,
+        payload,
+        attachment,
+        qos,
+        ref value_meta,
+        ..
+    } = *ask;
     let mut opts = QueryOptionsOf::get()
         .with_allowed_destination(qos.destination)
         .with_timeout_ms(get_timeout_ms(timeout_ms))
@@ -1010,8 +1011,8 @@ fn get_options<'a>(
     if let Some(encoding) = value_meta.encoding {
         opts = opts.with_encoding_ref(encoding);
     }
-    if let Some(si) = value_meta.source_info {
-        opts = opts.with_source_info(si);
+    if let Some(si) = &value_meta.source_info {
+        opts = opts.with_source_info(si.clone());
     }
 
     // `Z_QUERY_TARGET_BEST_MATCHING` is deliberately NOT representable in wz's
@@ -1260,23 +1261,18 @@ pub(crate) unsafe fn get_inner(
         encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),
         source_info,
     };
-    issue_get(
-        &engine,
-        ke,
-        wire,
-        params_in,
+    let ask = GetAsk {
+        parameters: params_in,
         target,
         consolidation,
         timeout_ms,
         accept_replies,
-        payload,
-        attachment,
+        payload: payload.as_ref(),
+        attachment: attachment.as_ref(),
         qos,
         value_meta,
-        cclosure,
-        token,
-        target_peer,
-    )
+    };
+    issue_get(&engine, ke, wire, &ask, cclosure, token, target_peer)
 }
 
 /// Adopt a moved reply closure and null the source, exactly as pico does
@@ -1316,6 +1312,22 @@ pub(crate) struct PicoQueryValueMeta<'a> {
     /// The query's `(zid, eid, sn)` — the Query body's source_info ext 0x01.
     /// Borrowed from the caller's `z_source_info_t*`, projected to an owned hint.
     pub(crate) source_info: Option<wz_session_core::sample::SourceInfo>,
+}
+
+/// What a C get asks besides its key, its callback, its cancellation and its addressee: its
+/// parameters as the caller wrote them, the reply keys it accepts, and the rest of its options,
+/// each read where the caller or the querier holds it. Lent to [`issue_get`] and [`get_options`]
+/// by reference, so neither call copies it.
+pub(crate) struct GetAsk<'a> {
+    pub(crate) parameters: &'a [u8],
+    pub(crate) target: z_query_target_t,
+    pub(crate) consolidation: z_consolidation_mode_t,
+    pub(crate) timeout_ms: u64,
+    pub(crate) accept_replies: crate::reply_keyexpr::z_reply_keyexpr_t,
+    pub(crate) payload: Option<&'a crate::bytes::ByteBuf>,
+    pub(crate) attachment: Option<&'a crate::bytes::ByteBuf>,
+    pub(crate) qos: PicoQueryQos,
+    pub(crate) value_meta: PicoQueryValueMeta<'a>,
 }
 
 /// R311y551 — the three request-QoS option fields, bundled so the shared
@@ -1373,25 +1385,16 @@ impl PicoQueryQos {
 /// every `z_*` entry point asks. An engine that cannot address a get to one node
 /// asks no link and the get answers `WZ_EXT_ERR_UNSUPPORTED`, completed with no
 /// reply.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn issue_get(
     engine: &Arc<Engine>,
     keyexpr: &str,
     wire: WireKey,
-    params_in: &[u8],
-    target: z_query_target_t,
-    consolidation: z_consolidation_mode_t,
-    timeout_ms: u64,
-    accept_replies: crate::reply_keyexpr::z_reply_keyexpr_t,
-    payload: Option<crate::bytes::ByteBuf>,
-    attachment: Option<crate::bytes::ByteBuf>,
-    qos: PicoQueryQos,
-    value_meta: PicoQueryValueMeta<'_>,
+    ask: &GetAsk<'_>,
     closure: CReplyClosure,
     token: Option<Arc<CancellationToken>>,
     target_peer: Option<Vec<u8>>,
 ) -> ZResult {
-    let params = transmit_parameters(params_in, accept_replies);
+    let params = transmit_parameters(ask.parameters, ask.accept_replies);
 
     // pico's `pen_qry->_anyke` is the OR of the option and the selector the
     // caller wrote by hand: `_anyke_in_parameters || _anyke_option`
@@ -1409,16 +1412,7 @@ pub(crate) fn issue_get(
         Err(code) => return code,
     };
 
-    let opts = get_options(
-        target,
-        consolidation,
-        &params,
-        timeout_ms,
-        payload.as_ref(),
-        attachment.as_ref(),
-        qos,
-        value_meta,
-    );
+    let opts = get_options(ask, &params);
 
     // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
@@ -2171,16 +2165,7 @@ mod tests {
             is_express: true,
             destination: Locality::Remote,
         };
-        let opts = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &[],
-            0,
-            None,
-            None,
-            qos,
-            PicoQueryValueMeta::default(),
-        );
+        let opts = get_options(&GetAsk { qos, ..asking(&[]) }, &[]);
         let packed = opts.qos.expect("the QoS trio reaches QueryOptions");
         assert_eq!(packed.priority(), Priority::RealTime, "priority");
         assert_eq!(packed.congestion(), CongestionControl::Drop, "congestion");
@@ -2190,16 +2175,7 @@ mod tests {
         // request-side default is BLOCK, which is NOT the wire DEFAULT byte, so
         // a default `z_get` legitimately carries a QoS ext. Leaving it unset
         // would downgrade every default query to Drop.
-        let defaulted = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &[],
-            0,
-            None,
-            None,
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta::default(),
-        );
+        let defaulted = get_options(&asking(&[]), &[]);
         let packed = defaulted
             .qos
             .expect("the options-default QoS reaches QueryOptions too");
@@ -2229,19 +2205,16 @@ mod tests {
             matches!(params, alloc::borrow::Cow::Borrowed(_)),
             "parameters that need no _anyke are not copied"
         );
-        let opts = get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            &params,
-            0,
-            Some(&value),
-            Some(&attachment),
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta {
+        let ask = GetAsk {
+            payload: Some(&value),
+            attachment: Some(&attachment),
+            value_meta: PicoQueryValueMeta {
                 encoding: Some(encoding),
                 source_info: None,
             },
-        );
+            ..asking(params_in)
+        };
+        let opts = get_options(&ask, &params);
         let lent = |slot: Option<&alloc::borrow::Cow<'_, [u8]>>| {
             slot.is_some_and(|bytes| matches!(bytes, alloc::borrow::Cow::Borrowed(_)))
         };
@@ -2386,19 +2359,24 @@ mod tests {
         assert!(!parameters_has_time_selector(b"_time"));
     }
 
+    /// A get that asks with `parameters` and every other option at pico's default.
+    fn asking(parameters: &[u8]) -> GetAsk<'_> {
+        GetAsk {
+            parameters,
+            target: Z_QUERY_TARGET_BEST_MATCHING,
+            consolidation: Z_CONSOLIDATION_MODE_AUTO,
+            timeout_ms: 0,
+            accept_replies: crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            payload: None,
+            attachment: None,
+            qos: PicoQueryQos::defaults(),
+            value_meta: PicoQueryValueMeta::default(),
+        }
+    }
+
     /// The consolidation an AUTO `z_get` is given, for `parameters`.
     fn auto_get_consolidation(parameters: &str) -> Option<ConsolidationMode> {
-        get_options(
-            Z_QUERY_TARGET_BEST_MATCHING,
-            Z_CONSOLIDATION_MODE_AUTO,
-            parameters.as_bytes(),
-            0,
-            None,
-            None,
-            PicoQueryQos::defaults(),
-            PicoQueryValueMeta::default(),
-        )
-        .consolidation
+        get_options(&asking(parameters.as_bytes()), parameters.as_bytes()).consolidation
     }
 
     /// The C ABI and the Rust API resolve AUTO by ONE rule: on every selector
@@ -2448,17 +2426,11 @@ mod tests {
     #[test]
     fn a_named_consolidation_is_kept_and_a_raw_one_names_none() {
         let named = |mode, parameters: &str| {
-            get_options(
-                Z_QUERY_TARGET_BEST_MATCHING,
-                mode,
-                parameters.as_bytes(),
-                0,
-                None,
-                None,
-                PicoQueryQos::defaults(),
-                PicoQueryValueMeta::default(),
-            )
-            .consolidation
+            let ask = GetAsk {
+                consolidation: mode,
+                ..asking(parameters.as_bytes())
+            };
+            get_options(&ask, parameters.as_bytes()).consolidation
         };
         assert_eq!(
             named(Z_CONSOLIDATION_MODE_MONOTONIC, "_time=[..]"),
