@@ -1329,7 +1329,7 @@ where
             };
         }
         let admitted = match active {
-            Some(idx) => self.admit_continuation(idx, &frag, ring, now_ms),
+            Some(idx) => self.admit_continuation(idx, &frag, ring),
             None => self
                 .admit_chain_start(&frag, now_ms)
                 .map_err(Judged::Outcome),
@@ -1732,20 +1732,20 @@ where
 
     /// Admit `frag` as the next fragment of the chain open in `idx`: the slot and that it does
     /// not start a chain, or the outcome of a continuation the chain cannot take, the chain
-    /// ended. A slot that holds no chain makes the fragment a start.
+    /// ended. A slot that holds no chain is refused.
     fn admit_continuation(
         &mut self,
         idx: usize,
         frag: &Fragment<'_>,
         ring: SnRing,
-        now_ms: u64,
     ) -> Result<(usize, bool), Judged> {
-        // The slot was found by its open chain; one that holds none has no
-        // chain for this fragment to continue, which makes it a start.
+        // The judge hands only the slot its key's open chain sits in. One that holds none is a
+        // slot the Router lost track of, not a chain to continue or a place to start one, and
+        // the fragment is refused with nothing opened.
         let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
-            return self
-                .admit_chain_start(frag, now_ms)
-                .map_err(Judged::Outcome);
+            return Err(Judged::Outcome(IngestOutcome::Refused(
+                RefuseReason::PoolExhausted,
+            )));
         };
         let last_sn = open.last_sn;
         // A payload the chain cannot hold is a codec error for the machine,
@@ -3643,6 +3643,21 @@ mod chain_boundary_marker_tests {
             Some(&b"BBBCCC"[..]),
             "the superseded prefix must not ride along"
         );
+    }
+
+    /// A continuation is taken only onto a slot that holds a chain: a free slot where the judge
+    /// looked is refused and nothing is opened on it. This is what keeps a restart that evicted
+    /// its key's chain from reaching the evicted slot as a continuation: it starts afresh only
+    /// because the marker rules hand the judge no slot once they evicted it.
+    #[test]
+    fn a_continuation_onto_a_free_slot_is_refused_and_opens_nothing() {
+        let mut d = armed::<2, 256>();
+        let frag = marked(2, 1, b"BBB", NONE);
+        match d.admit_continuation(0, &frag, SnRing::Known(MASK)) {
+            Err(Judged::Outcome(IngestOutcome::Refused(RefuseReason::PoolExhausted))) => {}
+            other => panic!("a free slot continues nothing, got {other:?}"),
+        }
+        assert_eq!(d.active_chains(), 0, "and no chain is opened");
     }
 
     /// The same sequence with the rules DISARMED delivers the merged
