@@ -210,7 +210,7 @@ impl Member {
     }
 
     fn join(&mut self) {
-        let dgram = encode_join(&self.params, &self.sn).expect("a JOIN encodes");
+        let dgram = encode_join(&self.params, &self.sn);
         self.socket
             .send_to(self.group, self.port, &dgram)
             .expect("member JOIN");

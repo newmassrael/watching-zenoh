@@ -1662,7 +1662,6 @@ mod batch_walk_tests {
             &p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
         )
-        .expect("a JOIN encodes")
     }
 
     /// One `T_MID_FRAME` at sn 0 carrying no network records — enough to be
@@ -1785,8 +1784,7 @@ mod batch_walk_tests {
         let beacon = encode_join(
             &member,
             &MulticastTxConduits::new(sn::mask_from_res(member.seq_num_res)),
-        )
-        .expect("a JOIN encodes");
+        );
         assert_eq!(
             beacon[0] & crate::compression::BATCH_HEADER_COMPRESSION,
             0,
@@ -2265,8 +2263,7 @@ mod batch_walk_tests {
             let beacon = encode_join(
                 &p,
                 &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
-            )
-            .expect("a JOIN encodes");
+            );
             crate::multicast_join::join_without_chain(&beacon)
         }
 
@@ -2379,7 +2376,6 @@ mod batch_walk_tests {
             &p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
         )
-        .expect("a JOIN encodes")
     }
 
     /// Collect every arrival a datagram produces, so a test can assert the

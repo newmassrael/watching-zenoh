@@ -926,6 +926,8 @@ pub mod scout_initiator;
     feature = "codec-hello",
     target_has_atomic = "ptr"
 ))]
+// Totality debt TD-032 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::expect_used)]
 pub mod scouting_host;
 
 // R311ky — deferred callback firing (the F-6 structural fix): the
@@ -2674,6 +2676,8 @@ mod multicast_member_scope;
     feature = "codec-join",
     feature = "storage-profile"
 ))]
+// Totality debt TD-063 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::expect_used)]
 pub mod multicast_join;
 
 // R311lv — the shared multicast RX classify + dispatch SSOT consumed by both

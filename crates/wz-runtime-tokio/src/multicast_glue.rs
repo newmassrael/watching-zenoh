@@ -1292,15 +1292,13 @@ where
             // R2929 — from the conduits as WRITTEN, not as minted: this JOIN
             // may pass data still queued, and a receiver re-seeds from it
             // ([`MulticastTxPlane`]).
+            let dgram = encode_join(params, tx.on_wire());
             // Best-effort: a failed multicast send is non-fatal (the next
             // cadence retries), so unlike the scout path there is no
-            // tx-failed transition to drive. A JOIN the codec refuses is the
-            // same: nothing is sent this cadence.
+            // tx-failed transition to drive.
             // R2848 — one transport message, counted once written, as the
             // pin counts its JOIN after `link.send` returns.
-            if let Ok(dgram) = encode_join(params, tx.on_wire()) {
-                tx.enqueue_control(dgram);
-            }
+            tx.enqueue_control(dgram);
             next_join_ms = now.saturating_add(params.join_interval_ms);
             // What must leave after a JOIN (a member's answer to an interest) goes now, behind
             // it on the wire.
@@ -2890,7 +2888,6 @@ mod tests {
             p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
         )
-        .expect("a JOIN encodes")
     }
 
     /// A fake in-memory link driver: replays queued inbound datagrams,
@@ -6219,7 +6216,7 @@ mod tests {
             for _ in 0..5 {
                 b_tx.mint(wz_session_core::qos::Priority::DEFAULT, true);
             }
-            let join_b_dgram = encode_join(&join_b, &b_tx).expect("a JOIN encodes");
+            let join_b_dgram = encode_join(&join_b, &b_tx);
 
             let mut link = FakeDriver::link_with([
                 (join_b_dgram, src(2)),

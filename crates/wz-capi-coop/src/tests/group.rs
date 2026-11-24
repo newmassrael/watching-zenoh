@@ -1956,7 +1956,6 @@ mod in_place {
             &params,
             &MulticastTxConduits::new(mask_from_res(params.seq_num_res)),
         )
-        .expect("a JOIN encodes")
     }
 
     /// One reliable frame numbered `sn` whose records are a Put of `b"x"` on each of `keys`, in

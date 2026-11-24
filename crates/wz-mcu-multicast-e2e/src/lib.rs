@@ -317,13 +317,11 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     let policy = resolve_policy();
     let mut peer = params(PEER_ZID, &policy);
     peer.batch_size = BATCH_SIZE;
-    // A JOIN the codec refused is never sent, and the peer the run reports is then not admitted.
-    if let Ok(peer_join) = encode_join(
+    let peer_join = encode_join(
         &peer,
         &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-    ) {
-        let _ = socket.send_to(group, PORT, &peer_join);
-    }
+    );
+    let _ = socket.send_to(group, PORT, &peer_join);
 
     let mut driver = LwipMulticastDriver::new(socket, group, PORT);
     let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));

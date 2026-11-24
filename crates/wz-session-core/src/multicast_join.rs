@@ -93,29 +93,22 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
 ///
-/// [`MulticastParams::zid`] is a zid by its type and a growing vector refuses no
-/// write, so the refusal is the codec's own, of a field past its bound, which the
-/// caller answers by sending no JOIN.
-///
-/// # Errors
-///
-/// The [`CodecError`] [`encode_join_into`] reports.
+/// [`MulticastParams::zid`] is a zid by its type, so the write the cbyte's length
+/// nibble needs always holds.
 #[cfg(feature = "alloc")]
-pub fn encode_join(
-    params: &MulticastParams,
-    tx_sn: &MulticastTxConduits,
-) -> Result<Vec<u8>, CodecError> {
+pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
     let mut dgram = Vec::with_capacity(JOIN_MAX_BYTES);
-    encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))?;
+    encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
+        .expect("a zid of 1 to 16 bytes, and a VecSink grows, so the JOIN is written");
     // A group that compresses (`transport/multicast/compression/enabled`) carries its beacon as
     // every other datagram, a batch with the `BatchHeader` in front: upstream's link writes the
     // JOIN through the same batch as any transport message. The sink forms below write the bare
     // JOIN; a build with no allocator does not compress.
     #[cfg(feature = "transport-compression")]
     if params.compression {
-        return Ok(crate::compression::compress_batch(&dgram));
+        return crate::compression::compress_batch(&dgram);
     }
-    Ok(dgram)
+    dgram
 }
 
 /// [`encode_join`] into a sink the caller holds: the same datagram, byte for
@@ -543,8 +536,7 @@ mod tests {
         let bytes = encode_join(
             &theirs,
             &MulticastTxConduits::new(sn::mask_from_res(theirs.seq_num_res)),
-        )
-        .expect("a JOIN encodes");
+        );
         let join = decode_join(&bytes).expect("a Join");
         for rule in [GroupJoinRule::Zenoh, GroupJoinRule::Pico] {
             let mut ours = params(&[0xAA]);
@@ -571,8 +563,7 @@ mod tests {
         let bytes = encode_join(
             &params(&zid),
             &MulticastTxConduits::new(sn::mask_from_res(0x02)),
-        )
-        .expect("a JOIN encodes");
+        );
         let join = decode_join(&bytes).expect("a Join");
         let mut ours = params(&[0xAA]);
         ours.join_rule = GroupJoinRule::Zenoh;
@@ -618,7 +609,7 @@ mod tests {
                                     tx.mint(priority, false);
                                 }
                             }
-                            let owned = encode_join(&p, &tx).expect("a JOIN encodes");
+                            let owned = encode_join(&p, &tx);
                             let mut slot = [0u8; JOIN_MAX_BYTES];
                             let mut sink = SliceSink::new(&mut slot);
                             encode_join_into(&p, &tx, &mut sink).expect("fits its bound");
@@ -691,8 +682,8 @@ mod tests {
             ..params(&[0xAA, 0xBB, 0xCC, 0xDD])
         };
         let tx = MulticastTxConduits::new(sn::mask_from_res(plain.seq_num_res));
-        let bare = encode_join(&plain, &tx).expect("a JOIN encodes");
-        let wrapped = encode_join(&squeezing, &tx).expect("a JOIN encodes");
+        let bare = encode_join(&plain, &tx);
+        let wrapped = encode_join(&squeezing, &tx);
         assert_eq!(wrapped, crate::compression::compress_batch(&bare));
         assert_eq!(
             crate::compression::decompress_batch(&wrapped, usize::from(squeezing.batch_size))
@@ -708,7 +699,6 @@ mod tests {
             p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
         )
-        .expect("a JOIN encodes")
     }
 
     /// A params bundle at the PROTOCOL defaults (8192 / 0x02 / 0x02) —
@@ -763,7 +753,7 @@ mod tests {
             // id 7, a z64, not mandatory, the last entry; level 1
             expected.extend_from_slice(&[0x27, 0x01]);
         }
-        assert_eq!(encode_join(&p, &tx).expect("a JOIN encodes"), expected);
+        assert_eq!(encode_join(&p, &tx), expected);
     }
 
     /// A zid the cbyte cannot state never reaches the encoder: the cbyte holds
@@ -1021,7 +1011,7 @@ mod tests {
         for _ in 0..3 {
             tx.mint(Priority::Data, true);
         }
-        let dgram = encode_join(&p, &tx).expect("a JOIN encodes");
+        let dgram = encode_join(&p, &tx);
         let silent = join_without_chain(&dgram);
         let mut behind = silent.clone();
         behind[0] |= wire_const::FLAG_T_Z;
@@ -1164,8 +1154,7 @@ mod tests {
         let named = encode_join(
             &p,
             &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
-        )
-        .expect("a JOIN encodes");
+        );
         let (_, zid) = decode_join_named(&named).expect("a Join naming a zid");
         assert_eq!(zid, [0x01]);
         // Header, version, cbyte, then the one byte of the zid.
@@ -1204,7 +1193,7 @@ mod tests {
             }
         }
         let expected = tx.advertise_per_priority();
-        let dgram = encode_join(&p, &tx).expect("a JOIN encodes");
+        let dgram = encode_join(&p, &tx);
         assert_ne!(
             dgram[0] & wire_const::FLAG_T_Z,
             0,
@@ -1286,8 +1275,7 @@ mod tests {
         let dgram2 = encode_join(
             &p2,
             &MulticastTxConduits::new(sn::mask_from_res(p2.seq_num_res)),
-        )
-        .expect("a JOIN encodes");
+        );
         assert!(
             decode_join_qos(&dgram2).is_none(),
             "a non-qos JOIN carries no qos ext"
@@ -1339,7 +1327,7 @@ mod tests {
                             ..config.clone()
                         };
                         let tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
-                        let dgram = encode_join(&p, &tx).expect("a JOIN encodes");
+                        let dgram = encode_join(&p, &tx);
                         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&dgram);
                         let view = TransportJoinView::decode(&mut cursor).expect("decodes");
                         assert_eq!(cursor.remaining(), 0, "the view reads the Join whole");

@@ -9249,7 +9249,7 @@ mod tests {
             let mut params = base.clone();
             params.is_qos = is_qos;
             let tx = MulticastTxConduits::new(crate::sn::mask_from_res(params.seq_num_res));
-            let dgram = encode_join(&params, &tx).expect("a JOIN encodes");
+            let dgram = encode_join(&params, &tx);
             let walked = dissect_transport_message(&dgram, 0)
                 .expect("the walker rejected a JOIN this tree produced");
             assert_eq!(
