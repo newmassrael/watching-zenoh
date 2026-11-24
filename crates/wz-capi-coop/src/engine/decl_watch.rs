@@ -22,9 +22,12 @@ use crate::prelude::*;
 use wz_capi_port::os::Mutex;
 use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
-use wz_session_core::bounded::Storage;
+use wz_session_core::bounded::{LendRefused, Storage};
+use wz_session_core::caps;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
 use wz_session_core::declare::MatchingReport;
+use wz_session_core::limit_binding::Quota;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
@@ -158,17 +161,55 @@ struct Observers {
     undeclared: u64,
 }
 
+/// The kinds of entity a watch may be of, each with one pair of observers ([`plane_row`]).
+const PLANES: usize = 3;
+
+/// The row of `plane`'s observers.
+const fn plane_row(plane: DeclPlane) -> usize {
+    match plane {
+        DeclPlane::Subscribers => 0,
+        DeclPlane::Queryables => 1,
+        DeclPlane::Tokens => 2,
+    }
+}
+
 /// The watches and the observers they are told through.
-#[derive(Default)]
 struct Table {
-    watches: Vec<Watch>,
-    observers: Vec<Observers>,
+    /// A row for each watch the build holds at most, of which the session's limit admits the
+    /// first `most`.
+    watches: [Option<Watch>; caps::MAX_DECL_WATCHES],
+    most: usize,
+    observers: [Option<Observers>; PLANES],
     next_id: DeclWatchId,
+}
+
+impl Table {
+    /// A table of no watch, `most` of whose rows hold one (all of them when `most` is more).
+    fn holding(most: usize) -> Self {
+        Self {
+            watches: [const { None }; caps::MAX_DECL_WATCHES],
+            most: most.min(caps::MAX_DECL_WATCHES),
+            observers: [const { None }; PLANES],
+            next_id: 0,
+        }
+    }
+
+    /// The watches the table holds.
+    fn watches(&self) -> impl Iterator<Item = &Watch> + '_ {
+        self.watches.iter().flatten()
+    }
+
+    /// Watch `id`, when the table holds it.
+    fn watch_mut(&mut self, id: DeclWatchId) -> Option<&mut Watch> {
+        self.watches
+            .iter_mut()
+            .flatten()
+            .find(|watch| watch.id == id)
+    }
 }
 
 /// The session's declaration watches and what is owed to them. The registry holds it, so a
 /// link's dispatch reaches it, and the engine holds it, so its deliveries do.
-#[derive(Default)]
 pub(super) struct DeclWatches {
     /// Written by the observers while a frame is dispatched, under the session's lock.
     staged: Arc<Mutex<Vec<Staged>>>,
@@ -184,16 +225,50 @@ struct Owed {
     handing: bool,
 }
 
+#[cfg(test)]
+impl Default for DeclWatches {
+    /// As many watches as the build holds.
+    fn default() -> Self {
+        Self::holding(caps::MAX_DECL_WATCHES)
+    }
+}
+
 impl DeclWatches {
-    /// Have the observers of `plane` installed in `app`, unless a watch of that kind installed
-    /// them already. [`Declined::TableFull`] when the application layer's list of observers
-    /// is at its bound; nothing is installed then.
+    /// No watch, and room for as many as the session's `MAX_DECL_WATCHES` admits under the
+    /// build's. A limit past the build's is refused, as the open that lays the ABI's places of
+    /// the watches out refuses it.
+    pub(super) fn under(limits: &SessionLimits) -> Result<Self, LendRefused> {
+        let value = limits.max_decl_watches();
+        let most = value
+            .lent_under(Quota::at_most(caps::MAX_DECL_WATCHES))
+            .map_err(|_| LendRefused::OverCeiling {
+                rows: value.most().unwrap_or(usize::MAX),
+                ceiling: caps::MAX_DECL_WATCHES,
+            })?;
+        Ok(Self::holding(most))
+    }
+
+    /// No watch, and room for `most` of them, at most the build's.
+    fn holding(most: usize) -> Self {
+        Self {
+            staged: Arc::default(),
+            table: Mutex::new(Table::holding(most)),
+            owed: Mutex::default(),
+        }
+    }
+
+    /// A watch of `plane` told through `sink` from now on: its id. The observers of `plane` are
+    /// installed in `app` with the first watch of that kind. Refused, with `sink` handed back for
+    /// the caller to let go of with no lock held, by [`Declined::TableFull`] when the session holds
+    /// as many watches as its limit admits or the application layer's list of observers is at
+    /// its bound, and by [`Declined::NotBuilt`] for a kind the build does not hear; nothing is
+    /// installed then.
     ///
     /// Whatever storage `P` the application's tables have: the session's registry holds them in
     /// rows its arena lent, while the lists of observers are the build's profile's in every
     /// observer. Whatever binding `K` they have, too, so its observers are the boxed ones: the
     /// engine's tables and the heap profile's alike.
-    pub(super) fn observe<
+    pub(super) fn add<
         K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
         P: Storage,
         M: MatchingReport,
@@ -201,28 +276,28 @@ impl DeclWatches {
         &self,
         app: &mut SlotObserverOf<K, P, M>,
         plane: DeclPlane,
-    ) -> Result<(), Declined> {
+        sink: DeclWatchSink,
+    ) -> Result<DeclWatchId, (Declined, DeclWatchSink)> {
         let mut table = lock(&self.table);
-        if table.observers.iter().any(|held| held.plane == plane) {
-            return Ok(());
+        let most = table.most;
+        let Some(free) = table.watches[..most].iter().position(Option::is_none) else {
+            return Err((Declined::TableFull, sink));
+        };
+        let observers = &mut table.observers[plane_row(plane)];
+        if observers.is_none() {
+            match install(app, plane, &self.staged) {
+                Ok(installed) => *observers = Some(installed),
+                Err(refused) => return Err((refused, sink)),
+            }
         }
-        let observers = install(app, plane, &self.staged)?;
-        table.observers.push(observers);
-        Ok(())
-    }
-
-    /// A watch of `plane` told through `sink` from now on, whose observers are installed
-    /// ([`Self::observe`]): its id.
-    pub(super) fn add(&self, plane: DeclPlane, sink: DeclWatchSink) -> DeclWatchId {
-        let mut table = lock(&self.table);
         table.next_id += 1;
         let id = table.next_id;
-        table.watches.push(Watch {
+        table.watches[free] = Some(Watch {
             id,
             plane,
             sink: Some(sink),
         });
-        id
+        Ok(id)
     }
 
     /// Owe watch `id`, of `plane`, the declarations the peer of `tables` holds now, as declared
@@ -285,15 +360,14 @@ impl DeclWatches {
         id: DeclWatchId,
     ) -> Option<Option<DeclWatchSink>> {
         let mut table = lock(&self.table);
-        let at = table.watches.iter().position(|watch| watch.id == id)?;
-        let watch = table.watches.remove(at);
-        if !table.watches.iter().any(|held| held.plane == watch.plane) {
-            if let Some(at) = table
-                .observers
-                .iter()
-                .position(|held| held.plane == watch.plane)
-            {
-                uninstall(app, table.observers.remove(at));
+        let watch = table
+            .watches
+            .iter_mut()
+            .find(|row| matches!(row, Some(watch) if watch.id == id))?
+            .take()?;
+        if !table.watches().any(|held| held.plane == watch.plane) {
+            if let Some(observers) = table.observers[plane_row(watch.plane)].take() {
+                uninstall(app, observers);
             }
         }
         drop(table);
@@ -305,11 +379,14 @@ impl DeclWatches {
     /// caller to let go of with no lock held; one out for a call is let go of by the thread that
     /// called it. The observers stay in the closed session's application layer, which dispatches
     /// nothing more.
-    pub(super) fn close(&self) -> Vec<DeclWatchSink> {
-        let watches = core::mem::take(&mut lock(&self.table).watches);
+    pub(super) fn close(&self) -> impl Iterator<Item = DeclWatchSink> {
+        let watches = core::mem::replace(
+            &mut lock(&self.table).watches,
+            [const { None }; caps::MAX_DECL_WATCHES],
+        );
         lock(&self.owed).queue.clear();
         lock(&self.staged).clear();
-        watches.into_iter().filter_map(|watch| watch.sink).collect()
+        watches.into_iter().flatten().filter_map(|watch| watch.sink)
     }
 
     /// Forget what an earlier dispatch staged and nobody settled: a group's.
@@ -335,11 +412,7 @@ impl DeclWatches {
         let table = lock(&self.table);
         let mut owed = lock(&self.owed);
         for event in &staged {
-            for watch in table
-                .watches
-                .iter()
-                .filter(|watch| event.reaches(watch.plane))
-            {
+            for watch in table.watches().filter(|watch| event.reaches(watch.plane)) {
                 owed.queue
                     .push_back((watch.id, event.told(peer.as_deref())));
             }
@@ -366,8 +439,7 @@ impl DeclWatches {
     /// went during the call (an undeclare from inside it, or the session's close), for the caller
     /// to let go of with no lock held.
     pub(super) fn put_back(&self, id: DeclWatchId, sink: DeclWatchSink) -> Option<DeclWatchSink> {
-        let mut table = lock(&self.table);
-        match table.watches.iter_mut().find(|watch| watch.id == id) {
+        match lock(&self.table).watch_mut(id) {
             Some(watch) => {
                 watch.sink = Some(sink);
                 None
@@ -407,9 +479,7 @@ impl HandingTurn<'_> {
                 return None;
             };
             let sink = lock(&self.watches.table)
-                .watches
-                .iter_mut()
-                .find(|watch| watch.id == id)
+                .watch_mut(id)
                 .and_then(|watch| watch.sink.take());
             if let Some(sink) = sink {
                 return Some((id, sink, told));
@@ -556,8 +626,6 @@ mod tests {
     #[cfg(any(feature = "query", feature = "queryable"))]
     use crate::arena::{AllocatorMemory, SessionArena};
     #[cfg(any(feature = "query", feature = "queryable"))]
-    use wz_session_core::limits::SessionLimits;
-    #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::slot_observer::ObserverRows;
     use wz_session_core::slot_observer::SlotObserver;
 
@@ -580,6 +648,23 @@ mod tests {
             ));
         });
         (sink, log)
+    }
+
+    /// Watch `plane` through `sink` in a table with room for it.
+    fn added<
+        K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+        P: Storage,
+        M: MatchingReport,
+    >(
+        watches: &DeclWatches,
+        app: &mut SlotObserverOf<K, P, M>,
+        plane: DeclPlane,
+        sink: DeclWatchSink,
+    ) -> DeclWatchId {
+        match watches.add(app, plane, sink) {
+            Ok(id) => id,
+            Err((refused, _)) => panic!("a table with room refused the watch: {refused:?}"),
+        }
     }
 
     fn drain(watches: &DeclWatches) -> usize {
@@ -605,13 +690,10 @@ mod tests {
     fn a_settled_event_reaches_the_watches_of_its_kind_and_a_dropped_one_none() {
         let watches = DeclWatches::default();
         let mut app = SlotObserver::new();
-        watches
-            .observe(&mut app, DeclPlane::Queryables)
-            .expect("an observer list with room");
         let (queryables, heard) = recording();
         let (subscribers, unheard) = recording();
-        watches.add(DeclPlane::Queryables, queryables);
-        watches.add(DeclPlane::Subscribers, subscribers);
+        added(&watches, &mut app, DeclPlane::Queryables, queryables);
+        added(&watches, &mut app, DeclPlane::Subscribers, subscribers);
 
         lock(&watches.staged).push(Staged::Declared {
             plane: DeclPlane::Queryables,
@@ -649,20 +731,22 @@ mod tests {
     fn an_undeclared_watch_is_owed_nothing_and_takes_its_observers_with_it() {
         let watches = DeclWatches::default();
         let mut app = SlotObserver::new();
-        watches
-            .observe(&mut app, DeclPlane::Subscribers)
-            .expect("an observer list with room");
+        let (sink, log) = recording();
+        let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
         assert_eq!(app.remote_subscribers.on_decl_len(), 1);
-        watches
-            .observe(&mut app, DeclPlane::Subscribers)
-            .expect("installed already");
+        let (second, _) = recording();
+        let other = added(&watches, &mut app, DeclPlane::Subscribers, second);
         assert_eq!(
             app.remote_subscribers.on_decl_len(),
             1,
             "one pair of observers for every watch of the kind"
         );
-        let (sink, log) = recording();
-        let id = watches.add(DeclPlane::Subscribers, sink);
+        assert!(matches!(watches.undeclare(&mut app, other), Some(Some(_))));
+        assert_eq!(
+            app.remote_subscribers.on_decl_len(),
+            1,
+            "the other watch of the kind keeps them"
+        );
         lock(&watches.staged).push(Staged::Undeclared {
             plane: DeclPlane::Subscribers,
             id: 9,
@@ -696,13 +780,10 @@ mod tests {
         )
         .expect("the arena has the rows");
         let watches = DeclWatches::default();
-        watches
-            .observe(&mut app, DeclPlane::Queryables)
-            .expect("an observer list with room");
+        let (sink, _log) = recording();
+        let id = added(&watches, &mut app, DeclPlane::Queryables, sink);
         assert_eq!(app.remote_queryables.on_decl_len(), 1);
         assert_eq!(app.remote_queryables.on_undecl_len(), 1);
-        let (sink, _log) = recording();
-        let id = watches.add(DeclPlane::Queryables, sink);
 
         assert!(watches.undeclare(&mut app, id).is_some());
         assert_eq!(app.remote_queryables.on_decl_len(), 0);
@@ -713,15 +794,15 @@ mod tests {
     #[test]
     fn a_close_gives_back_every_sink_and_owes_nothing() {
         let watches = DeclWatches::default();
+        let mut app = SlotObserver::new();
         let (sink, log) = recording();
-        watches.add(DeclPlane::Subscribers, sink);
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
         lock(&watches.owed)
             .queue
             .push_back((1, Told::Undeclared { id: 2, peer: None }));
-        let sinks = watches.close();
-        assert_eq!(sinks.len(), 1);
+        assert_eq!(watches.close().count(), 1);
         assert_eq!(drain(&watches), 0);
-        drop(sinks);
+        assert_eq!(lock(&watches.table).watches().count(), 0);
         assert_eq!(
             Arc::strong_count(&log),
             1,
@@ -735,11 +816,8 @@ mod tests {
     fn a_watch_undeclared_during_its_call_leaves_its_sink_with_the_caller() {
         let watches = DeclWatches::default();
         let mut app = SlotObserver::new();
-        watches
-            .observe(&mut app, DeclPlane::Subscribers)
-            .expect("an observer list with room");
         let (sink, log) = recording();
-        let id = watches.add(DeclPlane::Subscribers, sink);
+        let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
         lock(&watches.owed)
             .queue
             .push_back((id, Told::Undeclared { id: 3, peer: None }));
@@ -769,8 +847,9 @@ mod tests {
     #[test]
     fn a_turn_dropped_early_lets_the_next_thread_hand() {
         let watches = DeclWatches::default();
+        let mut app = SlotObserver::new();
         let (sink, _log) = recording();
-        let id = watches.add(DeclPlane::Subscribers, sink);
+        let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
         for declared in [1, 2] {
             lock(&watches.owed).queue.push_back((
                 id,
@@ -810,14 +889,69 @@ mod tests {
     fn a_build_without_the_queryables_plane_refuses_their_observers() {
         let watches = DeclWatches::default();
         let mut app = SlotObserver::new();
-        assert_eq!(
-            watches.observe(&mut app, DeclPlane::Queryables),
-            Err(Declined::NotBuilt)
-        );
-        assert!(lock(&watches.table).observers.is_empty());
-        watches
-            .observe(&mut app, DeclPlane::Subscribers)
-            .expect("CONTROL: the subscribers' plane is built");
+        let (sink, log) = recording();
+        assert!(matches!(
+            watches.add(&mut app, DeclPlane::Queryables, sink),
+            Err((Declined::NotBuilt, _))
+        ));
+        assert_eq!(Arc::strong_count(&log), 1, "the refused sink is let go of");
+        {
+            let table = lock(&watches.table);
+            assert!(table.observers.iter().all(Option::is_none));
+            assert_eq!(table.watches().count(), 0, "no row is taken");
+        }
+        let (sink, _log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
         assert_eq!(app.remote_subscribers.on_decl_len(), 1);
+    }
+
+    /// A watch past the rows the session's limit admits is refused with its sink handed back,
+    /// nothing installed for it, and the row an undeclared watch leaves takes the next one.
+    #[test]
+    fn a_watch_past_the_sessions_limit_is_refused_until_a_row_comes_back() {
+        let watches = DeclWatches::holding(1);
+        let mut app = SlotObserver::new();
+        let (first, _first_log) = recording();
+        let id = added(&watches, &mut app, DeclPlane::Subscribers, first);
+        let (second, log) = recording();
+        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, second)
+        else {
+            panic!("the session's one row is taken");
+        };
+        assert_eq!(refused, Declined::TableFull);
+        drop(handed_back);
+        assert_eq!(
+            Arc::strong_count(&log),
+            1,
+            "the refused sink is the caller's"
+        );
+        assert_eq!(
+            app.remote_subscribers.on_decl_len(),
+            1,
+            "one watch's observers"
+        );
+        assert!(watches.undeclare(&mut app, id).is_some());
+        let (third, _third_log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, third);
+        assert_eq!(lock(&watches.table).watches().count(), 1);
+    }
+
+    /// The session's limit sets the rows a table admits, under the build's.
+    #[test]
+    fn the_sessions_limit_sets_the_rows_under_the_builds() {
+        let mut limits = SessionLimits::defaults();
+        limits
+            .select_max_decl_watches(Quota::at_most(1))
+            .expect("one watch is within every build's domain");
+        let lowered = DeclWatches::under(&limits).expect("a limit under the build's");
+        assert_eq!(lock(&lowered.table).most, 1);
+        let defaults = DeclWatches::under(&SessionLimits::defaults()).expect("the build's own");
+        let expected = SessionLimits::defaults()
+            .max_decl_watches()
+            .most()
+            .map_or(caps::MAX_DECL_WATCHES, |most| {
+                most.min(caps::MAX_DECL_WATCHES)
+            });
+        assert_eq!(lock(&defaults.table).most, expected);
     }
 }

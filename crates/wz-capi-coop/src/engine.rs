@@ -6531,15 +6531,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::Closed);
         };
         let core = &guard.0;
-        let observed = self
+        let added = self
             .decl_watches
-            .observe(&mut core.registry.borrow_mut().app, plane);
-        if let Err(refused) = observed {
-            drop(guard);
-            drop(sink);
-            return Err(refused);
-        }
-        let id = self.decl_watches.add(plane, sink);
+            .add(&mut core.registry.borrow_mut().app, plane, sink);
+        let id = match added {
+            Ok(id) => id,
+            Err((refused, sink)) => {
+                drop(guard);
+                drop(sink);
+                return Err(refused);
+            }
+        };
         let registry = core.registry.borrow();
         for face in core.links.faces() {
             let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
