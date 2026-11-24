@@ -565,14 +565,15 @@ impl<P: Storage> PeerTokens<P> {
         })
     }
 
-    /// The id the next token declared by its keyexpr is held under: past every one held.
-    fn next_sourced_id(&self) -> u64 {
+    /// The id the next token declared by its keyexpr is held under: past every one held, and
+    /// none when the greatest id there is is held.
+    fn next_sourced_id(&self) -> Option<u64> {
         self.table
             .entries()
             .map(|(id, _)| id)
             .filter(|id| *id >= SOURCED_ID_BASE)
             .max()
-            .map_or(SOURCED_ID_BASE, |held| held + 1)
+            .map_or(Some(SOURCED_ID_BASE), |held| held.checked_add(1))
     }
 }
 
@@ -933,7 +934,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         if self.slots.iter().any(|s| s.interest_id == interest_id) {
             return Ok(false);
         }
-        if !self.quota.admits(self.slots.len() + 1) {
+        if !self.quota.admits(self.slots.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         if !self.key_quota.admits(keyexpr.len()) {
@@ -1463,7 +1464,13 @@ impl<P: Storage> PeerTokens<P> {
             if self.sourced_id(resolved).is_some() {
                 return;
             }
-            self.next_sourced_id()
+            // No id left past the ones held: refused and counted as a full table refuses, and
+            // not held under an id another token has.
+            let Some(next) = self.next_sourced_id() else {
+                self.table.count_refused();
+                return;
+            };
+            next
         } else {
             id
         };
@@ -1643,7 +1650,7 @@ impl<P: Storage> PeerTokens<P> {
                     id,
                     false,
                 );
-                flushed += 1;
+                flushed = flushed.saturating_add(1);
             }
             (flushed, true)
         }
@@ -1743,7 +1750,7 @@ impl<P: Storage> PeerTokens<P> {
                 },
                 held,
             );
-            replayed += 1;
+            replayed = replayed.saturating_add(1);
             after = Some(token_id);
         }
         replayed
@@ -2021,6 +2028,27 @@ mod tests {
     use crate::transport_profile::owned::DeclareOwnedVariant;
     use hashbrown::HashMap;
     use wz_codecs::lent::{Interest, InterestBody, Wireexpr, WireexprLocal, WireexprVariant};
+
+    /// A token a peer declares by its keyexpr is held under an id past every such id held; once
+    /// the greatest id there is is held, none is left past it, and the token is refused rather
+    /// than held under an id another token has.
+    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    #[test]
+    fn a_keyexpr_token_past_the_last_sourced_id_is_refused() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        for (id, keyexpr) in [(u64::MAX, "liveliness/last"), (0, "liveliness/new")] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(keyexpr))),
+                &HashMap::new(),
+            );
+        }
+        let held: Vec<(u64, String)> = reg
+            .peer
+            .iter()
+            .map(|(id, keyexpr)| (id, keyexpr.to_string()))
+            .collect();
+        assert_eq!(held, [(u64::MAX, "liveliness/last".to_string())]);
+    }
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;

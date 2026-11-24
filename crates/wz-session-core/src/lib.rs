@@ -1496,8 +1496,6 @@ pub mod declared_keyexprs;
 // `local_token` declarer-side responder + `liveliness_sample` /
 // `liveliness_subscriber` keep their `alloc` gates pending their own
 // Track 2 sub-round.
-// Totality debt TD-058 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod declare;
 
 // R311du — application-layer local subscriber registry
