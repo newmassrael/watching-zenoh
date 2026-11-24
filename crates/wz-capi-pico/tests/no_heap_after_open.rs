@@ -708,21 +708,33 @@ impl E2e {
     }
 }
 
-/// The schema of the message whose instances a keyer reads. Synthetic.
+/// The schema of the message whose instances a keyer reads, `syn/noheap.proto`, as
+/// `protoc --include_imports -o` compiles it. Synthetic.
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.noheap;
+/// message Reading {
+///   optional uint32 bay = 1;
+///   sint32 tilt = 2;
+///   bytes body = 3;
+/// }
+/// ```
 #[cfg(all(
     feature = "instance-key",
     feature = "e2e-sender",
     feature = "e2e-receiver"
 ))]
-const INSTANCE_SCHEMA: &CStr = cr#"
-syntax = "proto3";
-package syn.noheap;
-message Reading {
-  optional uint32 bay = 1;
-  sint32 tilt = 2;
-  bytes body = 3;
-}
-"#;
+const INSTANCE_SET: &[u8] = &[
+    0x0a, 0x78, 0x0a, 0x10, 0x73, 0x79, 0x6e, 0x2f, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70, 0x2e, 0x70,
+    0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70,
+    0x22, 0x50, 0x0a, 0x07, 0x52, 0x65, 0x61, 0x64, 0x69, 0x6e, 0x67, 0x12, 0x15, 0x0a, 0x03, 0x62,
+    0x61, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x48, 0x00, 0x52, 0x03, 0x62, 0x61, 0x79, 0x88,
+    0x01, 0x01, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x11,
+    0x52, 0x04, 0x74, 0x69, 0x6c, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x18, 0x03,
+    0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6f, 0x64, 0x79, 0x42, 0x06, 0x0a, 0x04, 0x5f, 0x62,
+    0x61, 0x79, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 
 /// Three bays and two tilts: six instances, the tilt varying fastest. Synthetic.
 #[cfg(all(
@@ -826,21 +838,16 @@ impl Keyed {
         keyed
     }
 
-    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SCHEMA`, keeping no last values.
+    /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SET`, keeping no last values.
     unsafe fn keyer() -> wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t {
-        use wz_capi_pico::instance_key::wz_ext_instance_keyer_new;
-        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
-        let files = [wz_ext_proto_file_t {
-            name: c"syn/noheap.proto".as_ptr(),
-            text: INSTANCE_SCHEMA.as_ptr(),
-        }];
+        use wz_capi_pico::instance_key::wz_ext_instance_keyer_from_descriptor_set;
         let mut keyer: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t =
             std::mem::zeroed();
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            wz_ext_instance_keyer_from_descriptor_set(
                 &mut keyer,
-                files.as_ptr(),
-                files.len(),
+                INSTANCE_SET.as_ptr(),
+                INSTANCE_SET.len(),
                 INSTANCE_DESCRIPTION.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null_mut(),
@@ -919,22 +926,39 @@ impl Keyed {
 #[cfg(feature = "message-payload")]
 const CATALOG: &str = include_str!("../../wz-app-frame/catalog/synthetic.json5");
 
-/// The schema of the catalog message's payload. Synthetic.
+/// The schema of the catalog message's payload, `syn/noheap.proto`, as
+/// `protoc --include_imports -o` compiles it. Synthetic.
+///
+/// ```text
+/// syntax = "proto3";
+/// package syn.noheap;
+/// message Point {
+///   sint32 x = 1;
+///   sint32 y = 2;
+/// }
+/// message Pose {
+///   uint32 serial = 1;
+///   int32 offset = 2;
+///   string label = 5;
+///   Point origin = 8;
+/// }
+/// ```
 #[cfg(feature = "message-payload")]
-const PAYLOAD_SCHEMA: &CStr = cr#"
-syntax = "proto3";
-package syn.noheap;
-message Point {
-  sint32 x = 1;
-  sint32 y = 2;
-}
-message Pose {
-  uint32 serial = 1;
-  int32 offset = 2;
-  string label = 5;
-  Point origin = 8;
-}
-"#;
+const PAYLOAD_SET: &[u8] = &[
+    0x0a, 0xc4, 0x01, 0x0a, 0x10, 0x73, 0x79, 0x6e, 0x2f, 0x6e, 0x6f, 0x68, 0x65, 0x61, 0x70, 0x2e,
+    0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61,
+    0x70, 0x22, 0x23, 0x0a, 0x05, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x12, 0x0c, 0x0a, 0x01, 0x78, 0x18,
+    0x01, 0x20, 0x01, 0x28, 0x11, 0x52, 0x01, 0x78, 0x12, 0x0c, 0x0a, 0x01, 0x79, 0x18, 0x02, 0x20,
+    0x01, 0x28, 0x11, 0x52, 0x01, 0x79, 0x22, 0x77, 0x0a, 0x04, 0x50, 0x6f, 0x73, 0x65, 0x12, 0x16,
+    0x0a, 0x06, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x06,
+    0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x12, 0x16, 0x0a, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74,
+    0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x06, 0x6f, 0x66, 0x66, 0x73, 0x65, 0x74, 0x12, 0x14,
+    0x0a, 0x05, 0x6c, 0x61, 0x62, 0x65, 0x6c, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6c,
+    0x61, 0x62, 0x65, 0x6c, 0x12, 0x29, 0x0a, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x18, 0x08,
+    0x20, 0x01, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x73, 0x79, 0x6e, 0x2e, 0x6e, 0x6f, 0x68, 0x65, 0x61,
+    0x70, 0x2e, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x52, 0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x62,
+    0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+];
 
 /// The room the encoded payload of a round takes, with headroom.
 #[cfg(feature = "message-payload")]
@@ -968,10 +992,9 @@ impl MessagePayload {
             wz_ext_owned_message_catalog_t,
         };
         use wz_capi_pico::message_payload::{
-            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop, wz_ext_payload_schema_move,
-            wz_ext_payload_schema_new,
+            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop,
+            wz_ext_payload_schema_from_descriptor_set, wz_ext_payload_schema_move,
         };
-        use wz_capi_pico::proto_file::wz_ext_proto_file_t;
         let text = std::ffi::CString::new(CATALOG).expect("no NUL in the catalog");
         let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
         assert_eq!(
@@ -979,16 +1002,12 @@ impl MessagePayload {
             Z_OK,
             "the synthetic catalog reads"
         );
-        let files = [wz_ext_proto_file_t {
-            name: c"syn/noheap.proto".as_ptr(),
-            text: PAYLOAD_SCHEMA.as_ptr(),
-        }];
         let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_payload_schema_new(
+            wz_ext_payload_schema_from_descriptor_set(
                 &mut schema,
-                files.as_ptr(),
-                files.len(),
+                PAYLOAD_SET.as_ptr(),
+                PAYLOAD_SET.len(),
                 std::ptr::null_mut()
             ),
             Z_OK,

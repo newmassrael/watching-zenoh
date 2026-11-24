@@ -11462,6 +11462,7 @@ pub(crate) fn session_init_params_for(
                  session whose anti-amplification cookie anybody could forge"
             ))
         })?,
+        region: None,
     })
 }
 

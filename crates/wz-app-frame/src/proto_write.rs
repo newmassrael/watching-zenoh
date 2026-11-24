@@ -55,11 +55,12 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind, Syntax};
 use crate::proto_range::{
     field_range, map_entry_range, type_field_range, RangeRefusal, ValueRange,
 };
-use crate::proto_schema::{FieldKind, FileOptions, Fld, Msg};
+use crate::proto_types::{
+    FieldKind, FieldOption, FileOptions, Fld, Label, Msg, OptionValue, ScalarKind, Syntax,
+};
 
 const WIRE_VARINT: u64 = 0;
 const WIRE_I64: u64 = 1;

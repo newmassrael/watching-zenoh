@@ -88,8 +88,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind};
-use crate::proto_schema::{FieldKind, FileOptions, Fld, Linker, MapValueKind, Msg};
+use crate::proto_types::{
+    FieldKind, FieldOption, FileOptions, Fld, Label, LinkedTypes, MapValueKind, Msg, OptionValue,
+    ScalarKind,
+};
 
 /// Why a message has no number: the words of `max_encoded_size_reason`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,14 +494,14 @@ enum Leaf {
     Message(usize),
 }
 
-struct Sizer<'l, 'f, 'a> {
-    linker: &'l Linker<'f, 'a>,
+struct Sizer<'l, S: ?Sized> {
+    schema: &'l S,
     memo: Vec<Option<Result<u128, SizeRefusal>>>,
     visiting: Vec<bool>,
     depth: usize,
 }
 
-impl Sizer<'_, '_, '_> {
+impl<S: LinkedTypes + ?Sized> Sizer<'_, S> {
     fn message(&mut self, idx: usize) -> Result<u128, SizeRefusal> {
         if let Some(done) = self.memo[idx] {
             return done;
@@ -524,9 +526,9 @@ impl Sizer<'_, '_, '_> {
     }
 
     fn message_inner(&mut self, idx: usize) -> Result<u128, SizeRefusal> {
-        let linker = self.linker;
-        let msg = &linker.msgs[idx];
-        let own = message_options(linker, msg);
+        let schema = self.schema;
+        let msg = &schema.linked_messages()[idx];
+        let own = message_options(schema, msg);
         if own.unmodelled {
             return Err(SizeRefusal::UnmodelledOption);
         }
@@ -594,7 +596,7 @@ impl Sizer<'_, '_, '_> {
         key: ScalarKind,
         value: MapValueKind,
     ) -> Result<u128, SizeRefusal> {
-        let entry_options = file_options(self.linker, file);
+        let entry_options = file_options(self.schema, file);
         if entry_options.unmodelled {
             return Err(SizeRefusal::UnmodelledOption);
         }
@@ -642,7 +644,7 @@ impl Sizer<'_, '_, '_> {
                 add(varint_size(n), n)?
             }
             Leaf::Scalar(kind) => scalar_size(kind, eff.int_size.unwrap_or(0)),
-            Leaf::Enum(e) => self.linker.enums[e]
+            Leaf::Enum(e) => self.schema.linked_enums()[e]
                 .values
                 .iter()
                 .map(|(_, n)| if *n < 0 { 10 } else { varint_size(*n as u128) })
@@ -704,15 +706,17 @@ fn is_deprecated(field: &Fld) -> bool {
 }
 
 /// The largest encoded size of each message in `which`, by index, in nanopb's
-/// arithmetic.
-pub fn encoded_sizes(
-    linker: &Linker<'_, '_>,
+/// arithmetic, over the linker a schema is read with or the schema set a compiled descriptor is
+/// read into.
+pub fn encoded_sizes<S: LinkedTypes + ?Sized>(
+    schema: &S,
     which: &[usize],
 ) -> BTreeMap<usize, Result<u64, SizeRefusal>> {
+    let count = schema.linked_messages().len();
     let mut sizer = Sizer {
-        linker,
-        memo: alloc::vec![None; linker.msgs.len()],
-        visiting: alloc::vec![false; linker.msgs.len()],
+        schema,
+        memo: alloc::vec![None; count],
+        visiting: alloc::vec![false; count],
         depth: 0,
     };
     which

@@ -3760,9 +3760,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `plugins_loading/enabled` LEFT this list for `HONOURED_CONFIG_KEYS`: the plugin plane takes
     // it from the reader.
     // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
-    // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
-    // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
-    // of the session.
+    // capability (`SessionInitParams::region`, `wz_session_core::extregion`), and it LEFT for
+    // [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed it through the offer of the session.
     // ⚠ R2633 — `routing/router/linkstate/transport_weights` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`], one round after R2632 put it here. That is this
     // list's whole purpose working as designed: R2632 built the capability and
@@ -4101,7 +4100,7 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // it used for `connect/timeout_ms`: a verdict about a key no longer in the
     // population is "a verdict about evidence that is gone".
     // The `region_name` / `wz-has-it` row (R2437, kind changed at R2539) left with its key: the
-    // reader feeds `SessionLinkActions::set_local_region` through the offer of the session.
+    // reader feeds `SessionInitParams::region` through the offer of the session.
     // R3075 -- the `autoconnect`, `autoconnect_strategy`, `target` and `multihop` rows left with
     // their keys.
     // R2336 (open-debt item 15) — the `transport/auth/pubkey/known_keys_file`
