@@ -516,8 +516,6 @@ pub mod clock_source;
 ))]
 pub mod decl_watch;
 #[cfg(feature = "unstable-api")]
-// Totality debt TD-194 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod device_requires;
 // End-to-end protection of an application's payload: what the sending and the receiving doors
 // share, and the instance keys' and the message payloads' doors with them, in a build with any of
