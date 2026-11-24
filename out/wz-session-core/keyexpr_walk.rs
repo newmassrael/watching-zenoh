@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_walk.scxml:37 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -68,7 +68,7 @@ pub fn keyexpr_walk(p: &[u8], t: &[u8], relation: u8, wild_single: bool, wild_do
             }
             if star_star || take {
                 if pe < pn {
-                    ps = pe + 1;
+                    ps = sce_forge_runtime::algorithm::proven::add::<u32>(pe, 1);
                     pe = keyexpr_chunk_end::keyexpr_chunk_end(p, ps);
                     if ps == pe {
                         return 0;
@@ -89,7 +89,7 @@ pub fn keyexpr_walk(p: &[u8], t: &[u8], relation: u8, wild_single: bool, wild_do
             }
             if take {
                 if te < tn {
-                    t_next = te + 1;
+                    t_next = sce_forge_runtime::algorithm::proven::add::<u32>(te, 1);
                 } else {
                     t_more = false;
                 }
@@ -104,7 +104,7 @@ pub fn keyexpr_walk(p: &[u8], t: &[u8], relation: u8, wild_single: bool, wild_do
                 return 0;
             }
             if fe < tn {
-                frame_ts = fe + 1;
+                frame_ts = sce_forge_runtime::algorithm::proven::add::<u32>(fe, 1);
                 t_next = frame_ts;
             } else {
                 t_more = false;
@@ -130,7 +130,7 @@ pub fn keyexpr_walk(p: &[u8], t: &[u8], relation: u8, wild_single: bool, wild_do
             return 0;
         }
         if pe < pn {
-            ps = pe + 1;
+            ps = sce_forge_runtime::algorithm::proven::add::<u32>(pe, 1);
             pe = keyexpr_chunk_end::keyexpr_chunk_end(p, ps);
             if ps == pe {
                 return 0;

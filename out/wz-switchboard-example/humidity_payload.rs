@@ -47,7 +47,7 @@ impl HumidityPayload {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
-        let raw = cursor.peek_slice(1)?;
+        let raw = cursor.peek_array::<1>()?;
         let percent = raw[0];
         let value = Self {
             percent,

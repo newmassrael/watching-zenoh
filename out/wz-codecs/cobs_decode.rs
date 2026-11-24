@@ -1,7 +1,7 @@
 // SCE-MAP: cobs_decode:93 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -20,8 +20,8 @@ pub fn cobs_decode(data: &[u8], out: &mut SceBytes<1507>) -> Result<(), Capacity
     let mut prev: u16 = 255;
     let mut done: bool = false;
     while i < n && done == false {
-        let code: u16 = data[(i) as usize] as u16;
-        i = i + 1;
+        let code: u16 = sce_forge_runtime::algorithm::proven::at(&data, i) as u16;
+        i = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
         if code == 0 {
             done = true;
         } else {
@@ -31,9 +31,9 @@ pub fn cobs_decode(data: &[u8], out: &mut SceBytes<1507>) -> Result<(), Capacity
             }
             let mut j: u16 = 1;
             while j < code && i < n {
-                out.push(data[(i) as usize])?;
-                i = i + 1;
-                j = j + 1;
+                out.push(sce_forge_runtime::algorithm::proven::at(&data, i))?;
+                i = sce_forge_runtime::algorithm::proven::add::<u32>(i, 1);
+                j = sce_forge_runtime::algorithm::proven::add::<u16>(j, 1);
             }
             prev = code;
         }
