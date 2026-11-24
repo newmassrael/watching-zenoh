@@ -6,6 +6,7 @@
 //! session that only dials holds its dial role's face alone, and its text has none of this.
 
 use super::*;
+use wz_session_core::locator_directory::LocatorText;
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Give a link taken off a port a face, and run its session as the acceptor. A link that

@@ -127,7 +127,6 @@ use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
-use wz_session_core::locator_directory::LocatorText;
 
 use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
 #[cfg(feature = "listen")]
