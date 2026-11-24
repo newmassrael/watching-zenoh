@@ -687,11 +687,6 @@ mod tests {
             lent[0].windows(payload.len()).any(|w| w == payload),
             "and it carries the payload"
         );
-        std::assert_eq!(
-            wz_link_lwip::tx_payloads_out(),
-            0,
-            "nothing is left out of lwIP's hands"
-        );
     }
 
     /// ARCHITECTURE section 9.1 on the MCU profile, the batching window: the
@@ -853,6 +848,5 @@ mod tests {
             wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
             "and no slot is still out"
         );
-        std::assert_eq!(wz_link_lwip::tx_payloads_out(), 0);
     }
 }

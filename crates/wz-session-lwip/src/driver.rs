@@ -550,11 +550,6 @@ mod tests {
 
         std::assert_eq!(lent, copied, "same bytes on the wire either way");
         std::assert_eq!(lent, std::vec![frame.to_vec()]);
-        std::assert_eq!(
-            wz_link_lwip::tx_payloads_out(),
-            0,
-            "a sent lend is settled: the pbuf the frame was copied into is lwIP's"
-        );
     }
 
     /// The datagram is the bytes written and not the size asked for: only what the
@@ -594,11 +589,6 @@ mod tests {
             let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT)
                 .expect("the slot came back after each abandoned lend");
             lease.append(b"never sent").expect("fits");
-            std::assert_eq!(
-                wz_link_lwip::tx_payloads_out(),
-                0,
-                "a held lend takes nothing of lwIP's"
-            );
             drop(lease);
         }
         std::assert!(delivered(&link, &driver).is_empty());
@@ -644,11 +634,6 @@ mod tests {
             capacity,
             SESSION_RX_SLOT_SIZE,
             "the whole slot, asked for one byte"
-        );
-        std::assert_eq!(
-            wz_link_lwip::tx_payloads_out(),
-            0,
-            "nothing of lwIP's is lent"
         );
         driver.tx_slot_abort(small.slot);
 

@@ -76,7 +76,7 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # pool (`mac_rx_pool`) and the sockets that hold lent frames (`rx-hold`), which
 # exist only with their features. A dev-dependency on itself turns them on for
 # the test build alone; the library an image links is unchanged, a test that
-# does not install a pool lends exactly as before, and a socket holds nothing
+# does not install a pool sends exactly as before, and a socket holds nothing
 # unless it is asked to.
 wz-link-lwip = { path = ".", features = ["tx-pool", "mac-rx-pool", "rx-hold"] }
 
@@ -114,9 +114,9 @@ loopif-multicast = []
 test-support = []
 
 # ARCHITECTURE section 9.1 -- the transmit pool (`tx_pool`, over the generated
-# `session_tx_pool_mcu` emit): a firmware that installs one has the session
-# encode each outbound datagram into a pool slot, and a MAC that gathers in
-# place reads the frame out of that slot, with the slot's generated transmit
+# `session_tx_pool_mcu` emit): a firmware that installs one has each datagram
+# a socket sends copied into a pool slot, and a MAC that gathers in place
+# reads the frame out of that slot, with the slot's generated transmit
 # lifecycle (armed, started, complete) following it. Off by default: the pool
 # is 12 KiB that only an image whose MAC reads in place, and which places the
 # pool where that MAC's DMA reaches uncached, has a use for. With it on and no
