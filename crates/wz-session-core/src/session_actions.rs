@@ -6440,9 +6440,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-close",
         )
     ))]
-    // The writer is written where it is called; the lease and the send around it are the two
-    // functions below, compiled once for every message this sends.
-    #[inline(always)]
     fn send_control_lent(
         &self,
         reliability: Reliability,
@@ -6452,64 +6449,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &mut crate::tx_buf::EncodeBuf<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     ) -> Result<(), crate::link::LinkDropCause> {
-        let mut slot = self.lend_control_slot(priority, want)?;
-        let written = fill(&mut slot).is_ok();
-        self.send_control_slot(slot, written, reliability, priority)
-    }
-
-    /// The slot [`Self::send_control_lent`] writes its message into, from this binding's own link,
-    /// or the refusal, counted, of a link that lent none.
-    #[cfg(all(
-        feature = "tx-lend-only",
-        any(
-            all(
-                any(feature = "codec-init-body", feature = "codec-open-body"),
-                any(feature = "session-unicast-open", feature = "session-unicast-accept")
-            ),
-            feature = "codec-close",
-        )
-    ))]
-    #[inline(never)]
-    fn lend_control_slot(
-        &self,
-        priority: Priority,
-        want: usize,
-    ) -> Result<crate::tx_lease::TxLease<'_, R::Driver>, crate::link::LinkDropCause> {
-        crate::tx_lease::TxLease::acquire(self.link.link_driver(), want, priority)
-            .ok_or_else(|| self.refuse_tx(crate::link::LinkDropCause::NoTxSlot))
-    }
-
-    /// Send `slot` once its message is `written` into it; a message that did not fit is refused
-    /// and counted, and dropping the lease gives the slot back unsent.
-    #[cfg(all(
-        feature = "tx-lend-only",
-        any(
-            all(
-                any(feature = "codec-init-body", feature = "codec-open-body"),
-                any(feature = "session-unicast-open", feature = "session-unicast-accept")
-            ),
-            feature = "codec-close",
-        )
-    ))]
-    #[inline(never)]
-    fn send_control_slot(
-        &self,
-        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
-        written: bool,
-        reliability: Reliability,
-        priority: Priority,
-    ) -> Result<(), crate::link::LinkDropCause> {
-        if !written {
+        let link = &self.link;
+        let Some(mut slot) = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
+        else {
+            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
+        };
+        if fill(&mut slot).is_err() {
+            // Dropping the lease gives the slot back unsent.
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         }
-        self.emit_on_link(
-            &self.link,
-            &[],
-            Some(&mut slot),
-            reliability,
-            priority,
-            false,
-        );
+        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
         Ok(())
     }
 
