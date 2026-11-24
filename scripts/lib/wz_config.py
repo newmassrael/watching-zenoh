@@ -288,7 +288,7 @@ def read_decl_toml(text: str) -> dict:
     `[array.table]`, a table of the last element of an array of tables opened before it (a
     profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
     an integer, a boolean, an array of strings or a non-empty array of integers (a limit's
-    `range`); a `'''`
+    `range`), or an inline table of bare keys to integers (a policy's `wire_codes`); a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -345,6 +345,21 @@ def read_decl_toml(text: str) -> dict:
             value = rest[3:-3]
         elif rest.startswith("'''"):
             raise ValueError(f"line {number}: a ''' string opens a line of its own")
+        elif rest.startswith("{"):
+            # An inline table of bare keys to integers on one line (a policy's `wire_codes`).
+            body_m = re.fullmatch(r"\{\s*(.*?)\s*\}", rest)
+            entries = [] if body_m is None or not body_m.group(1) else body_m.group(1).split(",")
+            inline: dict = {}
+            for entry in entries:
+                kv = re.fullmatch(r"\s*([A-Za-z0-9_-]+)\s*=\s*(-?[0-9]+)\s*", entry)
+                if body_m is None or kv is None or kv.group(1) in inline:
+                    raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                     "each once, on one line")
+                inline[kv.group(1)] = int(kv.group(2))
+            if body_m is None:
+                raise ValueError(f"line {number}: an inline table is bare keys to integers, "
+                                 "each once, on one line")
+            value = inline
         else:
             try:
                 value = json.loads(rest)
@@ -6463,8 +6478,8 @@ def cmd_selftest() -> int:
     expect("the generated rule and the Kconfig help name the build that selects nothing",
            f"(no `{POLICY_SELECTION_FEATURE}`)" in rpolicies
            and "or a build where nothing selects a policy after it," in kpolicies)
-    pico_doors = re.search(r"^config-policy = \[(.*)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
-                           re.MULTILINE)
+    pico_doors = re.search(r"^config-policy = \[(.*?)\]$", MANIFESTS["pico"].read_text(encoding="utf-8"),
+                           re.MULTILINE | re.DOTALL)
     expect("the pico config doors keep the domains wide, and a pico build without them does not",
            pico_doors is not None
            and f'"wz-session-core/{POLICY_SELECTION_FEATURE}"' in pico_doors.group(1))
