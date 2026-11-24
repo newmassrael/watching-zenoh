@@ -1389,6 +1389,9 @@ impl RowCallbacks for CoreRows {
     type Matching = ();
     type Reply = ();
     type QueryablePresence = wz_session_core::session_tables::Present;
+    type LivelinessPresence = wz_session_core::session_tables::Present;
+    type FilterPresence = wz_session_core::session_tables::Present;
+    type GetPresence = wz_session_core::session_tables::Present;
 }
 
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face

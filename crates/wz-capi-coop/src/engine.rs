@@ -1149,6 +1149,15 @@ impl RowCallbacks for CoopRows {
     type QueryablePresence = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "queryable"))]
     type QueryablePresence = wz_session_core::session_tables::Absent;
+    // A session without liveliness keeps neither tokens nor liveliness subscribers.
+    #[cfg(feature = "liveliness")]
+    type LivelinessPresence = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "liveliness"))]
+    type LivelinessPresence = wz_session_core::session_tables::Absent;
+    // The engine keeps its write filters, their Interests and listeners, and its pending gets in
+    // its own core, so the tables keep none of them.
+    type FilterPresence = wz_session_core::session_tables::Absent;
+    type GetPresence = wz_session_core::session_tables::Absent;
 }
 
 /// The session's one table set, its rows lent from the session's arena: the application's tables
