@@ -1653,13 +1653,29 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         }
     }
     // The session's table set is one row of the arena; the rows of each of its tables are the
-    // plan's own count of them.
-    assert_eq!(
-        plan.tables().keyexprs,
-        preset("MAX_DECLARED_KEYEXPRS"),
-        "the session's keyexpr table at the pico preset"
-    );
-    held += 1;
+    // plan's own count of them, each table counted here as a row of its own limit was before the
+    // set took it.
+    let tables = plan.tables();
+    for (rows, limit, what) in [
+        (
+            tables.keyexprs,
+            preset("MAX_DECLARED_KEYEXPRS"),
+            "keyexpr table",
+        ),
+        (
+            tables.write_filters,
+            preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"),
+            "write filter table",
+        ),
+        (
+            tables.matching_listeners,
+            preset("MAX_MATCHING_LISTENERS"),
+            "matching listener table",
+        ),
+    ] {
+        assert_eq!(rows, limit, "the session's {what} at the pico preset");
+        held += 1;
+    }
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
     assert_eq!(
