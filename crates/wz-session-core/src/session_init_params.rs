@@ -78,7 +78,9 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
     #[cfg(feature = "session-fixed-storage")]
     {
-        heapless::Vec::from_slice(src).ok()
+        let mut bytes = heapless::Vec::new();
+        crate::bounded::push_bytes(&mut bytes, src).ok()?;
+        Some(bytes)
     }
 }
 
@@ -106,7 +108,7 @@ impl SessionBytesStore for Vec<u8> {
 impl<const N: usize> SessionBytesStore for heapless::Vec<u8, N> {
     fn refill(&mut self, src: &[u8]) -> bool {
         self.clear();
-        self.extend_from_slice(src).is_ok()
+        crate::bounded::push_bytes(self, src).is_ok()
     }
 }
 
