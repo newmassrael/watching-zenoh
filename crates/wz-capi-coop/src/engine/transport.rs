@@ -11,8 +11,10 @@ use wz_runtime_coop::face_life::{FaceRole, Turn};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::FaceRead;
+#[cfg(feature = "group")]
+use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::locator_text::parse_locator;
-use wz_runtime_coop::session_drive::{LinkWait, PendingDial};
+use wz_runtime_coop::session_drive::{spawn_session_with_router, LinkWait, PendingDial};
 #[cfg(feature = "queryable")]
 use wz_session_core::response_sink::ResponseSink;
 
@@ -225,6 +227,109 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
             self.endpoint_text(endpoint),
             Refusal::Link(LinkOpenError::Exhausted),
         ))
+    }
+
+    /// The actions of a link the session makes, placed in their cell of the session's table: a
+    /// link past the cells is refused as one past the stack's buffers is. With `listen` the link
+    /// has its place in the session's admission before its handshake runs, which asks it once the
+    /// remote's zid is known: a second link to a node the session holds is refused there, with
+    /// nothing declared over it by either end, and not closed after it came up.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn place_actions(
+        &self,
+        actions: McuActions<C>,
+        role: SessionRole,
+        endpoint: Option<&DialEndpoint>,
+    ) -> Result<SessionHandle<C>, TransportRefusal> {
+        let actions: SessionHandle<C> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
+            .map_err(|_| self.cells_exhausted(endpoint))?;
+        #[cfg(feature = "listen")]
+        actions.install_link_admission(
+            Arc::clone(&self.admission),
+            matches!(role, SessionRole::Initiator),
+        );
+        #[cfg(not(feature = "listen"))]
+        let _ = role;
+        Ok(actions)
+    }
+
+    /// The key-wire form of a link dialled to or taken on `endpoint`: the one stated for the
+    /// endpoint apart from the session's, or the session's (`shared-key-ids`).
+    #[cfg(feature = "shared-key-ids")]
+    pub(super) fn key_form_of(
+        &self,
+        endpoint: Option<&DialEndpoint>,
+    ) -> wz_session_core::policy::KeyWireForm {
+        self.key_forms
+            .form_of(endpoint.map(|endpoint| endpoint.text(&self.endpoints)))
+    }
+
+    /// A link's gates placed in their cell of the session's table, as the link's driver is in one
+    /// of the stack's: a link past the cells is refused as one past the buffers is.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn place_gate<G: SessionDatagramLink + 'static>(
+        &self,
+        gate: G,
+        endpoint: Option<&DialEndpoint>,
+    ) -> Result<CellRc<dyn SessionDatagramLink>, TransportRefusal> {
+        Ok(CellRc::in_cells(self.gate_cells.as_ref(), gate)
+            .map_err(|_| self.cells_exhausted(endpoint))?
+            .into_link())
+    }
+
+    /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged
+    /// by the session's one Router, which its links share, keyed by their peers, in buffers of the
+    /// session's one table: a chain claims one when its first fragment arrives and gives it back
+    /// when it ends, and a chain that finds none free is refused and counted. The link's task
+    /// holds the place the Router is lent in. The runtime's cells were reserved at the open, one
+    /// for each link the config admits: a link past them has no task to run its session.
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn spawn_link<P, F>(
+        &self,
+        local: &CoopLocalSet<C>,
+        fields: PumpFields<C, P>,
+        dispatch: F,
+    ) -> Result<
+        wz_runtime_coop::CoopLocalJoinHandle<wz_session_core::driver_loop::DriverOutcome>,
+        TransportRefusal,
+    >
+    where
+        P: SessionDatagramLink + 'static,
+        F: EventSink + 'static,
+    {
+        spawn_session_with_router(local, fields, self.lend.clone(), dispatch)
+            .map_err(TransportRefusal::NoTask)
+    }
+
+    /// Open the link of the group `endpoint` names (`group`). A member's link is reported by the
+    /// endpoint the group was joined by, in a row of `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one
+    /// is refused before the group is joined, so no row of this engine is held on the heap.
+    #[cfg(feature = "group")]
+    // Always inlined: its one caller held these values in its own frame.
+    #[inline(always)]
+    pub(super) fn open_group(
+        &self,
+        endpoint: &str,
+    ) -> Result<alloc::boxed::Box<dyn GroupTransport>, TransportRefusal> {
+        if endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
+            return Err(TransportRefusal::Group(EndpointRefusal::new(
+                endpoint,
+                Refusal::GroupEndpointTooLong,
+            )));
+        }
+        self.links.links().open_group(endpoint).map_err(|why| {
+            TransportRefusal::Group(EndpointRefusal::new(endpoint, Refusal::Link(why)))
+        })
+    }
+
+    /// Hold the group the session joined as the face whose id was the next (`group`).
+    #[cfg(feature = "group")]
+    pub(super) fn add_group(&mut self, group: GroupFace<L::Waits>) {
+        self.links.advance_face_id();
+        self.groups.push(group);
     }
 
     /// The node a handshake that is over reached, when another face holds it or brings a link to

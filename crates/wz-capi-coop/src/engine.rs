@@ -103,8 +103,8 @@ use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
-    router_session_task_bytes, spawn_session_with_router, OpenedLink, PumpFields,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    router_session_task_bytes, OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig,
+    SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
@@ -2505,19 +2505,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        // The link's actions go in its cell of the session's table, as its gates do below.
         let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
-        let actions: SessionHandle<C> =
-            CellRc::in_cells(self.transport.actions_cells.as_ref(), actions)
-                .map_err(|_| self.transport.cells_exhausted(endpoint))?;
-        // The link has its place in the session's admission before the handshake runs, which asks
-        // it once the remote's zid is known: a second link to a node the session holds is refused
-        // there, with nothing declared over it by either end, and not closed after it came up.
-        #[cfg(feature = "listen")]
-        actions.install_link_admission(
-            Arc::clone(&self.transport.admission),
-            matches!(role, SessionRole::Initiator),
-        );
+        let actions = self.transport.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
         // source that is dry now is not a link to accept.
@@ -2543,9 +2532,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         {
             actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
                 self.session.key_ids.clone(),
-                self.transport
-                    .key_forms
-                    .form_of(endpoint.map(|endpoint| endpoint.text(&self.transport.endpoints))),
+                self.transport.key_form_of(endpoint),
                 resolve_limits(&self.config).link_noted_requests(),
             ));
             if let Some(ids) = &self.session.key_ids {
@@ -2586,11 +2573,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
         let gate: LinkGate<C> =
             unsafe { RoundGate::new(pump, self.session.lane.clone(), record_room) };
-        // The gates go in the link's cell of the session's table, as the link's driver goes in
-        // one of the stack's: a link past the cells is refused as one past the buffers is.
-        let link = CellRc::in_cells(self.transport.gate_cells.as_ref(), gate)
-            .map_err(|_| self.transport.cells_exhausted(endpoint))?
-            .into_link();
+        let link = self.transport.place_gate(gate, endpoint)?;
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -2603,11 +2586,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             generation,
             lane: self.session.lane.clone(),
         };
-        // The link's fragmented messages are staged by the session's one Router, which its links
-        // share, keyed by their peers, in buffers of the session's one table: a chain claims one
-        // when its first fragment arrives and gives it back when it ends, and a chain that finds
-        // none free is refused and counted. The link's task holds the place it is lent in.
-        let spawned = spawn_session_with_router(
+        let task = self.transport.spawn_link(
             &self.local,
             PumpFields {
                 link: link.clone(),
@@ -2620,15 +2599,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     max_iters: None,
                 },
             },
-            self.transport.lend.clone(),
             dispatch,
-        );
-        // The runtime's cells were reserved at the open, one for each link the config admits: a
-        // link past them has no task to run its session.
-        let task = match spawned {
-            Ok(task) => task,
-            Err(why) => return Err(OpenError::NoTask(why)),
-        };
+        )?;
         Ok(wz_runtime_coop::faces::Wire::new(
             LinkSession {
                 actions,
@@ -3057,10 +3029,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .install_shared_key_ids(id, ids.clone());
             }
             match self.join_group(id, join) {
-                Ok(face) => {
-                    self.transport.links.advance_face_id();
-                    self.transport.groups.push(face);
-                }
+                Ok(face) => self.transport.add_group(face),
                 Err(refused) => {
                     self.session.registry.borrow_mut().remove_face(id);
                     return Err(refused);
@@ -3087,23 +3056,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         id: FaceId,
         join: GroupJoin,
     ) -> Result<GroupFace<L::Waits>, OpenError> {
-        // A member's link is reported by the endpoint the group was joined by, in a row of
-        // `MAX_GROUP_ENDPOINT_LEN` bytes: a longer one is refused before the group is joined, so
-        // no row of this engine is held on the heap.
-        if join.endpoint.len() > caps::MAX_GROUP_ENDPOINT_LEN {
-            return Err(OpenError::Group(EndpointRefusal::new(
-                &join.endpoint,
-                Refusal::GroupEndpointTooLong,
-            )));
-        }
-        let transport = self
-            .transport
-            .links
-            .links()
-            .open_group(&join.endpoint)
-            .map_err(|why| {
-                OpenError::Group(EndpointRefusal::new(&join.endpoint, Refusal::Link(why)))
-            })?;
+        let transport = self.transport.open_group(&join.endpoint)?;
         let endpoint = join.endpoint.clone();
         let params = join.profile.params(
             self.config.whatami,
