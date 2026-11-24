@@ -1488,7 +1488,8 @@ impl<'a> CaptureReport<'a> {
             s.push_str(&alloc::format!(
                 ",\"dropped_frames\":{{\"total\":{},\"init\":{},\"open\":{},\
                  \"close\":{},\"keep_alive\":{},\"frame\":{},\"fragment\":{},\
-                 \"join\":{},\"network\":{},\"unknown\":{},\"undecodable\":{}}}",
+                 \"join\":{},\"network\":{},\"unknown\":{},\"undecodable\":{},\
+                 \"unread\":{}}}",
                 c.total(),
                 c.init(),
                 c.open(),
@@ -1499,7 +1500,8 @@ impl<'a> CaptureReport<'a> {
                 c.join(),
                 c.network(),
                 c.unknown(),
-                c.undecodable()
+                c.undecodable(),
+                c.unread()
             ));
         }
         // The figure the CAPTURE FILE reports about itself, which is a
@@ -1809,7 +1811,8 @@ impl<'a> CaptureReport<'a> {
                 s.push_str(&format!(
                     "  frames discarded by frames_per_flow: {} \
                      (init {}, open {}, close {}, keepalive {}, frame {}, \
-                     fragment {}, join {}, network {}, unknown {}, undecodable {})\n",
+                     fragment {}, join {}, network {}, unknown {}, undecodable {}, \
+                     unread {})\n",
                     c.total(),
                     c.init(),
                     c.open(),
@@ -1820,7 +1823,8 @@ impl<'a> CaptureReport<'a> {
                     c.join(),
                     c.network(),
                     c.unknown(),
-                    c.undecodable()
+                    c.undecodable(),
+                    c.unread()
                 ));
             }
         }

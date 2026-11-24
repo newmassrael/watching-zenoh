@@ -163,6 +163,9 @@ CALL_OR_PATH = re.compile(
     r"^\s*[A-Za-z_][A-Za-z0-9_:<>\.]*\s*(?:[({,]|=>|=[^=]|\.|::<)"
 )
 BARE_NAME = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,?\s*$")
+# A match arm with a guard, `None if cond =>` or `Some(x) if cond =>`: a pattern followed by
+# `if`, which no item starts with.
+GUARDED_ARM = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:]*(?:\s*\([^)]*\))?\s+if\b")
 # A foreign block that declares nothing: an item with no visibility whose only effect is the
 # `#[link]` attributes in front of it, naming a library for the linker. A foreign block that
 # declares functions makes each public or not by its own visibility, which the attribute in front
@@ -851,6 +854,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `PortPeer`, `PortPeerError`, `PORT_PEER_BACKLOG` in `pub mod udp_link`), selected by
         # `wz-capi-coop`'s `listen`, which is where a consumer reaches it; sites inside a `pub mod`,
         # the shape `app-link`'s have.
+        # `session-unicast-accept` joins: the pooled link storage a listening session's links share
+        # (`link_storage::LinkRx`, `LinkTxStore`, `LinkStorage::claim`) and the faces' owed writes
+        # (`Faces::write_owed_now`, `owing_waits`), selected by `wz-capi-coop`'s `listen`; sites
+        # inside a `pub mod` or an `impl`, the shape `udp-listen`'s have.
         frozenset(
             {
                 "alloc",
@@ -862,6 +869,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "scouting-static",
                 "session-slot",
                 "session-unicast",
+                "session-unicast-accept",
                 "switchboard",
                 "udp-listen",
             }
@@ -1467,6 +1475,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "scouting-static",
             "session-slot",
             "session-unicast",
+            "session-unicast-accept",
             "switchboard",
             "udp-listen",
         }
@@ -1894,6 +1903,8 @@ def classify(following: str) -> str:
     if FIELD.match(following) or BLOCK_OR_STMT.match(following):
         return "not-an-item"
     if CALL_OR_PATH.match(following) or BARE_NAME.match(following):
+        return "not-an-item"
+    if GUARDED_ARM.match(following):
         return "not-an-item"
     return "UNCLASSIFIED"
 

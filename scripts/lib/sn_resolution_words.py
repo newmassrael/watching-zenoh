@@ -139,6 +139,13 @@ ARM_RE = re.compile(r"(?P<code>0b[01]{1,8}|_)\s*=>\s*\"(?P<word>[^\"]+)\"")
 # is why the expression below has to be exactly the two-bit mask and nothing wider.
 INDEX_RE = re.compile(r"SN_RES_WORDS\[usize::from\(code\s*&\s*0b11\)\]")
 ARRAY_RE = re.compile(r"const SN_RES_WORDS:\s*\[&str;\s*4\]\s*=\s*\[(?P<items>[^\]]*)\];")
+# The third form, the one that indexes nothing: the const destructured into four names and a match
+# on the two-bit code answering one name per arm. A word's code is its place in the const, reached
+# through the name the destructure gives that place; the match has to be on exactly the two-bit
+# mask, as the index of the second form has to be.
+UNPACK_RE = re.compile(r"let\s*\[(?P<names>[^\]]*)\]\s*=\s*SN_RES_WORDS\s*;")
+MASK_MATCH_RE = re.compile(r"match\s+code\s*&\s*0b11\s*\{")
+NAME_ARM_RE = re.compile(r"(?P<code>0b[01]{1,8}|\d+|_)\s*=>\s*(?P<name>[a-z_][a-z0-9_]*)\s*,")
 CONST_STR_RE = re.compile(r"^const (?P<name>[A-Z0-9_]+):\s*&str\s*=\s*\"(?P<val>[^\"]+)\";",
                           re.M)
 CONST_U8_RE = re.compile(r"^const (?P<name>[A-Z0-9_]+):\s*u8\s*=\s*(?P<val>\d+);", re.M)
@@ -168,13 +175,38 @@ def wz_mapping(text: str) -> dict[int, str]:
             return {}
         words = re.findall(r'"([^"]*)"', array.group("items"))
         return dict(enumerate(words)) if len(words) == 4 else {}
+    unpack = UNPACK_RE.search(fn.group("body"))
+    if unpack:
+        # The const is destructured: each arm answers a name, and the name a place in the const.
+        array = ARRAY_RE.search(text)
+        if not array or not MASK_MATCH_RE.search(fn.group("body")):
+            return {}
+        words = re.findall(r'"([^"]*)"', array.group("items"))
+        names = [n.strip() for n in unpack.group("names").split(",") if n.strip()]
+        if len(words) != 4 or len(names) != 4 or len(set(names)) != 4:
+            return {}
+        word_of = dict(zip(names, words))
+        arms: list[tuple[str, str]] = []
+        for arm in NAME_ARM_RE.finditer(fn.group("body")):
+            if arm.group("name") not in word_of:
+                return {}
+            arms.append((arm.group("code"), word_of[arm.group("name")]))
+        return _with_catch_all(arms)
+    return _with_catch_all(
+        [(arm.group("code"), arm.group("word")) for arm in ARM_RE.finditer(fn.group("body"))]
+    )
+
+
+def _with_catch_all(arms: list[tuple[str, str]]) -> dict[int, str]:
+    """Code -> word from `(code, word)` arms, the `_` arm taking the one code the others leave;
+    nothing when they leave more or fewer than one."""
     out: dict[int, str] = {}
     catch_all: str | None = None
-    for arm in ARM_RE.finditer(fn.group("body")):
-        if arm.group("code") == "_":
-            catch_all = arm.group("word")
+    for code, word in arms:
+        if code == "_":
+            catch_all = word
         else:
-            out[int(arm.group("code"), 2)] = arm.group("word")
+            out[int(code, 0)] = word
     if catch_all is not None:
         rest = [c for c in range(4) if c not in out]
         if len(rest) != 1:
@@ -392,6 +424,17 @@ _INDEXED_FN = ('fn sn_res_word(code: u8) -> &\'static str {\n'
                '}\n\n'
                'pub(crate) const SN_RES_WORDS: [&str; 4] = ["8bit", "16bit", "32bit", "64bit"];\n')
 
+_UNPACKED_FN = ('fn sn_res_word(code: u8) -> &\'static str {\n'
+                '    let [bits8, bits16, bits32, bits64] = SN_RES_WORDS;\n'
+                '    match code & 0b11 {\n'
+                '        0 => bits8,\n'
+                '        1 => bits16,\n'
+                '        2 => bits32,\n'
+                '        _ => bits64,\n'
+                '    }\n'
+                '}\n\n'
+                'pub(crate) const SN_RES_WORDS: [&str; 4] = ["8bit", "16bit", "32bit", "64bit"];\n')
+
 _GOOD_INTEROP = ('const NON_DEFAULT_RESOLUTION: &str = "16bit";\n'
                  'const NON_DEFAULT_RES_CODE: u8 = 1;\n'
                  'const DEFAULT_RESOLUTION: &str = "32bit";\n'
@@ -445,6 +488,20 @@ def selftest(tmp: pathlib.Path) -> int:
          wz_mapping(_INDEXED_FN.replace('; 4]', '; 3]').replace(', "64bit"', "")) == {})
     case("an index wider than the two-bit mask is not read as the mapping",
          wz_mapping(_INDEXED_FN.replace("0b11)", "0b111)")) == {})
+
+    # The unpacked form: the const destructured into names, one name per arm.
+    case("the unpacked form maps all four codes through the names",
+         wz_mapping(_UNPACKED_FN) == WORDS)
+    case("two arms swapped are a different mapping",
+         wz_mapping(_UNPACKED_FN.replace("1 => bits16", "1 => bitsX")
+                    .replace("2 => bits32", "2 => bits16")
+                    .replace("1 => bitsX", "1 => bits32")) != WORDS)
+    case("an arm naming no place of the const yields NO mapping",
+         wz_mapping(_UNPACKED_FN.replace("2 => bits32", "2 => other")) == {})
+    case("an unpacked match wider than the two-bit mask is not read as the mapping",
+         wz_mapping(_UNPACKED_FN.replace("code & 0b11", "code & 0b111")) == {})
+    case("an unpacked function whose const is gone yields NO mapping",
+         wz_mapping(_UNPACKED_FN.split("pub(crate) const")[0]) == {})
 
     case("the interop pairs are read whole",
          interop_pairs(_GOOD_INTEROP)
