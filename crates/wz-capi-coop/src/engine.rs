@@ -4647,44 +4647,52 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // overlap, and the thread that put it back finds the verdict it is owed since. A listener
         // undeclared since its verdict changed is handed nothing.
         if self.matching_owed.load(Ordering::Acquire) {
-            let mut called: Option<(MatchingListenerHandle, MatchingSink)> = None;
-            loop {
-                let (gone, next) = match self.live() {
-                    Some(core) => {
-                        let mut tables = tables_mut(&core.0.session.registry);
-                        // Put back in its row, or let go of below, with no lock held, when the row
-                        // went during the call (an undeclare from inside it): the handle's
-                        // generation tells a row that took the slot since from the listener's.
-                        let gone = called.take().and_then(|(handle, sink)| {
-                            match tables.matching_listener_callback_mut(handle) {
-                                Some(call) => {
-                                    call.sink = Some(sink);
-                                    None
-                                }
-                                None => Some(sink),
-                            }
-                        });
-                        let next = tables.take_owed_matching(&mut 0, |call| call.sink.take());
-                        // Cleared under the lock a read sets it under, so a change found after
-                        // this walk keeps its word.
-                        if next.is_none() {
-                            self.matching_owed.store(false, Ordering::Release);
-                        }
-                        (gone, next)
-                    }
-                    // The session closed during the call: the callback goes with no row to go to.
-                    None => (called.take().map(|(_, sink)| sink), None),
-                };
-                drop(gone);
-                let Some((handle, matching, sink)) = next else {
-                    break;
-                };
+            // Each callback is moved into the walk that puts it back, so the pass itself lets
+            // none go: `Self::owed_matching` is where one is.
+            let mut called = None;
+            while let Some((handle, matching, sink)) = self.owed_matching(called) {
                 handed = true;
                 sink.call(matching);
                 called = Some((handle, sink));
             }
         }
         handed
+    }
+
+    /// Put `called`'s callback back in its row and take the next one owed its verdict out of its
+    /// row, under the session's lock, with the verdict it is owed. A callback with no row to go
+    /// back to, its row gone during the call or the session closed, is let go of here, after the
+    /// lock: the one place a pass lets one go.
+    fn owed_matching(
+        &self,
+        called: Option<(MatchingListenerHandle, MatchingSink)>,
+    ) -> Option<(MatchingListenerHandle, bool, MatchingSink)> {
+        let (gone, next) = match self.live() {
+            Some(core) => {
+                let mut tables = tables_mut(&core.0.session.registry);
+                // Put back in its row, or let go of below, with no lock held, when the row went
+                // during the call (an undeclare from inside it): the handle's generation tells a
+                // row that took the slot since from the listener's. A row holds no callback while
+                // its own is out, so what the put back replaces is none.
+                let gone = called.and_then(|(handle, sink)| {
+                    match tables.matching_listener_callback_mut(handle) {
+                        Some(call) => call.sink.replace(sink),
+                        None => Some(sink),
+                    }
+                });
+                let next = tables.take_owed_matching(&mut 0, |call| call.sink.take());
+                // Cleared under the lock a read sets it under, so a change found after this walk
+                // keeps its word.
+                if next.is_none() {
+                    self.matching_owed.store(false, Ordering::Release);
+                }
+                (gone, next)
+            }
+            // The session closed during the call: the callback goes with no row to go to.
+            None => (called.map(|(_, sink)| sink), None),
+        };
+        drop(gone);
+        next
     }
 
     /// Run the callback `call` was begun for on `query`, which arrived on the link of
