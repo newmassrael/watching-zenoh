@@ -492,6 +492,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 62, for `wz_dissect_live_follow_next`: a handle told that the container it
     // follows has ended goes on into the next container of the same capture,
     // its dissection whole and its packet numbers running on.
+    // 63, for `wz_dissect_live_options` growing `chain_bytes` at its end: the
+    // bytes one fragment chain may join, which was a fixed 65,536. No symbol
+    // moves. The `caps` group of every document that carries
+    // `dropped_by_limits` gained `chain_bytes` on the same step.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -509,7 +513,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 62;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 63;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3735,6 +3739,9 @@ pub struct WzDissectLiveOptions {
     /// (ABI 61) How long a fragment chain may stay open, in milliseconds of the
     /// capture's own clock from its first fragment: `0` keeps the preset's.
     pub reassembly_window_ms: u64,
+    /// (ABI 63) The bytes one fragment chain may join into a message: `0` keeps
+    /// the preset's, which is 65,536 under either preset.
+    pub chain_bytes: u64,
 }
 
 impl WzDissectLiveOptions {
@@ -3748,6 +3755,7 @@ impl WzDissectLiveOptions {
         frames_total: 0,
         stream_bytes_per_direction: 0,
         reassembly_window_ms: 0,
+        chain_bytes: 0,
     };
 }
 
@@ -3854,6 +3862,16 @@ fn caller_ceiling(value: u64, preset: Option<usize>) -> Option<Option<usize>> {
 /// gets when it opens; it also bounds how long a half-assembled IP datagram
 /// waits.
 ///
+/// # The chain ceiling (ABI 63)
+///
+/// `chain_bytes` is the bytes one fragment chain may join into a message, up to
+/// [`wz_capture::MAX_CHAIN_BYTES`] (a larger figure is
+/// [`WZ_DISSECT_ERR_INVALID_ARG`], never a quiet clamp). A message whose
+/// fragments come to more is not reassembled. A chain's buffer grows with what
+/// it stages, so the figure costs nothing until a message that large arrives;
+/// a direction holds at most four open chains, so the most chains can hold is
+/// four times it per direction of every flow.
+///
 /// # Safety
 /// `options` must point to a `wz_dissect_live_options` of at least the size
 /// its `size` field says, `serial_link_types` within it must point to
@@ -3895,6 +3913,13 @@ pub unsafe extern "C" fn wz_dissect_live_open_with(
     if options.reassembly_window_ms != 0 {
         limits.reassembly_window_ms = Some(options.reassembly_window_ms);
     }
+    let Some(chain_bytes) = caller_ceiling(options.chain_bytes, limits.chain_bytes) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    if chain_bytes.is_some_and(|n| n > wz_capture::MAX_CHAIN_BYTES) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    limits.chain_bytes = chain_bytes;
     let Ok(count) = usize::try_from(options.serial_link_type_count) else {
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
@@ -8419,7 +8444,7 @@ mod tests {
     const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":null,\"frames_total\":null,\
-         \"stream_bytes_per_direction\":null,\
+         \"stream_bytes_per_direction\":null,\"chain_bytes\":65536,\
          \"skipped_packets\":null,\"max_flows_per_table\":null,\
          \"max_scout_askers\":null}}";
 
@@ -8432,7 +8457,7 @@ mod tests {
     const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":10000,\"frames_total\":100000,\
-         \"stream_bytes_per_direction\":4194304,\
+         \"stream_bytes_per_direction\":4194304,\"chain_bytes\":65536,\
          \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
          \"max_scout_askers\":1024}}";
 
@@ -10743,7 +10768,8 @@ mod tests {
         // 62, for `wz_dissect_live_follow_next`: one symbol, a container's bytes
         // in and a `uint64_t` the caller owns out; nothing is retained of the
         // bytes and no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 62);
+        // 63, for that struct growing `chain_bytes`; no symbol moves.
+        assert_eq!(wz_dissect_abi_version(), 63);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

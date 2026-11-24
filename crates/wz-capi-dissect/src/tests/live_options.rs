@@ -73,7 +73,8 @@ fn the_options_layout_is_the_one_the_header_declares() {
     assert_eq!(offset_of!(O, frames_total), 32);
     assert_eq!(offset_of!(O, stream_bytes_per_direction), 40);
     assert_eq!(offset_of!(O, reassembly_window_ms), 48);
-    assert_eq!(size_of::<O>(), 56, "ABI 61 appended two fields");
+    assert_eq!(offset_of!(O, chain_bytes), 56);
+    assert_eq!(size_of::<O>(), 64, "ABI 61 appended two fields, ABI 63 one");
     assert_eq!(
         LIVE_OPTIONS_FIRST_SIZE, 40,
         "the six fields the first published struct holds"
@@ -432,4 +433,58 @@ fn the_appended_fields_reach_the_handle_and_an_older_caller_keeps_the_presets() 
         "and the preset's window"
     );
     unsafe { wz_dissect_live_close(older) };
+}
+
+/// A RAISED CHAIN CEILING REASSEMBLES A MESSAGE THE DEFAULT GIVES UP ON: two
+/// fragments of 40,000 bytes come to 80,000, past the 65,536 a chain joins by
+/// default, so under the default the chain ends as a capacity overflow and under
+/// a ceiling of 1 MiB it completes. `caps` names each ceiling, and one past the
+/// most a chain may join is refused.
+#[test]
+fn a_raised_chain_ceiling_reassembles_what_the_default_gives_up_on() {
+    let file = wz_capture::fixtures::oversized_chain_stream_capture();
+    let read_under = |chain_bytes: u64| {
+        let handle = open_with(&WzDissectLiveOptions {
+            chain_bytes,
+            ..options(WZ_DISSECT_LIMITS_NONE)
+        })
+        .expect("the ceiling opens");
+        read_file(handle, &file);
+        let census = call_live_census(handle, "").expect("the planes render");
+        let retention = live_retention(handle).expect("a handle");
+        unsafe { wz_dissect_live_close(handle) };
+        (census, retention)
+    };
+
+    let (census, retention) = read_under(0);
+    assert!(
+        census.contains("\"aborted_capacity_overflow\":1"),
+        "the default ceiling gives the chain up: {census}"
+    );
+    assert_eq!(
+        in_group(&retention, "frames_per_flow", "chain_bytes"),
+        "65536",
+        "{retention}"
+    );
+
+    let (census, retention) = read_under(1 << 20);
+    assert!(
+        census.contains("\"aborted_capacity_overflow\":0"),
+        "a raised ceiling joins the chain: {census}"
+    );
+    assert_eq!(
+        in_group(&retention, "frames_per_flow", "chain_bytes"),
+        "1048576",
+        "{retention}"
+    );
+
+    let past = WzDissectLiveOptions {
+        chain_bytes: wz_capture::MAX_CHAIN_BYTES as u64 + 1,
+        ..options(WZ_DISSECT_LIMITS_NONE)
+    };
+    assert_eq!(
+        open_with(&past),
+        Err(WZ_DISSECT_ERR_INVALID_ARG),
+        "a ceiling past the most a chain may join is refused, not clamped"
+    );
 }

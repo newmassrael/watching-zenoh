@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 62
+EXPECTED_VERSION = 63
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -539,7 +539,9 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # `wz_dissect_live_close`. The memory rule does not move. ABI 61 brought no
     # symbol: the struct this door reads grew two fields at its end (the byte
     # ceiling of each stream direction and the reassembly window), and a caller
-    # compiled against 60 is read as having left them zero.
+    # compiled against 60 is read as having left them zero. ABI 63 brought none
+    # either: the same struct grew `chain_bytes`, the bytes one fragment chain
+    # may join, read as zero (the preset's 65,536) from an older caller.
     "wz_dissect_live_open_with": 60,
     # (ABI 62) -- a live handle told that the container it follows has ended,
     # and handed the next container of the same capture: the dissection goes on

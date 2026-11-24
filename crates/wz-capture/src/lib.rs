@@ -1983,13 +1983,13 @@ impl DatagramDissection {
 
     fn new(
         flow: FlowKey,
-        window_ms: Option<u64>,
+        limits: DissectionLimits,
         keep: Keep,
         lent: Option<alloc::sync::Arc<dyn LentCapture>>,
     ) -> Self {
         Self {
             flow,
-            session: new_session(window_ms),
+            session: new_session(limits),
             frames: messages::MessageList::new(),
             scouting: ScoutingList::default(),
             last_activity: 0,
@@ -2952,12 +2952,14 @@ enum FlowKind {
 
 /// R311y594 — one place that decides how a per-flow observer is built, so the
 /// TCP and datagram halves cannot drift into different defaults.
-fn new_session(window_ms: Option<u64>) -> PassiveSession {
-    #[cfg(feature = "reassembly")]
-    if let Some(ms) = window_ms {
-        return PassiveSession::with_reassembly_window(ms);
-    }
-    let _ = window_ms;
+#[cfg(feature = "reassembly")]
+fn new_session(limits: DissectionLimits) -> PassiveSession {
+    PassiveSession::with_reassembly(limits.reassembly_window_ms, limits.chain_bytes_in_force())
+}
+
+/// [`new_session`] in a build with no chain routers: nothing to configure.
+#[cfg(not(feature = "reassembly"))]
+fn new_session(_limits: DissectionLimits) -> PassiveSession {
     PassiveSession::new()
 }
 
@@ -3332,12 +3334,17 @@ impl FlowDissection {
         self.ingest.evidence(self.session_observations())
     }
 
-    fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>, keep: Keep) -> Self {
+    fn new(
+        flow: FlowKey,
+        limits: DissectionLimits,
+        gap_patience: Option<usize>,
+        keep: Keep,
+    ) -> Self {
         Self {
             flow,
             low_to_high: StreamAssembler::new().with_gap_patience(gap_patience),
             high_to_low: StreamAssembler::new().with_gap_patience(gap_patience),
-            session: new_session(window_ms),
+            session: new_session(limits),
             frames: messages::MessageList::new(),
             keep,
             lent: None,
@@ -5078,6 +5085,18 @@ fn stream_into_session(
 /// after a third table lands.
 const FLOW_TABLES: usize = 2;
 
+/// The bytes one fragment chain joins when [`DissectionLimits::chain_bytes`]
+/// says none: the passive observer's own default
+/// (`wz_session_core::passive::PASSIVE_CHAIN_DEFAULT_BYTES`), which a test holds
+/// this equal to.
+pub const DEFAULT_CHAIN_BYTES: usize = 65_536;
+
+/// The most bytes one fragment chain may join whatever [`DissectionLimits::chain_bytes`]
+/// asks: the passive observer's slot ceiling
+/// (`wz_session_core::passive::PASSIVE_CHAIN_CAP`), which a test holds this
+/// equal to. A larger figure is held to it.
+pub const MAX_CHAIN_BYTES: usize = 1 << 30;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DissectionLimits {
     /// Per-chain reassembly deadline, in the capture's own milliseconds.
@@ -5134,6 +5153,16 @@ pub struct DissectionLimits {
     /// first, so this bites only for a flow whose held messages themselves span
     /// more than this.
     pub stream_bytes_per_direction: Option<usize>,
+    /// The bytes one fragment chain may join into a message. `None` is
+    /// [`DEFAULT_CHAIN_BYTES`] and NOT unbounded: a chain always has a ceiling,
+    /// so [`Self::chain_bytes_in_force`] is what a document echoes. A message
+    /// whose fragments come to more is not reassembled and its chain ends as a
+    /// capacity overflow.
+    ///
+    /// What it costs is what a chain stages, as it stages it: a direction holds
+    /// at most four open chains, so the most it can hold for chains is four
+    /// times this, per direction of every flow.
+    pub chain_bytes: Option<usize>,
     /// Entries kept in the skipped-packet list.
     pub skipped_packets: Option<usize>,
     /// Flows kept IN EACH FLOW TABLE. Beyond it the least recently active is
@@ -5224,6 +5253,14 @@ impl DissectionLimits {
         self.max_flows_per_table.map(|n| n * FLOW_TABLES)
     }
 
+    /// The bytes one fragment chain may join: [`Self::chain_bytes`], or
+    /// [`DEFAULT_CHAIN_BYTES`] where that says none.
+    pub fn chain_bytes_in_force(&self) -> usize {
+        self.chain_bytes
+            .unwrap_or(DEFAULT_CHAIN_BYTES)
+            .min(MAX_CHAIN_BYTES)
+    }
+
     /// A starting point for a live tap. Not tuned — these are the shapes, and
     /// a deployment with a measured packet rate should set its own.
     ///
@@ -5241,6 +5278,9 @@ impl DissectionLimits {
             // its own 10 000 as before.
             frames_total: Some(100_000),
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
+            // The observer's own default, named so the preset bounds the axis
+            // it has always bounded.
+            chain_bytes: Some(DEFAULT_CHAIN_BYTES),
             skipped_packets: Some(10_000),
             max_flows_per_table: Some(1_024),
             // 256 concurrent half-assembled datagrams is far past what a real
@@ -5428,7 +5468,12 @@ mod message_list_census {
             lent: _,
             // Where a decrypted flow's messages are read from, not a list.
             plaintext: _,
-        } = FlowDissection::new(FlowKey::serial_line(), None, None, Keep::Entries);
+        } = FlowDissection::new(
+            FlowKey::serial_line(),
+            DissectionLimits::default(),
+            None,
+            Keep::Entries,
+        );
     }
 
     /// Every field of [`DatagramDissection`], classified.
@@ -5463,7 +5508,12 @@ mod message_list_census {
             keep: _,
             // Where the datagrams' bytes are read from, not a list.
             lent: _,
-        } = DatagramDissection::new(FlowKey::serial_line(), None, Keep::Entries, None);
+        } = DatagramDissection::new(
+            FlowKey::serial_line(),
+            DissectionLimits::default(),
+            Keep::Entries,
+            None,
+        );
     }
 
     /// Every field of [`QuicStreamDissection`], classified.
@@ -5480,7 +5530,7 @@ mod message_list_census {
             keep: _,
         } = QuicStreamDissection {
             id: 0,
-            session: new_session(None),
+            session: new_session(DissectionLimits::default()),
             frames: messages::MessageList::new(),
             fed: [0, 0],
             plaintext: Default::default(),
@@ -5519,6 +5569,7 @@ mod live_tap_tests {
             frames_per_flow,
             frames_total,
             stream_bytes_per_direction,
+            chain_bytes,
             skipped_packets,
             max_flows_per_table,
             max_pending_fragments,
@@ -5535,6 +5586,7 @@ mod live_tap_tests {
             ("frames_per_flow", frames_per_flow),
             ("frames_total", frames_total),
             ("stream_bytes_per_direction", stream_bytes_per_direction),
+            ("chain_bytes", chain_bytes),
             ("skipped_packets", skipped_packets),
             ("max_flows_per_table", max_flows_per_table),
             ("max_pending_fragments", max_pending_fragments),
@@ -5550,6 +5602,35 @@ mod live_tap_tests {
             };
             assert!(v > 0, "{name} is bounded at zero, which taps nothing");
         }
+    }
+
+    /// THE CHAIN CEILING'S DEFAULT AND ITS MOST ARE THE OBSERVER'S OWN, and limits
+    /// that name none echo the default rather than "no ceiling": a chain always
+    /// has one.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_chain_ceiling_is_the_observers_and_always_a_number() {
+        assert_eq!(
+            DEFAULT_CHAIN_BYTES,
+            wz_session_core::passive::PASSIVE_CHAIN_DEFAULT_BYTES
+        );
+        assert_eq!(MAX_CHAIN_BYTES, wz_session_core::passive::PASSIVE_CHAIN_CAP);
+        assert_eq!(
+            DissectionLimits::default().chain_bytes_in_force(),
+            DEFAULT_CHAIN_BYTES
+        );
+        let raised = DissectionLimits {
+            chain_bytes: Some(4 << 20),
+            ..DissectionLimits::default()
+        };
+        assert_eq!(raised.chain_bytes_in_force(), 4 << 20);
+        let past = DissectionLimits {
+            chain_bytes: Some(usize::MAX),
+            ..DissectionLimits::default()
+        };
+        assert_eq!(past.chain_bytes_in_force(), MAX_CHAIN_BYTES);
+        let doc = crate::report::dropped_by_limits_json(&Dissection::with_limits(raised));
+        assert!(doc.contains("\"chain_bytes\":4194304,"), "{doc}");
     }
 
     /// One packet per step, cycling over a stream flow and two datagram flows, so
@@ -6757,7 +6838,7 @@ impl Default for Dissection {
             serial_pending: Vec::new(),
             serial_frames: messages::MessageList::new(),
             serial_origins: wz_session_core::chunk_log::ChunkLog::new(),
-            serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
+            serial_session: new_session(DissectionLimits::default()),
             serial_ingest: session_table::LinkIngest::default(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
@@ -6898,6 +6979,8 @@ impl Dissection {
                 limits.max_pending_fragments,
                 limits.reassembly_window_ms,
             ),
+            // The serial line's chains join what every flow's may.
+            serial_session: new_session(limits),
             limits,
             ..Self::default()
         }
@@ -8354,7 +8437,7 @@ impl Dissection {
                 }
                 dg.quic_streams.push(QuicStreamDissection {
                     id: stream_id,
-                    session: new_session(self.limits.reassembly_window_ms),
+                    session: new_session(self.limits),
                     frames: messages::MessageList::new(),
                     fed: [0, 0],
                     plaintext: Default::default(),
@@ -9298,12 +9381,8 @@ impl Dissection {
         let idx = match self.flows.position(&segment.flow) {
             Some(i) => i,
             None => {
-                let mut flow = FlowDissection::new(
-                    segment.flow,
-                    self.limits.reassembly_window_ms,
-                    self.gap_patience,
-                    self.keep,
-                );
+                let mut flow =
+                    FlowDissection::new(segment.flow, self.limits, self.gap_patience, self.keep);
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
                 self.flows.len() - 1
@@ -9611,12 +9690,8 @@ impl Dissection {
         let idx = match self.flows.position(&record.flow) {
             Some(i) => i,
             None => {
-                let mut flow = FlowDissection::new(
-                    record.flow,
-                    self.limits.reassembly_window_ms,
-                    self.gap_patience,
-                    self.keep,
-                );
+                let mut flow =
+                    FlowDissection::new(record.flow, self.limits, self.gap_patience, self.keep);
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
                 self.flows.len() - 1
@@ -9733,7 +9808,7 @@ impl Dissection {
             None => {
                 self.datagram_flows.push(DatagramDissection::new(
                     d.flow,
-                    self.limits.reassembly_window_ms,
+                    self.limits,
                     self.keep,
                     self.lent.clone(),
                 ));

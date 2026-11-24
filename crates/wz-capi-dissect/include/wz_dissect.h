@@ -1739,7 +1739,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":27,
+ *     {"document":{"name":"census","revision":28,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1785,13 +1785,13 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":80,"key":"kind","values":[...],
+ *     {"name":"fields","revision":81,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
  *                  "shapes":[["end","name","selector_path","start"]]}, ...]}
  *
- *     {"name":"census","revision":27,"key":"mode","values":[...],
+ *     {"name":"census","revision":28,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -2220,7 +2220,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 62
+#define WZ_DISSECT_ABI_REVISION 63
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2426,6 +2426,15 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * about whether a cap existed to bite, which is the whole distinction this
  * bounded door was added to make. Reading a loss beside its ceiling is also
  * how you tell which cap is NEAREST without waiting for one to bite.
+ *
+ * (ABI 63) -- and `caps` names `chain_bytes`, after
+ * `stream_bytes_per_direction`: the bytes one fragment chain may join into a
+ * message. Never `null`, because a chain always has a ceiling: 65,536 unless
+ * a live handle was opened with another (wz_dissect_live_open_with). A message
+ * whose fragments come to more is not reassembled, and its chain is counted
+ * under the census's `fragment_chains.aborted_capacity_overflow`. Census 28,
+ * fields 81, summary 9, session_table 16, selection 8, retention 5, health 6,
+ * selection_since 6 and row_facts 21 carry it.
  *
  * R2630 -- and the group counts `scouting`: the SCOUT and HELLO datagrams a
  * `frames_per_flow` ceiling evicted from a flow's scouting list. It shares
@@ -2848,7 +2857,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":15},"ok":true,
+ *     {"document":{"name":"session_table","revision":16},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -6536,7 +6545,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":80,"key":"state",
+ *     "value_families":[{"name":"fields","revision":81,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -7012,12 +7021,23 @@ int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total
  * `frames_total` to the list's row limit and this ceiling at least as large as
  * the bytes those rows span in one direction: the stream then follows the rows.
  *
- * A FRAGMENT CHAIN HAS A CEILING OF ITS OWN, and no option moves it: a chain
- * joins at most 65,536 bytes. A message whose fragments come to more is not
- * reassembled. Its fragment rows say `outcome` `aborted` with `reason`
+ * A FRAGMENT CHAIN HAS A CEILING OF ITS OWN, `chain_bytes` (ABI 63): the bytes
+ * one chain may join into a message. `0` keeps the preset's, 65,536 under
+ * either preset; the most it may be set to is 1,073,741,824 (2^30), and a larger
+ * figure is WZ_DISSECT_ERR_INVALID_ARG. A message whose fragments come to more
+ * is not reassembled. Its fragment rows say `outcome` `aborted` with `reason`
  * `capacity_overflow`, the census counts it in
  * `fragment_chains.aborted_capacity_overflow`, and the message has no record of
- * its own. The byte ceiling above plays no part in it.
+ * its own. The byte ceiling above plays no part in it. It is echoed as
+ * `dropped_by_limits.caps.chain_bytes`, always a number.
+ *
+ * WHAT THE CHAIN CEILING COSTS. A chain's buffer grows with the fragments it
+ * stages, so a ceiling of 16 MiB costs nothing until a message that large
+ * arrives, and then what that message's bytes are while it is being joined. A
+ * direction holds at most four open chains at once, so the most the chains of
+ * one direction can hold is four times the ceiling; a peer that opens chains it
+ * never finishes holds that until the window above expires them. Set it to the
+ * largest message your application sends.
  *
  * WHAT THE WINDOW DOES TO A SLOW CHAIN. A chain's deadline is armed by its
  * FIRST fragment and is not moved by the ones after it, so a chain whose
@@ -7057,6 +7077,9 @@ typedef struct wz_dissect_live_options {
     /* (ABI 61) How long a fragment chain may stay open, in milliseconds of
      * the capture's clock from its first fragment; 0 keeps the preset's. */
     uint64_t reassembly_window_ms;
+    /* (ABI 63) The bytes one fragment chain may join into a message; 0 keeps
+     * the preset's, 65,536. */
+    uint64_t chain_bytes;
 } wz_dissect_live_options;
 
 int wz_dissect_live_open_with(const wz_dissect_live_options *options,
@@ -8867,7 +8890,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":5},
+ *     {"document":{"name":"selection_since","revision":6},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],
