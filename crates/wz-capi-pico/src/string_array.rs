@@ -72,6 +72,13 @@ impl StringArrayEntry {
             view,
         })
     }
+
+    /// An entry over a copy of `bytes`. Never inlined: a push and both arms of a deep copy, which
+    /// the compiler splits by the array's kind, make their entries through this one body.
+    #[inline(never)]
+    fn copy_of(bytes: &[u8]) -> Box<Self> {
+        Self::new(Box::from(bytes))
+    }
 }
 
 pub(crate) struct StringArrayState {
@@ -131,7 +138,7 @@ impl StringArrayState {
             // SAFETY: an entry's view reads its own bytes, and a lent view a live string
             // (`Self::lent`).
             let bytes = unsafe { crate::abi::view_bytes(view._start, view._len) };
-            entries.push(StringArrayEntry::new(Box::from(bytes.unwrap_or(&[]))));
+            entries.push(StringArrayEntry::copy_of(bytes.unwrap_or(&[])));
         }
         Box::new(Self {
             items: Items::Owned(entries),
@@ -442,7 +449,7 @@ unsafe fn string_array_push(
     let Some(bytes) = crate::abi::view_bytes(view._start, view._len) else {
         return len;
     };
-    entries.push(StringArrayEntry::new(Box::from(bytes)));
+    entries.push(StringArrayEntry::copy_of(bytes));
     entries.len()
 }
 
@@ -499,6 +506,20 @@ pub unsafe extern "C" fn z_string_array_take_from_loaned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry made from bytes holds a copy of its own, and its view reads that copy whole.
+    #[test]
+    fn an_entry_copied_from_bytes_views_its_own_copy() {
+        let bytes = *b"udp/10.0.0.1:7447";
+        let entry = StringArrayEntry::copy_of(&bytes);
+        assert_ne!(entry.view._start, bytes.as_ptr());
+        assert_eq!(entry.view._len, bytes.len());
+        // SAFETY: the view reads the entry's own bytes, live while `entry` is.
+        let read = unsafe { core::slice::from_raw_parts(entry.view._start, entry.view._len) };
+        assert_eq!(read, &bytes);
+        let empty = StringArrayEntry::copy_of(&[]);
+        assert_eq!(empty.view._len, 0);
+    }
 
     /// The owned string array is stack-allocated by a C program, so its size is
     /// pinned against the 32 B measured off the pinned zenoh-pico headers on a 64-bit host,

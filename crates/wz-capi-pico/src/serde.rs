@@ -368,7 +368,11 @@ pub unsafe extern "C" fn ze_serializer_serialize_sequence_length(
 }
 
 /// Write a length-prefixed byte run (pico `ze_serializer_serialize_buf`).
+///
+/// Out of line: the slice, substring, string and NUL-terminated doors end in this one, and each
+/// held a copy of its own.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn ze_serializer_serialize_buf(
     serializer: *mut ze_loaned_serializer_t,
     val: *const u8,
