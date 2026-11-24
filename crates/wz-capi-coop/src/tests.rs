@@ -1925,6 +1925,34 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     SessionDrive::close(&*engine);
 }
 
+/// Starting the read task makes nothing of the heap of its own: what the thread runs is a value
+/// handed to the system's spawn, and the stop moves the engine's run of tasks, so no box and no
+/// word is made for either. A system that gives no thread is the start's every step but the
+/// thread. Turned red by a body boxed for the spawn or a stop word shared with the task.
+#[test]
+fn starting_the_read_task_makes_nothing_of_the_heap_of_its_own() {
+    use wz_capi_port::ReadTaskStartRefused;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let mut refused = None;
+    let allocations = redial_heap::counted(|| {
+        refused = Some(engine.start_reader(|_| None));
+    });
+    assert_eq!(refused, Some(Err(ReadTaskStartRefused::NoThread)));
+    assert_eq!(
+        allocations, 0,
+        "the start boxes nothing and makes no stop word"
+    );
+    SessionDrive::start_read_task(&*engine).expect("a read task once a thread is given");
+    SessionDrive::stop_read_task(&*engine).expect("stopped from the test's thread");
+    assert!(
+        !SessionDrive::read_task_is_running(&*engine),
+        "CONTROL: the stop ends the task the start ran"
+    );
+    SessionDrive::close(&*engine);
+}
+
 /// The session's peers are read one at a time, by key: the dial role's face is the one peer, a
 /// read past its key finds none, and the walk a C ABI makes hands each identity on with the
 /// session free, so what it is handed to may read the session again (a C callback may call into
