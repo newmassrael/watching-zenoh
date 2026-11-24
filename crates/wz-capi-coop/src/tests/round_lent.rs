@@ -121,6 +121,11 @@ fn a_record_with_a_part_the_round_cannot_read_where_it_lies_is_refused_and_count
         [("demo/a".to_owned(), datagram.as_ptr() as usize)],
         "the lent record alone, read where it lies"
     );
+    assert_eq!(
+        (round.samples_handed(), round.samples_lent()),
+        (1, 1),
+        "the round handed out the lent record alone"
+    );
 }
 
 /// The gate asks a filling round for room in its keys: once the keys a session composed leave no
