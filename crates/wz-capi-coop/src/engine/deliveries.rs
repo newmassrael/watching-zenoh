@@ -168,8 +168,10 @@ impl Drop for Linked<'_> {
     fn drop(&mut self) {
         self.set.beside.fetch_sub(1, Ordering::AcqRel);
         let gone = core::ptr::from_ref(self.link);
-        let after = self.link.next.get();
         self.set.with_others(|others| {
+            // Read under the lock: a thread taken out after this one in the list rewrites this
+            // link's `next` under it, so a `next` read before would relink a link already gone.
+            let after = self.link.next.get();
             if others.0 == gone {
                 others.0 = after;
                 return;
