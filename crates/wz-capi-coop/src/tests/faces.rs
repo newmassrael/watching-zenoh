@@ -123,3 +123,29 @@ fn a_watcher_is_told_of_the_face_lost_and_the_one_dialled_again() {
         "a watcher that stopped hears no more"
     );
 }
+
+/// Walking the faces a row at a time allocates nothing: a row's ends are written into the row in
+/// place under the session's lock, and the row is handed out whole. Turned red by a walk that
+/// builds the face's snapshot or a list of them, which the control below shows allocates.
+#[test]
+fn walking_the_faces_a_row_at_a_time_allocates_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert!(
+        engine.face_link_at(0).is_some(),
+        "the session stands on a face"
+    );
+    let mut rows = 0;
+    let allocations = super::redial_heap::counted(|| {
+        while let Some(row) = engine.face_link_at(rows) {
+            core::hint::black_box(&row);
+            rows += 1;
+        }
+    });
+    assert_eq!(rows, 1, "one link, one row");
+    assert_eq!(allocations, 0, "the walk allocates nothing");
+    let snapshots = super::redial_heap::counted(|| {
+        core::hint::black_box(engine.face_snapshots());
+    });
+    assert!(snapshots > 0, "a snapshot of the same face allocates");
+}

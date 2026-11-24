@@ -29,6 +29,18 @@ fn miss_of(zid: &[u8], eid: u32, nb: u32) -> Miss {
     }
 }
 
+/// The key of the sequenced source `zid`/`eid`.
+#[cfg(feature = "advanced-recovery")]
+fn src(zid: &[u8], eid: u32) -> EntityGlobalId {
+    EntityGlobalId::new(zid, eid).expect("a 1..=16-byte test zid")
+}
+
+/// The key of the timestamped source `zid`.
+#[cfg(feature = "advanced-history")]
+fn ts_src(zid: &[u8]) -> TimestampZid {
+    TimestampZid::new(zid).expect("an at most 16-byte test zid")
+}
+
 /// A registry holding ONE listener that records into `sink` — the shape
 /// the state-machine tests below drive [`State`] with directly.
 #[cfg(feature = "advanced-recovery")]
@@ -50,7 +62,8 @@ fn machine(
     global_pending_queries: usize,
     max_history_depth: usize,
 ) -> State {
-    let state = State::new(on_sample, miss_handlers).with_retransmission(retransmission);
+    let state =
+        State::new(owned_samples(on_sample), miss_handlers).with_retransmission(retransmission);
     #[cfg(feature = "advanced-history")]
     let state = state.with_history(global_pending_queries, max_history_depth);
     #[cfg(not(feature = "advanced-history"))]
@@ -196,12 +209,8 @@ fn recovery_flush_reports_miss_for_unfilled_hole() {
 #[test]
 fn periodic_requests_reask_each_source_once() {
     let mut state = silent(true);
-    state
-        .sequenced
-        .insert((vec![0x01u8], 1u32), source_at(Some(4)));
-    state
-        .sequenced
-        .insert((vec![0x02u8], 2u32), source_at(Some(0)));
+    state.sequenced.insert(src(&[0x01], 1), source_at(Some(4)));
+    state.sequenced.insert(src(&[0x02], 2), source_at(Some(0)));
 
     let mut reqs = state.periodic_requests();
     reqs.sort_by_key(|r| r.eid);
@@ -223,9 +232,7 @@ fn periodic_requests_reask_each_source_once() {
 
     // Retransmission OFF -> the periodic trigger is inert.
     let mut plain = silent(false);
-    plain
-        .sequenced
-        .insert((vec![0x01u8], 1u32), source_at(Some(0)));
+    plain.sequenced.insert(src(&[0x01], 1), source_at(Some(0)));
     assert!(
         plain.periodic_requests().is_empty(),
         "no retransmission -> periodic_requests is a no-op"
@@ -242,7 +249,7 @@ fn periodic_requests_come_in_the_same_order_in_every_run() {
     let ask = || {
         let mut state = silent(true);
         for eid in 0..32u8 {
-            let key = (vec![0x01, eid], u32::from(eid));
+            let key = src(&[0x01, eid], u32::from(eid));
             state.sequenced.insert(key, source_at(Some(0)));
         }
         state
@@ -269,7 +276,9 @@ fn periodic_requests_come_in_the_same_order_in_every_run() {
 fn handle_heartbeat_requests_bounded_get_when_ahead() {
     let mut state = silent(true);
     let key = (vec![0x09u8], 4u32);
-    state.sequenced.insert(key.clone(), source_at(Some(1)));
+    state
+        .sequenced
+        .insert(src(&key.0, key.1), source_at(Some(1)));
 
     // Beacon last sn = 4 > last_delivered 1 -> bounded _sn=2..4.
     let req = state
@@ -281,7 +290,11 @@ fn handle_heartbeat_requests_bounded_get_when_ahead() {
         .handle_heartbeat(key.0.clone(), key.1, 5, NOW)
         .is_none());
     // A caught-up beacon (<= last_delivered) on a fresh source is a no-op.
-    state.sequenced.get_mut(&key).unwrap().pending_queries = 0;
+    state
+        .sequenced
+        .get_mut(&src(&key.0, key.1))
+        .unwrap()
+        .pending_queries = 0;
     assert!(state
         .handle_heartbeat(key.0.clone(), key.1, 1, NOW)
         .is_none());
@@ -314,24 +327,22 @@ fn the_retention_sweep_reclaims_only_quiet_sources_that_no_token_calls_live() {
     let retention = Duration::from_secs(60);
     let now: u64 = 1_000_000;
     let long_ago = now - 600_000;
-    let quiet = (vec![0xAAu8], 1u32);
-    let live = (vec![0xBBu8], 1u32);
-    let recent = (vec![0xCCu8], 1u32);
+    let quiet = src(&[0xAA], 1);
+    let live = src(&[0xBB], 1);
+    let recent = src(&[0xCC], 1);
 
-    state.sequenced.insert(quiet.clone(), SourceState::new(now));
+    state.sequenced.insert(quiet, SourceState::new(now));
     state.sequenced.get_mut(&quiet).unwrap().retention = Retention {
         latest_access_ms: long_ago,
         alive: false,
     };
-    state.sequenced.insert(live.clone(), SourceState::new(now));
+    state.sequenced.insert(live, SourceState::new(now));
     state.sequenced.get_mut(&live).unwrap().retention = Retention {
         latest_access_ms: long_ago,
         alive: true,
     };
     // Recently heard from: a state is stamped with the reading it was created at.
-    state
-        .sequenced
-        .insert(recent.clone(), SourceState::new(now));
+    state.sequenced.insert(recent, SourceState::new(now));
 
     let reclaimed = state.reclaim_expired_sources(now, retention);
 
@@ -397,16 +408,14 @@ fn a_beacon_from_a_new_source_is_skipped_only_while_a_global_pull_is_running() {
     // ...and the source is REMEMBERED anyway, or the next beacon would look
     // new all over again and the skip would repeat forever.
     assert!(
-        pulling.sequenced.contains_key(&(vec![0x0Au8], 7)),
+        pulling.sequenced.contains_key(&src(&[0x0A], 7)),
         "the skipped source must still be recorded, as upstream records it \
          before deciding"
     );
 
     // CONTROL A: same in-flight pull, but a source already KNOWN -> recovers.
     let mut known = new_state(1);
-    known
-        .sequenced
-        .insert((vec![0x0Bu8], 7), source_at(Some(1)));
+    known.sequenced.insert(src(&[0x0B], 7), source_at(Some(1)));
     let req = known
         .handle_heartbeat(vec![0x0Bu8], 7, 5, NOW)
         .expect("the guard is about NEW sources only; a known one still recovers");
@@ -733,7 +742,7 @@ fn recovery_completing_mid_history_defers_flush() {
     let mut source = SourceState::new(NOW);
     source.pending_samples = buffered;
     source.pending_queries = 1;
-    state.sequenced.insert(key.clone(), source);
+    state.sequenced.insert(src(&key.0, key.1), source);
 
     // The recovery GET completes mid-history -> must NOT flush.
     state.finish_recovery(&key);
@@ -763,13 +772,13 @@ fn handle_late_publisher_opens_one_slot_per_source() {
     let zid = vec![0x09u8];
     // First detection opens a slot.
     assert!(state.handle_late_publisher(zid.clone(), 4, NOW));
-    assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
+    assert_eq!(state.sequenced[&src(&zid, 4)].pending_queries, 1);
     // A second detection while the GET is in flight is a no-op.
     assert!(!state.handle_late_publisher(zid.clone(), 4, NOW));
-    assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
+    assert_eq!(state.sequenced[&src(&zid, 4)].pending_queries, 1);
     // A distinct publisher gets its own slot.
     assert!(state.handle_late_publisher(zid.clone(), 5, NOW));
-    assert_eq!(state.sequenced[&(zid, 5)].pending_queries, 1);
+    assert_eq!(state.sequenced[&src(&zid, 5)].pending_queries, 1);
 }
 
 /// R2553 — the TIMESTAMPED trigger's own slot arithmetic, and the property
@@ -789,23 +798,77 @@ fn handle_late_timestamped_publisher_opens_one_slot_per_zid() {
 
     // First detection opens a slot; a second while it is in flight does not.
     assert!(state.handle_late_timestamped_publisher(zid.clone(), NOW));
-    assert_eq!(state.timestamped[&zid].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
     assert!(!state.handle_late_timestamped_publisher(zid.clone(), NOW));
-    assert_eq!(state.timestamped[&zid].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
 
     // A SEQUENCED publisher on the SAME zid is a different source: its slot
     // is opened independently and leaves the timestamped one untouched.
     assert!(state.handle_late_publisher(zid.clone(), 4, NOW));
-    assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
-    assert_eq!(state.timestamped[&zid].pending_queries, 1);
+    assert_eq!(state.sequenced[&src(&zid, 4)].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
 
     // A distinct zid gets its own slot.
     assert!(state.handle_late_timestamped_publisher(other.clone(), NOW));
-    assert_eq!(state.timestamped[&other].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&other)].pending_queries, 1);
 
     // The GET's terminal Final closes the slot, re-opening the gate.
     state.finish_timestamped_recovery(&zid);
-    assert_eq!(state.timestamped[&zid].pending_queries, 0);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 0);
     assert!(state.handle_late_timestamped_publisher(zid.clone(), NOW));
-    assert_eq!(state.timestamped[&zid].pending_queries, 1);
+    assert_eq!(state.timestamped[&ts_src(&zid)].pending_queries, 1);
+}
+
+/// What the machine hands its callback, recorded as whether it was lent and its payload byte.
+#[cfg(feature = "advanced-recovery")]
+fn lent_recording(record: Arc<Mutex<Vec<(bool, u8)>>>) -> Box<dyn FnMut(Delivery<'_>) + Send> {
+    Box::new(move |delivery: Delivery<'_>| {
+        let lent = matches!(delivery, Delivery::Lent(_));
+        let byte = delivery.view().payload()[0];
+        record.lock().unwrap().push((lent, byte));
+    })
+}
+
+/// A live sample the machine delivers as it arrives is handed on as the view the session lent,
+/// so nothing of it is copied: an unsequenced one and the first of a sequenced source alike.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_live_sample_delivered_as_it_arrives_is_lent_not_copied() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default());
+    let plain = Sample::new_put("demo/data", vec![0xA0]);
+    assert!(state.handle_live(&plain, NOW).is_none());
+    assert!(state.handle_live(&sequenced(0, 0xA1), NOW).is_none());
+    assert!(state.handle_live(&sequenced(1, 0xA2), NOW).is_none());
+    assert_eq!(
+        *record.lock().unwrap(),
+        vec![(true, 0xA0), (true, 0xA1), (true, 0xA2)]
+    );
+}
+
+/// A live sample the machine must keep past the call (a history get is in flight) is copied
+/// once into its buffer and handed over owned when the buffer drains.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn a_sample_the_machine_held_is_handed_on_owned() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default())
+        .with_history(1, usize::MAX);
+    assert!(state.handle_live(&sequenced(0, 0xB0), NOW).is_none());
+    assert!(
+        record.lock().unwrap().is_empty(),
+        "held while the history get is in flight"
+    );
+    state.finish_history();
+    assert_eq!(*record.lock().unwrap(), vec![(false, 0xB0)]);
+}
+
+/// A recovered sample the machine hands on at once is read where its reply lies, not copied.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_recovered_sample_handed_on_at_once_is_lent() {
+    let record = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::new(lent_recording(Arc::clone(&record)), MissHandlers::default());
+    assert!(state.handle_recovered(&sequenced(0, 0xC0), NOW).is_none());
+    assert_eq!(*record.lock().unwrap(), vec![(true, 0xC0)]);
 }

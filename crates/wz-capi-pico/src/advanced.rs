@@ -56,11 +56,11 @@ use wz_ext_pubsub::advanced_publisher::{
     MissDetectionConfig, Sequencing,
 };
 use wz_ext_pubsub::advanced_subscriber::{
-    AdvancedSubscriberOptions, EngineSubscriber, HistoryConfig, HostError, Miss, RecoveryConfig,
-    SubscriberDetection,
+    AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, Miss,
+    RecoveryConfig, SubscriberDetection,
 };
 use wz_session_core::publish_options::PublishError;
-use wz_session_core::sample::Sample;
+use wz_session_core::sink::SampleView;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::advanced_forms::PicoSubscriberForms;
@@ -962,7 +962,7 @@ struct AdvSampleSink(*mut AdvSubState);
 unsafe impl Send for AdvSampleSink {}
 
 impl AdvSampleSink {
-    fn hand(&self, sample: &Sample) {
+    fn hand(&self, sample: &dyn SampleView) {
         // SAFETY: the place stands while this is held, and what it keeps is taken out by nothing
         // but this sink's drop.
         let kept = unsafe { &*crate::object_slot::kept_at::<AdvSubState, SubscriberKept>(self.0) };
@@ -1173,7 +1173,7 @@ unsafe fn declare_subscriber_state(
         &engine,
         (*state).keyexpr.clone(),
         opts,
-        move |sample: Sample| sink.hand(&sample),
+        move |sample: Delivery<'_>| sink.hand(sample.view()),
         move |m: Miss| fire_miss(&miss, &m),
     );
     match declared {

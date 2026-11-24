@@ -221,9 +221,9 @@ use {
 mod faces;
 #[cfg(feature = "connectivity")]
 use faces::FacePlane;
-#[cfg(feature = "connectivity")]
-use wz_session_core::face::FaceEventSink;
 use wz_session_core::face::{FaceEventKind, FaceSnapshot};
+#[cfg(feature = "connectivity")]
+use wz_session_core::face::{FaceEventSink, FaceLinkRow};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 
@@ -253,7 +253,8 @@ pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 use {
     crate::round::LegHolders,
     get::{EndedLegs, GetKind, GetPlane, LegRows},
-    wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
+    wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
+    wz_capi_port::ReplyCallback,
     wz_session_core::bounded::CapacityFull,
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
@@ -3802,6 +3803,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let _ = (kind, face);
     }
 
+    /// The row at cursor `at` of the links of the faces that stand, in the order
+    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends are written
+    /// into the row with nothing allocated. A group's members are read off their snapshots.
+    #[cfg(feature = "connectivity")]
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        for face in self.links.faces() {
+            let Link::Up(wire) = &face.link else {
+                continue;
+            };
+            if !wire.actions.is_established() {
+                continue;
+            }
+            let links = FaceLinkRow::links_of(&*wire.actions);
+            if at < links {
+                return FaceLinkRow::of_actions(&*wire.actions, at);
+            }
+            at -= links;
+        }
+        #[cfg(feature = "group")]
+        for member in self.groups.iter().flat_map(GroupFace::member_snapshots) {
+            if at < member.links.len() {
+                return FaceLinkRow::of_snapshot(&member, at);
+            }
+            at -= member.links.len();
+        }
+        None
+    }
+
     /// The faces that stand: those whose links have completed their handshakes.
     #[cfg(feature = "connectivity")]
     fn standing_faces(&self) -> Vec<FaceSnapshot> {
@@ -5597,35 +5627,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Ok(count)
     }
 
-    /// Tell `fan`, when the get can be cancelled, how to undo leg `leg`: a token cancelled while
-    /// the leg is issued undoes it at once (`record` runs it). Whether the legs may go on being
-    /// issued: `false` once the token cancelled.
+    /// Attach this engine to `fan` as what ends the legs it tags with the fan's key, before a leg
+    /// is issued: the key, `None` for a get no token can cancel, or [`FanCancelled`] for a fan
+    /// cancelled already, whose get issues no leg. Nothing is kept for a leg but its tag.
     #[cfg(feature = "query")]
-    fn cancelling(&self, fan: Option<&CancellableFan>, leg: u64) -> bool {
+    fn tag_of(&self, fan: Option<&CancellableFan>) -> Result<Option<FanKey>, FanCancelled> {
         let Some(fan) = fan else {
-            return true;
+            return Ok(None);
         };
-        let engine = self.this.clone();
-        fan.record(move || {
-            if let Some(engine) = engine.upgrade() {
-                engine.cancel_get(leg);
-            }
-        })
+        let canceller: Weak<dyn FanCanceller> = Weak::<Self>::clone(&self.this);
+        if fan.attach(&canceller) {
+            Ok(Some(fan.key()))
+        } else {
+            Err(FanCancelled)
+        }
     }
 
-    /// Cancel leg `leg` (its get's cancellation token was cancelled): its pending entry is
-    /// dropped, and its callback with it, here, with no lock held, so a `cancel` that waits for
-    /// the leg's callback to be dropped returns whether or not the session is stepped.
+    /// Whether `fan` was cancelled while its legs were being issued: none further is issued, and
+    /// the legs tagged `tag` are ended here, since the cancel may have run before the last of
+    /// them was pending.
     #[cfg(feature = "query")]
-    fn cancel_get(&self, leg: u64) {
-        if let Some(mut core) = self.live() {
-            let core = &mut core.0;
-            if let Some(at) = core.session.pending_gets.iter().position(|p| p.leg == leg) {
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(&mut core.session.registry.borrow_mut());
+    fn cut_short(&self, fan: Option<&CancellableFan>, tag: Option<FanKey>) -> bool {
+        match (fan, tag) {
+            (Some(fan), Some(key)) if fan.is_cancelled() => {
+                self.cancel_fan(key);
+                true
             }
+            _ => false,
         }
-        self.end_leg_now(leg);
     }
 
     /// Let go of each row whose last call ended after it was undeclared, when a call said one may
@@ -6438,6 +6467,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[cfg(feature = "connectivity")]
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        self.live().and_then(|core| core.0.face_link_at(at))
+    }
+
+    #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
         if SessionEngine::is_closed(self) {
             return Err(Declined::Closed);
@@ -7173,6 +7207,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A get limited to some links or addressed to one node is refused by that statement:
         // this engine reads neither, and asking every link would widen it.
         StatementNotHonoured::of_query(opts)?;
+        // A fan cancelled before a leg is issued issues none: the get reached nobody.
+        let Ok(tag) = self.tag_of(fan) else {
+            return Ok(0);
+        };
         // The session's own queryables are asked all or none, under a row of the plane's held
         // Finals taken before any leg is issued: a session with none free refuses the get whole,
         // with nothing sent and no queryable asked, where zenoh-pico refuses a get whose delivery
@@ -7304,6 +7342,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
+                fan: tag,
             }) {
                 unheld += 1;
                 continue;
@@ -7311,7 +7350,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
-            if !self.cancelling(fan, leg_id) {
+            if self.cut_short(fan, tag) {
                 return Ok(issued);
             }
         }
@@ -7410,13 +7449,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 face,
                 leg: leg_id,
                 kind: GetKind::Query(rid),
+                fan: tag,
             }) {
                 unheld += 1;
                 continue;
             }
             drop(guard);
             issued += 1;
-            if !self.cancelling(fan, leg_id) {
+            if self.cut_short(fan, tag) {
                 return Ok(issued);
             }
         }
@@ -7464,6 +7504,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     face: LOCAL_FACE,
                     leg: leg_id,
                     kind: GetKind::Query(rid),
+                    fan: tag,
                 }) {
                     unheld += 1;
                 } else {
@@ -7472,7 +7513,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     let asked = self.ask_own_queryables(core, own, keyexpr, opts);
                     drop(guard);
                     issued += 1;
-                    let _ = self.cancelling(fan, leg_id);
+                    let _ = self.cut_short(fan, tag);
                     self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
             } else {
@@ -7500,6 +7541,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if self.live().is_none() {
             return Err(Declined::Closed);
         }
+        let Ok(tag) = self.tag_of(fan) else {
+            return Ok(0);
+        };
         // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
         // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
         // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
@@ -7587,13 +7631,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 face,
                 leg: leg_id,
                 kind: GetKind::Liveliness(interest_id),
+                fan: tag,
             }) {
                 continue;
             }
             drop(guard);
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
-            if !self.cancelling(fan, leg_id) {
+            if self.cut_short(fan, tag) {
                 return Ok(issued);
             }
         }
@@ -8063,6 +8108,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
+#[cfg(feature = "query")]
+struct FanCancelled;
+
+/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
+/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
+/// that waits for the callbacks returns whether or not the session is stepped.
+#[cfg(feature = "query")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller
+    for CoopEngine<L, C>
+{
+    fn cancel_fan(&self, key: FanKey) {
+        loop {
+            let leg = self.live().and_then(|mut core| {
+                let core = &mut core.0;
+                let at = core
+                    .session
+                    .pending_gets
+                    .iter()
+                    .position(|pending| pending.fan == Some(key))?;
+                let pending = core.session.pending_gets.remove(at);
+                pending.unregister(&mut core.session.registry.borrow_mut());
+                Some(pending.leg)
+            });
+            let Some(leg) = leg else {
+                break;
+            };
+            self.end_leg_now(leg);
+        }
     }
 }
 

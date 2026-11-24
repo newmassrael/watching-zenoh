@@ -50,7 +50,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::ReplyView;
-use wz_session_core::sample::{EntityGlobalId, Sample};
+use wz_session_core::sample::EntityGlobalId;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::serde_codec::z_deserialize;
 use wz_session_core::session_zid::SessionZid;
@@ -59,10 +59,10 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use super::options::{AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle};
 use super::plans::{
-    history_selector, parse_heartbeat_source, recovered_sample_from_reply,
-    recovery_query_timeout_ms, AdvPublisherSource,
+    history_selector, parse_heartbeat_source, recovery_query_timeout_ms, AdvPublisherSource,
+    RecoveredView,
 };
-use super::state::{Miss, MissHandlers, RecoveryRequest, SampleMissListener, State};
+use super::state::{Delivery, Miss, MissHandlers, RecoveryRequest, SampleMissListener, State};
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
@@ -275,7 +275,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         engine: &Arc<E>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
-        on_sample: impl FnMut(Sample) + Send + 'static,
+        on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
     ) -> Result<Self, HostError> {
         Self::declare_with_misses(engine, keyexpr, options, on_sample, MissHandlers::default())
     }
@@ -285,7 +285,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         engine: &Arc<E>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
-        on_sample: impl FnMut(Sample) + Send + 'static,
+        on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
         on_miss: impl FnMut(Miss) + Send + 'static,
     ) -> Result<Self, HostError> {
         let mut misses = MissHandlers::default();
@@ -297,7 +297,7 @@ impl<E: SessionEngine + ?Sized> EngineSubscriber<E> {
         engine: &Arc<E>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
-        on_sample: impl FnMut(Sample) + Send + 'static,
+        on_sample: impl FnMut(Delivery<'_>) + Send + 'static,
         misses: MissHandlers,
     ) -> Result<Self, HostError> {
         // Upstream's own config check opens its builder, before a single entity is declared.
@@ -745,11 +745,11 @@ fn issue_get<E: SessionEngine + ?Sized>(
             ) {
                 return;
             }
-            // `live = false`: the get that produced this reply is the one in flight, so a gap
-            // here must not fan another.
-            if let Some(sample) = recovered_sample_from_reply(reply) {
+            // Recovered, not live: the get that produced this reply is the one in flight, so a
+            // gap here must not fan another.
+            if let Some(view) = RecoveredView::of(reply) {
                 let now = shared.now_ms();
-                let _ = shared.lock().ingest(sample, false, now);
+                let _ = shared.lock().handle_recovered(&view, now);
             }
         })
     };

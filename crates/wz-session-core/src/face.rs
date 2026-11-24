@@ -222,6 +222,151 @@ impl FaceSnapshot {
 }
 
 /// Which way a face moved: the input to the kind an event of a transport or a link carries.
+/// A locator's or an endpoint's text as a [`FaceLinkRow`] holds it, in the row itself.
+pub type RowText = heapless::String<{ crate::caps::MAX_LOCATOR_LEN }>;
+
+/// `text` in a row, or a blank row with `clipped` set when it is longer than a row holds.
+fn row_text(text: &str, clipped: &mut bool) -> RowText {
+    let mut row = RowText::new();
+    if row.push_str(text).is_err() {
+        *clipped = true;
+        row.clear();
+    }
+    row
+}
+
+/// One link of an established face, with the face it is under, as a reader takes it out of the
+/// session's lock to hand on: every field is held in the row, so reading the faces one row at a
+/// time allocates nothing. What a connectivity plane reports of a transport and of its link; the
+/// fields an ABI that keeps a face's snapshot reads beyond them stay on [`FaceSnapshot`].
+#[derive(Debug, Clone)]
+pub struct FaceLinkRow {
+    /// The peer's zid.
+    pub zid: [u8; 16],
+    /// The peer's role as the raw 2-bit INIT wire form.
+    pub whatami: u8,
+    /// Whether QoS was negotiated on the transport.
+    pub is_qos: bool,
+    /// Whether the transport is a member of a group the session joined.
+    pub is_multicast: bool,
+    /// Whether SHM was negotiated on the transport.
+    pub is_shm: bool,
+    /// Which link of its face this is, `0` for the first: a reader that reports transports reads
+    /// the rows whose link is `0`, one for each face.
+    pub link: usize,
+    /// This end's locator.
+    pub src: RowText,
+    /// The peer end's locator.
+    pub dst: RowText,
+    /// The kind of link, `None` when the driver cannot say.
+    pub kind: Option<LinkKind>,
+    /// The negotiated outbound frame budget, clamped into a `u16`.
+    pub mtu: u16,
+    /// The endpoint the session joined the group by, for a member of a joined group.
+    pub group_endpoint: Option<RowText>,
+    /// Whether a text was longer than [`crate::caps::MAX_LOCATOR_LEN`] and reads blank here.
+    pub clipped: bool,
+}
+
+impl FaceLinkRow {
+    /// The `at`-th link of `face`, copied into a row; `None` past its last link.
+    pub fn of_snapshot(face: &FaceSnapshot, at: usize) -> Option<Self> {
+        let link = face.links.get(at)?;
+        let mut clipped = false;
+        let src = row_text(&link.src, &mut clipped);
+        let dst = row_text(&link.dst, &mut clipped);
+        let group_endpoint = link
+            .group
+            .as_ref()
+            .map(|group| row_text(&group.endpoint, &mut clipped));
+        Some(Self {
+            zid: face.zid,
+            whatami: face.whatami,
+            is_qos: face.is_qos,
+            is_multicast: face.is_multicast,
+            is_shm: face.is_shm,
+            link: at,
+            src,
+            dst,
+            kind: link.kind,
+            mtu: link.mtu,
+            group_endpoint,
+            clipped,
+        })
+    }
+}
+
+#[cfg(feature = "session-unicast")]
+impl FaceLinkRow {
+    /// How many links the face `actions` is the end of has, `0` while its INIT has not populated
+    /// the identity slots (the half-open face [`FaceSnapshot::of_actions`] refuses).
+    pub fn links_of<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) -> usize {
+        if actions.peer_session_zid().is_none() || actions.peer_whatami_wire().is_none() {
+            return 0;
+        }
+        let mut links = 0;
+        actions.visit_link_endpoints(|_| {
+            links += 1;
+            true
+        });
+        links
+    }
+
+    /// The `at`-th link of the face `actions` is the end of, read as
+    /// [`FaceSnapshot::of_actions`] reads it and written into the row; `None` for a half-open
+    /// face or past its last link.
+    pub fn of_actions<R: SessionRuntime, T: TimeSource>(
+        actions: &SessionLinkActions<R, T>,
+        at: usize,
+    ) -> Option<Self> {
+        let peer = actions.peer_session_zid()?;
+        let whatami = actions.peer_whatami_wire()?;
+        let mut zid = [0u8; 16];
+        // The first sixteen bytes at most, as many as the peer's zid has.
+        for (into, byte) in zid.iter_mut().zip(peer.as_slice()) {
+            *into = *byte;
+        }
+        let kind = actions.link_subject().and_then(|subject| subject.kind);
+        let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
+        #[cfg(feature = "transport-qos")]
+        let is_qos = actions.is_qos();
+        #[cfg(not(feature = "transport-qos"))]
+        let is_qos = false;
+        #[cfg(feature = "transport-shm")]
+        let is_shm = actions.is_shm();
+        #[cfg(not(feature = "transport-shm"))]
+        let is_shm = false;
+        let mut ends = None;
+        let mut index = 0;
+        actions.visit_link_endpoints(|link| {
+            if index < at {
+                index += 1;
+                return true;
+            }
+            let mut clipped = false;
+            let src = row_text(link.src.as_str(), &mut clipped);
+            let dst = row_text(link.dst.as_str(), &mut clipped);
+            ends = Some((src, dst, clipped));
+            false
+        });
+        let (src, dst, clipped) = ends?;
+        Some(Self {
+            zid,
+            whatami,
+            is_qos,
+            is_multicast: false,
+            is_shm,
+            link: at,
+            src,
+            dst,
+            kind,
+            mtu,
+            group_endpoint: None,
+            clipped,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaceEventKind {
     /// The face reached Established.
@@ -331,6 +476,66 @@ impl FaceSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A face of one TCP link from `src` to `dst`, and a group member's link.
+    fn face_of(src: &str, dst: &str) -> FaceSnapshot {
+        let mut tcp = LinkSnapshot::unicast(src, dst, None, 2048);
+        tcp.kind = Some(LinkKind::Tcp);
+        let mut member = LinkSnapshot::unicast("udp/a", "udp/b", None, 0);
+        member.group = Some(GroupLink {
+            locator: String::from("udp/224.0.0.224:7447"),
+            endpoint: String::from("udp/224.0.0.224:7447#iface=lo"),
+        });
+        FaceSnapshot {
+            zid: [7; 16],
+            whatami: 1,
+            is_qos: false,
+            is_multicast: false,
+            is_shm: false,
+            links: alloc::vec![tcp, member],
+        }
+    }
+
+    /// A row is the face's transport and one of its links, each link at its own index, and none
+    /// past the last. Turned red by a row that reads another link than the one asked, or that
+    /// drops the group's endpoint.
+    #[test]
+    fn a_row_holds_the_face_and_the_link_asked() {
+        let face = face_of("tcp/127.0.0.1:1", "tcp/127.0.0.1:2");
+        let first = FaceLinkRow::of_snapshot(&face, 0).expect("the first link");
+        assert_eq!((first.zid, first.whatami, first.link), ([7; 16], 1, 0));
+        assert_eq!(first.src.as_str(), "tcp/127.0.0.1:1");
+        assert_eq!(first.dst.as_str(), "tcp/127.0.0.1:2");
+        assert_eq!((first.kind, first.mtu), (Some(LinkKind::Tcp), 2048));
+        assert!(first.group_endpoint.is_none() && !first.clipped);
+        let second = FaceLinkRow::of_snapshot(&face, 1).expect("the second link");
+        assert_eq!(second.link, 1);
+        assert_eq!(
+            second.group_endpoint.as_deref(),
+            Some("udp/224.0.0.224:7447#iface=lo")
+        );
+        assert!(
+            FaceLinkRow::of_snapshot(&face, 2).is_none(),
+            "past the last link"
+        );
+    }
+
+    /// A locator longer than a row holds reads blank and says so, and one that fits whole is kept.
+    /// Turned red by a row that cuts a locator short, which would name another peer.
+    #[test]
+    fn a_locator_past_the_row_reads_blank_and_clipped() {
+        let long = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        let face = face_of(&long, "tcp/127.0.0.1:2");
+        let row = FaceLinkRow::of_snapshot(&face, 0).expect("the link");
+        assert!(row.src.is_empty() && row.clipped);
+        assert_eq!(row.dst.as_str(), "tcp/127.0.0.1:2");
+        let fits = "t".repeat(crate::caps::MAX_LOCATOR_LEN);
+        let row = FaceLinkRow::of_snapshot(&face_of(&fits, "d"), 0).expect("the link");
+        assert_eq!(
+            (row.src.len(), row.clipped),
+            (crate::caps::MAX_LOCATOR_LEN, false)
+        );
+    }
 
     fn named_subject(kind: Option<LinkKind>) -> LinkSubject {
         LinkSubject {

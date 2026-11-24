@@ -119,8 +119,8 @@ use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_ext_pubsub::advanced_subscriber::RecoveryRequest;
+use wz_ext_pubsub::advanced_subscriber::{owned_samples, MissHandlers, State};
 pub use wz_ext_pubsub::advanced_subscriber::{Miss, SampleMissListener};
-use wz_ext_pubsub::advanced_subscriber::{MissHandlers, State};
 
 /// R311y90 (review C5) — why declaring an advanced subscriber failed.
 /// Distinct from the base [`SubscribeError`] (which stays the plain
@@ -1526,7 +1526,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State::new(
-            Box::new(on_sample),
+            owned_samples(on_sample),
             MissHandlers::default(),
         )));
         let cb_state = Arc::clone(&state);
@@ -1583,7 +1583,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State::new(
-            Box::new(on_sample),
+            owned_samples(on_sample),
             MissHandlers::default(),
         )));
         let cb_state = Arc::clone(&state);
@@ -1772,7 +1772,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let base_keyexpr: String = keyexpr.into();
 
         let state =
-            State::new(Box::new(on_sample), miss_handlers).with_retransmission(retransmission);
+            State::new(owned_samples(on_sample), miss_handlers).with_retransmission(retransmission);
         // The startup history get is one in flight from the start; the buffer's ceiling is
         // upstream's own derivation, field for field — see the machine's field doc.
         #[cfg(feature = "ext-pubsub-advanced-history")]

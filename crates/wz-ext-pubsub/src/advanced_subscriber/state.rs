@@ -15,7 +15,7 @@ use alloc::sync::Weak;
 #[cfg(feature = "advanced-recovery")]
 use core::time::Duration;
 
-use wz_session_core::sample::{EntityGlobalId, Sample};
+use wz_session_core::sample::{EntityGlobalId, Sample, TimestampZid};
 use wz_session_core::sink::SampleView;
 
 use super::HashMap;
@@ -431,6 +431,44 @@ pub struct RecoveryRequest {
     pub to_sn: Option<u32>,
 }
 
+/// A sample the machine is handed or hands on: a live one read where the session lent it, or
+/// one the machine owns, because it held it in a reorder buffer or recovered it from a reply. A
+/// sample is copied out of the session's memory only when the machine must keep it past the call
+/// that lent it, so a sample delivered as it arrives takes no memory of its own. Both are borrowed,
+/// so a delivery is as small as a reference whatever a sample holds.
+pub enum Delivery<'a> {
+    /// Read where it lies, for the length of the call.
+    Lent(&'a dyn SampleView),
+    /// One the machine owns, which the callback may take ([`Self::into_sample`]).
+    Held(&'a mut Sample),
+}
+
+impl Delivery<'_> {
+    /// The sample, read where it lies.
+    pub fn view(&self) -> &dyn SampleView {
+        match self {
+            Self::Lent(view) => *view,
+            Self::Held(sample) => &**sample,
+        }
+    }
+
+    /// The sample as a value of its own: a lent one is copied out once, a held one moved out,
+    /// leaving the machine an empty one to drop, which holds no memory.
+    pub fn into_sample(self) -> Sample {
+        match self {
+            Self::Lent(view) => Sample::from_view(view),
+            Self::Held(sample) => core::mem::replace(sample, Sample::new_del(String::new())),
+        }
+    }
+}
+
+/// The machine's callback for a consumer that keeps every sample it is handed.
+pub fn owned_samples(
+    mut on_sample: impl FnMut(Sample) + Send + 'static,
+) -> Box<dyn FnMut(Delivery<'_>) + Send> {
+    Box::new(move |delivery: Delivery<'_>| on_sample(delivery.into_sample()))
+}
+
 /// Per-source last-in-order-delivered tracking + the user callbacks.
 /// Behind an `Arc<Mutex>` because the session may fire the subscriber
 /// callback from different worker threads (the storage-service idiom).
@@ -445,7 +483,7 @@ pub struct RecoveryRequest {
 /// the host's `issue_recovery_get`) for exactly this reason.
 pub struct State {
     /// `(zid, eid)` -> per-source ordering state.
-    sequenced: HashMap<(Vec<u8>, u32), SourceState>,
+    sequenced: HashMap<EntityGlobalId, SourceState>,
     /// R2522 — TIMESTAMP-mode ordering: the newest instant delivered per
     /// timestamp-id, which is the second of upstream's three `handle_sample`
     /// arms (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`).
@@ -498,8 +536,8 @@ pub struct State {
     /// gate) now pulls `pubsub-timestamp`, so a `#[cfg]` here would be
     /// vacuously true — a condition that can never be false reads as coverage
     /// while grading nothing.
-    timestamped: HashMap<Vec<u8>, TimestampedState>,
-    on_sample: Box<dyn FnMut(Sample) + Send>,
+    timestamped: HashMap<TimestampZid, TimestampedState>,
+    on_sample: Box<dyn FnMut(Delivery<'_>) + Send>,
     /// R2814 — every declared sample-miss listener; see [`MissHandlers`].
     miss_handlers: MissHandlers,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true)
@@ -548,7 +586,10 @@ impl State {
     /// A machine that delivers to `on_sample` and reports holes to `miss_handlers`, with
     /// forward gaps reported and delivered past (the plain subscriber) and no history get in
     /// flight. [`Self::with_retransmission`] and [`Self::with_history`] configure the rest.
-    pub fn new(on_sample: Box<dyn FnMut(Sample) + Send>, miss_handlers: MissHandlers) -> Self {
+    pub fn new(
+        on_sample: Box<dyn FnMut(Delivery<'_>) + Send>,
+        miss_handlers: MissHandlers,
+    ) -> Self {
         Self {
             sequenced: HashMap::default(),
             timestamped: HashMap::default(),
@@ -620,8 +661,8 @@ impl State {
     /// THE `max_history_depth == 1` ESCAPE IS UPSTREAM'S AND IS KEPT: a buffer
     /// of one can hold nothing that reordering would help, so that build
     /// delivers live rather than storing a single sample to hand straight back.
-    fn deliver_unsequenced(&mut self, sample: Sample, now_ms: u64) {
-        let Some(ts) = sample.timestamp.clone() else {
+    fn deliver_unsequenced(&mut self, sample: Delivery<'_>, now_ms: u64) {
+        let Some(ts) = sample.view().timestamp().cloned() else {
             (self.on_sample)(sample);
             return;
         };
@@ -634,9 +675,9 @@ impl State {
             on_sample,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
         let state = timestamped
-            .entry(ts.zid.to_vec())
+            .entry(ts.zid.clone())
             .or_insert_with(|| TimestampedState::new(now_ms));
         // R2621 — a sample IS being heard from, so the retention clock restarts.
         #[cfg(feature = "advanced-recovery")]
@@ -655,7 +696,10 @@ impl State {
             // R2555 — upstream's `entry(..).or_insert(sample)`: the FIRST
             // sample at an instant wins, so a duplicate arriving while the
             // buffer holds one does not displace it.
-            state.pending_samples.entry(ts.time).or_insert(sample);
+            state
+                .pending_samples
+                .entry(ts.time)
+                .or_insert_with(|| sample.into_sample());
             if state.pending_samples.len() >= max_history_depth {
                 flush_timestamped(&ts.zid, state, on_sample);
             }
@@ -706,14 +750,14 @@ impl State {
     /// own contract ("any value outside `1..=16` should be treated by consumers
     /// as an absence-of-source"), and it is now decided here, once, instead of
     /// every sequenced arm keying on an empty zid.
-    fn route_sample(
+    fn route_sample<'a>(
         &mut self,
-        sample: Sample,
+        sample: Delivery<'a>,
         now_ms: u64,
-    ) -> Option<(EntityGlobalId, u32, Sample)> {
+    ) -> Option<(EntityGlobalId, u32, Delivery<'a>)> {
         let sequenced = sample
-            .source_info
-            .as_ref()
+            .view()
+            .source_info()
             .and_then(|info| info.source_id().map(|id| (id, info.sn)));
         match sequenced {
             Some((source, sn)) => Some((source, sn, sample)),
@@ -748,11 +792,15 @@ impl State {
 /// through [`wz_session_core::sample::timestamp_strictly_newer`] rather
 /// than an open-coded `u64` test.
 #[cfg(feature = "advanced-history")]
-fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut dyn FnMut(Sample)) {
+fn flush_timestamped(
+    zid: &[u8],
+    state: &mut TimestampedState,
+    on_sample: &mut dyn FnMut(Delivery<'_>),
+) {
     if state.pending_queries != 0 || state.pending_samples.is_empty() {
         return;
     }
-    for (time, sample) in core::mem::take(&mut state.pending_samples) {
+    for (time, mut sample) in core::mem::take(&mut state.pending_samples) {
         let ts = wz_session_core::sample::TimestampHint::new(time, zid)
             .expect("a timestamp's zid is at most sixteen bytes");
         let newer = match &state.last_delivered {
@@ -761,7 +809,7 @@ fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut d
         };
         if newer {
             state.last_delivered = Some(ts);
-            on_sample(sample);
+            on_sample(Delivery::Held(&mut sample));
         }
     }
 }
@@ -776,19 +824,18 @@ impl State {
     /// in a build with no retransmission reports a [`Miss`] and advances past
     /// it, where the recovery build buffers and asks.
     pub fn handle(&mut self, view: &dyn SampleView, now_ms: u64) {
-        let Some((source, sn, sample)) = self.route_sample(Sample::from_view(view), now_ms) else {
+        let Some((source, sn, sample)) = self.route_sample(Delivery::Lent(view), now_ms) else {
             return;
         };
-        let key = (source.zid().to_vec(), source.eid());
         let State {
             sequenced,
             on_sample,
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
         let state = sequenced
-            .entry(key)
+            .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
         match state.last_delivered {
             // First sample from this source: deliver, record.
@@ -824,7 +871,7 @@ impl State {
     /// source needs a `_sn`-range recovery GET; the caller issues it OUTSIDE
     /// the state lock. `now_ms` is the host's clock reading.
     pub fn handle_live(&mut self, view: &dyn SampleView, now_ms: u64) -> Option<RecoveryRequest> {
-        self.ingest(Sample::from_view(view), true, now_ms)
+        self.admit(Delivery::Lent(view), true, now_ms)
     }
 
     /// R2554 — THE ONE INGEST ENTRY of a recovery-enabled build, and upstream's
@@ -836,7 +883,28 @@ impl State {
     /// one thing: whether a forward gap may trigger a NEW recovery GET. A
     /// recovered sample must not, because the GET that produced it is the one
     /// already in flight.
-    pub fn ingest(&mut self, sample: Sample, live: bool, now_ms: u64) -> Option<RecoveryRequest> {
+    pub fn ingest(
+        &mut self,
+        mut sample: Sample,
+        live: bool,
+        now_ms: u64,
+    ) -> Option<RecoveryRequest> {
+        self.admit(Delivery::Held(&mut sample), live, now_ms)
+    }
+
+    /// Ingest a RECOVERED sample read where its reply lies (a recovery or history get's reply),
+    /// as [`Self::ingest`] does an owned one: `live = false`, as the get that produced it is the
+    /// one in flight. A sample handed on at once is not copied.
+    pub fn handle_recovered(
+        &mut self,
+        view: &dyn SampleView,
+        now_ms: u64,
+    ) -> Option<RecoveryRequest> {
+        self.admit(Delivery::Lent(view), false, now_ms)
+    }
+
+    /// [`Self::ingest`] of a sample lent or held.
+    fn admit(&mut self, sample: Delivery<'_>, live: bool, now_ms: u64) -> Option<RecoveryRequest> {
         let (source, sn, sample) = self.route_sample(sample, now_ms)?;
         self.ingest_sequenced(source, sn, sample, live, now_ms)
     }
@@ -851,11 +919,10 @@ impl State {
         &mut self,
         source: EntityGlobalId,
         sn: u32,
-        sample: Sample,
+        sample: Delivery<'_>,
         live: bool,
         now_ms: u64,
     ) -> Option<RecoveryRequest> {
-        let key = (source.zid().to_vec(), source.eid());
         let retransmission = self.retransmission;
         #[cfg(feature = "advanced-history")]
         let history_pending = self.global_pending_queries != 0;
@@ -867,9 +934,9 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
         let state = sequenced
-            .entry(key.clone())
+            .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
         // R2621 — delivery is activity, as on the two paths above.
         state.retention.touch(now_ms);
@@ -883,7 +950,7 @@ impl State {
                 // Skip the recovery trigger — the history GET is recovering it.
                 #[cfg(feature = "advanced-history")]
                 if history_pending {
-                    state.pending_samples.insert(sn, sample);
+                    state.pending_samples.insert(sn, sample.into_sample());
                     // R2503 — SPILL, and note the order: upstream inserts FIRST
                     // and then checks, so the buffer transiently holds
                     // depth + 1. Copying the order matters because the
@@ -895,8 +962,8 @@ impl State {
                     // a length assertion and silently lose a sample.
                     // ⚠⚠ BEFORE the `return None` below, or it never runs.
                     if state.pending_samples.len() >= max_history_depth {
-                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
-                            deliver_and_flush(state, old_sn, old, on_sample);
+                        if let Some((old_sn, mut old)) = state.pending_samples.pop_first() {
+                            deliver_and_flush(state, old_sn, Delivery::Held(&mut old), on_sample);
                         }
                     }
                     return None;
@@ -910,7 +977,7 @@ impl State {
             Some(last) if sn > last => {
                 if retransmission {
                     // BUFFER; the recovery GET (below) back-fills the hole.
-                    state.pending_samples.insert(sn, sample);
+                    state.pending_samples.insert(sn, sample.into_sample());
                     // R2503 — the SAME ceiling as the history arm above. The
                     // residual clause named only that arm, and a build that
                     // trusted it would leave this one unbounded: upstream
@@ -927,8 +994,8 @@ impl State {
                     // unbounded is exactly what upstream does in that case.
                     #[cfg(feature = "advanced-history")]
                     if state.pending_samples.len() >= max_history_depth {
-                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
-                            deliver_and_flush(state, old_sn, old, on_sample);
+                        if let Some((old_sn, mut old)) = state.pending_samples.pop_first() {
+                            deliver_and_flush(state, old_sn, Delivery::Held(&mut old), on_sample);
                         }
                     }
                 } else {
@@ -952,8 +1019,8 @@ impl State {
         {
             state.pending_queries += 1;
             Some(RecoveryRequest {
-                zid: key.0,
-                eid: key.1,
+                zid: source.zid().to_vec(),
+                eid: source.eid(),
                 from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
                 to_sn: None,
             })
@@ -984,14 +1051,17 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        if let Some(state) = sequenced.get_mut(key) {
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let Some(source) = EntityGlobalId::new(&key.0, key.1) else {
+            return;
+        };
+        if let Some(state) = sequenced.get_mut(&source) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
             let may_flush = state.pending_queries == 0;
             #[cfg(feature = "advanced-history")]
             let may_flush = may_flush && !history_pending;
             if may_flush {
-                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
+                flush_sequenced(state, source, on_sample, miss_handlers);
             }
         }
     }
@@ -1033,10 +1103,10 @@ impl State {
             miss_handlers,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        for (key, state) in sequenced.iter_mut() {
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        for (source, state) in sequenced.iter_mut() {
             if state.pending_queries == 0 {
-                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
+                flush_sequenced(state, *source, on_sample, miss_handlers);
             }
         }
         for (zid, state) in timestamped.iter_mut() {
@@ -1116,14 +1186,15 @@ impl State {
     /// call it is the dead code this module already refuses.
     #[cfg(feature = "advanced-history")]
     pub fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
-        for (key, state) in self.sequenced.iter_mut() {
+        for (source, state) in self.sequenced.iter_mut() {
             // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
             // only since 1.82 and this crate's MSRV is 1.81.
-            if key.0 == zid && eid.map_or(true, |e| e == key.1) {
+            if source.zid() == zid && eid.map_or(true, |e| e == source.eid()) {
                 state.retention.alive = alive;
             }
         }
-        if let Some(state) = self.timestamped.get_mut(zid) {
+        let timestamped = &mut self.timestamped;
+        if let Some(state) = TimestampZid::new(zid).and_then(|id| timestamped.get_mut(&id)) {
             state.retention.alive = alive;
         }
     }
@@ -1151,12 +1222,12 @@ impl State {
             return Vec::new();
         }
         let mut requests = Vec::new();
-        for (key, state) in self.sequenced.iter_mut() {
+        for (source, state) in self.sequenced.iter_mut() {
             if state.pending_queries == 0 {
                 state.pending_queries += 1;
                 requests.push(RecoveryRequest {
-                    zid: key.0.clone(),
-                    eid: key.1,
+                    zid: source.zid().to_vec(),
+                    eid: source.eid(),
                     from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
                     to_sn: None,
                 });
@@ -1180,7 +1251,8 @@ impl State {
         if !self.retransmission {
             return None;
         }
-        let key = (zid, eid);
+        // A beacon's zid is one a token decoded, 1..=16 bytes: no other names a source.
+        let source = EntityGlobalId::new(&zid, eid)?;
         // R2617 — SKIP THE HEARTBEAT FOR A SOURCE THIS SUBSCRIBER HAS JUST MET
         // WHILE A GLOBAL PULL IS STILL RUNNING. Upstream's guard, on the arm it
         // takes only for a newly-inserted source:
@@ -1204,10 +1276,10 @@ impl State {
         let global_pull_in_flight = self.global_pending_queries != 0;
         #[cfg(not(feature = "advanced-history"))]
         let global_pull_in_flight = false;
-        let newly_seen = !self.sequenced.contains_key(&key);
+        let newly_seen = !self.sequenced.contains_key(&source);
         let state = self
             .sequenced
-            .entry(key.clone())
+            .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
         // R2621 — a beacon is the publisher saying it is still there, which is
         // exactly what upstream's heartbeat arm refreshes `latest_access` for.
@@ -1222,8 +1294,8 @@ impl State {
         if !caught_up && state.pending_queries == 0 {
             state.pending_queries += 1;
             Some(RecoveryRequest {
-                zid: key.0,
-                eid: key.1,
+                zid,
+                eid,
                 from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
                 to_sn: Some(hb_sn),
             })
@@ -1244,9 +1316,13 @@ impl State {
     /// gates it on `historyconf.liveliness`, not retransmission).
     #[cfg(feature = "advanced-history")]
     pub fn handle_late_publisher(&mut self, zid: Vec<u8>, eid: u32, now_ms: u64) -> bool {
+        // A token's zid is 1..=16 bytes; no other names a source to recover.
+        let Some(source) = EntityGlobalId::new(&zid, eid) else {
+            return false;
+        };
         let state = self
             .sequenced
-            .entry((zid, eid))
+            .entry(source)
             .or_insert_with(|| SourceState::new(now_ms));
         if state.pending_queries == 0 {
             state.pending_queries += 1;
@@ -1274,9 +1350,12 @@ impl State {
     /// un-deduped re-query); the RETURN is what says whether to issue.
     #[cfg(feature = "advanced-history")]
     pub fn handle_late_timestamped_publisher(&mut self, zid: Vec<u8>, now_ms: u64) -> bool {
+        let Some(id) = TimestampZid::new(&zid) else {
+            return false;
+        };
         let state = self
             .timestamped
-            .entry(zid)
+            .entry(id)
             .or_insert_with(|| TimestampedState::new(now_ms));
         if state.pending_queries == 0 {
             state.pending_queries += 1;
@@ -1326,8 +1405,11 @@ impl State {
             on_sample,
             ..
         } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        if let Some(state) = timestamped.get_mut(zid) {
+        let on_sample: &mut dyn FnMut(Delivery<'_>) = &mut **on_sample;
+        let Some(id) = TimestampZid::new(zid) else {
+            return;
+        };
+        if let Some(state) = timestamped.get_mut(&id) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
             if !history_pending {
                 flush_timestamped(zid, state, on_sample);
@@ -1346,14 +1428,14 @@ mod tests;
 fn deliver_and_flush(
     state: &mut SourceState,
     sn: u32,
-    sample: Sample,
-    on_sample: &mut dyn FnMut(Sample),
+    sample: Delivery<'_>,
+    on_sample: &mut dyn FnMut(Delivery<'_>),
 ) {
     on_sample(sample);
     let mut delivered = sn;
     state.last_delivered = Some(delivered);
-    while let Some(next) = state.pending_samples.remove(&delivered.wrapping_add(1)) {
-        on_sample(next);
+    while let Some(mut next) = state.pending_samples.remove(&delivered.wrapping_add(1)) {
+        on_sample(Delivery::Held(&mut next));
         delivered = delivered.wrapping_add(1);
         state.last_delivered = Some(delivered);
     }
@@ -1366,30 +1448,23 @@ fn deliver_and_flush(
 #[cfg(feature = "advanced-recovery")]
 fn flush_sequenced(
     state: &mut SourceState,
-    zid: &[u8],
-    eid: u32,
-    on_sample: &mut dyn FnMut(Sample),
+    source: EntityGlobalId,
+    on_sample: &mut dyn FnMut(Delivery<'_>),
     miss_handlers: &mut MissHandlers,
 ) {
     if state.pending_samples.is_empty() {
         return;
     }
-    // Every key of the sequenced map is built from a valid identity — by
-    // `State::route_sample` from an `EntityGlobalId`, or from a heartbeat /
-    // liveliness token whose zid `zenoh_hex_to_zid` decoded, which yields
-    // 1..=16 bytes or nothing — so this cannot fail on a key the map holds.
-    let source = EntityGlobalId::new(zid, eid)
-        .expect("sequenced-source keys are built from valid 1..=16-byte zids");
     let pending = core::mem::take(&mut state.pending_samples);
-    for (sn, sample) in pending {
+    for (sn, mut sample) in pending {
         match state.last_delivered {
             None => {
                 state.last_delivered = Some(sn);
-                on_sample(sample);
+                on_sample(Delivery::Held(&mut sample));
             }
             Some(last) if sn == last.wrapping_add(1) => {
                 state.last_delivered = Some(sn);
-                on_sample(sample);
+                on_sample(Delivery::Held(&mut sample));
             }
             Some(last) if sn > last => {
                 miss_handlers.fire(Miss {
@@ -1397,7 +1472,7 @@ fn flush_sequenced(
                     nb: sn - last - 1,
                 });
                 state.last_delivered = Some(sn);
-                on_sample(sample);
+                on_sample(Delivery::Held(&mut sample));
             }
             // duplicate — drop.
             Some(_) => {}

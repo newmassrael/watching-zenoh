@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
-use wz_session_core::face::{FaceEventSink, FaceSnapshot};
+use wz_session_core::face::{FaceEventSink, FaceLinkRow, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -174,6 +174,26 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// built without the connectivity plane lists none, which is the provided answer.
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         Vec::new()
+    }
+
+    /// The row at cursor `at` of the established faces' links: each face's links in order, the
+    /// faces in the order [`Self::face_snapshots`] lists them; `None` past the last. A caller
+    /// walks the faces by asking `0`, `1`, ... until `None`. The session's lock is held only
+    /// while the one row is read, and the row holds everything in itself, so a caller may hand
+    /// each to a program's callback between two calls. A face that comes up or goes down between
+    /// two calls may be skipped or met twice: a reader that must miss none watches the faces
+    /// ([`Self::watch_faces`]) before it walks them, and the watch's events cover the difference.
+    /// The provided answer reads [`Self::face_snapshots`] for each row; an engine that reserves
+    /// its memory answers from its faces in place.
+    fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        for face in self.face_snapshots() {
+            if at < face.links.len() {
+                return FaceLinkRow::of_snapshot(&face, at);
+            }
+            at -= face.links.len();
+        }
+        None
     }
 
     /// Tell `sink` each time a face comes up or goes down, from now on, and answer the id that
@@ -569,9 +589,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
     /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
     /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
-    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
-    /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
-    /// legs are issued stops the issuing.
+    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
+    /// attached as what ends the legs it tags with the fan's key ([`CancellableFan::attach`]), and
+    /// a fan cancelled while the legs are issued stops the issuing.
     ///
     /// The number of legs issued, `0` for a get that reached nobody (its destination admits
     /// nobody, or no link is up), which is over at once. A refused get issued no leg (`leg` was
