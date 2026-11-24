@@ -12,13 +12,14 @@
 
 mod files;
 
-// The helper two files of `files/` run a sample through. A file that named it by `#[path]`
-// would load it again in a build that holds both, which rustc refuses ("file is loaded as a
-// module multiple times"), so it is loaded here once and the files `use` it.
+// The helper the link files of `files/` run a sample through. A file that named it by `#[path]`
+// would load it again in a build that holds two of them, which rustc refuses ("file is loaded as
+// a module multiple times"), so it is loaded here once and the files `use` it.
 #[cfg(all(
     feature = "peer",
     any(
         all(feature = "transport-link-serial", target_os = "linux"),
+        all(feature = "transport-link-unixpipe", target_os = "linux"),
         feature = "transport-link-ws"
     )
 ))]

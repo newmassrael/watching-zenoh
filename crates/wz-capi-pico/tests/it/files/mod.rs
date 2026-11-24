@@ -60,5 +60,7 @@ mod stream_supervision_doors;
 mod teardown_drain;
 mod time_base_accept;
 mod tls_coop_roundtrip;
+mod unixpipe_link_refused;
+mod unixpipe_link_roundtrip;
 mod unixpipe_listen_multiclient;
 mod ws_link_roundtrip;
