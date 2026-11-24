@@ -48,9 +48,10 @@
 //!   it hands its subscribers' callbacks after its lock (`crate::round`), lent first of the
 //!   state's tables (`SessionRows::lane_bytes`);
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`, one for each
-//!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
-//!   arrives and given back when the chain ends, each as long as the largest message the session
+//!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
+//!   each reliability a peer has a chain open in, and one for the rejoined message the round
+//!   reads where its chain lay), each buffer claimed when a chain's first fragment arrives and
+//!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
 //!   with the links' tables;
@@ -108,7 +109,7 @@ use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
-use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
+use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
@@ -735,7 +736,7 @@ impl ArenaPlan {
                 tx_slots: links,
                 link_bytes,
                 reassembly_bytes: 0,
-                reassembly_chains: LENT_CHAINS,
+                reassembly_chains: SESSION_CHAIN_BUFFERS,
                 endpoint_rows: (config.endpoints.count(), config.listen.count()),
                 cell_bytes: LinkCells::default(),
             },
