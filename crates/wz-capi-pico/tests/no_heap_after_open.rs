@@ -284,11 +284,12 @@ enum Round {
     E2eSupervision,
     InstanceKey,
     MessagePayload,
+    SharedKeyIds,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 30] = [
+    const ALL: [Round; 31] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -319,12 +320,14 @@ impl Round {
         Round::E2eSupervision,
         Round::InstanceKey,
         Round::MessagePayload,
+        Round::SharedKeyIds,
     ];
 
     /// The stage whose pair the round calls through.
     fn stage(self) -> Stage {
         match self {
             Round::GroupReceive => Stage::Group,
+            Round::SharedKeyIds => Stage::SharedKeyIds,
             _ => Stage::Pipe,
         }
     }
@@ -348,6 +351,7 @@ impl Round {
             }
             Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
             Round::MessagePayload => cfg!(feature = "message-payload"),
+            Round::SharedKeyIds => cfg!(feature = "shared-key-ids"),
             Round::InstanceKey => {
                 cfg!(all(
                     feature = "instance-key",
@@ -384,7 +388,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 34] = [
+const FAMILIES: [(&str, Round, Part); 35] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -437,6 +441,9 @@ const FAMILIES: [(&str, Round, Part); 34] = [
     ("e2e-supervision", Round::E2eSupervision, Part::All),
     ("instance-key", Round::InstanceKey, Part::All),
     ("message-payload", Round::MessagePayload, Part::All),
+    // A put by a key's shared id and its reading by the listener that holds the dictionary, on
+    // sessions opened with it.
+    ("shared-key-ids", Round::SharedKeyIds, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -1454,7 +1461,7 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
-            Round::GroupReceive => {
+            Round::GroupReceive | Round::SharedKeyIds => {
                 unreachable!("{round:?} runs on its own stage's pair")
             }
             Round::KeyexprDeclare => self.keyexpr_declare(),
@@ -2061,11 +2068,14 @@ enum Stage {
     Pipe,
     /// Two members of one group over the program's transport.
     Group,
+    /// Two sessions over the program's pipe that hold one dictionary of key ids and name their
+    /// keys by it.
+    SharedKeyIds,
 }
 
 impl Stage {
     /// Every stage, in the order its pair is opened.
-    const ALL: [Stage; 2] = [Stage::Pipe, Stage::Group];
+    const ALL: [Stage; 3] = [Stage::Pipe, Stage::Group, Stage::SharedKeyIds];
 
     /// The stage's pair, open; `None` in a build without the stage's capability, whose rounds are
     /// then all unbuilt.
@@ -2082,6 +2092,16 @@ impl Stage {
                     None
                 }
             }
+            Stage::SharedKeyIds => {
+                #[cfg(feature = "shared-key-ids")]
+                {
+                    Some(Open::SharedKeyIds(Pair::open_shaped(true, state_key_ids)))
+                }
+                #[cfg(not(feature = "shared-key-ids"))]
+                {
+                    None
+                }
+            }
         }
     }
 }
@@ -2091,6 +2111,8 @@ enum Open {
     Pipe(Bench),
     #[cfg(feature = "multicast-transport")]
     Group(GroupPair),
+    #[cfg(feature = "shared-key-ids")]
+    SharedKeyIds(Pair),
 }
 
 impl Open {
@@ -2100,6 +2122,8 @@ impl Open {
             Open::Pipe(bench) => bench.run(round),
             #[cfg(feature = "multicast-transport")]
             Open::Group(group) => group_put_and_hear(group),
+            #[cfg(feature = "shared-key-ids")]
+            Open::SharedKeyIds(pair) => pair_put_and_hear(pair),
         }
     }
 
@@ -2115,6 +2139,8 @@ impl Open {
                 // The group's transports are released by its drop, which counts none.
                 (closures_dropped(&counts), true)
             }
+            #[cfg(feature = "shared-key-ids")]
+            Open::SharedKeyIds(pair) => pair.close(),
         }
     }
 }
@@ -2142,6 +2168,51 @@ unsafe fn group_put_and_hear(group: &GroupPair) {
     assert!(
         wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
         "a put on the group was not heard within {WAIT_BOUND:?}"
+    );
+}
+
+/// The id every node of the shared pair's deployment names `DATA_KEY` by. Synthetic.
+#[cfg(feature = "shared-key-ids")]
+const SHARED_ID: u16 = 40;
+
+/// Hand a config of the shared pair the dictionary and state the pipe's endpoint `shared`, so
+/// what either session sends over it names `DATA_KEY` by its id, with no declaration first.
+#[cfg(feature = "shared-key-ids")]
+unsafe fn state_key_ids(config: &mut wz_capi_pico::z_owned_config_t) {
+    use wz_capi_pico::key_ids::{wz_ext_config_key_ids, wz_ext_config_key_wire_form_for};
+    let ids = [SHARED_ID];
+    let keys = [DATA_KEY.as_ptr()];
+    assert_eq!(
+        wz_ext_config_key_ids(
+            wz_capi_pico::z_config_loan_mut(config),
+            ids.as_ptr(),
+            keys.as_ptr(),
+            ids.len()
+        ),
+        Z_OK,
+        "the config holds the dictionary"
+    );
+    assert_eq!(
+        wz_ext_config_key_wire_form_for(
+            wz_capi_pico::z_config_loan_mut(config),
+            pipe_pair::LISTEN.as_ptr(),
+            c"shared".as_ptr()
+        ),
+        Z_OK,
+        "the pipe's endpoint names its keys by the dictionary"
+    );
+}
+
+/// Put from `pair`'s dialler on the key its listener hears and wait for the listener to hear it.
+#[cfg(feature = "shared-key-ids")]
+unsafe fn pair_put_and_hear(pair: &Pair) {
+    let counts = &pair.counts;
+    let heard = counts.heard.load(Ordering::SeqCst);
+    let mut bytes = payload();
+    assert_eq!(put(pair.dialler(), &mut bytes), Z_OK, "a put is taken");
+    assert!(
+        wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+        "a put did not cross within {WAIT_BOUND:?}"
     );
 }
 

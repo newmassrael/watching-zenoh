@@ -153,6 +153,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "shared-key-ids": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
     "subscriber-declare": {
       "allocs_per_round": 18.01,
       "locked": false,
@@ -284,6 +289,11 @@
     },
     "scout": {
       "reason": "z_scout takes a config and opens no session (crates/wz-capi-pico/src/scout.rs:1167); a session's own scout runs inside its open"
+    },
+    "shared-key-ids": {
+      "families": [
+        "shared-key-ids"
+      ]
     },
     "unstable-api": {
       "families": [
