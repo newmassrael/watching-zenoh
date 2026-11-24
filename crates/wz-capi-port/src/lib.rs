@@ -117,7 +117,10 @@ pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
 };
-pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
+pub use query::{
+    HeldQuery, QblId, QueryCallback, QueryHolder, QueryRowSink, QueryableSink, RawQueryCallback,
+    RawQueryFn, ReplyCallback, SharedQueryFn,
+};
 pub use refusal::Refusal;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an

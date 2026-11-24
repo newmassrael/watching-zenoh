@@ -2260,6 +2260,10 @@ mod tests {
 
     impl HeldQuery for NoHold {
         fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
+
+        fn session_closed(&self) -> bool {
+            false
+        }
     }
 
     /// A query's payload and attachment are read where the view holds them, with nothing copied
@@ -2414,6 +2418,10 @@ mod tests {
         fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
             let mut out = KeyTap(self.0.clone());
             answer(&mut out);
+        }
+
+        fn session_closed(&self) -> bool {
+            false
         }
     }
 

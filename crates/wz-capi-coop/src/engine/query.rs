@@ -874,6 +874,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
         }
         engine.answer(generation, rid, false);
     }
+
+    fn session_closed(&self) -> bool {
+        self.engine
+            .upgrade()
+            .map_or(true, |engine| super::SessionEngine::is_closed(&*engine))
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {

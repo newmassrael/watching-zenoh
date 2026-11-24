@@ -805,7 +805,10 @@ impl wz_capi_port::QueryHolder for FaceHolder {
         &self,
         view: &dyn wz_session_core::query_sink::QueryView,
     ) -> Box<dyn wz_capi_port::HeldQuery> {
-        Box::new(FaceHeld(self.face.hold_query(view)))
+        Box::new(FaceHeld {
+            held: self.face.hold_query(view),
+            closed: self.closed.clone(),
+        })
     }
 
     fn session_closed(&self) -> bool {
@@ -851,14 +854,21 @@ impl SharedSession {
     }
 }
 
-/// The runtime's held query as the port's [`HeldQuery`](wz_capi_port::HeldQuery); dropping it
-/// releases the runtime's hold.
+/// The runtime's held query as the port's [`HeldQuery`](wz_capi_port::HeldQuery), beside the
+/// node's closed latch its face's holder reads; dropping it releases the runtime's hold.
 #[cfg(feature = "queryable")]
-struct FaceHeld(wz_runtime_tokio::session::TokioHeldQuery);
+struct FaceHeld {
+    held: wz_runtime_tokio::session::TokioHeldQuery,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
 
 #[cfg(feature = "queryable")]
 impl wz_capi_port::HeldQuery for FaceHeld {
     fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
-        self.0.reply(|out| answer(out));
+        self.held.reply(|out| answer(out));
+    }
+
+    fn session_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

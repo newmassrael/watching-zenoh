@@ -402,11 +402,13 @@ impl RouterQueryHolder {
     /// Keep the query the handler this thread is inside of was handed. Outside a handler, or for
     /// a node that has gone, there is nothing to keep and the query is answered with nothing.
     pub fn hold_current(&self) -> RouterHeld {
-        RouterHeld(
-            self.forwarder
+        RouterHeld {
+            held: self
+                .forwarder
                 .upgrade()
                 .and_then(|forwarder| forwarder.hold_current_query()),
-        )
+            closed: Arc::clone(&self.closed),
+        }
     }
 
     /// Whether the node has been closed.
@@ -428,14 +430,17 @@ impl wz_capi_port::QueryHolder for RouterQueryHolder {
     }
 }
 
-/// A query kept through the forwarder of a router node.
-pub struct RouterHeld(Option<wz_runtime_tokio::router_forward::HeldRouterQuery>);
+/// A query kept through the forwarder of a router node, beside the node's closed latch.
+pub struct RouterHeld {
+    held: Option<wz_runtime_tokio::router_forward::HeldRouterQuery>,
+    closed: Arc<AtomicBool>,
+}
 
 impl RouterHeld {
     /// Answer the query now with what `answer` writes into a responder built as the handler's
     /// was. A query of a node that has gone is answered with nothing.
     pub fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
-        if let Some(held) = &self.0 {
+        if let Some(held) = &self.held {
             held.reply(answer);
         }
     }
@@ -444,6 +449,10 @@ impl RouterHeld {
 impl wz_capi_port::HeldQuery for RouterHeld {
     fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
         Self::reply(self, answer);
+    }
+
+    fn session_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 }
 
