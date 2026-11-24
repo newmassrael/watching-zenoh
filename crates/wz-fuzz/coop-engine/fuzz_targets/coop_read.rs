@@ -31,7 +31,7 @@ use libfuzzer_sys::fuzz_target;
 use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
 use wz_capi_coop::{CoopConfig, CoopEngine};
 use wz_capi_port::{
-    QueryHolder, QueryableSink, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+    PeerLists, QueryHolder, QueryableSink, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_fuzz_ingress_common::{
     advance_ms, handshake_replies, now_us, reset_clock, units, CountingAlloc, Window, BATCH,
@@ -184,7 +184,7 @@ fuzz_target!(|data: &[u8]| {
         "the open engine holds the far end as its peer"
     );
     let _ = engine.declare_subscriber_on_wire(
-        "**".to_owned(),
+        "**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -193,7 +193,7 @@ fuzz_target!(|data: &[u8]| {
         }),
     );
     let _ = engine.declare_queryable_on_wire(
-        "**".to_owned(),
+        "**",
         WireKey::literal(),
         false,
         Locality::Any,

@@ -24,6 +24,9 @@
 //!   input shows it);
 //! - each call of the program's answers a code its documentation states, and names a link the
 //!   transport no longer holds only once the session has closed that link on the program;
+//! - bytes more than the link can ever hold at once are refused, never a single byte: the
+//!   program hands a stream's in smaller calls and drops such a datagram, as a stack whose
+//!   receive buffer is the link's bound does;
 //! - every link the session opens on the program is closed on it exactly once, no call reaches
 //!   the program after its `drop(context)`, and that drop runs once, once the session and the
 //!   program have let the transport go;
@@ -41,7 +44,7 @@ use std::time::{Duration, Instant};
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::app_transport::*;
 use wz_capi_pico::result::{
-    WZ_EXT_ERR_LINK_CLOSED, WZ_EXT_ERR_LINK_FULL, WZ_EXT_ERR_LINK_UNKNOWN, Z_OK,
+    WZ_EXT_ERR_LINK_CLOSED, WZ_EXT_ERR_LINK_FULL, WZ_EXT_ERR_LINK_UNKNOWN, Z_EINVAL, Z_OK,
 };
 use wz_capi_pico::{
     z_close, z_closure_sample, z_closure_sample_move, z_config_default, z_config_loan_mut,
@@ -366,6 +369,10 @@ fuzz_target!(|data: &[u8]| {
 /// `DRAIN_WAIT` to be read down; a link the session has closed takes nothing more: it answers
 /// `WZ_EXT_ERR_LINK_CLOSED` until the program's close of it returns, and `WZ_EXT_ERR_LINK_UNKNOWN`
 /// after, which this program's own thread meets when the session closes the link under it.
+///
+/// A call of more bytes than the link's bound is refused with `Z_EINVAL`, and refused again
+/// whenever it is repeated: a stream's bytes are then handed in as two halves, each in turn, and
+/// a datagram is dropped, the link still taking the next one.
 fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
     let deadline = Instant::now() + DRAIN_WAIT;
     loop {
@@ -384,11 +391,25 @@ fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
             rc,
             &[
                 Z_OK,
+                Z_EINVAL,
                 WZ_EXT_ERR_LINK_FULL,
                 WZ_EXT_ERR_LINK_CLOSED,
                 WZ_EXT_ERR_LINK_UNKNOWN,
             ],
         );
+        if rc == Z_EINVAL {
+            // Every bound holds one byte at least, so a refused call is one that can be cut.
+            assert!(
+                bytes.len() > 1,
+                "transport_received: {} byte(s) are more than link {link} can ever hold",
+                bytes.len()
+            );
+            if !far.stream {
+                return true;
+            }
+            let (front, back) = bytes.split_at(bytes.len() / 2);
+            return hand_in(far, link, front) && hand_in(far, link, back);
+        }
         if rc == WZ_EXT_ERR_LINK_UNKNOWN {
             assert!(
                 far.closed_links
