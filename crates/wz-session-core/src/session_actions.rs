@@ -302,7 +302,11 @@ use crate::interest_build::*;
 use crate::interest_build::InterestKinds;
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::push_build::*;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+#[cfg(all(
+    feature = "codec-response-final",
+    feature = "alloc",
+    not(feature = "tx-lend-only")
+))]
 use crate::response_final_build::*;
 
 /// R311jp — TX batching accumulator state (zenoh-pico
@@ -17147,11 +17151,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         request_id: crate::wire_id::RequestId,
         qos: crate::sample::QosLevel,
     ) {
-        // With no allocator the terminator is written from its two numbers through the
-        // borrowed writer of `lent_control`, routed as `dispatch_response_final` routes
-        // it: on the band its own `ext_qos` names, as control plane.
-        #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
+        // Where the session writes into lent slots (with no allocator, or lend-only) the
+        // terminator is written from its two numbers through the borrowed writer of
+        // `lent_control`, so no owned extension chain is built on the heap for its `ext_qos`;
+        // routed as `dispatch_response_final` routes it: on the band its own `ext_qos` names,
+        // as control plane.
+        #[cfg(all(
+            feature = "codec-response-final",
+            any(not(feature = "alloc"), feature = "tx-lend-only")
+        ))]
         {
+            let encode = |sink: &mut crate::tx_buf::TxSink<'_>| {
+                crate::lent_control::response_final(request_id, qos).encode(sink)
+            };
+            #[cfg(not(feature = "alloc"))]
+            let len = crate::lent_control::response_final_len(request_id, qos);
+            // The lend-only build counts with the encoder it sends with
+            // (`frame_encode::push_capacity_hint` says why).
+            #[cfg(feature = "alloc")]
+            let len = crate::tx_buf::encoded_len(as_encoder(&encode));
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
@@ -17160,17 +17178,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         reliable: true,
                     },
                     qos,
-                    crate::lent_control::response_final_len(request_id, qos),
+                    len,
                     crate::stats::NetworkStatsClass::control(
                         crate::stats::MessageLabel::ResponseFinal,
                     ),
-                    as_encoder(&|sink| {
-                        crate::lent_control::response_final(request_id, qos).encode(sink)
-                    }),
+                    as_encoder(&encode),
                 )
                 .map(|_| ());
         }
-        #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+        #[cfg(all(
+            feature = "codec-response-final",
+            feature = "alloc",
+            not(feature = "tx-lend-only")
+        ))]
         {
             let response_final = build_response_final(request_id, qos);
             // F2 — this surface has no error channel; a transport-down
