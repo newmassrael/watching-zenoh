@@ -25,15 +25,20 @@
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
 //!
-//! With `WZ_NO_HEAP_SITES` set, each family is counted in one window of a few rounds and every
-//! allocation of its counted rounds records its stack: one `no-heap-site:` line is printed per
-//! round and site, the site being the innermost frame of a wz crate and the door the calling
-//! thread entered, with the allocations a round made there. The family lines are not printed
-//! then, since the records' own allocations fall in the windows; the gate reads no site line.
-//! `scripts/lib/no_heap_ratchet_gate.py --check` holds those lines to `deploy/no_heap_ratchet.json`:
-//! the allocations of a round may only fall, and a family that reached 0 stays there. Layer C1nh
-//! builds and runs this file; its one test is `#[ignore]`d, so a default sweep does not count a
-//! process it shares with other tests.
+//! With `WZ_NO_HEAP_SITES` set, every allocation of a family's counted rounds also records its
+//! stack. The windows are the reading's own, `WINDOWS` windows of `ROUNDS` rounds each closed
+//! after `SETTLE`, so an allocation the reading counts once a window is recorded as well; fewer
+//! rounds would miss one made once in a hundred. One `no-heap-site:` line is printed per round
+//! and site, the site being the innermost frame of a wz crate and the door the calling thread
+//! entered: `per_round` is the fewest allocations a window made there over its rounds, what the
+//! gate would read were it the only site, `allocs` all it made and `windows` how many windows
+//! made any. The family lines are not printed then, since the records' own allocations fall in
+//! the windows; the gate reads no site line.
+//! `scripts/lib/no_heap_ratchet_gate.py --check` holds the family lines to
+//! `deploy/no_heap_ratchet.json`: the allocations of a round may only fall, and a family that
+//! reached 0 stays there. Layer C1nh builds and runs this file; its measuring test is
+//! `#[ignore]`d, so a default sweep does not count a process it shares with other tests, and the
+//! lane's `--ignored` run leaves out the test of the site lines.
 //!
 //! Families that share a round are told apart by thread. Of a put round, the allocations of the
 //! calling thread are the put's (the program's transport hands the bytes to the other session on
@@ -93,9 +98,6 @@ static ALLOCATOR: Sited = Sited;
 const SITES_VARIABLE: &str = "WZ_NO_HEAP_SITES";
 /// The prefix of a line that says where a round's allocations are made; the gate reads none.
 const SITE_PREFIX: &str = "no-heap-site:";
-/// The rounds a family is counted in, in one window, when its sites are recorded: a record
-/// captures the stack of every allocation, which takes far longer than the allocation.
-const SITE_ROUNDS: usize = 3;
 /// No round's counted rounds are running.
 const NO_ROUND: usize = usize::MAX;
 
@@ -103,10 +105,12 @@ const NO_ROUND: usize = usize::MAX;
 static SITES_ON: AtomicBool = AtomicBool::new(false);
 /// The round whose counted rounds are running, as its place in `Round::ALL`, or `NO_ROUND`.
 static SITE_ROUND: AtomicUsize = AtomicUsize::new(NO_ROUND);
-/// The stack of each recorded allocation and the place of its round, read only once every round
-/// has run: reading a stack's symbols takes far longer than capturing it, and a round that took
-/// that long would not see its traffic cross within the wait.
-static SITES: Mutex<Vec<(usize, Backtrace)>> = Mutex::new(Vec::new());
+/// The window of its round that is running, from 0.
+static SITE_WINDOW: AtomicUsize = AtomicUsize::new(0);
+/// The stack of each recorded allocation with the place of its round and its window, read only
+/// once every round has run: reading a stack's symbols takes far longer than capturing it, and a
+/// round that took that long would not see its traffic cross within the wait.
+static SITES: Mutex<Vec<(usize, usize, Backtrace)>> = Mutex::new(Vec::new());
 
 thread_local! {
     /// Whether this thread is recording a site, whose own allocations are not recorded. A `const`
@@ -153,11 +157,12 @@ fn record_site() {
         return;
     }
     RECORDING.with(|recording| recording.set(true));
+    let window = SITE_WINDOW.load(Ordering::Relaxed);
     let stack = Backtrace::force_capture();
     SITES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .push((round, stack));
+        .push((round, window, stack));
     RECORDING.with(|recording| recording.set(false));
 }
 
@@ -204,22 +209,37 @@ fn site_of(stack: &str) -> String {
     }
 }
 
-/// The rounds of a window: fewer when the sites are recorded.
-fn rounds() -> usize {
-    if SITES_ON.load(Ordering::Relaxed) {
-        SITE_ROUNDS
-    } else {
-        ROUNDS
+/// The `no-heap-site:` lines of the recorded allocations, each its round's place in
+/// `Round::ALL`, its window and its site: one line a round and site, a round's sites with the
+/// most allocations first. A site's `per_round` is read as the reading is, from the window that
+/// made fewest there, so a site of every window reads what a family of that one site reads.
+fn site_lines(records: impl IntoIterator<Item = (usize, usize, String)>) -> Vec<String> {
+    let mut sites: BTreeMap<(usize, String), [u64; WINDOWS]> = BTreeMap::new();
+    for (round, window, site) in records {
+        sites.entry((round, site)).or_insert([0; WINDOWS])[window] += 1;
     }
-}
-
-/// The windows of a family: one when the sites are recorded.
-fn windows() -> usize {
-    if SITES_ON.load(Ordering::Relaxed) {
-        1
-    } else {
-        WINDOWS
-    }
+    let mut rows: Vec<(usize, u64, u64, usize, String)> = sites
+        .into_iter()
+        .map(|((round, site), made)| {
+            let total: u64 = made.iter().sum();
+            let least = made.iter().copied().min().unwrap_or(0);
+            let windows = made.iter().filter(|count| **count > 0).count();
+            (round, total, least, windows, site)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    rows.into_iter()
+        .map(|(round, total, least, windows, site)| {
+            let name = Round::ALL
+                .get(round)
+                .map_or_else(|| String::from("?"), |round| format!("{round:?}"));
+            let per_round = least as f64 / ROUNDS as f64;
+            format!(
+                "{SITE_PREFIX} {name} per_round={per_round:.2} allocs={total} \
+                 windows={windows}/{WINDOWS} {site}"
+            )
+        })
+        .collect()
 }
 
 /// Rounds of each family run before the count, so that what the library makes on the first
@@ -2527,8 +2547,8 @@ impl UdpPair {
     }
 }
 
-/// One window of `round`: the warm-up and the counted rounds.
-unsafe fn window(open: &mut Open, round: Round) -> Seen {
+/// Window `index` of `round`: the warm-up and the counted rounds.
+unsafe fn window(open: &mut Open, round: Round, index: usize) -> Seen {
     for _ in 0..WARM_UP {
         open.run(round);
     }
@@ -2538,8 +2558,9 @@ unsafe fn window(open: &mut Open, round: Round) -> Seen {
         .position(|of| *of == round)
         .unwrap_or(NO_ROUND);
     open_window(0);
+    SITE_WINDOW.store(index, Ordering::SeqCst);
     SITE_ROUND.store(place, Ordering::SeqCst);
-    for _ in 0..rounds() {
+    for _ in 0..ROUNDS {
         open.run(round);
     }
     std::thread::sleep(SETTLE);
@@ -2554,9 +2575,9 @@ unsafe fn window(open: &mut Open, round: Round) -> Seen {
 
 /// Every window of `round`.
 unsafe fn measure(open: &mut Open, round: Round) -> Vec<Seen> {
-    let mut seen = Vec::with_capacity(windows());
-    for _ in 0..windows() {
-        seen.push(window(open, round));
+    let mut seen = Vec::with_capacity(WINDOWS);
+    for index in 0..WINDOWS {
+        seen.push(window(open, round, index));
     }
     seen
 }
@@ -2616,23 +2637,11 @@ fn allocations_after_open_are_counted_per_operation_family() {
     // reading is not printed: what is printed is each round's allocations a round, at each site.
     if SITES_ON.load(Ordering::SeqCst) {
         let stacks = std::mem::take(&mut *SITES.lock().unwrap_or_else(PoisonError::into_inner));
-        let mut sites: BTreeMap<(usize, String), u64> = BTreeMap::new();
-        for (round, stack) in stacks {
-            *sites
-                .entry((round, site_of(&stack.to_string())))
-                .or_insert(0) += 1;
-        }
-        let mut lines: Vec<(usize, u64, String)> = sites
+        let records = stacks
             .into_iter()
-            .map(|((round, site), count)| (round, count, site))
-            .collect();
-        lines.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-        for (round, count, site) in lines {
-            let name = Round::ALL
-                .get(round)
-                .map_or_else(|| String::from("?"), |round| format!("{round:?}"));
-            let per_round = count as f64 / SITE_ROUNDS as f64;
-            println!("{SITE_PREFIX} {name} per_round={per_round:.2} {site}");
+            .map(|(round, window, stack)| (round, window, site_of(&stack.to_string())));
+        for line in site_lines(records) {
+            println!("{line}");
         }
         return;
     }
@@ -2655,4 +2664,33 @@ fn allocations_after_open_are_counted_per_operation_family() {
         std::fs::write(&path, reading)
             .unwrap_or_else(|error| panic!("the reading is written to {path:?}: {error}"));
     }
+}
+
+/// The site lines read a site as the reading reads a family: one allocation in every window is
+/// one in `ROUNDS` rounds, as the reading of a family allocating once a window is, and a site of
+/// one window only reads 0 a round and is told apart by its windows.
+#[test]
+fn a_site_that_allocates_once_a_window_reads_as_its_family_does() {
+    let place = Round::ALL
+        .iter()
+        .position(|of| *of == Round::MatchingListener)
+        .expect("the round is counted");
+    let mut records: Vec<(usize, usize, String)> = (0..WINDOWS)
+        .map(|window| (place, window, String::from("every")))
+        .collect();
+    records.push((place, 0, String::from("one")));
+    records.push((place, 0, String::from("one")));
+    let once = 1.0 / ROUNDS as f64;
+    assert_eq!(
+        site_lines(records),
+        vec![
+            format!(
+                "{SITE_PREFIX} MatchingListener per_round={once:.2} allocs={WINDOWS} \
+                 windows={WINDOWS}/{WINDOWS} every"
+            ),
+            format!(
+                "{SITE_PREFIX} MatchingListener per_round=0.00 allocs=2 windows=1/{WINDOWS} one"
+            ),
+        ]
+    );
 }
