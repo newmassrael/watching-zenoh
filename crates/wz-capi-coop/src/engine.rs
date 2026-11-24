@@ -647,6 +647,27 @@ impl OpenKeyIds {
     }
 }
 
+/// The config `source` gives and the writer of its endpoints' texts. Measurement only: out of
+/// line, so the open's measure shows what the source brings into it.
+#[inline(never)]
+fn source_parts(
+    source: impl OpenSource,
+) -> (
+    CoopConfig<Counted>,
+    impl FnOnce(&mut EndpointWriter<'_>) -> Result<(), OpenError>,
+) {
+    source.into_parts()
+}
+
+/// `write` writes the endpoints' texts into `texts`. Measurement only, as [`source_parts`].
+#[inline(never)]
+fn write_texts(
+    write: impl FnOnce(&mut EndpointWriter<'_>) -> Result<(), OpenError>,
+    texts: &mut EndpointTexts,
+) -> Result<(), OpenError> {
+    write(&mut EndpointWriter::over(texts))
+}
+
 /// What a session's open decided before its state is built ([`CoopEngine::core_of`]): the
 /// stack its links are opened on, the clock and the entropy it runs on, its config and policies,
 /// the zid it announces and, with `shared-key-ids`, the key ids it holds and the key-wire form of
@@ -3833,7 +3854,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         memory: &'static dyn ArenaMemory,
         held: HeldPlaces,
     ) -> Result<Arc<Self>, OpenError> {
-        let (config, write_endpoints) = source.into_parts();
+        let (config, write_endpoints) = source_parts(source);
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
@@ -3845,7 +3866,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
-        write_endpoints(&mut EndpointWriter::over(&mut lent.endpoints))?;
+        write_texts(write_endpoints, &mut lent.endpoints)?;
         let mut entropy = SessionEntropy::new(entropy);
         let wire = session_zid(&config, &policy, &lent.endpoints, &mut entropy)?;
         let decided = OpenDecided {
