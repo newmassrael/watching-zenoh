@@ -2337,19 +2337,14 @@ pub fn multicast_chain_key(peer_idx: usize) -> [u8; 4] {
 /// [`IterationEvent::ReassemblyDropped`]. An unknown-peer / not-running
 /// fragment is dropped silently (pico logs and moves on). Alloc-gated
 /// like the observer surface it fans into ([`crate::driver_loop`]).
-/// The DEFAULT-band fragment ingest (no per-priority QoS conduit) — the non-qos
-/// entry, delegating to [`ingest_multicast_fragment_qos`] with `Priority::DEFAULT`.
-/// The pre-R311y227 surface + the tests use this; only the qos RX classifier
-/// ([`crate::multicast_rx`]) passes the fragment's decoded band.
+/// The fragment ingest. A caller that does not read the fragment's QoS band or its ext chain
+/// gives `Priority::DEFAULT` and [`FragmentMarkers::NONE`](crate::extfragment::FragmentMarkers::NONE);
+/// only the qos RX classifier ([`crate::multicast_rx`]) passes the fragment's decoded band.
 ///
-/// R2417 — and the fragment's decoded chain-boundary markers, which this entry
-/// passes as [`FragmentMarkers::NONE`](crate::extfragment::FragmentMarkers::NONE):
-/// a caller that does not project the ext chain has no markers to hand over, and
-/// an absent marker must read as "this fragment carried none" rather than as a
+/// R2417 — an absent marker must read as "this fragment carried none" rather than as a
 /// negotiation verdict — the peer's negotiated LEVEL is what decides whether the
 /// rules run at all, and that comes from the peer table either way.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-#[allow(clippy::too_many_arguments)]
 pub fn ingest_multicast_fragment<
     const MAX_PEERS: usize,
     const SLOTS: usize,
@@ -2360,51 +2355,7 @@ pub fn ingest_multicast_fragment<
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    src: SocketAddr,
-    reliable: bool,
-    sn: u64,
-    more: bool,
-    payload: &[u8],
-    now_ms: u64,
-    on_event: &mut F,
-) where
-    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_, '_>),
-{
-    ingest_multicast_fragment_qos(
-        dispatcher,
-        reasm,
-        src,
-        reliable,
-        sn,
-        more,
-        crate::qos::Priority::DEFAULT,
-        crate::extfragment::FragmentMarkers::NONE,
-        payload,
-        now_ms,
-        on_event,
-    )
-}
-
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
-#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, mirroring report_outcome_reassembling's outcome fields
-pub fn ingest_multicast_fragment_qos<
-    const MAX_PEERS: usize,
-    const SLOTS: usize,
-    const CAP: usize,
-    S,
-    F,
-    Grow: TableGrowth,
->(
-    dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    src: SocketAddr,
-    reliable: bool,
-    sn: u64,
-    more: bool,
-    priority: crate::qos::Priority,
-    markers: crate::extfragment::FragmentMarkers,
-    payload: &[u8],
+    fragment: GroupFragment<'_>,
     now_ms: u64,
     on_event: &mut F,
 ) where
@@ -2414,27 +2365,45 @@ pub fn ingest_multicast_fragment_qos<
     ingest_multicast_fragment_counted(
         dispatcher,
         reasm,
-        src,
-        reliable,
-        sn,
-        more,
-        priority,
-        markers,
-        payload,
+        fragment,
         now_ms,
         on_event,
         &mut |_: &[u8], _: &crate::network_message::NetworkMessage| {},
     )
 }
 
-/// R2848 — [`ingest_multicast_fragment_qos`], also handing each network
+/// A `Fragment` a group member sent, as its head decodes it: who sent it, its channel and
+/// sequence number, whether more of its chain follows, its QoS band, its chain-boundary
+/// markers and its payload.
+#[cfg(all(
+    feature = "reassembly",
+    any(feature = "alloc", feature = "storage-profile")
+))]
+#[derive(Clone, Copy, Debug)]
+pub struct GroupFragment<'a> {
+    /// The member that sent it.
+    pub src: SocketAddr,
+    /// Whether it rode the reliable channel.
+    pub reliable: bool,
+    /// Its sequence number on that channel.
+    pub sn: u64,
+    /// Whether more fragments of its chain follow.
+    pub more: bool,
+    /// The QoS band it rode, `Priority::DEFAULT` for a member without QoS.
+    pub priority: crate::qos::Priority,
+    /// The chain-boundary markers its ext chain carries.
+    pub markers: crate::extfragment::FragmentMarkers,
+    /// Its payload.
+    pub payload: &'a [u8],
+}
+
+/// R2848 — [`ingest_multicast_fragment`], also handing each network
 /// message of a COMPLETED chain to `count`, with the zid of the peer that sent
 /// it. The shared RX dispatch passes its stats recorder through here, so a
 /// reassembled message is counted at the same point of the pipeline as a
 /// whole Frame's: after the peer's aliases resolve it, before the namespace
 /// strip can drop it (see [`count_received_network_messages`]).
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
 pub(crate) fn ingest_multicast_fragment_counted<
     const MAX_PEERS: usize,
     const SLOTS: usize,
@@ -2446,13 +2415,7 @@ pub(crate) fn ingest_multicast_fragment_counted<
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    src: SocketAddr,
-    reliable: bool,
-    sn: u64,
-    more: bool,
-    priority: crate::qos::Priority,
-    markers: crate::extfragment::FragmentMarkers,
-    payload: &[u8],
+    fragment: GroupFragment<'_>,
     now_ms: u64,
     on_event: &mut F,
     count: &mut C,
@@ -2461,6 +2424,15 @@ pub(crate) fn ingest_multicast_fragment_counted<
     F: FnMut(IterationEvent<'_, '_>),
     C: FnMut(&[u8], &crate::network_message::NetworkMessage),
 {
+    let GroupFragment {
+        src,
+        reliable,
+        sn,
+        more,
+        priority,
+        markers,
+        payload,
+    } = fragment;
     // R311y227 — a qos peer's oversize frame fragments ride its per-`priority`
     // conduit SN ring (the SAME conduit the whole-frame gate uses); admit against
     // it, and key the reassembly chain by that priority (the Router already keys
@@ -2640,7 +2612,6 @@ pub(crate) fn ingest_multicast_fragment_counted<
         )
     )
 ))]
-#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
 pub(crate) fn ingest_multicast_fragment_in_place<
     const MAX_PEERS: usize,
     const SLOTS: usize,
@@ -2651,13 +2622,7 @@ pub(crate) fn ingest_multicast_fragment_in_place<
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS, Grow>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    src: SocketAddr,
-    reliable: bool,
-    sn: u64,
-    more: bool,
-    priority: crate::qos::Priority,
-    markers: crate::extfragment::FragmentMarkers,
-    payload: &[u8],
+    fragment: GroupFragment<'_>,
     now_ms: u64,
     on_event: &mut F,
 ) where
@@ -2665,6 +2630,15 @@ pub(crate) fn ingest_multicast_fragment_in_place<
     F: crate::driver_loop::EventSink + ?Sized,
 {
     use crate::driver_loop::EventSink;
+    let GroupFragment {
+        src,
+        reliable,
+        sn,
+        more,
+        priority,
+        markers,
+        payload,
+    } = fragment;
     let (peer_idx, sn_mask) =
         match dispatcher.ingest_fragment_by_src_qos(src, priority, reliable, sn, now_ms) {
             FragmentIngest::Admitted { peer_idx, sn_mask } => (peer_idx, sn_mask),
@@ -4554,6 +4528,25 @@ mod tests {
             ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
         }
 
+        /// A DEFAULT-band fragment that carries no chain-boundary markers.
+        fn frag(
+            src: SocketAddr,
+            reliable: bool,
+            sn: u64,
+            more: bool,
+            payload: &[u8],
+        ) -> GroupFragment<'_> {
+            GroupFragment {
+                src,
+                reliable,
+                sn,
+                more,
+                priority: crate::qos::Priority::DEFAULT,
+                markers: crate::extfragment::FragmentMarkers::NONE,
+                payload,
+            }
+        }
+
         /// Events captured from the pipeline: completed FramePayload
         /// batches (cloned out of the borrow) + drop reasons.
         #[derive(Default)]
@@ -4601,22 +4594,14 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    5,
-                    true,
-                    head,
+                    frag(SRC_A, true, 5, true, head),
                     0,
                     &mut on_event,
                 );
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    6,
-                    false,
-                    tail,
+                    frag(SRC_A, true, 6, false, tail),
                     1,
                     &mut on_event,
                 );
@@ -4737,16 +4722,18 @@ mod tests {
             let mut cap = Captured::default();
             {
                 let mut on_event = capture(&mut cap);
-                ingest_multicast_fragment_qos(
+                ingest_multicast_fragment(
                     &mut d,
                     &mut reasm(),
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    crate::qos::Priority::DEFAULT,
-                    none,
-                    head,
+                    GroupFragment {
+                        src: SRC_A,
+                        reliable: true,
+                        sn: 0,
+                        more: true,
+                        priority: crate::qos::Priority::DEFAULT,
+                        markers: none,
+                        payload: head,
+                    },
                     0,
                     &mut on_event,
                 );
@@ -4771,29 +4758,33 @@ mod tests {
             let mut r = reasm();
             {
                 let mut on_event = capture(&mut cap);
-                ingest_multicast_fragment_qos(
+                ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    1,
-                    true,
-                    crate::qos::Priority::DEFAULT,
-                    first,
-                    head,
+                    GroupFragment {
+                        src: SRC_A,
+                        reliable: true,
+                        sn: 1,
+                        more: true,
+                        priority: crate::qos::Priority::DEFAULT,
+                        markers: first,
+                        payload: head,
+                    },
                     0,
                     &mut on_event,
                 );
-                ingest_multicast_fragment_qos(
+                ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    2,
-                    false,
-                    crate::qos::Priority::DEFAULT,
-                    none,
-                    tail,
+                    GroupFragment {
+                        src: SRC_A,
+                        reliable: true,
+                        sn: 2,
+                        more: false,
+                        priority: crate::qos::Priority::DEFAULT,
+                        markers: none,
+                        payload: tail,
+                    },
                     1,
                     &mut on_event,
                 );
@@ -4814,29 +4805,33 @@ mod tests {
             let mut r = reasm();
             {
                 let mut on_event = capture(&mut cap);
-                ingest_multicast_fragment_qos(
+                ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_B,
-                    true,
-                    0,
-                    true,
-                    crate::qos::Priority::DEFAULT,
-                    none,
-                    head,
+                    GroupFragment {
+                        src: SRC_B,
+                        reliable: true,
+                        sn: 0,
+                        more: true,
+                        priority: crate::qos::Priority::DEFAULT,
+                        markers: none,
+                        payload: head,
+                    },
                     0,
                     &mut on_event,
                 );
-                ingest_multicast_fragment_qos(
+                ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_B,
-                    true,
-                    1,
-                    false,
-                    crate::qos::Priority::DEFAULT,
-                    none,
-                    tail,
+                    GroupFragment {
+                        src: SRC_B,
+                        reliable: true,
+                        sn: 1,
+                        more: false,
+                        priority: crate::qos::Priority::DEFAULT,
+                        markers: none,
+                        payload: tail,
+                    },
                     1,
                     &mut on_event,
                 );
@@ -4873,22 +4868,14 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    head,
+                    frag(SRC_A, true, 0, true, head),
                     0,
                     &mut on_event,
                 );
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    1,
-                    false,
-                    tail,
+                    frag(SRC_A, true, 1, false, tail),
                     1,
                     &mut on_event,
                 );
@@ -4910,11 +4897,7 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    b"head",
+                    frag(SRC_A, true, 0, true, b"head"),
                     0,
                     &mut on_event,
                 );
@@ -4923,11 +4906,7 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    2,
-                    false,
-                    b"tail",
+                    frag(SRC_A, true, 2, false, b"tail"),
                     1,
                     &mut on_event,
                 );
@@ -4951,11 +4930,7 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    b"head",
+                    frag(SRC_A, true, 0, true, b"head"),
                     0,
                     &mut on_event,
                 );
@@ -4964,11 +4939,7 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    b"head",
+                    frag(SRC_A, true, 0, true, b"head"),
                     1,
                     &mut on_event,
                 );
@@ -4989,11 +4960,7 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    b"x",
+                    frag(SRC_A, true, 0, true, b"x"),
                     0,
                     &mut on_event,
                 );
@@ -5018,22 +4985,14 @@ mod tests {
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_A,
-                    true,
-                    0,
-                    true,
-                    b"a",
+                    frag(SRC_A, true, 0, true, b"a"),
                     0,
                     &mut on_event,
                 );
                 ingest_multicast_fragment(
                     &mut d,
                     &mut r,
-                    SRC_B,
-                    true,
-                    0,
-                    true,
-                    b"b",
+                    frag(SRC_B, true, 0, true, b"b"),
                     0,
                     &mut on_event,
                 );
