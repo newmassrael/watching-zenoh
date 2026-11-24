@@ -5918,6 +5918,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the runtime, which pushes it off the caller's thread and then gives the
     /// slot back ([`Self::run_block_first_job`]).
     ///
+    /// # Errors
+    ///
+    /// The refusal of `encode_body`, a body that refuses its message: the slot taken for it
+    /// is given back and nothing is handed to the runtime.
+    ///
     /// The slot is the one of the link the message's conduit is routed to,
     /// keyed by the message's OWN priority (upstream's `msg.priority()`), and
     /// it waits `wait_before_drop` (`.wait_timeout(self.manager.config.wait_before_drop)`).
@@ -5949,7 +5954,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         worst_case_payload: usize,
         stats_class: crate::stats::NetworkStatsClass,
         encode_body: &P,
-    ) -> bool
+    ) -> Result<bool, sce_forge_runtime::codec::CodecError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
@@ -5957,7 +5962,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // holds a slot nothing would give back.
         let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
         if !installed {
-            return false;
+            return Ok(false);
         }
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let wait_us = self.params.tx_queue.wait_before_drop_us;
@@ -5968,12 +5973,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !granted {
             #[cfg(feature = "transport-stats")]
             self.count_congestion_drop(wire_reliability, route, priority, &stats_class);
-            return true;
+            return Ok(true);
         }
         let mut body = Vec::with_capacity(worst_case_payload);
-        {
+        let encoded = {
             let mut sink = crate::tx_buf::TxSink::new(&mut body);
-            encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+            encode_body(&mut sink)
+        };
+        if let Err(refused) = encoded {
+            // The body refused its message: the slot taken for it goes back, and the caller
+            // answers the refusal as a send it made itself would.
+            self.with_conduit_link(wire_reliability, route, |link| {
+                link.link_driver()
+                    .block_first_release_for(wire_reliability, qos.priority())
+            });
+            return Err(refused);
         }
         let job = BlockFirstJob {
             priority,
@@ -5990,7 +6004,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 handoff(job);
             }
         });
-        true
+        Ok(true)
     }
 
     /// R2952 — the background half of a block-first message: push its bytes
@@ -11344,8 +11358,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 let mut wire = Vec::with_capacity(worst_case_payload);
                 {
+                    // The vector refuses no write, but the body can refuse its message.
                     let mut sink = crate::tx_buf::TxSink::new(&mut wire);
-                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                    encode_body(&mut sink)?;
                 }
                 // No congestion decision on this path: upstream's lowlatency
                 // transport writes to the link under its own lock and has no
@@ -11372,7 +11387,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 worst_case_payload,
                 _stats_class,
                 &encode_body,
-            )
+            )?
         {
             return Ok(Dispatched::Sent);
         }
@@ -11563,7 +11578,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(not(feature = "tx-lend-only"))]
                 let encode_into = |buf: &mut Vec<u8>| {
                     let mut sink = crate::tx_buf::TxSink::new(buf);
-                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                    encode_body(&mut sink)
                 };
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
@@ -11658,9 +11673,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         stage
                             .buf
                             .reserve(worst_case_payload.saturating_add(1 + 10 + 2));
-                        begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos)
-                            .expect("a Vec grows, so its sink is infallible");
-                        encode_into(&mut stage.buf);
+                        let staged =
+                            match begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos) {
+                                Ok(()) => encode_into(&mut stage.buf),
+                                Err(refused) => Err(refused),
+                            };
+                        if let Err(refused) = staged {
+                            // The body refused its message: the frame it opened is dropped whole
+                            // and its SN given back, before a byte left.
+                            stage.buf.clear();
+                            stage.count = 0;
+                            self.outbound_frame_sn.unmint(priority, reliable);
+                            return Err(SendWireError::Codec(refused));
+                        }
                         if stage.buf.len() > mtu {
                             // The message alone exceeds the budget — the
                             // batch cannot carry it; emit it through the
@@ -11724,7 +11749,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             continue;
                         }
                         let wpos = stage.buf.len();
-                        encode_into(&mut stage.buf);
+                        if let Err(refused) = encode_into(&mut stage.buf) {
+                            // The body refused its message: its partial bytes are rolled back and
+                            // the frame open before it stays as it was.
+                            stage.buf.truncate(wpos);
+                            return Err(SendWireError::Codec(refused));
+                        }
                         if stage.buf.len() <= mtu {
                             // One more message than the frame held, which holds at most a batch.
                             stage.count = stage.count.saturating_add(1);
