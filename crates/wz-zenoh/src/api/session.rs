@@ -4807,7 +4807,7 @@ impl SessionInner {
             self.engine
                 .faces()
                 .into_iter()
-                .filter(move |face| transport.as_ref().map_or(true, |t| face.is_the_face_of(t)))
+                .filter(move |face| transport.as_ref().is_none_or(|t| face.is_the_face_of(t)))
                 .flat_map(|face| face.links),
         )
     }

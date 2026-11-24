@@ -404,7 +404,7 @@ pub(crate) struct AdapterRow {
 #[cfg(any(windows, test))]
 pub(crate) fn adapter_local_addresses(rows: &[AdapterRow], interface: Option<&str>) -> Vec<IpAddr> {
     rows.iter()
-        .filter(|row| interface.map_or(true, |name| row.adapter_name == name))
+        .filter(|row| interface.is_none_or(|name| row.adapter_name == name))
         .flat_map(|row| row.unicast.iter().copied())
         .collect()
 }

@@ -823,12 +823,8 @@ pub(crate) struct LinkListener {
 }
 
 impl LinkListener {
-    // `Option::is_none_or` would read better and is stable since 1.82; this
-    // workspace's MSRV is 1.81, and clippy's `incompatible_msrv` is right to
-    // refuse it.
-    #[allow(clippy::unnecessary_map_or)]
     fn wants(&self, transport: &z_loaned_transport_t) -> bool {
-        self.filter.map_or(true, |(zid, multicast)| {
+        self.filter.is_none_or(|(zid, multicast)| {
             zid == transport.zid.id && multicast == transport.is_multicast
         })
     }

@@ -878,7 +878,7 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
         None | Some((None, None)) => true,
         Some((lo, hi)) => match sample_sn {
             None => false,
-            Some(sn) => lo.map_or(true, |l| sn >= l) && hi.map_or(true, |h| sn <= h),
+            Some(sn) => lo.is_none_or(|l| sn >= l) && hi.map_or(true, |h| sn <= h),
         },
     }
 }
@@ -886,7 +886,7 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
 /// Whether a sample's NTP64 timestamp satisfies the resolved `_time` range.
 /// No range (absent, or a value zenoh's parser rejects) matches every sample.
 fn sample_matches_time(sample_time: u64, range: Option<TimeRange<WallTime>>) -> bool {
-    range.map_or(true, |r| contains_ntp64(&r, sample_time))
+    range.is_none_or(|r| contains_ntp64(&r, sample_time))
 }
 
 /// A ring of cached samples over bytes of the heap for the tests, laid on a record's alignment, and

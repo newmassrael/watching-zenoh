@@ -4749,7 +4749,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// node's is before a client has come: synced is a statement about established sessions, not
     /// about whether a session exists.
     pub fn declarations_synced(&self) -> bool {
-        self.live().map_or(true, |core| {
+        self.live().is_none_or(|core| {
             core.0
                 .transport
                 .links
@@ -6082,14 +6082,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             target: opts.effective_target(),
             qos,
         };
-        let query = opts.loopback_query();
+        // A body the codec refuses is one no link could carry either: no queryable is asked, and
+        // the Final is owed as one that matched none.
+        let query = opts.loopback_query().ok();
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`), so none stages a reply here: the stage they are handed has no
         // room.
         let mut staged = ReplyStage::<Lent>::default();
         let mut registry = core.session.registry.borrow_mut();
-        self.plane
-            .asking_locally(|| registry.ask_own_queryables(envelope, keyexpr, &query, &mut staged));
+        if let Some(query) = &query {
+            self.plane.asking_locally(|| {
+                registry.ask_own_queryables(envelope, keyexpr, query, &mut staged)
+            });
+        }
         let gets = &mut registry.local;
         lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
         if own.release().is_some() {
@@ -6762,7 +6767,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let usable = |id: ExprId| -> bool {
             #[cfg(feature = "shared-key-ids")]
             {
-                shared.map_or(true, |ids| ids.next_free_id(id) == Some(id))
+                shared.is_none_or(|ids| ids.next_free_id(id) == Some(id))
             }
             #[cfg(not(feature = "shared-key-ids"))]
             {

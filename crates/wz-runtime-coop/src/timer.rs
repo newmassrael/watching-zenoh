@@ -321,7 +321,7 @@ fn earliest(slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
     for (index, slot) in slots.iter().enumerate() {
         if let Some(entry) = &slot.0 {
             if entry.deadline_us <= until_us
-                && best.map_or(true, |(_, deadline, seq)| {
+                && best.is_none_or(|(_, deadline, seq)| {
                     (entry.deadline_us, entry.seq) < (deadline, seq)
                 })
             {

@@ -2470,7 +2470,7 @@ impl LinkstateNetwork {
             let delta: Vec<Zid> = self.trees[tree_root_idx.index()]
                 .children
                 .iter()
-                .filter(|child| old.map_or(true, |o| !o.contains(child)))
+                .filter(|child| old.is_none_or(|o| !o.contains(child)))
                 .map(|child| self.graph[*child].zid)
                 .collect();
             if !delta.is_empty() {

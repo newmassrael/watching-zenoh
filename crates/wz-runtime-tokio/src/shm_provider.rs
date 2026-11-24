@@ -1712,7 +1712,7 @@ impl ChunkHold {
         let resolves_posix = self
             .clients
             .as_ref()
-            .map_or(true, |clients| clients.resolves_posix());
+            .is_none_or(|clients| clients.resolves_posix());
         if protocol == POSIX_PROTOCOL_ID && resolves_posix {
             let segment = u64::from(segment_id);
             let data = peer_data(segment)?;

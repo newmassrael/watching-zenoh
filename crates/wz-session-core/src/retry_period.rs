@@ -170,8 +170,8 @@ fn grown_ms(delay_ms: u64, factor: f64) -> u64 {
 }
 
 /// [`grown_ms`] with the factor given as the bits of its `f64`. A `const fn`, so a schedule the
-/// build fixes is computed when the build is compiled ([`fixed_waits`]): a `const fn` cannot read
-/// the bits of a float on the workspace's MSRV, so the bits are what it is given.
+/// build fixes is computed when the build is compiled ([`fixed_waits`]) from the bits of the
+/// factor the build states.
 const fn grown_ms_by_bits(delay_ms: u64, bits: u64) -> u64 {
     const FRACTION_BITS: u32 = 52;
     const SIGNIFICANT_BITS: u32 = 53;
@@ -335,23 +335,25 @@ pub const fn fixed_waits<const N: usize>(
     assert!(N > 0, "a schedule has a first wait");
     let mut waits = [0u64; N];
     let mut delay = period_init_ms;
-    let mut at = 0usize;
-    while at < N {
-        waits[at] = delay;
+    // Each wait is written into the first slot left, so no write names an index; the last slot
+    // is the one with none after it.
+    let mut slots: &mut [u64] = &mut waits;
+    while let [slot, more @ ..] = slots {
+        *slot = delay;
         let next = clamp_to_ceiling(grown_ms_by_bits(delay, factor_bits), period_max_ms);
-        if at.saturating_add(1) < N {
-            assert!(
-                next != delay,
-                "the schedule settles in fewer waits than stated"
-            );
-        } else {
+        if more.is_empty() {
             assert!(
                 next == delay,
                 "the schedule has not settled after the waits stated"
             );
+        } else {
+            assert!(
+                next != delay,
+                "the schedule settles in fewer waits than stated"
+            );
         }
         delay = next;
-        at = at.saturating_add(1);
+        slots = more;
     }
     waits
 }
