@@ -3718,6 +3718,10 @@ mod control_read_tests {
             assert_eq!(chain.entries().count(), 2);
             assert_eq!(crate::extpatch::peer_patch_in(chain.entries()), 1);
             assert_eq!(
+                crate::extregion::peer_patch_and_region_in(chain.entries()),
+                (1, Ok(Some(north.clone())))
+            );
+            assert_eq!(
                 crate::extregion::peer_region_in(chain.entries()),
                 Ok(Some(north))
             );
