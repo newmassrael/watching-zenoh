@@ -3980,9 +3980,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
-        write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints))?;
-        let mut entropy = SessionEntropy::new(entropy);
-        let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
+        let written = write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints));
+        // One refusal for both, so what the arena lent is let go of on one path.
+        let (wire, entropy) = written.and_then(|()| {
+            let mut entropy = SessionEntropy::new(entropy);
+            let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
+            Ok((wire, entropy))
+        })?;
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "listen")]
         links.lend_port_rows(lent.transport.port_rows);
