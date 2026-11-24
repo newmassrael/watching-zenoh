@@ -92,19 +92,14 @@ pub trait PlaceLender {
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace>;
 }
 
-/// An engine that lends an ABI rows for the samples its advanced publishers' caches keep, from
-/// memory the session reserved at its open: as many as `ADVANCED_CACHE_ROWS` admits, each of the
-/// layout the open was given for them, so a cache's put copies its sample into the session's memory
-/// and takes none of its own ([`crate::SessionEngine::cache_row_lender`]).
-pub trait CacheRowLender {
-    /// A free row, closed or not: `None` when every one is lent, or when the open laid out none.
-    fn claim_cache_row(&self) -> Option<NonNull<u8>>;
-
-    /// Give back `row`, closed or not: `false`, and the row stays lent, when it is no row this
-    /// session lent.
-    ///
-    /// # Safety
-    /// `row` is a row a session lent the ABI and the ABI has not given back, and nothing lies there
-    /// any more.
-    unsafe fn give_back_cache_row(&self, row: NonNull<u8>) -> bool;
+/// An engine that keeps, in memory its session reserved at its open, the ring its advanced
+/// publishers' caches keep their samples in (`ADVANCED_CACHE_BYTES`): one span of bytes, zeroed at
+/// the open, lent to one caller at a time under a lock of its own, so a cache's put copies its
+/// sample into the session's memory and takes none of its own
+/// ([`crate::SessionEngine::cache_bytes`]). The engine reads none of what the caches write there.
+pub trait CacheBytes {
+    /// Call `with` with the ring's bytes, closed or not: the span is the session's memory and not
+    /// its state, and stands until the engine is let go. `with` runs under a lock no other
+    /// operation of the session takes, and calls into nothing that takes the bytes again.
+    fn with_cache_bytes(&self, with: &mut dyn FnMut(&mut [u8]));
 }

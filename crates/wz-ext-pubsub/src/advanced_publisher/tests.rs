@@ -18,8 +18,8 @@ struct RecordingPlane {
     stamped: std::sync::Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// The node clock the plane answers with; `NodeHlc::disabled()` unless a test gives one.
     node: NodeHlc,
-    /// The rows a session lends the cache, as many as it has free; `None` keeps it on the heap.
-    rows: Option<usize>,
+    /// The bytes of the ring the session keeps its caches in; `None` keeps them on the heap.
+    ring: Option<usize>,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -46,14 +46,14 @@ impl RecordingPlane {
             order_from: None,
             stamped: std::sync::Mutex::new(Vec::new()),
             node: NodeHlc::disabled(),
-            rows: None,
+            ring: None,
         }
     }
 
-    /// A plane whose session lends its caches `rows` rows.
-    fn with_rows(rows: usize) -> Self {
+    /// A plane whose session keeps its caches in a ring of `span` bytes.
+    fn with_ring(span: usize) -> Self {
         Self {
-            rows: Some(rows),
+            ring: Some(span),
             ..Self::new(true)
         }
     }
@@ -207,13 +207,13 @@ impl AdvancedPublisherPlane for RecordingPlane {
     }
 
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
-        match self.rows {
+        match self.ring {
             None => Ok(CacheStore::new(config)),
-            Some(rows) => {
-                let (lender, _out) = crate::advanced_cache::test_rows::HeapRows::new(rows);
-                CacheStore::over_rows(config, Box::new(lender))
-                    .ok_or(AdvancedPublisherError::CacheRowsExhausted)
-            }
+            Some(span) => CacheStore::in_ring(
+                config,
+                Box::new(crate::advanced_cache::test_ring::HeapRing::new(span)),
+            )
+            .ok_or(AdvancedPublisherError::CacheRingUnavailable),
         }
     }
 
@@ -684,12 +684,13 @@ fn the_publisher_knobs_reach_the_publish_options_and_default_changes_nothing() {
     );
 }
 
-/// A cache of rows refuses a sample larger than a row before the sample takes a time or a
-/// sequence number, and nothing is sent; a sample at the room is sent and kept, numbered as if
-/// the refusal had not been.
+/// A cache in a ring refuses a sample whose record is longer than the whole ring before the sample
+/// takes a time or a sequence number, and nothing is sent; a record of the ring's length is sent
+/// and kept, numbered as if the refusal had not been.
 #[test]
-fn a_cache_of_rows_refuses_a_sample_past_its_room_before_anything_is_sent() {
-    let plane = Arc::new(RecordingPlane::with_rows(4));
+fn a_cache_in_a_ring_refuses_a_record_past_the_ring_before_anything_is_sent() {
+    // Room for 256 bytes of records: a header of 88, the key's 9 and a payload of 159.
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 256));
     let options = AdvancedPublisherOptions {
         cache: Some(CacheConfig {
             max_samples: 2,
@@ -700,19 +701,19 @@ fn a_cache_of_rows_refuses_a_sample_past_its_room_before_anything_is_sent() {
     };
     let publisher = AdvancedPublisherOn::declare_on(
         Arc::clone(&plane),
-        "demo/rows",
+        "demo/ring",
         options,
         SessionZid::from([0x01]),
     )
-    .expect("four rows lend a cache of two");
+    .expect("the ring holds a record");
 
-    let room = wz_session_core::caps::ADVANCED_CACHE_SAMPLE_BYTES;
-    let past = vec![0u8; room + 1];
-    assert_eq!(publisher.put(&past), Err(PublishError::ExceedsCacheRow));
+    assert_eq!(
+        publisher.put(&[0u8; 160]),
+        Err(PublishError::ExceedsCacheRoom)
+    );
     assert!(plane.stamped().is_empty(), "nothing was sent");
 
-    let at_room = vec![0u8; room];
-    assert_eq!(publisher.put(&at_room), Ok(room));
+    assert_eq!(publisher.put(&[0u8; 159]), Ok(159));
     assert_eq!(
         plane.stamped().first().map(|(_, sn)| *sn),
         Some(Some(0)),
@@ -721,27 +722,23 @@ fn a_cache_of_rows_refuses_a_sample_past_its_room_before_anything_is_sent() {
     assert_eq!(publisher.cache().map(CacheStore::len), Some(1));
 }
 
-/// A session with fewer rows free than the cache's depth refuses the cache before anything is
-/// declared.
+/// A session whose ring holds no record refuses the cache before anything is declared.
 #[test]
-fn a_cache_with_too_few_rows_is_refused_before_anything_is_declared() {
-    let plane = Arc::new(RecordingPlane::with_rows(1));
+fn a_cache_in_a_ring_that_holds_no_record_is_refused_before_anything_is_declared() {
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 80));
     let options = AdvancedPublisherOptions {
-        cache: Some(CacheConfig {
-            max_samples: 2,
-            ..CacheConfig::default()
-        }),
+        cache: Some(CacheConfig::default()),
         ..AdvancedPublisherOptions::default()
     };
     let refused = AdvancedPublisherOn::declare_on(
         Arc::clone(&plane),
-        "demo/rows",
+        "demo/ring",
         options,
         SessionZid::from([0x01]),
     );
     assert!(matches!(
         refused,
-        Err(AdvancedPublisherError::CacheRowsExhausted)
+        Err(AdvancedPublisherError::CacheRingUnavailable)
     ));
     assert!(plane.events().is_empty(), "nothing was declared");
 }
@@ -757,27 +754,28 @@ fn lent_options(attachment: &[u8]) -> AdvancedPutOptions<'_> {
         })
 }
 
-/// A lent attachment counts against a row's room as an owned one does: a payload beside an
-/// attachment of the whole room is refused, and the attachment alone is sent and kept.
+/// A lent attachment and a lent schema count in a record as owned ones do: beside a payload of
+/// one byte they pass the ring, and alone they fill it.
 #[test]
-fn a_lent_attachment_counts_against_a_rows_room() {
-    let plane = Arc::new(RecordingPlane::with_rows(1));
+fn a_lent_attachment_and_schema_count_in_the_record() {
+    // 256 bytes of records: a header of 88, the key's 9, the schema's 10 and an attachment of 149.
+    let plane = Arc::new(RecordingPlane::with_ring(32 + 256));
     let options = AdvancedPublisherOptions {
         cache: Some(CacheConfig::default()),
         ..AdvancedPublisherOptions::default()
     };
     let publisher = AdvancedPublisherOn::declare_on(
         Arc::clone(&plane),
-        "demo/rows",
+        "demo/ring",
         options,
         SessionZid::from([0x01]),
     )
-    .expect("one row lends a cache of one");
+    .expect("the ring holds a record");
 
-    let attachment = vec![7u8; wz_session_core::caps::ADVANCED_CACHE_SAMPLE_BYTES];
+    let attachment = [7u8; 149];
     assert_eq!(
         publisher.put_with(b"x", lent_options(&attachment)),
-        Err(PublishError::ExceedsCacheRow)
+        Err(PublishError::ExceedsCacheRoom)
     );
     assert_eq!(publisher.cache().map(CacheStore::len), Some(0));
     assert_eq!(publisher.put_with(b"", lent_options(&attachment)), Ok(0));
