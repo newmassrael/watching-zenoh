@@ -862,7 +862,8 @@ The limits zenoh-pico has a constant for already default to it (`PICO_UNICAST_BA
 `PICO_MULTICAST_BATCH_BYTES` 2,048, `PICO_FRAG_MAX_BYTES` 4,096) and have no preset.
 `MAX_KEYEXPR_BYTES` keeps 256: zenoh-pico bounds no key, and a shorter bound would refuse keys a
 router declares and samples it delivers that zenoh-pico takes. The limits of what the peer writes
-(`MAX_INBOUND_SUB_INTERESTS`, `MAX_REMOTE_DECLS`, `MAX_PEER_KEYEXPR_ALIASES`) keep theirs too: the
+(`MAX_INBOUND_SUB_INTERESTS`, `MAX_REMOTE_DECLS`, `MAX_PEER_KEYEXPR_ALIASES`, and
+`MAX_MEMBER_KEYEXPRS`, one group member's own keyexprs, whose default is one peer's 16) keep theirs too: the
 peer, not the program, decides how many it sends, and zenoh-pico allocates each as it comes with no
 bound, so a lower preset would refuse declarations zenoh-pico accepts. Their memory is cut by the
 form of their rows instead: one pool of each kind the faces share, bounded by what the session's
