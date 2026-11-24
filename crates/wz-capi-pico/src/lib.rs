@@ -625,8 +625,6 @@ pub mod platform;
 // The places of the objects a program holds that no session holds for it, reserved once for the
 // process: in every library without the tokio engine, and in one with it that has their doors.
 #[cfg(wz_process_pools)]
-// Totality debt TD-156 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema: the instance keys' and the message payloads'.

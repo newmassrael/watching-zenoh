@@ -237,7 +237,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (26) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (25) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -274,7 +274,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `arithmetic_side_effects` | 113 | in flight |
-| TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing` | 2 | in flight |
 | TD-168 | `wz-capi-pico` | `connectivity` | `indexing_slicing`, `arithmetic_side_effects` | 8 | in flight |
 | TD-181 | `wz-capi-pico` | `matching` | `arithmetic_side_effects` | 3 | in flight |
 | TD-185 | `wz-capi-pico` | `app_transport` | `arithmetic_side_effects` | 2 | in flight |
@@ -326,11 +325,6 @@ a send hands its dispatch can refuse its own message (a key or a payload past it
 whatever buffer it is written into, so a heap send answers that refusal as a value
 (`SendWireError::Codec`, `PushOutcome::Refused`); an owned message, which its writer cannot
 refuse, is framed through the codec's own vector sink, which refuses no write.
-
-TD-156 (`process_pool`) keeps `indexing_slicing` for `Plan::with`, the `const fn` that writes a
-kind's slots and their bytes into the plan the build works out when it is compiled. Its two writes
-are the module's last sites, made by index because a `const fn` before Rust 1.83 takes no `&mut`,
-as TD-207 says; they are paid at the MSRV of 1.83.
 
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
