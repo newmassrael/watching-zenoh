@@ -687,17 +687,19 @@ impl SessionEngine for SharedSession {
     }
 
     #[cfg(feature = "queryable")]
-    #[allow(clippy::too_many_arguments)]
     fn declare_queryable_on_link_set(
         &self,
         keyexpr: &str,
         wire: WireKey,
         complete: bool,
-        allowed_origin: Locality,
-        links: LinkRestriction,
+        reach: wz_capi_port::DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Result<wz_capi_port::QblId, Refusal> {
+        let wz_capi_port::DeclarationReach {
+            allowed_origin,
+            links,
+        } = reach;
         self.declared(|| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),

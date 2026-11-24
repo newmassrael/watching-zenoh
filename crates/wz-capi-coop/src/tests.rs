@@ -1499,7 +1499,7 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let into = log.clone();
     (
-        Arc::new(move |matching| into.lock().unwrap().push(matching)),
+        wz_capi_port::MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
         log,
     )
 }
@@ -1517,12 +1517,15 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         complete_required: false,
     };
     let (sink, told) = heard();
-    let kept = Arc::downgrade(&sink);
     assert_eq!(
         engine.declare_matching_listener(plane, "demo/q", sink, false),
         Err(wz_capi_port::Refusal::NotBuilt)
     );
-    assert!(kept.upgrade().is_none(), "the refused sink is not kept");
+    assert_eq!(
+        Arc::strong_count(&told),
+        1,
+        "the refused sink is not kept: the log is held by nothing else"
+    );
     assert_eq!(
         engine.declare_write_filter(
             plane,
@@ -1973,8 +1976,10 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::handle(layout),
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::handle(layout),
+        },
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -2045,8 +2050,10 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             || config(router),
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
-            &AllocatorMemory,
-            held,
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held,
+            },
         )
         .expect("the session opens")
     };
@@ -2113,7 +2120,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
 #[test]
 #[should_panic(expected = "taken again on the thread that holds it")]
 fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
-    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces};
+    use crate::arena::{AllocatorMemory, EntityKind, HeldPlaces, OpenStorage};
     use crate::OpenKeyIds;
     use core::alloc::Layout;
     use wz_capi_port::PlaceLender;
@@ -2129,8 +2136,10 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         || config(&router),
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        held,
+        OpenStorage {
+            memory: &AllocatorMemory,
+            held,
+        },
     )
     .expect("the session opens");
     let place = engine
@@ -2629,8 +2638,10 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         },
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2671,8 +2682,10 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         listener,
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
-        &AllocatorMemory,
-        crate::arena::HeldPlaces::NONE,
+        crate::arena::OpenStorage {
+            memory: &AllocatorMemory,
+            held: crate::arena::HeldPlaces::NONE,
+        },
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());
@@ -2761,11 +2774,7 @@ mod queryable;
 mod redial_heap;
 mod redial_wait;
 mod replay;
-// The round's own tests write parts into its area, which a lent-only build keeps none of.
-#[cfg(not(feature = "rx-lent-only"))]
 mod round;
-#[cfg(feature = "rx-lent-only")]
-mod round_lent;
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",

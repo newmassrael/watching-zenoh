@@ -959,23 +959,15 @@ impl TransportMetrics {
     /// every configured key in `keys`. Both series are created on the first
     /// call even when `keys` is empty, as upstream creates the pair together
     /// (`commons/zenoh-stats/src/transport.rs` @ `pub fn observe_network_message_payload(`).
-    #[allow(clippy::too_many_arguments)]
+    /// Upstream's labels (space, priority, message, shm) come as the one
+    /// [`NetworkMessagePayloadLabels`] both series are labelled by.
     pub fn observe_network_message_payload<'k>(
         &mut self,
         direction: StatsDirection,
-        space: StatSpace,
-        priority: Priority,
-        message: MessageLabel,
-        shm: bool,
+        labels: NetworkMessagePayloadLabels,
         size: u64,
         keys: impl IntoIterator<Item = &'k str>,
     ) {
-        let labels = NetworkMessagePayloadLabels {
-            space,
-            priority,
-            message,
-            shm,
-        };
         let own = direction.of_mut(&mut self.directions);
         own.network_message_payload
             .entry(labels.clone())

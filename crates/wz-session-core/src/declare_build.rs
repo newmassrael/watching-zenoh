@@ -1159,7 +1159,11 @@ pub fn build_group_announcement(
         GroupDeclaration::Token => {
             build_declare_token(id, mapping_id, suffix).map_err(SendWireError::Codec)
         }
-        #[allow(unreachable_patterns)]
+        #[cfg(not(all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
         _ => Err(SendWireError::FeatureDisabled),
     }
 }
@@ -1200,7 +1204,11 @@ pub fn build_group_retraction(
         GroupDeclaration::Token => {
             build_undeclare_token_on_wire(id, mapping_id, suffix).map_err(SendWireError::Codec)
         }
-        #[allow(unreachable_patterns)]
+        #[cfg(not(all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
         _ => Err(SendWireError::FeatureDisabled),
     }
 }

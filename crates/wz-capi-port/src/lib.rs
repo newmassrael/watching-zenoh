@@ -100,6 +100,7 @@ mod query;
 mod refusal;
 // The limits of the process's runtime, which the machines it makes apart from any session read.
 pub mod runtime_limits;
+pub mod scout_ask;
 pub mod sync;
 // A time base the program supplies, made from the calls each C ABI's door is handed.
 #[cfg(feature = "time-base")]
@@ -107,7 +108,7 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
-pub use engine::{KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
+pub use engine::{DeclarationReach, KeyHolds, RedeclareRefusal, SessionEngine, Tickers};
 pub use entity_place::{CacheBytes, EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
@@ -118,6 +119,7 @@ pub use query::{
     SharedQueryFn,
 };
 pub use refusal::Refusal;
+pub use scout_ask::ScoutAsk;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
@@ -362,7 +364,80 @@ impl Drop for LivelinessSink {
 /// design of the matching plane: a C program holds one matching listener and must be told about
 /// the SESSION's verdict, not about each face's. A per-face pass-through would report the
 /// opposite of the truth whenever one face matches and another does not.
-pub type MatchingSink = Arc<dyn Fn(bool) + Send + Sync>;
+///
+/// Called through a shared borrow, from any thread and from inside itself, as a subscriber's
+/// callback is ([`SubscriberSink`]), and let go of once, after its last call: its drop is the
+/// program's.
+pub enum MatchingSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawMatchingCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<dyn Fn(bool) + Send + Sync>),
+}
+
+/// The parts of a C program's closure an engine calls ([`MatchingSink::Raw`]): plain values; the
+/// drop runs once, when the [`MatchingSink`] holding them is dropped.
+#[derive(Clone, Copy)]
+pub struct RawMatchingCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, matching: bool),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `MatchingSink::raw`, whose caller
+// promises what the marker traits ask of it; the shared one is `Send + Sync` itself.
+unsafe impl Send for MatchingSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for MatchingSink {}
+
+impl MatchingSink {
+    /// A C program's closure: `call` with `context` for each status, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// As [`SubscriberSink::raw`]'s.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, matching: bool),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawMatchingCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `matching` to the callback.
+    pub fn call(&self, matching: bool) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, matching) },
+            Self::Shared(call) => call(matching),
+        }
+    }
+}
+
+impl Drop for MatchingSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawMatchingCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call, since a
+            // call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// Which declarations a write filter counts: pico's `_Z_WRITE_FILTER_SUBSCRIBER` for a
 /// publisher, `_Z_WRITE_FILTER_QUERYABLE` for a querier (`vendor/zenoh-pico/src/net/filtering.c`

@@ -82,6 +82,43 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
+/// The storage [`SessionBytes`] is on this build, refilled where it lies.
+///
+/// [`store_session_bytes`] is generic over this storage and not over a capacity: the growable
+/// form of [`SessionBytes`] names no capacity, so a capacity parameter could not be inferred from
+/// a slot of that form and every caller would have to spell it out.
+pub trait SessionBytesStore: Default {
+    /// Hold `src` in place of what was held: `false` when it does not fit, which only the fixed
+    /// form can say.
+    fn refill(&mut self, src: &[u8]) -> bool;
+}
+
+#[cfg(not(feature = "session-fixed-storage"))]
+impl SessionBytesStore for Vec<u8> {
+    fn refill(&mut self, src: &[u8]) -> bool {
+        self.clear();
+        self.extend_from_slice(src);
+        true
+    }
+}
+
+#[cfg(feature = "session-fixed-storage")]
+impl<const N: usize> SessionBytesStore for heapless::Vec<u8, N> {
+    fn refill(&mut self, src: &[u8]) -> bool {
+        self.clear();
+        self.extend_from_slice(src).is_ok()
+    }
+}
+
+/// [`session_bytes`] written into `slot` where it lies: `slot` holds a copy of `src` after, or
+/// `None` when its storage cannot hold it. A slot of the fixed form is as wide as its capacity,
+/// and a value built beside it and moved in was one more such copy in the frame of every caller.
+pub fn store_session_bytes<B: SessionBytesStore>(slot: &mut Option<B>, src: &[u8]) {
+    if !slot.get_or_insert_with(B::default).refill(src) {
+        *slot = None;
+    }
+}
+
 /// A cookie for [`SessionInitParams::cookie`] from an array the caller wrote, written the
 /// same way on every profile. An array longer than [`COOKIE_MAX`] does not build; a cookie
 /// read at run time is copied with [`session_bytes`], whose refusal the caller reports.
@@ -858,7 +895,7 @@ mod keep_alive_tests {
 
 #[cfg(test)]
 mod cookie_bound_tests {
-    use super::{session_bytes, COOKIE_FIELD_MAX, COOKIE_MAX};
+    use super::{session_bytes, store_session_bytes, SessionBytes, COOKIE_FIELD_MAX, COOKIE_MAX};
 
     /// `COOKIE_FIELD_MAX` is the capacity the INIT body declares for its cookie, read from its
     /// source, so a codec that changed it would fail here and not leave the bound's ceiling a copy of
@@ -906,6 +943,25 @@ mod cookie_bound_tests {
         assert!(too_long.is_none());
         #[cfg(not(feature = "session-fixed-storage"))]
         assert_eq!(too_long.map(|b| b.len()), Some(9));
+    }
+
+    /// A slot written in place holds what was written last, whatever it held before; one written
+    /// a value the fixed form cannot hold holds none, as `session_bytes` answers. The calls name no
+    /// capacity: the slot's own type decides, on the growable form too, whose type names none.
+    #[test]
+    fn a_slot_written_in_place_holds_the_last_value_that_fits() {
+        let mut slot: Option<SessionBytes<8>> = None;
+        store_session_bytes(&mut slot, &[1, 2, 3]);
+        assert_eq!(slot.as_deref(), Some(&[1u8, 2, 3][..]));
+        store_session_bytes(&mut slot, &[9; 8]);
+        assert_eq!(slot.as_deref(), Some(&[9u8; 8][..]));
+        store_session_bytes(&mut slot, &[4]);
+        assert_eq!(slot.as_deref(), Some(&[4u8][..]));
+        store_session_bytes(&mut slot, &[7; 9]);
+        #[cfg(feature = "session-fixed-storage")]
+        assert_eq!(slot, None);
+        #[cfg(not(feature = "session-fixed-storage"))]
+        assert_eq!(slot.as_deref(), Some(&[7u8; 9][..]));
     }
 }
 

@@ -303,6 +303,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/querier.rs` | S7 | |
 | `crates/wz-capi-pico/src/query.rs` | S7 | |
 | `crates/wz-capi-pico/src/redeclare.rs` | S12 | |
+| `crates/wz-capi-pico/src/refusal.rs` | S7 | |
 | `crates/wz-capi-pico/src/replay_publisher.rs` | S12 | |
 | `crates/wz-capi-pico/src/replay_subscriber.rs` | S12 | |
 | `crates/wz-capi-pico/src/reply_keyexpr.rs` | S7 | |

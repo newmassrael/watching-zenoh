@@ -183,7 +183,7 @@ unsafe fn judge(
     frame: &[u8],
     now: u64,
 ) -> (ZResult, wz_ext_e2e_verdict_t) {
-    let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+    let mut verdict = wz_ext_e2e_verdict_t::default();
     let rc = wz_ext_e2e_receiver_judge(
         wz_ext_e2e_receiver_loan(rx),
         stream,

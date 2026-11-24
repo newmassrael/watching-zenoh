@@ -244,6 +244,14 @@ pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
 /// declaration past it is refused, having sent nothing.
 pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 
+/// The declaration watches a session holds at once, over every kind of entity watched. A watch
+/// past it is refused, having installed nothing.
+pub const MAX_DECL_WATCHES: usize = generated::MAX_DECL_WATCHES;
+
+/// The transport events listeners a session holds at once. A listener past it is refused, having
+/// been told nothing.
+pub const MAX_TRANSPORT_EVENTS_LISTENERS: usize = generated::MAX_TRANSPORT_EVENTS_LISTENERS;
+
 /// The distinct key expressions a session declares to its peers at once (each held by every
 /// entity that names it). A declaration of one more distinct key is refused, having sent nothing.
 pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;

@@ -176,18 +176,54 @@ pub fn peer_region(extensions: &[ExtEntryOwned]) -> Result<Option<RegionName>, R
 pub fn peer_region_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<RegionName>, RegionNameError> {
-    let want = crate::ext_header::ext_eid(REGION_NAME_EXT_HEADER);
-    for ext in extensions {
-        if ext.eid() != want {
-            continue;
-        }
-        let Some(value) = ext.plain_zbuf() else {
-            continue;
-        };
-        let s = core::str::from_utf8(value).map_err(|_| RegionNameError::NotUtf8)?;
-        return RegionName::new(s).map(Some);
+    extensions
+        .into_iter()
+        .find_map(|ext| region_of_entry(&ext))
+        .transpose()
+}
+
+/// One entry's part in [`peer_region`]: the name or its refusal when the entry is the region
+/// extension with a plain ZBuf body, `None` otherwise (and the scan goes on).
+pub fn region_of_entry<E: crate::ext_view::ExtEntryView>(
+    ext: &E,
+) -> Option<Result<RegionName, RegionNameError>> {
+    if ext.eid() != crate::ext_header::ext_eid(REGION_NAME_EXT_HEADER) {
+        return None;
     }
-    Ok(None)
+    let value = ext.plain_zbuf()?;
+    Some(
+        core::str::from_utf8(value)
+            .map_err(|_| RegionNameError::NotUtf8)
+            .and_then(RegionName::new),
+    )
+}
+
+/// The patch level ([`crate::extpatch::peer_patch_in`]) and the region identity
+/// ([`peer_region_in`]) of one Init, off a single walk of its chain: each answer is the one its
+/// own reader gives, and the walk stops once both extensions are found.
+pub fn peer_patch_and_region_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+) -> (
+    crate::extpatch::PatchLevel,
+    Result<Option<RegionName>, RegionNameError>,
+) {
+    let mut patch = None;
+    let mut region = None;
+    for ext in extensions {
+        if patch.is_none() {
+            patch = crate::extpatch::patch_of_entry(&ext);
+        }
+        if region.is_none() {
+            region = region_of_entry(&ext);
+        }
+        if patch.is_some() && region.is_some() {
+            break;
+        }
+    }
+    (
+        patch.unwrap_or(crate::extpatch::NO_PATCH),
+        region.transpose(),
+    )
 }
 
 #[cfg(test)]
@@ -281,5 +317,55 @@ mod tests {
     #[test]
     fn empty_is_empty_and_never_too_long() {
         assert_eq!(RegionName::new(""), Err(RegionNameError::Empty));
+    }
+
+    /// The one walk answers each extension as its own reader does, in either order on the chain
+    /// and with either one absent.
+    #[test]
+    fn one_walk_reads_the_patch_and_the_region_as_their_own_readers_do() {
+        let name = RegionName::new("north").expect("a valid name");
+        let region = || encode_region_name_ext(&name).expect("encodes");
+        let patch = || crate::extpatch::encode_patch_ext_at(1);
+        for chain in [[patch(), region()], [region(), patch()]] {
+            assert_eq!(
+                peer_patch_and_region_in(&chain),
+                (1, Ok(Some(name.clone())))
+            );
+            assert_eq!(
+                peer_patch_and_region_in(&chain),
+                (crate::extpatch::peer_patch(&chain), peer_region(&chain))
+            );
+        }
+        assert_eq!(
+            peer_patch_and_region_in(&[region()]),
+            (crate::extpatch::NO_PATCH, Ok(Some(name.clone())))
+        );
+        assert_eq!(peer_patch_and_region_in(&[patch()]), (1, Ok(None)));
+        assert_eq!(
+            peer_patch_and_region_in(&[] as &[ExtEntryOwned]),
+            (crate::extpatch::NO_PATCH, Ok(None))
+        );
+    }
+
+    /// A refused region does not end the walk before the patch: the patch reject is judged
+    /// first in the handshake, so it must still see the level a later entry announces. Only the
+    /// first region entry is judged, as [`peer_region`] judges it.
+    #[test]
+    fn one_walk_reads_the_patch_past_a_refused_region_and_judges_the_first_region() {
+        let empty = ExtEntryOwned {
+            header: REGION_NAME_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 0,
+                value: crate::codec_owned::owned_bytes(b"").expect("empty fits"),
+            }),
+        };
+        let valid = encode_region_name_ext(&RegionName::new("north").expect("a valid name"))
+            .expect("encodes");
+        let chain = [empty, valid, crate::extpatch::encode_patch_ext_at(1)];
+        assert_eq!(
+            peer_patch_and_region_in(&chain),
+            (1, Err(RegionNameError::Empty))
+        );
+        assert_eq!(peer_region(&chain), Err(RegionNameError::Empty));
     }
 }

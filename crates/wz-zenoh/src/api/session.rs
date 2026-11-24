@@ -1562,7 +1562,7 @@ impl Engine {
                     tokio_engine::router_plane_of(kind),
                     key,
                     tokio_engine::engine_locality(destination),
-                    Box::new(move |matching| sink(matching)),
+                    Box::new(move |matching| sink.call(matching)),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a matching listener {id}, more than an id holds")
@@ -4104,7 +4104,7 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> MatchingSink {
         let ordered = Ordered::new(callback, notifier);
-        Arc::new(move |matching| ordered.deliver(MatchingStatus { matching }))
+        MatchingSink::shared(move |matching| ordered.deliver(MatchingStatus { matching }))
     }
 
     /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a

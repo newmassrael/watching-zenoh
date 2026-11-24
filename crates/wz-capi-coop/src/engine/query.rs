@@ -22,8 +22,9 @@
 //!
 //! The session's own get is the exception to the round (`local-queryable`): the queryables it
 //! matched are noted ([`QueryPlane::take_asked`]) and the get hands each of them its own view
-//! ([`OwnGet`]) once the session's lock is let go, inside the call. Only a queryable whose callback
-//! the asking thread is inside of has the query copied, to be handed when that callback returns.
+//! ([`OwnGet`]) once the session's lock is let go, inside the call. Nothing of the query is copied:
+//! a queryable whose callback the asking thread is inside of is called there too, as zenoh-pico
+//! calls it.
 //!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
 //! arrives when every row is taken is refused and counted: it is not handed to a callback, and
@@ -36,8 +37,6 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-#[cfg(feature = "local-queryable")]
-use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::ptr::NonNull;
 #[cfg(feature = "local-queryable")]
@@ -71,8 +70,6 @@ use wz_session_core::sample::{EncodingHint, SourceInfo};
 use wz_session_core::session_tables::QueryableHandle;
 use wz_session_mcu::dial::McuActions;
 
-#[cfg(feature = "local-queryable")]
-use super::queued::Queued;
 use super::{key_on_link, lock, CoopEngine};
 
 /// One of the session's own queryables, as a row of the session's tables holds it: the row keeps
@@ -222,13 +219,6 @@ impl QueryableCall {
         unsafe { self.call.0.as_ref() }
     }
 
-    /// The queryable's id: what a get of the session's own made from inside its callback reads it
-    /// running by.
-    #[cfg(feature = "local-queryable")]
-    pub(super) fn id(&self) -> QblId {
-        self.row().id
-    }
-
     /// Whether the queryable was undeclared since the call was begun: its callback is handed
     /// nothing more.
     pub(super) fn retired(&self) -> bool {
@@ -265,64 +255,6 @@ impl QueryableCall {
             call: RowCallback::begin(row).expect("a live row begins a call"),
             handle,
         }
-    }
-}
-
-/// A query copied out of the dispatch that delivered it, for a callback that runs after: the
-/// session's own get, kept for a queryable whose callback the asking thread is inside of.
-#[cfg(feature = "local-queryable")]
-pub(super) struct OwnedQuery {
-    keyexpr: String,
-    parameters: Option<Vec<u8>>,
-    payload: Option<Vec<u8>>,
-    attachment: Option<Vec<u8>>,
-    encoding: Option<EncodingHint>,
-    source_info: Option<SourceInfo>,
-    rid: wz_session_core::wire_id::RequestId,
-    qos: QosLevel,
-}
-
-#[cfg(feature = "local-queryable")]
-impl OwnedQuery {
-    pub(super) fn of(view: &dyn QueryView) -> Self {
-        Self {
-            keyexpr: view.keyexpr().to_owned(),
-            parameters: view.parameters().map(<[u8]>::to_vec),
-            payload: view.payload().map(<[u8]>::to_vec),
-            attachment: view.attachment().map(<[u8]>::to_vec),
-            encoding: view.encoding().cloned(),
-            source_info: view.source_info().cloned(),
-            rid: view.rid(),
-            qos: view.qos(),
-        }
-    }
-}
-
-#[cfg(feature = "local-queryable")]
-impl QueryView for OwnedQuery {
-    fn keyexpr(&self) -> &str {
-        &self.keyexpr
-    }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters.as_deref()
-    }
-    fn attachment(&self) -> Option<&[u8]> {
-        self.attachment.as_deref()
-    }
-    fn source_info(&self) -> Option<&SourceInfo> {
-        self.source_info.as_ref()
-    }
-    fn payload(&self) -> Option<&[u8]> {
-        self.payload.as_deref()
-    }
-    fn encoding(&self) -> Option<&EncodingHint> {
-        self.encoding.as_ref()
-    }
-    fn rid(&self) -> wz_session_core::wire_id::RequestId {
-        self.rid
-    }
-    fn qos(&self) -> QosLevel {
-        self.qos
     }
 }
 
@@ -665,12 +597,6 @@ pub(super) struct QueryPlane {
     #[cfg(feature = "local-queryable")]
     asking: AtomicBool,
     pub(super) holds: Mutex<FinalHolds>,
-    /// The session's own gets waiting for the callbacks of queryables the asking thread was inside
-    /// of, in the order they were asked: the call begun on the row of the queryable each matched,
-    /// the query, and the generation it is answered under. A link's queries wait in the round of
-    /// deliveries.
-    #[cfg(feature = "local-queryable")]
-    pub(super) queries: Queued<VecDeque<(QueryableCall, OwnedQuery, u64)>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -710,8 +636,6 @@ impl QueryPlane {
             #[cfg(feature = "local-queryable")]
             asking: AtomicBool::new(false),
             holds: Mutex::new(FinalHolds::holding(rows)),
-            #[cfg(feature = "local-queryable")]
-            queries: Queued::new(VecDeque::new()),
             refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
@@ -1136,7 +1060,8 @@ mod round_tests {
         let key = core::str::from_utf8(&datagram[..6]).expect("a key");
         let round = Round::leaked(4);
         let noting = Arc::new(Noting(Noted::default()));
-        let answering: Weak<dyn AnswersQueries> = Arc::downgrade(&noting);
+        // Made of the stand-in's own type, then unsized where the round takes it.
+        let answering: Weak<Noting> = Arc::downgrade(&noting);
         round.answer_queries_with(answering);
         let (row, handle) = row();
         // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.

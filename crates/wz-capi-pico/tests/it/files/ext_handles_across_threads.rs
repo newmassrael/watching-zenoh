@@ -190,7 +190,7 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
                             counter, round as u64,
                             "stream {stream} keeps its own counter"
                         );
-                        let mut verdict: wz_ext_e2e_verdict_t = std::mem::zeroed();
+                        let mut verdict = wz_ext_e2e_verdict_t::default();
                         let rc = wz_ext_e2e_receiver_judge(
                             rx,
                             stream,
@@ -269,7 +269,7 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
                     start.wait();
                     for round in 0..ROUNDS {
                         // An undecodable payload between each two, which every thread counts.
-                        let mut key: wz_ext_instance_key_t = std::mem::zeroed();
+                        let mut key = wz_ext_instance_key_t::default();
                         let garbage = [0xFFu8, 0xFF];
                         let rc = wz_ext_instance_keyer_index(
                             keyer,
@@ -367,6 +367,15 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                     let schema = wz_ext_payload_schema_loan(schema_at.get());
                     let message = CString::new("syn.thread.Pose").unwrap();
                     let path = CString::new("serial").unwrap();
+                    // The thread's storage, which outlives its payload.
+                    let (fields, bytes) = (8, 64);
+                    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(fields, bytes)];
+                    let options = wz_ext_message_payload_options_t {
+                        storage: storage.as_mut_ptr(),
+                        storage_len: storage.len(),
+                        fields,
+                        bytes,
+                    };
                     let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
                     let rc = wz_ext_message_payload_new(
                         &mut payload,
@@ -374,13 +383,14 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                         thread % 2,
                         schema,
                         message.as_ptr(),
+                        &options,
                         std::ptr::null_mut(),
                     );
                     assert_eq!(rc, Z_OK, "thread {thread}'s payload");
                     let mine = wz_ext_message_payload_loan(&payload);
                     start.wait();
                     for round in 0..ROUNDS {
-                        let mut entry: wz_ext_message_entry_t = std::mem::zeroed();
+                        let mut entry = wz_ext_message_entry_t::default();
                         let index = round % 2;
                         let rc = wz_ext_message_catalog_entry(catalog, index, &mut entry);
                         assert_eq!(rc, Z_OK);

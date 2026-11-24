@@ -641,68 +641,25 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
         plan.reserved_bytes() < built.reserved_bytes(),
         "the lowered limits lower the arena"
     );
-    // The round's tables follow its area, where the build keeps one.
-    #[cfg(not(feature = "rx-lent-only"))]
-    {
-        let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
-        let lane = parts
-            .iter()
-            .position(|part| *part == "delivery lane")
-            .expect("the plan has the lane");
-        assert_eq!(
-            parts[lane + 1..lane + 4],
-            ["delivery records", "delivery callbacks", "delivery keys"]
-        );
-    }
 }
 
-/// The delivery lane's area is the `DELIVERY_LANE_BYTES` the session's limits state, one buffer
-/// and its flag: a lowered value lowers it, and one over the build's refuses the plan, naming the
-/// limit and both values.
-#[cfg(not(feature = "rx-lent-only"))]
+/// The plan lays out no delivery area: every record is read where it lies, so the plan has no lane
+/// and no flag of one, and the round's tables are laid out next to each other. Turned red by a plan
+/// that reserves the area again.
 #[test]
-fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
-    let built =
-        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&built, "delivery lane").count, 1);
-    assert_eq!(
-        row(&built, "delivery lane").entry_bytes,
-        SessionLimits::defaults().delivery_lane_bytes()
-    );
-    assert_eq!(row(&built, "delivery lane flag").count, 1);
-    let lowered = lowered(|l| l.select_delivery_lane_bytes(1024));
-    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(row(&plan, "delivery lane").entry_bytes, 1024);
-    let over = caps::DELIVERY_LANE_BYTES + 1;
-    let mut raised = SessionLimits::defaults();
-    if raised.select_delivery_lane_bytes(over).is_ok() {
-        assert_eq!(
-            ArenaPlan::of(&client_config(), &raised),
-            Err(ArenaRefused::Limit {
-                limit: "DELIVERY_LANE_BYTES",
-                why: UnlentRows::OverCeiling {
-                    value: over,
-                    ceiling: caps::DELIVERY_LANE_BYTES,
-                },
-            })
-        );
-    }
-}
-
-/// A build that keeps no delivery area (`rx-lent-only`) lays out none: the plan has no lane and no
-/// flag of one, and the round's tables are its first rows of the session's state. Turned red by a
-/// lent-only plan that still reserves the area.
-#[cfg(feature = "rx-lent-only")]
-#[test]
-fn a_lent_only_plan_lays_out_no_delivery_lane() {
+fn the_plan_lays_out_no_delivery_lane() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let parts: Vec<&str> = built.rows().iter().map(|row| row.part).collect();
     assert!(!parts.contains(&"delivery lane"));
     assert!(!parts.contains(&"delivery lane flag"));
-    assert!(
-        parts.contains(&"delivery records"),
-        "CONTROL: the round's tables are laid out"
+    let records = parts
+        .iter()
+        .position(|part| *part == "delivery records")
+        .expect("CONTROL: the round's tables are laid out");
+    assert_eq!(
+        parts[records..records + 3],
+        ["delivery records", "delivery callbacks", "delivery keys"]
     );
 }
 
@@ -1616,13 +1573,11 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, the key arena's and the advanced
-        // cache's ring one area of them, a pool's one area of the rows its faces share, the
-        // watchers' one row of the spans of their lists, and the session's table set one area of
-        // its tables, not a row of each. The udp ports' slots and their queue are a listening
+        // The key arena's row and the advanced cache's ring are one area of the limit's bytes, a
+        // pool's one area of the rows its faces share, the watchers' one row of the spans of their
+        // lists, and the session's table set one area of its tables, not a row of each. The udp ports' slots and their queue are a listening
         // session's, which the preset's client is not: it holds none whatever the limit.
-        if row.basis == "DELIVERY_LANE_BYTES"
-            || row.basis == "KEY_ARENA_BYTES"
+        if row.basis == "KEY_ARENA_BYTES"
             || row.basis == "ADVANCED_CACHE_BYTES"
             || row.basis == "UDP_PORT_SLOTS"
             || row.basis == "MAX_DECL_OBSERVERS"
@@ -1740,40 +1695,6 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
         Err(wz_capi_port::Refusal::TableFull),
         "CONTROL: the third is refused"
     );
-}
-
-/// The pico preset's delivery lane is the least lane the build accepts at the preset's other
-/// values: one record of the larger of the batch and the largest message the session rejoins, with
-/// the most a sample adds to it, so a read always finds room for the record it takes next.
-#[cfg(not(feature = "rx-lent-only"))]
-#[test]
-fn the_pico_presets_lane_holds_one_record() {
-    let presets = pico_preset();
-    let lane = preset_of(&presets, "DELIVERY_LANE_BYTES").expect("the preset states the lane");
-    let limits = pico_preset_limits();
-    let frag = limits
-        .pico_frag_max_bytes()
-        .lent_under(Quota::at_most(caps::PICO_FRAG_MAX_BYTES))
-        .expect("the preset's rejoined message is under the build's");
-    let key = limits
-        .max_keyexpr_bytes()
-        .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
-        .expect("the preset's key is under the build's");
-    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
-    let liveliness = pico_value("MAX_LIVELINESS_SUBSCRIPTIONS");
-    let most = if cfg!(feature = "liveliness") {
-        subscribers.max(liveliness)
-    } else {
-        subscribers
-    };
-    assert_eq!(
-        lane,
-        crate::round::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
-        "the preset's lane is one record's room"
-    );
-    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
-    assert_eq!(row(&plan, "delivery lane").entry_bytes, lane);
-    assert!(lane < SessionLimits::defaults().delivery_lane_bytes());
 }
 
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
@@ -2227,6 +2148,91 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     assert_eq!(
         plan.entities().of_kind(EntityKind::PendingGet),
         plan.gets().rows.queries
+    );
+}
+
+/// The ABI's places of matching listeners are as many as the rows of the engine's table of them,
+/// counted by `MAX_MATCHING_LISTENERS`, in every build. Turned red by places counted by another
+/// limit, or none laid out for the kind.
+#[test]
+fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::MatchingListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().matching_listeners;
+    assert!(rows > 0, "the build's limits admit matching listeners");
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "matching listener places")
+        .map(|row| (row.basis, row.count));
+    assert_eq!(laid, Some(("MAX_MATCHING_LISTENERS", rows)));
+    assert_eq!(plan.entities().of_kind(EntityKind::MatchingListener), rows);
+}
+
+/// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
+/// with the watch, and none without it. Turned red by places counted by another limit, or laid
+/// out in a build that has no watch to hold.
+#[test]
+fn the_places_of_declaration_watches_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::DeclWatch, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().decl_watches;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "declaration watch places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )) {
+        assert!(rows > 0, "the build's limits admit declaration watches");
+        assert_eq!(laid, Some(("MAX_DECL_WATCHES", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without the watch holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(plan.entities().of_kind(EntityKind::DeclWatch), rows);
+}
+
+/// The ABI's places of transport events listeners are as many as
+/// `MAX_TRANSPORT_EVENTS_LISTENERS` admits in a build with `connectivity`, and none without it.
+/// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+#[test]
+fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::TransportEventsListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().transport_events_listeners;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "transport events listener places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(feature = "connectivity") {
+        assert!(
+            rows > 0,
+            "the build's limits admit transport events listeners"
+        );
+        assert_eq!(laid, Some(("MAX_TRANSPORT_EVENTS_LISTENERS", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without connectivity holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(
+        plan.entities().of_kind(EntityKind::TransportEventsListener),
+        rows
     );
 }
 

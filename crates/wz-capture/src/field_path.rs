@@ -198,7 +198,8 @@ pub(crate) enum PathKind {
 }
 
 impl PathKind {
-    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+    // Read by the declared shape, which only a build with `dissect` has.
+    #[cfg(feature = "dissect")]
     fn of_word(word: &str) -> Option<Self> {
         Some(match word {
             "bits" => Self::Bits,

@@ -89,7 +89,7 @@ fuzz_target!(|data: &[u8]| {
                 made_for(this, index, node, &entry);
             }
         }
-        let mut past: wz_ext_message_entry_t = unsafe { core::mem::zeroed() };
+        let mut past = wz_ext_message_entry_t::default();
         // SAFETY: `this` is a live loaned catalog; `past` is writable.
         let rc = unsafe { wz_ext_message_catalog_entry(this, len, &mut past) };
         assert_eq!(
@@ -121,7 +121,7 @@ fuzz_target!(|data: &[u8]| {
             0,
             "a dropped catalog has messages"
         );
-        let mut entry: wz_ext_message_entry_t = core::mem::zeroed();
+        let mut entry = wz_ext_message_entry_t::default();
         assert_eq!(
             wz_ext_message_catalog_entry(this, 0, &mut entry),
             Z_ERR_NULL,
@@ -132,7 +132,7 @@ fuzz_target!(|data: &[u8]| {
 
 /// Entry `index`, held to its documented shape and found again under its key and its id.
 fn entry_of(this: *const wz_ext_loaned_message_catalog_t, index: usize) -> wz_ext_message_entry_t {
-    let mut entry: wz_ext_message_entry_t = unsafe { core::mem::zeroed() };
+    let mut entry = wz_ext_message_entry_t::default();
     // SAFETY: `this` is a live loaned catalog; `entry` is writable.
     let rc = unsafe { wz_ext_message_catalog_entry(this, index, &mut entry) };
     assert_eq!(
@@ -207,7 +207,7 @@ fn entry_of(this: *const wz_ext_loaned_message_catalog_t, index: usize) -> wz_ex
 }
 
 fn key_of(this: *const wz_ext_loaned_message_catalog_t, index: usize) -> String {
-    let mut entry: wz_ext_message_entry_t = unsafe { core::mem::zeroed() };
+    let mut entry = wz_ext_message_entry_t::default();
     // SAFETY: `this` is a live loaned catalog; `entry` is writable.
     let rc = unsafe { wz_ext_message_catalog_entry(this, index, &mut entry) };
     assert_eq!(

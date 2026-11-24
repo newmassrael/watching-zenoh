@@ -202,6 +202,10 @@ pub enum MatchingListenerError {
     /// watch was not emitted and no listener was registered, for the reason
     /// [`Self::Wire`] gives.
     IdsExhausted,
+    /// The entity's keyexpr is longer than the
+    /// [`MAX_KEYEXPR_BYTES`](wz_session_core::caps::MAX_KEYEXPR_BYTES) a watch holds in place,
+    /// so no listener was registered and no Interest was emitted.
+    KeyexprTooLong,
 }
 
 impl core::fmt::Display for MatchingListenerError {
@@ -221,6 +225,10 @@ impl core::fmt::Display for MatchingListenerError {
             Self::IdsExhausted => f.write_str(
                 "declare_matching_listener: the session has handed out every \
                  32-bit interest id; no watch was registered",
+            ),
+            Self::KeyexprTooLong => f.write_str(
+                "declare_matching_listener: the keyexpr is longer than a watch \
+                 holds; no watch was registered",
             ),
         }
     }

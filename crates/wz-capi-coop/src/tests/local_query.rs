@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, QblId, QueryHolder, QueryableSink, Refusal, ReplyCallback,
-    SessionDrive, SessionEngine, WireKey,
+    FilterPlane, HeldQuery, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
@@ -26,9 +26,9 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use super::get::{ask, settle, Leg};
 use super::{open, until, CatchAll, Command, Engine, Router};
 
-/// What the queryable of `a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns`
-/// saw of the get it made from inside its callback: whether it was issued, whether it was still
-/// open with no reply when the get returned, and its leg.
+/// What the queryable of `a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once`
+/// saw of the get it made from inside its callback: whether it was issued, whether the callback had
+/// been called on the get's query by the time the get returned, and its leg.
 type InnerGet = Arc<Mutex<Option<(Result<usize, Refusal>, bool, Arc<Mutex<Leg>>)>>>;
 
 /// What a queryable was shown of each get: its parameters, payload and attachment, and whether it
@@ -359,7 +359,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
             .declare_matching_listener(
                 plane,
                 "demo/lq/x",
-                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                MatchingSink::shared(move |matching| into.lock().unwrap().push(matching)),
                 count_local,
             )
             .expect("a session with rows left declares");
@@ -419,43 +419,53 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
 }
 
 /// A get a queryable of the session makes from inside its own callback, on a key that queryable
-/// answers, cannot reach that callback while it runs: its query waits for the callback to return
-/// and is answered then, still inside the outer get. The CONTROL is the inner get as the callback
-/// saw it: issued, and open with no reply.
+/// answers, reaches that callback there and then, inside the running call, as zenoh-pico calls a
+/// queryable's callback where the get stands (`vendor/zenoh-pico/src/session/queryable.c` @
+/// `qle_info->_callback(&query, qle_info->_arg);`): the callback is entered on the inner query
+/// and returns before the outer call does, and both gets end answered inside the outer get. Turned
+/// red by a session that keeps the inner query until the callback returns.
 #[test]
-fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
+fn a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let session = Arc::downgrade(&engine);
     let inner: InnerGet = Arc::default();
     let into = inner.clone();
+    // Each entry and return of the callback, by the key of the query it was called on.
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = calls.clone();
     declare(
         &engine,
         "demo/lq/**",
         Locality::Any,
         move |_, query, out| {
+            log.lock()
+                .unwrap()
+                .push(format!("enter {}", query.keyexpr()));
             out.reply_keyed(query.keyexpr(), b"own")
                 .expect("a reply on the query's own key");
-            if query.keyexpr() != "demo/lq/outer" {
-                return;
+            if query.keyexpr() == "demo/lq/outer" {
+                if let Some(engine) = session.upgrade() {
+                    let (issued, leg) = ask(
+                        &engine,
+                        "demo/lq/inner",
+                        &get_for(Locality::SessionLocal),
+                        None,
+                        None,
+                        None,
+                    );
+                    let reached = log
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|call| call == "exit demo/lq/inner");
+                    *into.lock().unwrap() = Some((issued, reached, leg));
+                }
             }
-            let Some(engine) = session.upgrade() else {
-                return;
-            };
-            let (issued, leg) = ask(
-                &engine,
-                "demo/lq/inner",
-                &get_for(Locality::SessionLocal),
-                None,
-                None,
-                None,
-            );
-            let open = {
-                let seen = leg.lock().unwrap();
-                !seen.ended && seen.replies.is_empty()
-            };
-            *into.lock().unwrap() = Some((issued, open, leg));
+            log.lock()
+                .unwrap()
+                .push(format!("exit {}", query.keyexpr()));
         },
     );
 
@@ -476,21 +486,28 @@ fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
             [(ReplyKind::Put, "demo/lq/outer".to_owned(), b"own".to_vec())]
         );
     }
-    let (inner_issued, open_inside, leg) = inner
+    let (inner_issued, reached_inside, leg) = inner
         .lock()
         .unwrap()
         .take()
         .expect("the callback made its get");
     assert_eq!(inner_issued, Ok(1));
     assert!(
-        open_inside,
-        "CONTROL: inside the callback the inner get was asked and not answered"
+        reached_inside,
+        "the inner query reached the callback before the inner get returned"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            "enter demo/lq/outer",
+            "enter demo/lq/inner",
+            "exit demo/lq/inner",
+            "exit demo/lq/outer",
+        ],
+        "the callback was entered on the inner query inside the outer call"
     );
     let leg = leg.lock().unwrap();
-    assert!(
-        leg.ended,
-        "answered once the callback returned, inside the outer get"
-    );
+    assert!(leg.ended, "the inner get ended inside the outer get");
     assert_eq!(
         leg.replies,
         [(ReplyKind::Put, "demo/lq/inner".to_owned(), b"own".to_vec())]

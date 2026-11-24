@@ -519,7 +519,16 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Option<Result<(), SendWireError>> {
-        payload.send_plain_put_qos(key, value, qos, reliable, express, priority)
+        payload.send_plain_put_qos(
+            key,
+            value,
+            qos,
+            wz_session_core::session_actions::SendAs {
+                reliable,
+                express,
+                priority,
+            },
+        )
     }
 
     // The unicast bundle names the key from its own record of the session's declarations.
@@ -761,7 +770,8 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
 /// congestion drop and a message put while the group has no link or past its namespace, as
 /// upstream's multicast send answers `Ok` for each. A droppable message the queue profile dropped
 /// behind a conduit another sender held is told, as on a link (`SendWireError::HeldConduit`), so
-/// the pico profile's put on a group fails as its put on a link does.
+/// the pico profile's put on a group fails as its put on a link does, and so is a message whose
+/// body refused it (`SendWireError::Codec`), as a session's send on a link refuses it.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn group_sent(
     pushed: Result<
@@ -772,6 +782,7 @@ fn group_sent(
     use wz_session_core::tx_deadline::PushOutcome;
     match pushed {
         Ok(PushOutcome::Held) => Err(SendWireError::HeldConduit),
+        Ok(PushOutcome::Refused(refused)) => Err(SendWireError::Codec(refused)),
         Ok(PushOutcome::Pushed | PushOutcome::Congested) | Err(_) => Ok(()),
     }
 }

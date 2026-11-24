@@ -1590,7 +1590,8 @@ const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 struct DeclWatchEntry {
     id: DeclWatchId,
     plane: DeclPlane,
-    sink: DeclWatchSink,
+    /// Shared by the watch's listener on each face, so it is let go of with the last of them.
+    sink: Arc<DeclWatchSink>,
 }
 
 /// Whether this build hears the peers' declarations of `plane`: the runtime's registry of that
@@ -1621,12 +1622,12 @@ const fn hears_declarations_of(plane: DeclPlane) -> bool {
 fn install_decl_watch(
     session: &TokioSession,
     plane: DeclPlane,
-    sink: &DeclWatchSink,
+    sink: &Arc<DeclWatchSink>,
 ) -> Option<DeclListener> {
     let sink = Arc::clone(sink);
     let callback = move |event: DeclEvent| {
         if let Some(event) = port_decl_event(&event) {
-            sink(event);
+            sink.call(event);
         }
     };
     // A subscriber or a queryable the peer declared before the watch was installed (a watch
@@ -1808,7 +1809,7 @@ fn deliver_matching_flip(
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
             let _guard = MatchingDeliveryGuard::enter();
-            sink(now);
+            sink.call(now);
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -6952,6 +6953,7 @@ impl SharedSession {
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;
+        let sink = Arc::new(sink);
         for face in guard.faces.values_mut() {
             if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
                 face.decl_watches.insert(id, listener);
@@ -7761,7 +7763,8 @@ mod matching_aggregate_tests {
             .expect("a session with ids left declares");
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
-        let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
+        let sink: MatchingSink =
+            MatchingSink::shared(move |matching| log.lock().unwrap().push(matching));
         shared.declare_plane_matching_listener(
             FilterPlane::Subscribers,
             "wz/local/a".to_owned(),
@@ -8442,7 +8445,7 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
                 log.lock().unwrap().push(now);
                 let probe = probe
                     .upgrade()
@@ -8470,7 +8473,7 @@ mod matching_aggregate_tests {
     fn the_verdict_is_the_or_across_faces() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8495,7 +8498,7 @@ mod matching_aggregate_tests {
     fn a_purge_after_an_ordinary_false_is_silent() {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
-        let sink: MatchingSink = Arc::new(move |now| log.lock().unwrap().push(now));
+        let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
@@ -8527,7 +8530,7 @@ mod matching_aggregate_tests {
             let inflight = inflight.clone();
             let overlaps = overlaps.clone();
             let log = observed.clone();
-            Arc::new(move |now| {
+            MatchingSink::shared(move |now| {
                 if inflight.fetch_add(1, Ordering::SeqCst) != 0 {
                     overlaps.fetch_add(1, Ordering::SeqCst);
                 }
@@ -8603,12 +8606,14 @@ mod matching_aggregate_tests {
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |now| {
-                // Keep the probe owned BY the closure, exactly as a C sink owns
-                // its context, so the probe's drop is the closure's drop.
-                let _ = &probe;
-                log.lock().unwrap().push(now);
-            }))))
+            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+                move |now| {
+                    // Keep the probe owned BY the closure, exactly as a C sink owns
+                    // its context, so the probe's drop is the closure's drop.
+                    let _ = &probe;
+                    log.lock().unwrap().push(now);
+                },
+            ))))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -8655,14 +8660,16 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
-            entered_tx.send(()).expect("the test thread is waiting");
-            release_rx
-                .lock()
-                .unwrap()
-                .recv()
-                .expect("the test thread releases the sink");
-        }))));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
+            move |_now| {
+                entered_tx.send(()).expect("the test thread is waiting");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("the test thread releases the sink");
+            },
+        ))));
 
         let deliverer = {
             let state = state.clone();
@@ -8715,7 +8722,7 @@ mod matching_aggregate_tests {
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(Arc::new(move |_now| {
+            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
                 let state = weak.upgrade().expect("alive during its own call");
                 // The re-entrant undeclare. It must RETURN, and it must decline
                 // to take the sink rather than block on this frame's own lock.

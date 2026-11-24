@@ -828,10 +828,24 @@ impl<const N: usize, const Q: usize> Inner<N, Q> {
     #[inline(never)]
     unsafe fn init_in_place(at: *mut Self) {
         use core::ptr::{self, addr_of_mut};
+        // A field added to `Inner` and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |inner: &Self| {
+            let Self {
+                pcb: _,
+                rx_queue: _,
+                rx_drops: _,
+                #[cfg(feature = "rx-hold")]
+                    hold_lent: _,
+                _pin: _,
+            } = inner;
+        };
         // Each gated statement opens with the path `ptr::write(`, not the macro: the
         // feature-public-surface census reads a gated line that starts with a macro
         // call as one that may expand to a public item.
-        // SAFETY: the caller's; each field is written once through a pointer to it.
+        // SAFETY: the caller's; each field the list above names is written once through a
+        // pointer to it.
         unsafe {
             ptr::write(addr_of_mut!((*at).pcb), NonNull::dangling());
             ptr::write(addr_of_mut!((*at).rx_queue), Queue::new());
@@ -840,21 +854,6 @@ impl<const N: usize, const Q: usize> Inner<N, Q> {
             ptr::write(addr_of_mut!((*at).hold_lent), false);
             ptr::write(addr_of_mut!((*at)._pin), PhantomPinned);
         }
-    }
-
-    /// A field added to `Inner` and not written by `init_in_place` would be read
-    /// uninitialised: this destructures the struct with no `..`, so adding one without
-    /// naming it here, and so without writing it above, does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(inner: Self) {
-        let Self {
-            pcb: _,
-            rx_queue: _,
-            rx_drops: _,
-            #[cfg(feature = "rx-hold")]
-                hold_lent: _,
-            _pin: _,
-        } = inner;
     }
 }
 

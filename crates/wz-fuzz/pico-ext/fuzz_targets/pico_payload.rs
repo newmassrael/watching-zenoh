@@ -23,6 +23,8 @@
 //! have); bit 2 drops the schema once the payload is made. An op of 8 or more clears the path
 //! instead (16 and more resets the payload) before the operation.
 //!
+//! The payload keeps its values in storage of `FIELDS` values and `BYTES` bytes the harness gives.
+//!
 //! Held beside not crashing: each door answers a code its documentation states; a refused making
 //! leaves the gravestone; a payload keeps its message's key and its schema past the schema's drop;
 //! a refused call changes nothing and leaves its reason, an accepted one none; bytes a payload
@@ -62,6 +64,11 @@ const REFUSALS: [ZResult; 7] = [
 ];
 
 type Payload = wz_ext_owned_message_payload_t;
+
+/// The values and the bytes a payload holds: few enough that the fuzzer reaches a storage with no
+/// room left.
+const FIELDS: usize = 64;
+const BYTES: usize = 1024;
 
 fuzz_target!(|data: &[u8]| {
     let mut r = Reader::new(data);
@@ -117,9 +124,18 @@ fuzz_target!(|data: &[u8]| {
 
     let index = usize::from(choices & 3).min(2);
     let catalog_loan = unsafe { wz_ext_message_catalog_loan(&catalog) };
+    // The program's storage, which outlives the payload: it is dropped after the payload is.
+    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(FIELDS, BYTES)];
+    let options = wz_ext_message_payload_options_t {
+        storage: storage.as_mut_ptr(),
+        storage_len: storage.len(),
+        fields: FIELDS,
+        bytes: BYTES,
+    };
     let mut payload: Payload = unsafe { core::mem::zeroed() };
     let mut refusal = empty_string();
-    // SAFETY: every handle is owned or the gravestone; `message` is NUL-terminated.
+    // SAFETY: every handle is owned or the gravestone; `message` is NUL-terminated; the storage
+    // is writable for its length until the payload is dropped below.
     let rc = unsafe {
         wz_ext_message_payload_new(
             &mut payload,
@@ -127,6 +143,7 @@ fuzz_target!(|data: &[u8]| {
             index,
             wz_ext_payload_schema_loan(&schema),
             message.as_ptr(),
+            &options,
             &mut refusal,
         )
     };
@@ -168,6 +185,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     drop_payload(&mut payload);
+    drop(storage);
     drop_schema(&mut schema);
     // SAFETY: an owned catalog slot, dropped once.
     unsafe { wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog)) };
@@ -179,7 +197,7 @@ fn loan(p: &Payload) -> *const wz_ext_loaned_message_payload_t {
 }
 
 fn key_is_the_catalogs(p: &Payload, catalog: *const wz_ext_loaned_message_catalog_t, index: usize) {
-    let mut entry: wz_ext_message_entry_t = unsafe { core::mem::zeroed() };
+    let mut entry = wz_ext_message_entry_t::default();
     // SAFETY: `catalog` is a live loaned catalog; `entry` is writable.
     assert_eq!(
         unsafe { wz_ext_message_catalog_entry(catalog, index, &mut entry) },
@@ -318,6 +336,7 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
         WZ_EXT_ERR_PAYLOAD_PATH,
         WZ_EXT_ERR_PAYLOAD_TYPE,
         WZ_EXT_ERR_PAYLOAD_RANGE,
+        Z_ERR_OVERFLOW,
         Z_EINVAL,
     ];
     let before = encode(p);
@@ -352,8 +371,22 @@ fn decode(p: &Payload, bytes: &[u8]) {
     stated(
         "message_payload_decode",
         rc,
-        &[Z_OK, WZ_EXT_ERR_PAYLOAD_WIRE],
+        &[Z_OK, WZ_EXT_ERR_PAYLOAD_WIRE, Z_ERR_OVERFLOW],
     );
+    if rc == Z_ERR_OVERFLOW {
+        // Values the storage has no room for leave the payload empty, not as it was.
+        assert!(
+            !refusal_of(p).is_empty(),
+            "message_payload_decode: refused with {rc} and left no reason"
+        );
+        let emptied = encode(p);
+        assert!(
+            matches!(emptied, Ok(ref bytes) if bytes.is_empty())
+                || emptied == Err(WZ_EXT_ERR_PAYLOAD_ABSENT),
+            "message_payload_decode: a decode past the storage left values: {emptied:?}"
+        );
+        return;
+    }
     held_to("message_payload_decode", p, rc, &before);
     if rc != Z_OK {
         return;

@@ -252,11 +252,10 @@ impl OpenClosures {
     pub(crate) fn close_one(&self) -> bool {
         let mut state = self.state.lock();
         state.held = state.held.saturating_sub(1);
-        if state.held != 0 {
-            return false;
-        }
+        // Every close is told, as a waiter may wait for fewer held rather than none
+        // ([`Self::wait_at_most`]).
         self.none_open.notify_all();
-        state.retired
+        state.held == 0 && state.retired
     }
 
     /// The owner lets go of its place: `true` when no closure counted here is held, so the owner
@@ -272,11 +271,18 @@ impl OpenClosures {
     /// program's callbacks: that callback holds a closure, so waiting would wait for itself, as
     /// [`ReleaseLatch::wait`] says.
     pub(crate) fn wait_none(&self) {
+        self.wait_at_most(0);
+    }
+
+    /// Block until at most `kept` are held here: the holds the caller has itself and lets go of
+    /// after, so it waits for every other one, closures among them, and not for its own. Returns
+    /// at once inside one of the program's callbacks, as [`Self::wait_none`] does.
+    pub(crate) fn wait_at_most(&self, kept: usize) {
         if InCallback::here() {
             return;
         }
         let mut state = self.state.lock();
-        while state.held != 0 {
+        while state.held > kept {
             state = self.none_open.wait(state);
         }
     }
@@ -618,5 +624,39 @@ mod closure_tests {
             "the wait outlasted the drop"
         );
         release.join().expect("the releasing thread ends");
+    }
+
+    /// A wait for all but the waiter's own hold returns once the other closure is let go of on
+    /// another thread, and leaves that hold counted. Turned red by a close that tells a waiter
+    /// only when none is held, which leaves this wait waiting on its own hold.
+    #[test]
+    fn a_wait_for_all_but_its_own_hold_returns_when_the_others_go() {
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        let owner = std::sync::Arc::new(Owner::default());
+        let own = owner_of(&owner).hold();
+        let mut other = closure(&DROPPED);
+        other.count_in(owner_of(&owner));
+        assert_eq!(held(&owner), 2);
+        let kept = std::sync::Arc::clone(&owner);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(other);
+            drop(kept);
+        });
+        owner.open.wait_at_most(1);
+        assert_eq!(
+            DROPPED.load(Ordering::SeqCst),
+            1,
+            "the wait outlasted the other closure's drop"
+        );
+        assert_eq!(held(&owner), 1, "the waiter's own hold is still counted");
+        release.join().expect("the releasing thread ends");
+        drop(own);
+        assert_eq!(held(&owner), 0);
+        assert_eq!(
+            owner.given_back.load(Ordering::SeqCst),
+            0,
+            "an owner still held keeps its place"
+        );
     }
 }

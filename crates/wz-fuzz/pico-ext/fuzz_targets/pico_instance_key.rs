@@ -154,7 +154,7 @@ fuzz_target!(|data: &[u8]| {
     );
 
     drop_keyer(&mut keyer);
-    let mut out: wz_ext_instance_key_t = unsafe { core::mem::zeroed() };
+    let mut out = wz_ext_instance_key_t::default();
     // SAFETY: `keyer` holds the gravestone; `out` is writable.
     let rc = unsafe {
         wz_ext_instance_keyer_index(
@@ -225,7 +225,7 @@ fn new_keyer(
 }
 
 fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8], now_ms: u64) {
-    let mut out: wz_ext_instance_key_t = unsafe { core::mem::zeroed() };
+    let mut out = wz_ext_instance_key_t::default();
     // SAFETY: `keyer` is a live owned keyer; `payload` is readable; `out` is writable.
     let rc = unsafe {
         wz_ext_instance_keyer_index(
@@ -298,7 +298,7 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
 }
 
 fn flush(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, now_ms: u64) {
-    let mut out: wz_ext_instance_key_t = unsafe { core::mem::zeroed() };
+    let mut out = wz_ext_instance_key_t::default();
     // SAFETY: `keyer` is a live owned keyer; `out` is writable.
     let due =
         unsafe { wz_ext_instance_keyer_flush(wz_ext_instance_keyer_loan(keyer), now_ms, &mut out) };

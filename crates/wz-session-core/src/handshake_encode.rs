@@ -42,6 +42,9 @@ use sce_forge_runtime::codec::VecSink;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
+/// The chain a handshake writer is handed: a slice, or a staged fixed chain.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+pub use crate::ext_chain::{ChainIter, ChainRef};
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use crate::session_init_params::SessionInitParams;
 // The `_into` encoders write through the buffer seam, which every one of them
@@ -114,7 +117,7 @@ pub fn encode_init(
         params,
         InitCaps::of(params),
         is_ack,
-        extensions,
+        extensions.into(),
         cookie_override,
     )
 }
@@ -127,7 +130,7 @@ pub fn encode_init_with_caps(
     params: &SessionInitParams,
     caps: InitCaps,
     is_ack: bool,
-    extensions: &[ExtEntryOwned],
+    extensions: ChainRef<'_>,
     cookie_override: Option<&[u8]>,
 ) -> Result<Vec<u8>, CodecError> {
     // No reservation up front: the body is built inside `encode_init_into`, and
@@ -197,7 +200,7 @@ pub fn encode_init_into(
     params: &SessionInitParams,
     caps: InitCaps,
     is_ack: bool,
-    extensions: &[ExtEntryOwned],
+    extensions: ChainRef<'_>,
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
     with_parts(extensions, |parts| {
@@ -225,7 +228,7 @@ pub(crate) fn init_frame_len(
     params: &SessionInitParams,
     caps: InitCaps,
     is_ack: bool,
-    extensions: &[ExtEntryOwned],
+    extensions: ChainRef<'_>,
     cookie_override: Option<&[u8]>,
 ) -> usize {
     // Counted by the writer itself, so the count and the write are one compiled encoder and
@@ -319,8 +322,8 @@ const EMPTY_PARTS: ExtEntryParts<'static> = ExtEntryParts {
 };
 
 /// How many held entries a build with no growable store presents: as many as a chain a session
-/// stages holds, one entry per kind of extension the build stages (`ext_chain::STAGED_EXT_KINDS`
-/// counts the same kinds, and the staged chain is that long at most). A longer chain is refused.
+/// stages holds, one entry per kind of extension the build stages (a staged chain has one place
+/// per kind, so it is that long at most). A longer chain is refused.
 #[cfg(all(
     any(feature = "codec-init-body", feature = "codec-open-body"),
     any(not(feature = "alloc"), feature = "session-fixed-storage")
@@ -339,16 +342,16 @@ const STACK_PARTS: usize = 3
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 #[inline(never)]
 fn project_parts<'b, 'p>(
-    entries: &'b [ExtEntryOwned],
+    entries: ChainRef<'b>,
     bodies: &'b mut [HeldBody<'b>],
     parts: &'p mut [ExtEntryParts<'b>],
 ) -> &'p [ExtEntryParts<'b>] {
-    for (slot, entry) in bodies.iter_mut().zip(entries) {
+    for (slot, entry) in bodies.iter_mut().zip(entries.iter()) {
         *slot = HeldBody::of(entry);
     }
     let bodies: &'b [HeldBody<'b>] = bodies;
     let filled = entries.len().min(bodies.len()).min(parts.len());
-    for ((slot, body), entry) in parts.iter_mut().zip(bodies).zip(entries) {
+    for ((slot, body), entry) in parts.iter_mut().zip(bodies).zip(entries.iter()) {
         *slot = body.parts(entry.header);
     }
     parts.get(..filled).unwrap_or(&[])
@@ -360,7 +363,7 @@ fn project_parts<'b, 'p>(
 /// writer is compiled once.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn with_parts<R>(
-    entries: &[ExtEntryOwned],
+    entries: ChainRef<'_>,
     write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
 ) -> Result<R, CodecError> {
     #[cfg(any(not(feature = "alloc"), feature = "session-fixed-storage"))]
@@ -467,6 +470,17 @@ pub fn encode_open(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<Vec<u8>, CodecError> {
+    encode_open_chain(params, is_ack, cookie_override, extensions.into())
+}
+
+/// [`encode_open`] of a chain as its writers read it: a staged chain, or a slice.
+#[cfg(all(feature = "alloc", feature = "codec-open-body"))]
+pub(crate) fn encode_open_chain(
+    params: &SessionInitParams,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+    extensions: ChainRef<'_>,
+) -> Result<Vec<u8>, CodecError> {
     // No reservation up front, for the reason `encode_init_with_caps` gives: an
     // Open body has no largest frame at all, its cookie length being a `usize`.
     let mut wire = Vec::new();
@@ -498,7 +512,7 @@ pub fn encode_open_into(
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&[u8]>,
-    extensions: &[ExtEntryOwned],
+    extensions: ChainRef<'_>,
 ) -> Result<(), CodecError> {
     with_parts(extensions, |parts| {
         let message = open_message(params, initial_sn, is_ack, cookie_override, parts)?;
@@ -558,9 +572,12 @@ pub(crate) fn encode_open_head_into(
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
+// Out of line: its sizer (`ext_chain_len`) runs it over a counting buffer, and inlined there it
+// was a second copy of the writer beside the one the send calls.
+#[inline(never)]
 pub(crate) fn encode_held_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
-    entries: &[ExtEntryOwned],
+    entries: ChainRef<'_>,
 ) -> Result<(), CodecError> {
     with_parts(entries, |parts| {
         let last = parts.len().wrapping_sub(1);
@@ -1065,8 +1082,15 @@ mod tests {
             for chain in [&entries[..], &[][..]] {
                 for cookie in [None, Some(&echoed[..])] {
                     let mut whole = alloc::vec::Vec::new();
-                    super::encode_open_into(&mut whole, &params, 1234, is_ack, cookie, chain)
-                        .expect("whole");
+                    super::encode_open_into(
+                        &mut whole,
+                        &params,
+                        1234,
+                        is_ack,
+                        cookie,
+                        chain.into(),
+                    )
+                    .expect("whole");
                     let mut split = alloc::vec::Vec::new();
                     super::encode_open_head_into(
                         &mut split,
@@ -1078,7 +1102,7 @@ mod tests {
                     )
                     .expect("head");
                     let head = split.len();
-                    super::encode_held_chain_into(&mut split, chain).expect("chain");
+                    super::encode_held_chain_into(&mut split, chain.into()).expect("chain");
                     assert_eq!(split, whole, "ack {is_ack}, {} ext(s)", chain.len());
                     assert_eq!(
                         whole[0] & wire_const::FLAG_T_Z != 0,
@@ -1103,7 +1127,7 @@ mod tests {
                         any(feature = "session-unicast-open", feature = "session-unicast-accept")
                     ))]
                     assert_eq!(
-                        crate::ext_chain::ext_chain_len(chain),
+                        crate::ext_chain::ext_chain_len(chain.into()),
                         split.len() - head,
                         "the sizer counts the chain it writes"
                     );
@@ -1143,12 +1167,12 @@ mod tests {
                         &params,
                         caps,
                         is_ack,
-                        chain,
+                        chain.into(),
                         cookie_override,
                     )
                     .expect("writes");
                     assert_eq!(
-                        super::init_frame_len(&params, caps, is_ack, chain, cookie_override),
+                        super::init_frame_len(&params, caps, is_ack, chain.into(), cookie_override),
                         wire.len(),
                         "ack {is_ack}, {} ext(s), cookie {}",
                         chain.len(),

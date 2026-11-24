@@ -390,7 +390,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
+    let first_sink: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     let first = engine
         .declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false)
         .expect("a row is free");
@@ -399,8 +399,12 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     });
     let asked = router.seen(|s| s.interests);
 
-    let refused_sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let held = Arc::downgrade(&refused_sink);
+    // The sink holds the one strong count of the token the weak one reads.
+    let token = Arc::new(());
+    let held = Arc::downgrade(&token);
+    let refused_sink: MatchingSink = MatchingSink::shared(move |_matching: bool| {
+        let _ = &token;
+    });
     let refused =
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
     assert_eq!(refused, Err(Refusal::TableFull));
@@ -412,7 +416,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 
     engine.undeclare_matching_listener(first);
-    let again: MatchingSink = Arc::new(|_matching: bool| {});
+    let again: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert!(
         engine
             .declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false)
@@ -610,7 +614,7 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         filter(&engine, FilterPlane::Subscribers, past),
         Err(Refusal::KeyTooLong)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),
         Err(Refusal::KeyTooLong),
@@ -628,6 +632,31 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
         declare_subscriber(&engine, "demo/k/9", &dropped).is_ok(),
         "a key of the session's bound is taken"
     );
+}
+
+/// A matching listener's criterion holds its key in place, so a key longer than that is refused
+/// for its length before anything is taken or sent, and its sink is let go of.
+#[test]
+fn a_listener_on_a_key_past_the_criterion_is_refused_for_its_length() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let before = router.seen(|s| s.declares);
+    let past = format!(
+        "demo/{}",
+        "k".repeat(wz_session_core::caps::MAX_KEYEXPR_BYTES)
+    );
+    let token = Arc::new(());
+    let held = Arc::clone(&token);
+    let listener = MatchingSink::shared(move |_matching: bool| {
+        let _ = &held;
+    });
+    assert_eq!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, &past, listener, false),
+        Err(Refusal::KeyTooLong)
+    );
+    settle(&engine);
+    assert_eq!(Arc::strong_count(&token), 1, "the refused sink is let go");
+    assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
 }
 
 /// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
@@ -659,7 +688,7 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
         declare_subscriber(&engine, "demo/k/3", &dropped),
         Err(Refusal::TableFull)
     );
-    let listener: MatchingSink = Arc::new(|_matching: bool| {});
+    let listener: MatchingSink = MatchingSink::shared(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, "demo/k/3", listener, false),
         Err(Refusal::TableFull),

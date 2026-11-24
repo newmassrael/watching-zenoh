@@ -250,8 +250,8 @@ fn a_lent_queryable_declaration_carries_its_completeness_as_the_owned_one_does()
     );
     // Completeness is what a querier that demands it asks of the table: only the
     // declaration whose extension says complete answers it.
-    let complete = QuerierCriterion::new("q/complete", Locality::Any, true);
-    let partial = QuerierCriterion::new("q/partial", Locality::Any, true);
+    let complete = QuerierCriterion::new("q/complete", Locality::Any, true).expect("a short key");
+    let partial = QuerierCriterion::new("q/partial", Locality::Any, true).expect("a short key");
     assert_eq!(
         (
             owned.has_matching_for(&complete),
@@ -459,12 +459,14 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
             0,
             Priority::DEFAULT,
         ));
-        let owned_refused = registry.dispatch_iteration_event(
+        let owned_refused = registry.answer_iteration_event(
+            &registry,
             owned_form(&owned_frame, record),
             &table,
             &mut owned_pending,
         );
-        let lent_refused = registry.dispatch_iteration_event(record, &table, &mut lent_pending);
+        let lent_refused =
+            registry.answer_iteration_event(&registry, record, &table, &mut lent_pending);
         assert_eq!(owned_refused, lent_refused, "refused chains");
         assert_eq!(
             tokens_and_finals(&lent_pending),
@@ -482,7 +484,8 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
         .expect("a borrowed view")
         .encode_to_vec();
     let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-    registry.dispatch_iteration_event(
+    registry.answer_iteration_event(
+        &registry,
         IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
             &view,
             true,

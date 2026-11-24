@@ -450,11 +450,11 @@
               "x-wz-wire": "none"
             },
             "KEY_ARENA_BYTES": {
-              "description": "How many bytes of key text the rows of a session's tables hold at once, in one arena each row keeps its key in: the session's own declarations, the application's tables, its pending gets and what each peer declares to it.",
+              "description": "How many bytes of key text a session holds at once, in one arena every keyed row keeps its key in: its declared key expressions, its entities with their write filters, Interests and matching listeners, its pending gets and what each peer declares to it.",
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967291,
-              "default": 97152,
+              "default": 11984,
               "x-wz-kind": "parameter",
               "x-wz-storage": "both",
               "x-wz-scope": "session",
@@ -693,6 +693,44 @@
             },
             "MAX_MATCHING_LISTENERS": {
               "description": "The matching listeners a session holds at once, over all its publishers and queriers.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_DECL_WATCHES": {
+              "description": "The declaration watches a session holds at once (what its peers declare and retract, told to the program), over every kind of entity watched.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_TRANSPORT_EVENTS_LISTENERS": {
+              "description": "The transport events listeners a session holds at once, each told when a transport to a peer opens or closes.",
               "oneOf": [
                 {
                   "type": "integer",

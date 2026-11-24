@@ -475,12 +475,7 @@ mod tests {
     /// step between "the arena fills slots" (the tests below) and "a production
     /// link fills slots". A comment saying it would be a claim; a signature
     /// saying it is a binding.
-    #[allow(dead_code)]
-    fn the_selected_link_arena_is_this_table(
-        selected: crate::frame_arena::LinkArena,
-    ) -> LinkRxArena {
-        selected
-    }
+    const _: fn(crate::frame_arena::LinkArena) -> LinkRxArena = |selected| selected;
 
     /// One universal-prefix frame on the wire.
     fn framed(payload: &[u8]) -> Vec<u8> {

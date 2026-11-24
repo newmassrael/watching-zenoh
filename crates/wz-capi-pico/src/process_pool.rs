@@ -111,6 +111,12 @@ pub(crate) struct Counts {
     pub(crate) gets: usize,
     /// Liveliness gets each session holds pending.
     pub(crate) liveliness_gets: usize,
+    /// Matching listeners of each session, its publishers' and queriers' together.
+    pub(crate) matching_listeners: usize,
+    /// Declaration watches of each session.
+    pub(crate) decl_watches: usize,
+    /// Transport events listeners of each session.
+    pub(crate) transport_events_listeners: usize,
     /// Advanced publishers of each session.
     pub(crate) advanced_publishers: usize,
     /// Advanced subscribers of each session, owned and background.
@@ -186,6 +192,9 @@ pub(crate) struct Bounds {
     keyexprs: Option<usize>,
     gets: Option<usize>,
     liveliness_gets: Option<usize>,
+    matching_listeners: Option<usize>,
+    decl_watches: Option<usize>,
+    transport_events_listeners: Option<usize>,
     advanced_publishers: Option<usize>,
     advanced_subscribers: Option<usize>,
 }
@@ -203,6 +212,9 @@ impl Bounds {
             keyexprs: limits.max_declared_keyexprs().most(),
             gets: limits.max_pending_queries().most(),
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
+            matching_listeners: limits.max_matching_listeners().most(),
+            decl_watches: limits.max_decl_watches().most(),
+            transport_events_listeners: limits.max_transport_events_listeners().most(),
             advanced_publishers: limits.max_advanced_publishers().most(),
             advanced_subscribers: limits.max_advanced_subscribers().most(),
         }
@@ -317,6 +329,27 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.liveliness_gets,
             bounds.liveliness_gets,
         )),
+        matching_listeners: planned!(bounded(
+            true,
+            sessions,
+            stated.matching_listeners,
+            bounds.matching_listeners,
+        )),
+        decl_watches: planned!(bounded(
+            cfg!(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )),
+            sessions,
+            stated.decl_watches,
+            bounds.decl_watches,
+        )),
+        transport_events_listeners: planned!(bounded(
+            cfg!(feature = "connectivity"),
+            sessions,
+            stated.transport_events_listeners,
+            bounds.transport_events_listeners,
+        )),
         advanced_publishers: planned!(bounded(
             cfg!(feature = "advanced"),
             sessions,
@@ -413,6 +446,31 @@ impl Plan {
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         {
             plan = plan.with::<crate::get::GetPlace>(Kind::LivelinessGet, objects.liveliness_gets);
+        }
+        #[cfg(feature = "engine-tokio")]
+        {
+            plan = plan.with::<crate::matching::MatchingPlace>(
+                Kind::MatchingListener,
+                objects.matching_listeners,
+            );
+        }
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        {
+            plan =
+                plan.with::<crate::decl_watch::WatchPlace>(Kind::DeclWatch, objects.decl_watches);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        {
+            plan = plan.with::<crate::connectivity::TransportPlace>(
+                Kind::TransportEventsListener,
+                objects.transport_events_listeners,
+            );
         }
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         {
@@ -941,6 +999,13 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_gets: each::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
             limits.max_pending_liveliness_gets(),
         ),
+        matching_listeners: each::<{ caps::MAX_MATCHING_LISTENERS }>(
+            limits.max_matching_listeners(),
+        ),
+        decl_watches: each::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches()),
+        transport_events_listeners: each::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+            limits.max_transport_events_listeners(),
+        ),
         advanced_publishers: each::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
             limits.max_advanced_publishers(),
         ),
@@ -972,6 +1037,9 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         encodings: caps::HELD_ENCODINGS,
         gets: 0,
         liveliness_gets: 0,
+        matching_listeners: 0,
+        decl_watches: 0,
+        transport_events_listeners: 0,
         advanced_publishers: 0,
         advanced_subscribers: 0,
     };
@@ -1217,6 +1285,9 @@ mod tests {
         keyexprs: Some(7),
         gets: Some(8),
         liveliness_gets: Some(9),
+        matching_listeners: Some(10),
+        decl_watches: Some(11),
+        transport_events_listeners: Some(12),
         advanced_publishers: Some(10),
         advanced_subscribers: Some(11),
     };
@@ -1230,6 +1301,9 @@ mod tests {
         liveliness_subscribers: None,
         gets: None,
         liveliness_gets: None,
+        matching_listeners: None,
+        decl_watches: None,
+        transport_events_listeners: None,
         advanced_publishers: None,
         advanced_subscribers: None,
     };
@@ -1330,6 +1404,9 @@ mod tests {
             encodings: 12,
             gets: 1,
             liveliness_gets: 1,
+            matching_listeners: 1,
+            decl_watches: 1,
+            transport_events_listeners: 1,
             advanced_publishers: 1,
             advanced_subscribers: 1,
         };
@@ -1741,6 +1818,30 @@ mod tests {
             Kind::LivelinessGet,
             core::mem::size_of::<crate::get::GetPlace>(),
         );
+        #[cfg(feature = "engine-tokio")]
+        row(
+            "matching_listener",
+            Kind::MatchingListener,
+            core::mem::size_of::<crate::matching::MatchingPlace>(),
+        );
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        row(
+            "decl_watch",
+            Kind::DeclWatch,
+            core::mem::size_of::<crate::decl_watch::WatchPlace>(),
+        );
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        row(
+            "transport_events_listener",
+            Kind::TransportEventsListener,
+            core::mem::size_of::<crate::connectivity::TransportPlace>(),
+        );
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         row(
             "advanced_publisher",
@@ -1936,6 +2037,18 @@ mod tests {
         check(Kind::Get);
         #[cfg(all(feature = "engine-tokio", feature = "liveliness-get"))]
         check(Kind::LivelinessGet);
+        #[cfg(feature = "engine-tokio")]
+        check(Kind::MatchingListener);
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        check(Kind::DeclWatch);
+        #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
+        check(Kind::TransportEventsListener);
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         check(Kind::AdvancedPublisher);
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
@@ -1961,6 +2074,15 @@ mod tests {
         assert_eq!(
             bounds.liveliness_gets,
             limits.max_pending_liveliness_gets().most()
+        );
+        assert_eq!(
+            bounds.matching_listeners,
+            limits.max_matching_listeners().most()
+        );
+        assert_eq!(bounds.decl_watches, limits.max_decl_watches().most());
+        assert_eq!(
+            bounds.transport_events_listeners,
+            limits.max_transport_events_listeners().most()
         );
         assert_eq!(
             bounds.advanced_publishers,

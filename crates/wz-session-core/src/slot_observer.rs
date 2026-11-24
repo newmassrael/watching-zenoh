@@ -398,7 +398,9 @@ pub struct SlotObserverOf<
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
         LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink, P>,
-    /// The tokens wz itself holds, answered to a peer's interest.
+    /// The tokens wz itself holds, answered to a peer's interest, and the staging of those
+    /// answers. Where the tables keep the session's tokens as rows ([`ObserverTables::held_tokens`])
+    /// the answers are read from them and this registry holds none.
     #[cfg(feature = "liveliness-token")]
     pub local_tokens: LocalTokenRegistry<P>,
 }
@@ -533,6 +535,15 @@ pub trait ObserverTables: LocalSubscribers + Sized {
     /// Hold the tables to the limits `limits` states, what the creator of the session resolved for
     /// them. What they hold is kept, and what they are asked for next is held to the new bound.
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits);
+
+    /// The session's own tokens, where these tables keep them as rows: what a peer's liveliness
+    /// Interest is answered from in place of the observer's registry of them
+    /// ([`SlotObserverOf::local_tokens`]), which such a session keeps empty. `None` where the
+    /// tables keep no tokens.
+    #[cfg(feature = "liveliness-token")]
+    fn held_tokens(&self) -> Option<&dyn crate::declare::local_token::HeldTokens> {
+        None
+    }
 }
 
 /// The table of the application's tables the session's own queryables are kept in and asked
@@ -813,6 +824,12 @@ impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
         Self::new()
     }
 
+    #[cfg(feature = "liveliness-token")]
+    fn held_tokens(&self) -> Option<&dyn crate::declare::local_token::HeldTokens> {
+        self.kept_tokens()
+            .map(|_| self as &dyn crate::declare::local_token::HeldTokens)
+    }
+
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits) {
         self.limit_memo_to(limits.match_memo_slots());
     }
@@ -1048,8 +1065,8 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// it with [`ObserverCell::init_with`] instead, which builds it where it stays.
     pub fn new() -> Self {
         let mut observer = MaybeUninit::<Self>::uninit();
-        // SAFETY: `init_in_place` writes every field, which `every_field_is_written`
-        // below holds to the field list at compile time.
+        // SAFETY: `init_in_place` writes every field, which the list it names holds to
+        // the struct's fields at compile time.
         unsafe {
             Self::init_in_place(observer.as_mut_ptr());
             observer.assume_init()
@@ -1077,11 +1094,32 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     #[inline(never)]
     pub unsafe fn init_in_place(at: *mut Self) {
         use core::ptr::{self, addr_of_mut};
+        // A field added to the observer and not written below would be read uninitialised.
+        // This names every field with no `..`, so adding one without naming it here (and so
+        // without writing it below) does not compile.
+        let _every_field_is_written = |observer: &Self| {
+            let Self {
+                tables: _,
+                #[cfg(feature = "switchboard")]
+                    switchboard: _,
+                #[cfg(feature = "declare-subscriber")]
+                    remote_subscribers: _,
+                #[cfg(feature = "declare-queryable")]
+                    remote_queryables: _,
+                #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+                    matching: _,
+                #[cfg(feature = "liveliness-token")]
+                    liveliness: _,
+                #[cfg(feature = "liveliness-token")]
+                    local_tokens: _,
+            } = observer;
+        };
         // Each gated statement opens with the path `ptr::write(`, not with the
         // `addr_of_mut!` macro: the feature-public-surface census reads a gated
         // line that starts with a macro call as a macro that may expand to a public
         // item, and a statement here is not one.
-        // SAFETY: the caller's; each field is written once through a pointer to it.
+        // SAFETY: the caller's; each field the list above names is written once through a
+        // pointer to it.
         unsafe {
             ptr::write(addr_of_mut!((*at).tables), ObserverTables::empty());
             #[cfg(feature = "switchboard")]
@@ -1103,28 +1141,6 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
         }
-    }
-
-    /// A field added to [`SlotObserverOf`] and not written by `init_in_place` would be
-    /// read uninitialised. This destructures the struct with no `..`, so adding a field
-    /// without naming it here (and so without writing it above) does not compile.
-    #[allow(dead_code)]
-    fn every_field_is_written(observer: Self) {
-        let Self {
-            tables: _,
-            #[cfg(feature = "switchboard")]
-                switchboard: _,
-            #[cfg(feature = "declare-subscriber")]
-                remote_subscribers: _,
-            #[cfg(feature = "declare-queryable")]
-                remote_queryables: _,
-            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
-                matching: _,
-            #[cfg(feature = "liveliness-token")]
-                liveliness: _,
-            #[cfg(feature = "liveliness-token")]
-                local_tokens: _,
-        } = observer;
     }
 }
 
@@ -1433,7 +1449,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // (`SubscriberPeer`'s `ignore_subscriber_interest`).
         #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
         {
-            let refused = self.local_tokens.dispatch_iteration_event(
+            let held: &dyn crate::declare::local_token::HeldTokens =
+                self.tables.held_tokens().unwrap_or(&self.local_tokens);
+            let refused = self.local_tokens.answer_iteration_event(
+                held,
                 event,
                 peer_table,
                 &mut peers.pending_declares,
@@ -1809,7 +1828,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 } => {
                     // A token unregistered between stage and drain is skipped;
                     // its chain's Final still terminates.
-                    if let Some(keyexpr) = self.local_tokens.keyexpr_for(token_id) {
+                    let held: &dyn crate::declare::local_token::HeldTokens =
+                        self.tables.held_tokens().unwrap_or(&self.local_tokens);
+                    if let Some(keyexpr) = held.keyexpr_for(token_id) {
                         sink.send_declare_token_reply(token_id, keyexpr, interest_id);
                     }
                 }
@@ -3235,10 +3256,12 @@ mod lent_tests {
             }
         }
         let querier =
-            crate::declare::queryable::QuerierCriterion::new("demo/q", Locality::Remote, false);
+            crate::declare::queryable::QuerierCriterion::new("demo/q", Locality::Remote, false)
+                .expect("a short key");
         assert!(!SubscribersOnly.answers(&querier));
         let publisher =
-            crate::declare::subscriber::PublisherCriterion::new("demo/q", Locality::Remote);
+            crate::declare::subscriber::PublisherCriterion::new("demo/q", Locality::Remote)
+                .expect("a short key");
         assert!(
             SubscribersOnly.subscribes(&publisher),
             "CONTROL: the method the faces do say is theirs"

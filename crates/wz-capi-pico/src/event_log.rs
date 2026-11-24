@@ -23,6 +23,7 @@
 //! on too; this file is the pico ABI's names and result codes for it.
 
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
+use crate::sized::{Out, SizedOut};
 use wz_capi_port::observation::events::{self, Read};
 
 /// What a read found: an event.
@@ -58,11 +59,14 @@ pub const WZ_EXT_EVENT_INSTANCE_KEY_ABSENT: u64 = events::INSTANCE_KEY_ABSENT;
 /// The first integer of an instance key's report: a key value is in no list.
 pub const WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = events::INSTANCE_KEY_NOT_LISTED;
 
-/// One event, as `wz_ext_event_read` gives it.
+/// One event, as `wz_ext_event_read` gives it, into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_event_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// `WZ_EXT_EVENT_RECORD`, `WZ_EXT_EVENT_EMPTY` or `WZ_EXT_EVENT_LOST`.
     pub kind: u8,
     /// How serious it is, in the program's own scale.
@@ -78,6 +82,28 @@ pub struct wz_ext_event_t {
     pub sequence: u64,
     /// When, as an NTP64 word, or `0` where the clock did not know the date.
     pub timestamp: u64,
+}
+
+impl Default for wz_ext_event_t {
+    /// No event, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            kind: 0,
+            level: 0,
+            arg_count: 0,
+            reserved: 0,
+            source: 0,
+            reserved2: 0,
+            sequence: 0,
+            timestamp: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_event_t {
+    const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// Write an event: `args` is `arg_count` integers (null when it is 0), of which the log keeps as
@@ -116,11 +142,13 @@ pub unsafe extern "C" fn wz_ext_event_emit(
 /// Read the event at `*cursor`, or say there is none. `*cursor` is the number the program reads
 /// next, 0 at the start; it moves past the event read, or past the events that were lost. `out`
 /// receives the result; the event's integers go to `args`, up to `args_capacity` of them (`args`
-/// may be null when the capacity is 0).
+/// may be null when the capacity is 0). `Z_ERR_NULL` for a null `cursor` or `out`, or a null `args`
+/// with a capacity; `Z_EINVAL` for a `struct_size` short of the struct, nothing read or written
+/// and the cursor where it was.
 ///
 /// # Safety
-/// `cursor` and `out` must be valid and writable, and `args` null or writable for `args_capacity`
-/// integers.
+/// `cursor` must be valid and writable, `out` a struct of `struct_size` writable bytes, and
+/// `args` null or writable for `args_capacity` integers.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_event_read(
     cursor: *mut u64,
@@ -132,12 +160,16 @@ pub unsafe extern "C" fn wz_ext_event_read(
         if cursor.is_null() || out.is_null() || (args.is_null() && args_capacity > 0) {
             return Z_ERR_NULL;
         }
+        let out = match Out::of(out) {
+            Ok(out) => out,
+            Err(code) => return code,
+        };
         let args: &mut [u64] = if args_capacity == 0 {
             &mut []
         } else {
             std::slice::from_raw_parts_mut(args, args_capacity)
         };
-        *out = match events::read(&mut *cursor, args) {
+        out.put(&match events::read(&mut *cursor, args) {
             Read::Record {
                 level,
                 arg_count,
@@ -162,7 +194,7 @@ pub unsafe extern "C" fn wz_ext_event_read(
                 sequence: missed,
                 ..Default::default()
             },
-        };
+        });
         Z_OK
     })
 }
@@ -182,4 +214,24 @@ pub extern "C" fn wz_ext_event_release(upto: u64) -> ZResult {
 #[no_mangle]
 pub extern "C" fn wz_ext_event_dropped() -> u32 {
     events::dropped()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read into a struct a byte short of the event's is refused untouched, and the cursor stays
+    /// where it was. Turned red by a read before the size is checked.
+    #[test]
+    fn a_read_into_a_short_struct_is_refused_and_moves_nothing() {
+        let mut cursor = 0u64;
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_event_t, _>(
+            |out| {
+                // SAFETY: `cursor` and `out` are live; no integers are asked for.
+                unsafe { wz_ext_event_read(&mut cursor, out, core::ptr::null_mut(), 0) }
+            },
+            crate::result::Z_EINVAL,
+        );
+        assert_eq!(cursor, 0, "the cursor did not move");
+    }
 }

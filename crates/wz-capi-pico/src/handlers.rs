@@ -356,46 +356,43 @@ pub struct _z_ring_mt_t {
 
 // The two collections as pico's header declares them, field for field, over this host's mutex and
 // condvar types (`os`): their size is the size the C program allocates, on every host and word
-// size, and is measured, not written down. They are layouts only and are never built.
+// size, and is measured, not written down. They are layouts only and are never built, so their
+// fields, named after pico's, are never read.
 
 /// pico's `_z_ring_t` (`collections/ring.h`): the values' pointer and four `size_t` counts.
-#[allow(dead_code)]
 #[repr(C)]
 struct RingLayout {
-    values: *mut *mut c_void,
-    counts: [usize; 4],
+    _values: *mut *mut c_void,
+    _counts: [usize; 4],
 }
 
 /// `_z_fifo_mt_t` in the multi-threaded arm.
 #[cfg(feature = "multi-thread")]
-#[allow(dead_code)]
 #[repr(C)]
 struct FifoMtLayout {
-    fifo: RingLayout,
-    is_closed: bool,
-    mutex: crate::os::RawMutex,
-    cv_not_full: crate::os::RawCondvar,
-    cv_not_empty: crate::os::RawCondvar,
+    _fifo: RingLayout,
+    _is_closed: bool,
+    _mutex: crate::os::RawMutex,
+    _cv_not_full: crate::os::RawCondvar,
+    _cv_not_empty: crate::os::RawCondvar,
 }
 
 /// `_z_ring_mt_t` in the multi-threaded arm.
 #[cfg(feature = "multi-thread")]
-#[allow(dead_code)]
 #[repr(C)]
 struct RingMtLayout {
-    ring: RingLayout,
-    is_closed: bool,
-    mutex: crate::os::RawMutex,
-    cv_not_empty: crate::os::RawCondvar,
+    _ring: RingLayout,
+    _is_closed: bool,
+    _mutex: crate::os::RawMutex,
+    _cv_not_empty: crate::os::RawCondvar,
 }
 
 /// `_z_fifo_mt_t` in the single-threaded arm: the ring and the flag.
 #[cfg(not(feature = "multi-thread"))]
-#[allow(dead_code)]
 #[repr(C)]
 struct FifoMtLayout {
-    fifo: RingLayout,
-    is_closed: bool,
+    _fifo: RingLayout,
+    _is_closed: bool,
 }
 
 /// `_z_ring_mt_t` in the single-threaded arm, which has the fifo's fields.
