@@ -971,14 +971,20 @@ impl ArenaPlan {
         &self,
         lane: LentByteCells,
         handle: Option<LentByteCells>,
-    ) -> Result<((NonNull<u8>, usize), Option<HandlePlace>), ArenaRefused> {
+    ) -> Result<ClaimedPlaces, ArenaRefused> {
         let lane = claimed(lane);
         let handle = handle.map(claimed);
         match (lane, handle) {
-            (Some(lane), None) => Ok((lane, None)),
-            (Some(lane), Some(Some((base, bytes)))) => {
-                Ok((lane, Some(HandlePlace { base, bytes })))
-            }
+            (Some((lane_area, lane_bytes)), None) => Ok(ClaimedPlaces {
+                lane_area,
+                lane_bytes,
+                handle: None,
+            }),
+            (Some((lane_area, lane_bytes)), Some(Some((base, bytes)))) => Ok(ClaimedPlaces {
+                lane_area,
+                lane_bytes,
+                handle: Some(HandlePlace { base, bytes }),
+            }),
             (None, _) | (_, Some(None)) => Err(ArenaRefused::Lend(LendRefused::Exhausted {
                 asked: Some(self.lane_bytes.max(self.handle_bytes)),
                 left: 0,
@@ -1695,6 +1701,17 @@ impl EntityPlaces {
         self.of(kind)
             .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))
     }
+}
+
+/// The places an open claims from its arena for the session's life
+/// (`ArenaPlan::claim_lane_and_handle`).
+pub(crate) struct ClaimedPlaces {
+    /// Where the delivery lane's area starts.
+    pub(crate) lane_area: NonNull<u8>,
+    /// The bytes of the lane's area.
+    pub(crate) lane_bytes: usize,
+    /// The place of the ABI's handle, `None` for a plan with no place.
+    pub(crate) handle: Option<HandlePlace>,
 }
 
 /// The one buffer of `cells`, a table of one buffer, claimed and never given back:

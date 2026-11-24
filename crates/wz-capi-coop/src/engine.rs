@@ -46,8 +46,8 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlace, EntityPlaces,
-    EntityRows, HandlePlace, HeldPlaces, LinkCells, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, EntityKind, EntityPlace,
+    EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, SessionArena,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -721,7 +721,11 @@ fn lend_session(
     let handle = plan.handle_from(&mut lend);
     let places = plan.places_from(&mut lend);
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
-    let ((lane_area, lane_bytes), handle_place) = plan.claim_lane_and_handle(lane, handle)?;
+    let ClaimedPlaces {
+        lane_area,
+        lane_bytes,
+        handle: handle_place,
+    } = plan.claim_lane_and_handle(lane, handle)?;
     let router = session_reassembly(policy, SessionChains::over(&reassembly, LENT_CHAINS));
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
