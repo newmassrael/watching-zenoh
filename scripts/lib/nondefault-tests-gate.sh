@@ -523,13 +523,19 @@ transport-link-unixpipe,transport-link-ws|"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors. The tests of the schema reader's tokenizer and parser are
     # `wz-app-schema`'s, in its default build.
-    "wz-app-frame|hook|instance-key|"
+    "wz-app-frame|hook|instance-key,proto-text|"
     # The comments a schema keeps (`wz_app_schema::proto_lex::Gap`, behind `docs`): the
     # tokenizer's tests of which comment trails a token and which leads the next.
     "wz-app-schema|hook|docs|"
     # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
     # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
-    "wz-app-frame|hook|message-payload|message_payload_tests::"
+    "wz-app-frame|hook|message-payload,proto-text|message_payload_tests::"
+    # The schema compiled by protoc and read without the text reader (`proto_descriptor`, behind
+    # `proto`): the fixture's tables, a payload set, encoded, decoded and refused on them, and the
+    # refused descriptor sets. With the text reader too, the same fixture's text is held to them,
+    # and the writer's and the typed reader's own tests on schemas read from text run.
+    "wz-app-frame|hook|message-payload|proto_descriptor_tests::"
+    "wz-app-frame|hook|proto-text|"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,

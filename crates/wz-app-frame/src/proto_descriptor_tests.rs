@@ -766,3 +766,36 @@ fn a_map_entry_is_a_map_only_on_a_repeated_field_with_a_key_a_map_may_have() {
         "{why}"
     );
 }
+
+/// The payload of a message of the compiled schema, set, written, read back and refused, with no
+/// `.proto` text read: the path a device build takes.
+#[cfg(feature = "message-payload")]
+#[test]
+fn a_payload_is_written_and_read_by_the_compiled_schema() {
+    use crate::message_payload::{Given, Got, Payload, Refusal, Wanted};
+
+    let schema = compiled();
+    let reading = schema
+        .message("wz.fixture.Reading")
+        .expect("the message is in the set");
+    let mut p = Payload::new(&schema, reading);
+    p.set("zone", Given::Unsigned(3)).expect("zone is set");
+    p.set("label", Given::Text("a")).expect("label is set");
+    assert_eq!(
+        p.encode().expect("the payload encodes"),
+        [0x08, 0x03, 0x1a, 0x01, b'a'],
+        "zone and label in field order, laid by hand"
+    );
+    assert_eq!(p.get("label", Wanted::Text), Ok(Got::Text("a")));
+    assert!(
+        matches!(
+            p.set("nowhere", Given::Signed(1)),
+            Err(Refusal::Path { .. })
+        ),
+        "a path the schema has not is refused"
+    );
+    assert!(
+        matches!(p.set("label", Given::Signed(1)), Err(Refusal::Type { .. })),
+        "an integer into a string field is refused"
+    );
+}
