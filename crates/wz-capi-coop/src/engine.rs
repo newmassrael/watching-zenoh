@@ -91,8 +91,8 @@ use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::{
-    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, HandshakeEnd, IdleWait,
-    Link, LinkSupervisor,
+    Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
+    LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -108,6 +108,8 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+use wz_runtime_coop::transport::TransportRefusal;
+pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -450,110 +452,6 @@ pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     config.limits
 }
 
-/// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
-/// given, and why.
-// Typed and not a text: the C ABIs answer a refusal with a code and never read its words, so the
-// formatter is linked only into a program that prints one (`Display`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EndpointRefusal {
-    /// The endpoint, as the config or the caller states it, at most `MAX_LOCATOR_LEN` bytes of
-    /// it; empty when the refusal is the session's and names no endpoint ([`Refusal::LinkLost`]).
-    pub endpoint: LocatorText,
-    /// Why it could not be used.
-    pub why: Refusal,
-}
-
-impl EndpointRefusal {
-    /// The refusal of `endpoint` for `why`. A refusal is made after the open too (a dial again
-    /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
-    /// longer than that is kept up to the last whole character that fits. Out of line: every way
-    /// an endpoint is refused makes one.
-    #[inline(never)]
-    pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
-        let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
-        while !endpoint.is_char_boundary(cut) {
-            cut = cut.saturating_sub(1);
-        }
-        let mut kept = LocatorText::new();
-        // The cut is at most a row's length, so the text before it fits whole.
-        let _ = kept.push_str(endpoint.get(..cut).unwrap_or_default());
-        Self {
-            endpoint: kept,
-            why,
-        }
-    }
-}
-
-/// Why an endpoint could not be used ([`EndpointRefusal`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// The endpoint does not parse as a locator this build can dial or listen on.
-    Locator(wz_runtime_coop::locator_text::DialRefused),
-    /// The network opened no link, listener or group for it.
-    Link(LinkOpenError),
-    /// The handshake ended with a close reason.
-    HandshakeClosed(CloseReason),
-    /// The handshake ended with no close reason.
-    HandshakeEnded,
-    /// Nothing answered by the deadline.
-    NoAnswerInTime,
-    /// The link was lost and the session dials no endpoint again.
-    LinkLost,
-    /// The endpoint is one to listen on, and this build does not listen.
-    ListeningNotBuilt,
-    /// The endpoint is a group to join, and this build joins no group.
-    GroupsNotBuilt,
-    /// The group was joined and its link did not open.
-    GroupLinkDidNotOpen,
-    /// The session is closed.
-    SessionClosed,
-    /// The session holds as many faces as `max_faces` admits.
-    FacesFull,
-    /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
-    /// bytes.
-    TextTooLong,
-    /// The group's endpoint is longer than the row a member's link is reported in,
-    /// `MAX_GROUP_ENDPOINT_LEN` bytes.
-    GroupEndpointTooLong,
-}
-
-impl From<HandshakeEnd> for Refusal {
-    fn from(end: HandshakeEnd) -> Self {
-        match end {
-            HandshakeEnd::Closed(reason) => Refusal::HandshakeClosed(reason),
-            HandshakeEnd::Ended => Refusal::HandshakeEnded,
-            HandshakeEnd::NoAnswerInTime => Refusal::NoAnswerInTime,
-        }
-    }
-}
-
-impl core::fmt::Display for EndpointRefusal {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if !self.endpoint.is_empty() {
-            write!(f, "{}: ", self.endpoint)?;
-        }
-        match self.why {
-            Refusal::Locator(why) => write!(f, "{why:?}"),
-            Refusal::Link(why) => write!(f, "{why:?}"),
-            Refusal::HandshakeClosed(reason) => write!(f, "the handshake ended: {reason:?}"),
-            Refusal::HandshakeEnded => f.write_str("the handshake ended"),
-            Refusal::NoAnswerInTime => f.write_str("no answer in time"),
-            Refusal::LinkLost => f.write_str("the link was lost"),
-            Refusal::ListeningNotBuilt => f.write_str("listening is not built"),
-            Refusal::GroupsNotBuilt => f.write_str("joining a group is not built"),
-            Refusal::GroupLinkDidNotOpen => f.write_str("the group's link did not open"),
-            Refusal::SessionClosed => f.write_str("the session is closed"),
-            Refusal::FacesFull => {
-                f.write_str("the session holds as many faces as max_faces admits")
-            }
-            Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
-            Refusal::GroupEndpointTooLong => {
-                f.write_str("the group endpoint is longer than MAX_GROUP_ENDPOINT_LEN")
-            }
-        }
-    }
-}
-
 /// Why no session was opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
@@ -608,6 +506,19 @@ pub enum KeyWireFormRefused {
     NoDictionary,
     /// The form of one endpoint is stated twice.
     LinkStatedTwice,
+}
+
+impl From<TransportRefusal> for OpenError {
+    fn from(refused: TransportRefusal) -> Self {
+        match refused {
+            TransportRefusal::NoEndpoint => OpenError::NoEndpoint,
+            TransportRefusal::Listen(why) => OpenError::Listen(why),
+            TransportRefusal::Group(why) => OpenError::Group(why),
+            TransportRefusal::Unreachable(why) => OpenError::Unreachable(why),
+            TransportRefusal::EntropyUnavailable => OpenError::EntropyUnavailable,
+            TransportRefusal::NoTask(why) => OpenError::NoTask(why),
+        }
+    }
 }
 
 /// The key ids every node of a deployment shares that an open hands the session, and the
@@ -2758,7 +2669,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let row = match self.transport.dial_row(at) {
                 Ok(row) => row,
                 Err(refused) => {
-                    last = refused;
+                    last = refused.into();
                     continue;
                 }
             };
@@ -2955,7 +2866,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
-                let last = self.transport.handshake_failed(at, &then, why, now_us);
+                let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
                 self.follow(at, then, last, redial_ms)
             }
             // The dial under way was asked, never waited for: its link's handshake begins once

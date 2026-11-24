@@ -136,7 +136,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             Ok(pending) => pending,
             Err(refused) => {
                 core.session.registry.borrow_mut().remove_face(id);
-                return Err(refused);
+                return Err(refused.into());
             }
         };
         core.transport.links.advance_face_id();

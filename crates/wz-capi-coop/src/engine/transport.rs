@@ -197,16 +197,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     }
 
     /// Begin a dial of `endpoint`, which the network answers later
-    /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
+    /// (`SessionLinks::begin_initiator`). [`TransportRefusal::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
     /// Out of line: the dial role and a face added by the program each begin a dial.
     #[inline(never)]
-    pub(super) fn begin_dial(&self, endpoint: &str) -> Result<L::Dial, OpenError> {
+    pub(super) fn begin_dial(&self, endpoint: &str) -> Result<L::Dial, TransportRefusal> {
         let to = parse_locator(endpoint).map_err(|refused| {
-            OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
+            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
         })?;
         self.links.begin_dial(to).map_err(|refused| {
-            OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
+            TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
         })
     }
 
@@ -220,8 +220,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
     /// stack's buffers is. Out of line: each part of a link a cell holds is refused by it.
     #[cold]
     #[inline(never)]
-    pub(super) fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> OpenError {
-        OpenError::Unreachable(EndpointRefusal::new(
+    pub(super) fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> TransportRefusal {
+        TransportRefusal::Unreachable(EndpointRefusal::new(
             self.endpoint_text(endpoint),
             Refusal::Link(LinkOpenError::Exhausted),
         ))
@@ -260,14 +260,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
         self.links.listens()
     }
 
-    /// Listen on every endpoint the config lists. [`OpenError::Listen`] for the first that does
+    /// Listen on every endpoint the config lists. [`TransportRefusal::Listen`] for the first that does
     /// not parse, that the network opens no listener for, or whose port is taken; a build without
     /// `listen` answers every endpoint so.
-    pub(super) fn listen_on_config(&mut self) -> Result<(), OpenError> {
+    pub(super) fn listen_on_config(&mut self) -> Result<(), TransportRefusal> {
         #[cfg(feature = "listen")]
         for row in 0..self.endpoints.listens() {
             let endpoint = self.endpoints.listen_text(row);
-            let refused = |why| OpenError::Listen(EndpointRefusal::new(endpoint, why));
+            let refused = |why| TransportRefusal::Listen(EndpointRefusal::new(endpoint, why));
             let at =
                 parse_listen_locator(endpoint).map_err(|why| refused(Refusal::Locator(why)))?;
             // The key-wire form of a link taken on the port is the one stated for its endpoint
@@ -282,7 +282,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
         }
         #[cfg(not(feature = "listen"))]
         if self.endpoints.listens() > 0 {
-            return Err(OpenError::Listen(EndpointRefusal::new(
+            return Err(TransportRefusal::Listen(EndpointRefusal::new(
                 self.endpoints.listen_text(0),
                 Refusal::ListeningNotBuilt,
             )));
@@ -436,24 +436,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> TransportState
         then: &Next,
         why: Refusal,
         now_us: u64,
-    ) -> OpenError {
+    ) -> TransportRefusal {
         self.links.put_link(at, Link::Waiting { at_us: now_us });
         match then {
-            Next::DialFrom { from } => OpenError::Unreachable(EndpointRefusal::new(
+            Next::DialFrom { from } => TransportRefusal::Unreachable(EndpointRefusal::new(
                 self.endpoints.dial_text(from.saturating_sub(1)),
                 why,
             )),
-            _ => OpenError::NoEndpoint,
+            _ => TransportRefusal::NoEndpoint,
         }
     }
 
     /// Begin a dial of the session's endpoint at row `at` and ask it once: one the network has not
     /// answered yet is handed back under way, and one answered at once with its answer.
-    /// [`OpenError::Unreachable`] when the endpoint does not parse or the network refuses the
+    /// [`TransportRefusal::Unreachable`] when the endpoint does not parse or the network refuses the
     /// dial at once.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
-    pub(super) fn dial_row(&self, at: usize) -> Result<DialRow<L::Dial, L::Pump>, OpenError> {
+    pub(super) fn dial_row(
+        &self,
+        at: usize,
+    ) -> Result<DialRow<L::Dial, L::Pump>, TransportRefusal> {
         let mut pending = self.begin_dial(self.endpoints.dial_text(at))?;
         // A dial that answered has handed out all it held (the socket, the link's buffers, the
         // program's link), and keeps only handles that own nothing, so it is let go of here,
