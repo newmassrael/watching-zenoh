@@ -2869,7 +2869,7 @@ fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
     );
     let refused = open_with_result(CoopConfig {
         listen: vec![long.clone()],
-        max_faces: 1,
+        max_faces: 0,
         accept_pending: 1,
         ..config(&router)
     });

@@ -2279,10 +2279,20 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
 /// The faces besides the dial role's that `limits` admit: the session's `MAX_FACES`, under the
 /// build's. What an ABI states as [`CoopConfig::max_faces`] for a session that takes faces besides
 /// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
-/// the build's.
+/// the build's. None in a build that takes no face beside its dial role's (`TAKES_FACES`),
+/// whatever the session's value: such a session holds its dial role's face alone, so a config that
+/// states one more is refused by the limit's name rather than lent places no face can take.
 pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    if !TAKES_FACES {
+        return Ok(0);
+    }
     lent::<{ caps::MAX_FACES }>(ArenaLimit::MaxFaces, limits.max_faces())
 }
+
+/// Whether the build takes faces beside its dial role's: the links a listener accepts and the
+/// faces it attaches (`listen`), and the groups it joins (`group`). A build of neither holds
+/// its dial role's face alone (`wz_runtime_coop::faces::OneFace`).
+pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "group"));
 
 /// The inbound links in their handshake at once that `limits` admit: the session's
 /// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as
