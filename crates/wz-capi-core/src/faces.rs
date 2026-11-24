@@ -894,16 +894,16 @@ impl QueryLeg<'_> {
             QueryLeg::Face(session) => on_link(session, keyexpr, wire),
             _ => wz_capi_port::LinkKey::Lent(wire),
         };
-        let wire: &WireKey = &linked;
-        match self {
-            QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
-                wire.mapping_id,
-                wire.suffix(),
-                keyexpr,
-                opts.with_allowed_destination(self.locality()),
-                on_reply,
-                |_rid| {},
-            ),
+        match (self, linked.names_in(keyexpr)) {
+            (QueryLeg::Face(session), (mapping_id, suffix)) if mapping_id != 0 => session
+                .query_aliased(
+                    mapping_id,
+                    suffix,
+                    keyexpr,
+                    opts.with_allowed_destination(self.locality()),
+                    on_reply,
+                    |_rid| {},
+                ),
             _ => self.query(keyexpr, opts, on_reply),
         }
     }
@@ -1001,15 +1001,13 @@ fn declare_subscriber_on(
         ));
         callback(sample);
     };
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_subscriber(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_subscriber_aliased(wire.mapping_id, wire.suffix(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_subscriber_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1046,15 +1044,13 @@ fn declare_queryable_on(
     options: QueryableOptions,
     callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
 ) -> Option<Queryable<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_queryable(keyexpr.to_string(), options, callback)
-            .ok()
-    } else {
-        session
-            .declare_queryable_aliased(wire.mapping_id, wire.suffix(), options, callback)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_queryable_aliased(mapping_id, suffix, options, callback)
+            .ok(),
     }
 }
 
@@ -1065,13 +1061,11 @@ fn declare_token_on(
     wire: &WireKey,
     options: LivelinessOptions,
 ) -> Option<LivelinessToken<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session.declare_token(keyexpr.to_string(), options).ok()
-    } else {
-        session
-            .declare_token_aliased(wire.mapping_id, wire.suffix(), options)
-            .ok()
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session.declare_token(keyexpr.to_string(), options).ok(),
+        (mapping_id, suffix) => session
+            .declare_token_aliased(mapping_id, suffix, options)
+            .ok(),
     }
 }
 
@@ -1084,15 +1078,13 @@ fn declare_liveliness_subscriber_on(
     options: LivelinessSubscriberOptions,
     sink: impl for<'a> FnMut(LivelinessSample<'a>) + Send + 'static,
 ) -> Option<LivelinessSubscriber<TokioRuntime>> {
-    let wire: &WireKey = &on_link(session, keyexpr, wire);
-    if wire.is_literal() {
-        session
+    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+        (0, _) => session
             .declare_liveliness_subscriber(keyexpr.to_string(), options, sink)
-            .ok()
-    } else {
-        session
-            .declare_liveliness_subscriber_aliased(wire.mapping_id, wire.suffix(), options, sink)
-            .ok()
+            .ok(),
+        (mapping_id, suffix) => session
+            .declare_liveliness_subscriber_aliased(mapping_id, suffix, options, sink)
+            .ok(),
     }
 }
 
@@ -4671,7 +4663,8 @@ impl SharedSession {
         payload: wz_session_core::extshm::ShmSendHandle,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        if wire.is_literal() {
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        if mapping_id == 0 {
             self.fan_out_with(
                 opts,
                 PutKey::Literal(keyexpr),
@@ -4683,8 +4676,6 @@ impl SharedSession {
                 },
             )
         } else {
-            let mapping_id = wire.mapping_id;
-            let suffix = wire.suffix();
             self.fan_out_with(
                 opts,
                 PutKey::Declared {
@@ -4724,16 +4715,11 @@ impl SharedSession {
         if self.key_ids.names_keys_by_link() {
             return self.publish_by_link(keyexpr, wire, payload, opts);
         }
-        if wire.is_literal() {
-            self.publish_all(keyexpr, payload, opts)
-        } else {
-            self.publish_aliased_all_for(
-                Some(keyexpr),
-                wire.mapping_id,
-                wire.suffix(),
-                payload,
-                opts,
-            )
+        match wire.names_in(keyexpr) {
+            (0, _) => self.publish_all(keyexpr, payload, opts),
+            (mapping_id, suffix) => {
+                self.publish_aliased_all_for(Some(keyexpr), mapping_id, suffix, payload, opts)
+            }
         }
     }
 
@@ -4749,87 +4735,75 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        let key = if wire.is_literal() {
-            PutKey::Literal(keyexpr)
-        } else {
-            PutKey::Declared {
+        let key = match wire.names_in(keyexpr) {
+            (0, _) => PutKey::Literal(keyexpr),
+            (mapping_id, suffix) => PutKey::Declared {
                 literal: keyexpr,
-                mapping_id: wire.mapping_id,
-                suffix: wire.suffix(),
-            }
+                mapping_id,
+                suffix,
+            },
         };
         self.fan_out(
             opts,
             key,
             payload,
-            |session, leg| {
-                let wire = on_link(session, keyexpr, wire);
-                if wire.is_literal() {
-                    Leg::of_publish(session.publish(keyexpr, payload, leg))
-                } else {
-                    Leg::of_alias(session.publish_aliased_auto(
-                        wire.mapping_id,
-                        wire.suffix(),
-                        payload,
-                        leg,
-                    ))
+            |session, leg| match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                (0, _) => Leg::of_publish(session.publish(keyexpr, payload, leg)),
+                (mapping_id, suffix) => {
+                    Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
                 }
             },
             WireCalls {
-                probe: |session: &TokioSession, leg: PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(session.publish_probe(keyexpr, payload, leg))
-                    } else {
-                        Leg::of_probe_alias(session.publish_aliased_auto_probe(
-                            wire.mapping_id,
-                            wire.suffix(),
-                            payload,
-                            leg,
-                        ))
-                    }
+                probe: |session: &TokioSession, leg: PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => Leg::of_probe(session.publish_probe(keyexpr, payload, leg)),
+                    (mapping_id, suffix) => Leg::of_probe_alias(
+                        session.publish_aliased_auto_probe(mapping_id, suffix, payload, leg),
+                    ),
                 },
-                reserve: |session: &TokioSession, leg: &PublishOptions| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
+                reserve: |session: &TokioSession, leg: &PublishOptions| match on_link(
+                    session, keyexpr, wire,
+                )
+                .names_in(keyexpr)
+                {
+                    (0, _) => {
                         Reserved::of_reserve(session.reserve_wire_chain(keyexpr, payload, leg))
-                    } else if session
-                        .actions()
-                        .resolve_outbound_mapping(wire.mapping_id)
-                        .is_none()
+                    }
+                    (mapping_id, _)
+                        if session
+                            .actions()
+                            .resolve_outbound_mapping(mapping_id)
+                            .is_none() =>
                     {
                         Reserved::Absent
-                    } else {
-                        Reserved::of_reserve(session.reserve_wire_chain_aliased(
-                            wire.mapping_id,
-                            wire.suffix(),
-                            payload,
-                            leg,
-                        ))
                     }
+                    (mapping_id, suffix) => Reserved::of_reserve(
+                        session.reserve_wire_chain_aliased(mapping_id, suffix, payload, leg),
+                    ),
                 },
                 reserved: |session: &TokioSession,
                            leg: PublishOptions,
                            reservation: WireReservation| {
-                    let wire = on_link(session, keyexpr, wire);
-                    if wire.is_literal() {
-                        Leg::of_probe(
+                    match on_link(session, keyexpr, wire).names_in(keyexpr) {
+                        (0, _) => Leg::of_probe(
                             session
                                 .publish_reserved(keyexpr, payload, leg, reservation)
                                 .map(|()| WireProbe::Queued),
-                        )
-                    } else {
-                        Leg::of_probe_alias(
+                        ),
+                        (mapping_id, suffix) => Leg::of_probe_alias(
                             session
                                 .publish_aliased_auto_reserved(
-                                    wire.mapping_id,
-                                    wire.suffix(),
+                                    mapping_id,
+                                    suffix,
                                     payload,
                                     leg,
                                     reservation,
                                 )
                                 .map(|()| WireProbe::Queued),
-                        )
+                        ),
                     }
                 },
             },

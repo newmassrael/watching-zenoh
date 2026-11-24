@@ -166,12 +166,10 @@ impl LivelinessRow {
     ) -> bool {
         let id = u64::from(id);
         let wire = super::on_link(actions, keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_interest_liveliness_subscriber(id, history, 0, Some(keyexpr))
-        } else {
-            actions.send_interest_liveliness_subscriber(id, history, wire.mapping_id, wire.suffix())
-        }
-        .is_ok()
+        let (mapping_id, suffix) = wire.names_in(keyexpr);
+        actions
+            .send_interest_liveliness_subscriber(id, history, mapping_id, suffix)
+            .is_ok()
     }
 }
 

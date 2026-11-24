@@ -266,11 +266,7 @@ fn interest_ask<'a>(
     if !client && !shared.has_router_peer() {
         return None;
     }
-    let (mapping_id, suffix) = if wire.mapping_id == 0 {
-        (0, Some(key.literal()))
-    } else {
-        (wire.mapping_id, wire.suffix())
-    };
+    let (mapping_id, suffix) = wire.names_in(key.literal());
     Some(InterestAsk {
         mapping_id,
         suffix,

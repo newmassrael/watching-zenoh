@@ -140,7 +140,7 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
-use crate::keyexpr::named_wire_key_of;
+use crate::keyexpr::wire_key_of;
 use crate::prelude::*;
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
@@ -1244,7 +1244,7 @@ pub(crate) unsafe fn get_inner(
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
     let engine = crate::session::engine_of(handle);
-    let wire = named_wire_key_of(keyexpr, Arc::as_ref(&engine));
+    let wire = wire_key_of(keyexpr, Arc::as_ref(&engine));
 
     let value_meta = PicoQueryValueMeta {
         encoding: encoding.as_ref().map(crate::encoding::OwnedEncoding::view),

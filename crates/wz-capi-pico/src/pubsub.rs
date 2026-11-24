@@ -44,7 +44,9 @@ use crate::abi::{
 use crate::bytes::{ByteBuf, NoRoom};
 use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::{declared_of, keyexpr_str, named_wire_key_of, wire_key_of, DeclaredKeyexpr};
+use crate::keyexpr::{
+    declared_of, keyexpr_str, wire_key_holding_declaration_of, wire_key_of, DeclaredKeyexpr,
+};
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
@@ -1436,7 +1438,7 @@ impl PlainPublisher {
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
         // The publisher keeps its key, which holds the declaration: its wire form holds nothing.
-        let wire = key.named_wire(Arc::as_ref(&session.engine));
+        let wire = key.wire(Arc::as_ref(&session.engine));
         let filter = WriteFilter::declare(
             session,
             FilterPlane::Subscribers,
@@ -1447,7 +1449,7 @@ impl PlainPublisher {
         // How a put that brings nothing of its own is sent plain, worked out once from the QoS it
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         filter.keep_plain(
-            (wire.mapping_id != 0 && wire.suffix().is_none())
+            matches!(wire.names_in(key.literal()), (id, None) if id != 0)
                 .then(|| declared.apply(put_options()).plain_put_params())
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
@@ -2876,7 +2878,7 @@ unsafe fn session_publish(
         return Z_ERR_INVALID;
     };
     let engine = engine_ref(state);
-    let wire = named_wire_key_of(keyexpr, engine);
+    let wire = wire_key_of(keyexpr, engine);
     publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
 }
 
@@ -3226,7 +3228,7 @@ unsafe fn subscriber_wire(
     shared: &Engine,
     key: &DeclaredKeyexpr,
 ) -> WireKey {
-    let wire = wire_key_of(keyexpr, shared);
+    let wire = wire_key_holding_declaration_of(keyexpr, shared);
     match key.declaration_hold(shared) {
         Some(hold) => wire.holding_also(hold),
         None => wire,
