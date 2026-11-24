@@ -287,6 +287,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The link of the face at `at` has been established: begin to tell its peer what the session
     /// holds, and send the first turn of it; what that turn leaves of the link.
+    /// Out of line: a link brought up and a redeclare each begin a replay.
     #[inline(never)]
     pub(super) fn begin_replay(
         &mut self,
