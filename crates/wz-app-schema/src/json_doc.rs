@@ -68,6 +68,7 @@ impl core::fmt::Display for DocError {
 /// whole grammar and refuses nesting past [`MAX_JSON_DEPTH`] without recursing
 /// beyond it; only then is the tree built, by a parser that has no bound of its
 /// own. Both refusals carry the byte they stopped at.
+#[inline(never)]
 pub fn read_json(text: &str) -> Result<Json5Value, DocError> {
     let syntax = |e: Json5Error| DocError::Syntax {
         offset: e.offset,
@@ -98,6 +99,10 @@ enum Step<'a> {
     Index(usize),
 }
 
+// The readers below are out of line: each kind of document calls them at many
+// places, and every inlined copy carried the member search, the comparison of
+// its text and the building of the refusal. A document is read once, when it is
+// handed over, so the call costs nothing a sample pays.
 impl<'a> Pointer<'a> {
     /// A pointer already written out: `""` is the document itself.
     pub const fn text(text: &'a str) -> Self {
@@ -155,6 +160,7 @@ impl<'a> Pointer<'a> {
     }
 
     /// The refusal of what stands here, for `reason`.
+    #[inline(never)]
     pub fn refuse(&self, reason: impl Into<String>) -> DocError {
         DocError::Invalid {
             path: self.render(),
@@ -163,6 +169,7 @@ impl<'a> Pointer<'a> {
     }
 
     /// The object this points at.
+    #[inline(never)]
     pub fn object<'v>(&self, value: &'v Json5Value) -> Result<&'v Entries, DocError> {
         match value {
             Json5Value::Object(entries) => Ok(entries),
@@ -171,6 +178,7 @@ impl<'a> Pointer<'a> {
     }
 
     /// The array this points at.
+    #[inline(never)]
     pub fn array<'v>(&self, value: &'v Json5Value) -> Result<&'v [Json5Value], DocError> {
         match value {
             Json5Value::Array(items) => Ok(items),
@@ -181,6 +189,7 @@ impl<'a> Pointer<'a> {
     /// Refuse a key outside `allowed` and a key that appears twice. The reader
     /// keeps every member, and resolving a repeat silently (last one wins) would
     /// make a typo in a profile read as a choice.
+    #[inline(never)]
     pub fn check_keys(&self, entries: &Entries, allowed: &[&str]) -> Result<(), DocError> {
         for (key, _) in entries {
             if !allowed.contains(&key.as_str()) {
@@ -195,6 +204,7 @@ impl<'a> Pointer<'a> {
 
     /// Refuse a key that appears twice, for an object whose keys are the
     /// caller's own names rather than a fixed list.
+    #[inline(never)]
     pub fn check_distinct(&self, entries: &Entries) -> Result<(), DocError> {
         for (i, (key, _)) in entries.iter().enumerate() {
             if entries[..i].iter().any(|(earlier, _)| earlier == key) {
@@ -208,6 +218,7 @@ impl<'a> Pointer<'a> {
 
     /// The member `key` of `entries`, which this points at, refused here when
     /// it is missing.
+    #[inline(never)]
     pub fn required<'v>(
         &self,
         entries: &'v Entries,
@@ -218,6 +229,7 @@ impl<'a> Pointer<'a> {
 
     /// An unsigned integer as a profile or a values document writes one: a
     /// plain decimal JSON number, or a string of decimal or `0x` hex digits.
+    #[inline(never)]
     pub fn read_uint(&self, value: &Json5Value) -> Result<u64, DocError> {
         let result = match value {
             Json5Value::Number(text) => {
@@ -241,6 +253,7 @@ impl<'a> Pointer<'a> {
     }
 
     /// The boolean this points at.
+    #[inline(never)]
     pub fn read_bool(&self, value: &Json5Value) -> Result<bool, DocError> {
         match value {
             Json5Value::Bool(b) => Ok(*b),
@@ -249,6 +262,7 @@ impl<'a> Pointer<'a> {
     }
 
     /// The string this points at.
+    #[inline(never)]
     pub fn read_string<'v>(&self, value: &'v Json5Value) -> Result<&'v str, DocError> {
         match value {
             Json5Value::String(s) => Ok(s),
@@ -269,6 +283,7 @@ pub fn at(path: &str, index: usize) -> String {
 }
 
 /// The kind of `value`, as a refusal names what it found.
+#[inline(never)]
 pub fn describe(value: &Json5Value) -> &'static str {
     match value {
         Json5Value::Null => "null",
@@ -300,6 +315,7 @@ pub fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocError> {
     Pointer::text(path).check_distinct(entries)
 }
 
+#[inline(never)]
 pub fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5Value> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
