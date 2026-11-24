@@ -474,8 +474,6 @@ mod advanced_plane;
 // A transport the program supplies, in place of the system's sockets: wz doors (`wz_ext.h`) of the
 // unstable surface, over the links of the program's stack of whichever engine the build has.
 #[cfg(feature = "app-transport")]
-// Totality debt TD-185 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod app_transport;
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
