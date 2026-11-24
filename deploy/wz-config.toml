@@ -4000,11 +4000,15 @@ id = "APP_LINK_QUEUE_BYTES"
 kconfig = "WZ_LIMIT_APP_LINK_QUEUE_BYTES"
 kind = "bound"
 driven = "remote"
+# The heap profile refuses past it; the fixed profile sizes each link row's storage by it when the
+# session opens (the receive queue and the remainder), so it is that profile's capacity, and no
+# bound at all is not a value a fixed build can hold.
+on_heap = "quota"
 default = 262144
-storage = "quota"
+storage = "both"
 scope = "link"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 read = "snapshot"
 # `wire` is timing: past the bound the program's bytes are refused and handed in again once the
 # session has read the queue down, so a peer receives the same bytes later.
