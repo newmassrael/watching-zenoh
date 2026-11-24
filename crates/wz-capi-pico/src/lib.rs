@@ -596,8 +596,6 @@ pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
 pub mod key_ids;
-// Totality debt TD-164 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr;
 mod last_timestamp;
 #[cfg(any(feature = "connectivity", feature = "admin-space"))]
