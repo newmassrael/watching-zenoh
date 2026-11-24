@@ -292,7 +292,15 @@ derived from the declaration and never chosen by hand:
   one row per cell with its figures, the boots, the host, the date and the tree. A change
   that moves a cell moves its row in the same commit. Hosted CI grades the host size cells.
   The MCU and the host time cells are lab rows: a person or the loop runs the lane, and the
-  row records when.
+  row records when. A run's rows hold every image of the run against its reference, the
+  reference's other arm included, so not every row is a cell of wz: the rows of
+  `zephyr-pico-queryable` against `zephyr-pico-queryable-st` (run 20261031T063515) are
+  zenoh-pico's multi-threaded arm against its single-threaded arm, which is how the stronger
+  arm was chosen as the reference. Their gaps are pico's own, not debts of D5: the
+  multi-threaded arm's static task stacks and its read task,
+  `vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`.
+  wz's pico C ABI under the same program is `zephyr-wz-pico-queryable` and `-st` (section
+  5a), which no run of the matrix holds yet.
 
 - **D7. Every capability is a switch, from Kconfig down to the generated state machine (owner,
   2026-10-26: "kconfig와 sce code gen으로 기능을 껐다 켰다 자유롭게 조작할 수 있어야 해").**
