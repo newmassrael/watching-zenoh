@@ -398,7 +398,9 @@ pub struct SlotObserverOf<
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
         LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink, P>,
-    /// The tokens wz itself holds, answered to a peer's interest.
+    /// The tokens wz itself holds, answered to a peer's interest, and the staging of those
+    /// answers. Where the tables keep the session's tokens as rows ([`ObserverTables::held_tokens`])
+    /// the answers are read from them and this registry holds none.
     #[cfg(feature = "liveliness-token")]
     pub local_tokens: LocalTokenRegistry<P>,
 }
@@ -533,6 +535,15 @@ pub trait ObserverTables: LocalSubscribers + Sized {
     /// Hold the tables to the limits `limits` states, what the creator of the session resolved for
     /// them. What they hold is kept, and what they are asked for next is held to the new bound.
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits);
+
+    /// The session's own tokens, where these tables keep them as rows: what a peer's liveliness
+    /// Interest is answered from in place of the observer's registry of them
+    /// ([`SlotObserverOf::local_tokens`]), which such a session keeps empty. `None` where the
+    /// tables keep no tokens.
+    #[cfg(feature = "liveliness-token")]
+    fn held_tokens(&self) -> Option<&dyn crate::declare::local_token::HeldTokens> {
+        None
+    }
 }
 
 /// The table of the application's tables the session's own queryables are kept in and asked
@@ -811,6 +822,12 @@ impl<S, Q, L: LivelinessSampleSink> LentTables for RegistryTables<S, Q, L, Lent>
 impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
     fn empty() -> Self {
         Self::new()
+    }
+
+    #[cfg(feature = "liveliness-token")]
+    fn held_tokens(&self) -> Option<&dyn crate::declare::local_token::HeldTokens> {
+        self.kept_tokens()
+            .map(|_| self as &dyn crate::declare::local_token::HeldTokens)
     }
 
     fn hold_to(&mut self, limits: &crate::limits::SessionLimits) {
@@ -1433,7 +1450,10 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         // (`SubscriberPeer`'s `ignore_subscriber_interest`).
         #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
         {
-            let refused = self.local_tokens.dispatch_iteration_event(
+            let held: &dyn crate::declare::local_token::HeldTokens =
+                self.tables.held_tokens().unwrap_or(&self.local_tokens);
+            let refused = self.local_tokens.answer_iteration_event(
+                held,
                 event,
                 peer_table,
                 &mut peers.pending_declares,
@@ -1809,7 +1829,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
                 } => {
                     // A token unregistered between stage and drain is skipped;
                     // its chain's Final still terminates.
-                    if let Some(keyexpr) = self.local_tokens.keyexpr_for(token_id) {
+                    let held: &dyn crate::declare::local_token::HeldTokens =
+                        self.tables.held_tokens().unwrap_or(&self.local_tokens);
+                    if let Some(keyexpr) = held.keyexpr_for(token_id) {
                         sink.send_declare_token_reply(token_id, keyexpr, interest_id);
                     }
                 }

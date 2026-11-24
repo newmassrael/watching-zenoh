@@ -192,9 +192,8 @@ const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
-/// The application's tables apart from the session's one table set: liveliness tokens
-/// (`liveliness`), and the declaration watchers.
-const OBSERVER_ROWS: usize = cfg!(feature = "liveliness") as usize + 1;
+/// The application's tables apart from the session's one table set: the declaration watchers.
+const OBSERVER_ROWS: usize = 1;
 /// The pending gets, the ends of their legs and the replies the gets that consolidate hold, all of
 /// a build that asks (`query`): one that asks nothing holds no table of gets.
 const GET_ROWS: usize = 3 * cfg!(feature = "query") as usize;
@@ -1016,13 +1015,6 @@ impl ArenaPlan {
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
         plan.session.entities = plan.kept(entity_rows(limits));
-        #[cfg(feature = "liveliness")]
-        plan.put(
-            "liveliness tokens",
-            "MAX_LOCAL_TOKENS",
-            plan.session.entities.tokens,
-            wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-        );
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
         let watchers = plan.lent(
