@@ -1,0 +1,15 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended"]
+decision = '''
+The firmware images that build outside the crates workspace did not follow the change that gave each session one entropy source: deploy/mcu-admin-node and deploy/zephyr-admin-node still passed a source to new_session_actions and none to AdminNode::new, the Zephyr client passed none to ClientNode::new, and the FreeRTOS two-session image passed none to spawn_session and named its session handle as an Rc where the profile now holds a cell handle. Each image now makes its board's source once, as a SessionEntropy, hands a clone to the accept closure beside each bundle it builds and the source itself to the node, and names its handle SessionHandle, the profile's one name for it. The QEMU image's xorshift stream is seeded once at boot instead of at each accepted session, so the accepted sessions draw from one stream rather than from streams seeded by nearby clock reads.
+'''
+changes = '''
+deploy/mcu-admin-node/src/main.rs: one SessionEntropy over the clock-seeded xorshift; accept returns the bundle and a clone of it; the node takes it.
+deploy/zephyr-admin-node/rust/src/lib.rs: the admin node as above over ZephyrEntropy; the client node takes a SessionEntropy over ZephyrEntropy; String, CoopTime and new_session_actions are imported only where the admin node is built, so the client build warns of none.
+deploy/mcu-freertos-demo/src/two_session/scenarios.rs: one SessionEntropy over FreertosEntropy handed to both spawn_session calls; new_session_actions takes three arguments; Actions is SessionHandle<Clock>.
+'''
+verification = '''
+Run through bx on this host from the item's worktree, each verdict the exit code the command wrote to a file: cargo build --release of deploy/mcu-admin-node for thumbv7m-none-eabi at its default features (the build that failed) passed; cargo build --release of deploy/mcu-freertos-demo for thumbv7m-none-eabi, the mcu-freertos-demo bin and the mcu-freertos-two-session bin with two-session, passed; cargo build --release of the zephyr-admin-node staticlib for thumbv7m-none-eabi, the admin node (default features with net-zephyr-sockets) and the client node (client-node with net-zephyr-sockets), passed with the build values a west build passes set by hand and no warning. rustfmt --check of the three files, reason_review_pin_gate, reason_citation_gate and store_reason_citation_gate passed.
+'''
+carry = '''
+The fixed-memory builds of deploy/mcu-admin-node were not built here: on the previous main they stop in wz-session-core (an unused import in pubsub/in_place.rs and an unused FLAG_PUSH_M in lent_push.rs under the deny lints), which an integration branch in flight changes. The Zephyr images were checked as cargo builds of the staticlib, not through west, and none of the images was booted under QEMU here; the lanes Q, Qz and Qza boot them.
+'''
