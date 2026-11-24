@@ -48,6 +48,9 @@ use crate::ext_header::{ext_identity, EXT_ENC_ZBUF, EXT_FLAG_Z};
 use crate::lent_control::with_z;
 use crate::reply_stage::{PartsBody, PartsKind, ReplyParts};
 use crate::sample::QosLevel;
+// Every integer here is written as the codec runtime writes a `u64`: a `u16` or a `u32` ends on
+// its own data before the narrower width's cap could bind, so one count serves every width.
+use wz_codecs::vle::zint_len as vle_len;
 
 /// The `Response` envelope header of a reply that names its keyexpr inline:
 /// `N_MID_RESPONSE | N` (a suffix follows the id). The `M` flag derives from the
@@ -57,25 +60,6 @@ const RESPONSE_HEADER: u8 = wire_const::N_MID_RESPONSE | wire_const::FLAG_N_N;
 
 /// The bit the generated `Response::encode` derives from the key's `Local` arm.
 const LOCAL_KEY: u8 = 0x40;
-
-/// The continuation bytes a VLE of each width may take before its last byte, as the codec runtime
-/// writes them (`write_vle_inner`: `ceil((bits - 1) / 7) - 1`): the last byte of a `u64` carries a
-/// full eight bits with no flag, so it ends at nine bytes.
-const VLE_U64: u32 = 8;
-const VLE_U32: u32 = 4;
-const VLE_U16: u32 = 2;
-
-/// The bytes a VLE of `value` takes, by the rule the codec runtime writes it by.
-fn vle_len(value: u64, continuation_max: u32) -> usize {
-    let mut rest = value;
-    // At most `continuation_max`, so the count and the one byte after it never overflow.
-    let mut taken = 0u32;
-    while rest >= 0x80 && taken < continuation_max {
-        rest = rest.wrapping_shr(7);
-        taken = taken.saturating_add(1);
-    }
-    (taken as usize).saturating_add(1)
-}
 
 /// The sum of byte counts, saturated: a count past `usize` is a window no buffer lends, so the
 /// reserve refuses it rather than lend a window of a wrapped length.
@@ -122,14 +106,13 @@ impl Window<'_> {
     }
 
     /// `value` as the codec runtime writes a VLE: seven bits at a time with the continuation
-    /// flag, and after `continuation_max` bytes the rest in one.
-    fn vle(&mut self, value: u64, continuation_max: u32) {
+    /// flag, and the ninth byte, when there is one, carrying its last eight bits whole. The loop
+    /// runs to the length the value has, so it is not unrolled to the widest one at each call.
+    fn vle(&mut self, value: u64) {
         let mut rest = value;
-        let mut taken = 0u32;
-        while rest >= 0x80 && taken < continuation_max {
+        for _ in 1..vle_len(value) {
             self.byte((rest as u8 & 0x7F) | 0x80);
             rest = rest.wrapping_shr(7);
-            taken = taken.saturating_add(1);
         }
         self.byte(rest as u8);
     }
@@ -141,9 +124,9 @@ fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usiz
     let Some(encoding) = encoding else {
         return 0;
     };
-    let mut len = vle_len(u64::from(encoding.packed_id), VLE_U32);
+    let mut len = vle_len(u64::from(encoding.packed_id));
     if let Some(schema) = encoding.schema {
-        len = sum([len, vle_len(schema.len() as u64, VLE_U64), schema.len()]);
+        len = sum([len, vle_len(schema.len() as u64), schema.len()]);
     }
     len
 }
@@ -153,9 +136,9 @@ fn write_encoding(out: &mut Window<'_>, encoding: Option<crate::reply_stage::Enc
     let Some(encoding) = encoding else {
         return;
     };
-    out.vle(u64::from(encoding.packed_id), VLE_U32);
+    out.vle(u64::from(encoding.packed_id));
     if let Some(schema) = encoding.schema {
-        out.vle(schema.len() as u64, VLE_U64);
+        out.vle(schema.len() as u64);
         out.bytes(schema);
     }
 }
@@ -539,29 +522,29 @@ impl<'a> ResponseWriter<'a> {
         let responder = self.responder.value();
         let name = self.key_name();
         let suffix = name.suffix.map_or(0, |suffix| {
-            sum([vle_len(suffix.len() as u64, VLE_U64), suffix.len()])
+            sum([vle_len(suffix.len() as u64), suffix.len()])
         });
         let envelope = sum([
             1,
-            vle_len(u64::from(parts.rid), VLE_U32),
-            vle_len(u64::from(name.id), VLE_U16),
+            vle_len(u64::from(parts.rid)),
+            vle_len(u64::from(name.id)),
             suffix,
         ]);
         let qos = if qos_extension {
-            sum([1, vle_len(u64::from(parts.qos.raw), VLE_U64)])
+            sum([1, vle_len(u64::from(parts.qos.raw))])
         } else {
             0
         };
         let identity = if responder.is_empty() {
             0
         } else {
-            sum([1, vle_len(responder.len() as u64, VLE_U64), responder.len()])
+            sum([1, vle_len(responder.len() as u64), responder.len()])
         };
         let body = match body {
             BodyView::Put { payload, encoding } => sum([
                 2,
                 encoding_len(encoding),
-                vle_len(payload.len() as u64, VLE_U64),
+                vle_len(payload.len() as u64),
                 payload.len(),
             ]),
             BodyView::Del => 2,
@@ -569,7 +552,7 @@ impl<'a> ResponseWriter<'a> {
             BodyView::Err { payload, encoding } => sum([
                 1,
                 encoding_len(encoding),
-                vle_len(payload.len() as u64, VLE_U64),
+                vle_len(payload.len() as u64),
                 payload.len(),
             ]),
         };
@@ -607,20 +590,20 @@ impl<'a> ResponseWriter<'a> {
             header = with_z(header);
         }
         out.byte(header);
-        out.vle(u64::from(parts.rid), VLE_U32);
-        out.vle(u64::from(name.id), VLE_U16);
+        out.vle(u64::from(parts.rid));
+        out.vle(u64::from(name.id));
         if let Some(suffix) = name.suffix {
-            out.vle(suffix.len() as u64, VLE_U64);
+            out.vle(suffix.len() as u64);
             out.bytes(suffix.as_bytes());
         }
         if qos_extension {
             let entry = QOS_EXT_HEADER & !EXT_FLAG_Z;
             out.byte(if responder { entry | EXT_FLAG_Z } else { entry });
-            out.vle(u64::from(parts.qos.raw), VLE_U64);
+            out.vle(u64::from(parts.qos.raw));
         }
         if responder {
             out.byte(RESPONDER_EXT_HEADER & !EXT_FLAG_Z);
-            out.vle(identity.len() as u64, VLE_U64);
+            out.vle(identity.len() as u64);
             out.bytes(identity);
         }
         match body {
@@ -632,7 +615,7 @@ impl<'a> ResponseWriter<'a> {
                 }
                 out.byte(header);
                 write_encoding(&mut out, encoding);
-                out.vle(payload.len() as u64, VLE_U64);
+                out.vle(payload.len() as u64);
                 out.bytes(payload);
             }
             BodyView::Del => {
@@ -647,7 +630,7 @@ impl<'a> ResponseWriter<'a> {
                 }
                 out.byte(header);
                 write_encoding(&mut out, encoding);
-                out.vle(payload.len() as u64, VLE_U64);
+                out.vle(payload.len() as u64);
                 out.bytes(payload);
             }
         }
@@ -1603,14 +1586,48 @@ mod tests {
         assert!(!out.filled(), "a byte left over");
     }
 
+    /// The window writes a VLE as the codec runtime does, at each width it changes at and at the
+    /// ninth byte that carries eight bits whole. Turned red by a `Window::vle` that stops short of
+    /// the value's length or writes a tenth byte.
+    #[test]
+    fn a_window_writes_a_vle_as_the_codec_writes_it() {
+        let mut compared = 0usize;
+        for value in [
+            0u64,
+            0x7F,
+            0x80,
+            0x3FFF,
+            0x4000,
+            u64::from(u32::MAX),
+            (1 << 56) - 1,
+            1 << 56,
+            u64::MAX,
+        ] {
+            let mut expected = [0u8; 16];
+            let mut sink = SliceSink::new(&mut expected);
+            sink.write_vle_u64(value).expect("room");
+            let len = sink.position();
+            let mut written = [0u8; 16];
+            let mut out = Window {
+                rest: &mut written[..len],
+                short: false,
+            };
+            out.vle(value);
+            assert!(out.filled(), "{value:#x}: the window is the codec's length");
+            assert_eq!(written[..len], expected[..len], "{value:#x}");
+            compared += 1;
+        }
+        assert_eq!(compared, 9);
+    }
+
     /// A count past `usize` saturates, so it asks for a window no buffer lends.
     #[test]
     fn a_sum_of_counts_past_usize_saturates() {
         assert_eq!(sum([1, 2, 3]), 6);
         assert_eq!(sum([usize::MAX, 1]), usize::MAX);
-        assert_eq!(vle_len(0x7f, VLE_U64), 1);
-        assert_eq!(vle_len(0x80, VLE_U64), 2);
-        assert_eq!(vle_len(u64::MAX, VLE_U64), 9);
-        assert_eq!(vle_len(u64::from(u32::MAX), VLE_U32), 5);
+        assert_eq!(vle_len(0x7f), 1);
+        assert_eq!(vle_len(0x80), 2);
+        assert_eq!(vle_len(u64::MAX), 9);
+        assert_eq!(vle_len(u64::from(u32::MAX)), 5);
     }
 }

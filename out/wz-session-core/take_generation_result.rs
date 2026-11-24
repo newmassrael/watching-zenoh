@@ -50,12 +50,12 @@ impl TakeGenerationResult {
         }
     }
 
-    /// The record of the case `duplicate`, read where a test of the tag proved
-    /// the value is in it.
-    pub fn proven_duplicate(&self) -> &take_generation_duplicate::TakeGenerationDuplicatePayload {
+    /// The record of the case `duplicate`, or `None` when the value is in
+    /// another case.
+    pub fn as_duplicate(&self) -> Option<&take_generation_duplicate::TakeGenerationDuplicatePayload> {
         match self {
-            Self::Duplicate(record) => record,
-            _ => unreachable!("a value of {} read as {} is in another case", "take_generation_result", "duplicate"),
+            Self::Duplicate(record) => Some(record),
+            _ => None,
         }
     }
 }

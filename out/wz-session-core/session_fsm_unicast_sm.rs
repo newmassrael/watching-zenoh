@@ -117,6 +117,26 @@ pub enum SessionFsmUnicastState {
     #[cfg(feature = "session-unicast-accept")] Closed = 11,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl SessionFsmUnicastState {
+    pub const ID_Init: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Init as u16);
+    pub const ID_LinkOpening: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::LinkOpening as u16);
+    pub const ID_Opening: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Opening as u16);
+    pub const ID_SentInitSyn: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::SentInitSyn as u16);
+    pub const ID_GotInitAck: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::GotInitAck as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_Accepting: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Accepting as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_AwaitingInitSyn: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::AwaitingInitSyn as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_SentInitAck: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::SentInitAck as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_SentOpenAck: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::SentOpenAck as u16);
+    pub const ID_Established: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Established as u16);
+    pub const ID_Closing: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Closing as u16);
+    pub const ID_Closed: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Closed as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -165,6 +185,35 @@ pub enum SessionFsmUnicastEvent {
     #[cfg(feature = "session-unicast-accept")] TxCongestionExhaust = 18,
     #[cfg(feature = "session-unicast-accept")] /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 19,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl SessionFsmUnicastEvent {
+    #[cfg(feature = "session-unicast-accept")] pub const ID_AcceptingInactivityTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::AcceptingInactivityTimeout as u16);
+    pub const ID_ClosingTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ClosingTimeout as u16);
+    pub const ID_EstablishmentExtRejected: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::EstablishmentExtRejected as u16);
+    pub const ID_FramingError: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::FramingError as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_InboundStart: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::InboundStart as u16);
+    pub const ID_InitAckReceived: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::InitAckReceived as u16);
+    pub const ID_InitAckTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::InitAckTimeout as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_InitSynReceived: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::InitSynReceived as u16);
+    pub const ID_LeaseExpired: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LeaseExpired as u16);
+    pub const ID_LinkLost: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkLost as u16);
+    pub const ID_LinkOpenTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkOpenTimeout as u16);
+    pub const ID_LinkOpened: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::LinkOpened as u16);
+    pub const ID_OpenAckReceived: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::OpenAckReceived as u16);
+    pub const ID_OpenAckTimeout: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::OpenAckTimeout as u16);
+    #[cfg(feature = "session-unicast-accept")] pub const ID_OpenSynReceived: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::OpenSynReceived as u16);
+    pub const ID_OutboundStart: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::OutboundStart as u16);
+    pub const ID_PeerClose: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::PeerClose as u16);
+    pub const ID_SessionClose: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SessionClose as u16);
+    pub const ID_TxCongestionExhaust: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::TxCongestionExhaust as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -799,9 +848,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:118 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
-            SessionFsmUnicastState::Closed => {
+            SessionFsmUnicastState::ID_Closed => {
                 // SCE-MAP: session_fsm_unicast.scxml:257 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -814,7 +863,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.free_pool_slots();
                 }
             },
-            SessionFsmUnicastState::Closing => {
+            SessionFsmUnicastState::ID_Closing => {
                 // SCE-MAP: session_fsm_unicast.scxml:249 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -824,7 +873,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.send_close_frame_with_reason();
                 }
             },
-            SessionFsmUnicastState::Established => {
+            SessionFsmUnicastState::ID_Established => {
                 // SCE-MAP: session_fsm_unicast.scxml:218 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -843,7 +892,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.start_keepalive_worker();
                 }
             },
-            SessionFsmUnicastState::GotInitAck => {
+            SessionFsmUnicastState::ID_GotInitAck => {
                 // SCE-MAP: session_fsm_unicast.scxml:164 :: GotInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -853,7 +902,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.send_open_syn();
                 }
             },
-            SessionFsmUnicastState::LinkOpening => {
+            SessionFsmUnicastState::ID_LinkOpening => {
                 // SCE-MAP: session_fsm_unicast.scxml:136 :: LinkOpening :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -863,7 +912,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.link_driver_open();
                 }
             },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentInitAck => {
                 // SCE-MAP: session_fsm_unicast.scxml:195 :: SentInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -873,7 +922,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.send_init_ack_with_cookie();
                 }
             },
-            SessionFsmUnicastState::SentInitSyn => {
+            SessionFsmUnicastState::ID_SentInitSyn => {
                 // SCE-MAP: session_fsm_unicast.scxml:155 :: SentInitSyn :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -883,7 +932,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             self.actions.send_init_syn();
                 }
             },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentOpenAck => {
                 // SCE-MAP: session_fsm_unicast.scxml:201 :: SentOpenAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -908,7 +957,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 // SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -917,7 +966,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         // set records before its first exit (W3C SCXML 3.10), and removes
         // `state` from the configuration after this returns.
         match state {
-            SessionFsmUnicastState::Established => {
+            SessionFsmUnicastState::ID_Established => {
                 // SCE-MAP: session_fsm_unicast.scxml:218 :: Established :: _state_body
                 // W3C SCXML 3.9: onexit block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.9: error stops block)
@@ -942,42 +991,44 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:118 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:118 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => {
-                if event == SessionFsmUnicastEvent::AcceptingInactivityTimeout {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_Accepting => {
+                if event == SessionFsmUnicastEvent::ID_AcceptingInactivityTimeout {
                     {
                         // Accepting, transition 0
                         return Some(::sce_rust_runtime::TransitionId(13));
                     }
                 }
-                if event == SessionFsmUnicastEvent::FramingError {
+                if event == SessionFsmUnicastEvent::ID_FramingError {
                     {
                         // Accepting, transition 1
                         return Some(::sce_rust_runtime::TransitionId(14));
                     }
                 }
-                if event == SessionFsmUnicastEvent::EstablishmentExtRejected {
+                if event == SessionFsmUnicastEvent::ID_EstablishmentExtRejected {
                     {
                         // Accepting, transition 2
                         return Some(::sce_rust_runtime::TransitionId(15));
                     }
                 }
-                if event == SessionFsmUnicastEvent::PeerClose {
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
                     {
                         // Accepting, transition 3
                         return Some(::sce_rust_runtime::TransitionId(16));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkLost {
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
                     {
                         // Accepting, transition 4
                         return Some(::sce_rust_runtime::TransitionId(17));
@@ -985,8 +1036,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => {
-                if event == SessionFsmUnicastEvent::InitSynReceived {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_AwaitingInitSyn => {
+                if event == SessionFsmUnicastEvent::ID_InitSynReceived {
                     {
                         // AwaitingInitSyn, transition 0
                         return Some(::sce_rust_runtime::TransitionId(18));
@@ -994,15 +1045,15 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::Closing => {
-                if event == SessionFsmUnicastEvent::ClosingTimeout {
+            SessionFsmUnicastState::ID_Closing => {
+                if event == SessionFsmUnicastEvent::ID_ClosingTimeout {
                     {
                         // Closing, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(18));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(27));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkLost {
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
                     {
                         // Closing, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(19));
@@ -1011,43 +1062,43 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::Established => {
-                if event == SessionFsmUnicastEvent::SessionClose {
+            SessionFsmUnicastState::ID_Established => {
+                if event == SessionFsmUnicastEvent::ID_SessionClose {
                     {
                         // Established, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(12));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(21));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LeaseExpired {
+                if event == SessionFsmUnicastEvent::ID_LeaseExpired {
                     {
                         // Established, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(13));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(22));
                     }
                 }
-                if event == SessionFsmUnicastEvent::FramingError {
+                if event == SessionFsmUnicastEvent::ID_FramingError {
                     {
                         // Established, transition 2
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(14));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(23));
                     }
                 }
-                if event == SessionFsmUnicastEvent::TxCongestionExhaust {
+                if event == SessionFsmUnicastEvent::ID_TxCongestionExhaust {
                     {
                         // Established, transition 3
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(15));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(24));
                     }
                 }
-                if event == SessionFsmUnicastEvent::PeerClose {
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
                     {
                         // Established, transition 4
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(16));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(25));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkLost {
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
                     {
                         // Established, transition 5
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(17));
@@ -1056,15 +1107,15 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::GotInitAck => {
-                if event == SessionFsmUnicastEvent::OpenAckReceived {
+            SessionFsmUnicastState::ID_GotInitAck => {
+                if event == SessionFsmUnicastEvent::ID_OpenAckReceived {
                     {
                         // GotInitAck, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(10));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(11));
                     }
                 }
-                if event == SessionFsmUnicastEvent::OpenAckTimeout {
+                if event == SessionFsmUnicastEvent::ID_OpenAckTimeout {
                     {
                         // GotInitAck, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(11));
@@ -1073,14 +1124,14 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::Init => {
-                if event == SessionFsmUnicastEvent::OutboundStart {
+            SessionFsmUnicastState::ID_Init => {
+                if event == SessionFsmUnicastEvent::ID_OutboundStart {
                     {
                         // Init, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                #[cfg(feature = "session-unicast-accept")] if event == SessionFsmUnicastEvent::InboundStart {
+                #[cfg(feature = "session-unicast-accept")] if event == SessionFsmUnicastEvent::ID_InboundStart {
                     {
                         // Init, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
@@ -1088,22 +1139,22 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::LinkOpening => {
-                if event == SessionFsmUnicastEvent::LinkOpened {
+            SessionFsmUnicastState::ID_LinkOpening => {
+                if event == SessionFsmUnicastEvent::ID_LinkOpened {
                     {
                         // LinkOpening, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(1));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkOpenTimeout {
+                if event == SessionFsmUnicastEvent::ID_LinkOpenTimeout {
                     {
                         // LinkOpening, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(2));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkLost {
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
                     {
                         // LinkOpening, transition 2
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(3));
@@ -1112,29 +1163,29 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::Opening => {
-                if event == SessionFsmUnicastEvent::FramingError {
+            SessionFsmUnicastState::ID_Opening => {
+                if event == SessionFsmUnicastEvent::ID_FramingError {
                     {
                         // Opening, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(4));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
-                if event == SessionFsmUnicastEvent::EstablishmentExtRejected {
+                if event == SessionFsmUnicastEvent::ID_EstablishmentExtRejected {
                     {
                         // Opening, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(5));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
-                if event == SessionFsmUnicastEvent::PeerClose {
+                if event == SessionFsmUnicastEvent::ID_PeerClose {
                     {
                         // Opening, transition 2
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(6));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
-                if event == SessionFsmUnicastEvent::LinkLost {
+                if event == SessionFsmUnicastEvent::ID_LinkLost {
                     {
                         // Opening, transition 3
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(7));
@@ -1143,8 +1194,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
-                if event == SessionFsmUnicastEvent::OpenSynReceived {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentInitAck => {
+                if event == SessionFsmUnicastEvent::ID_OpenSynReceived {
                     {
                         // SentInitAck, transition 0
                         return Some(::sce_rust_runtime::TransitionId(19));
@@ -1152,15 +1203,15 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            SessionFsmUnicastState::SentInitSyn => {
-                if event == SessionFsmUnicastEvent::InitAckReceived {
+            SessionFsmUnicastState::ID_SentInitSyn => {
+                if event == SessionFsmUnicastEvent::ID_InitAckReceived {
                     {
                         // SentInitSyn, transition 0
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(8));
                         #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
-                if event == SessionFsmUnicastEvent::InitAckTimeout {
+                if event == SessionFsmUnicastEvent::ID_InitAckTimeout {
                     {
                         // SentInitSyn, transition 1
                         #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(9));
@@ -1169,8 +1220,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                 }
                 None
             },
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
-                if event == SessionFsmUnicastEvent::Null {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::ID_SentOpenAck => {
+                if event == SessionFsmUnicastEvent::ID_Null {
                     {
                         // SentOpenAck, transition 0
                         return Some(::sce_rust_runtime::TransitionId(20));

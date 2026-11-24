@@ -114,6 +114,26 @@ pub enum PeerConnectionState {
     AuthorityRefused = 11,
 }
 
+/// Each state's number, as the document's tables and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant. The hooks
+/// match on these, and the variants stay the machine's names in its API.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl PeerConnectionState {
+    pub const ID_Idle: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Idle as u16);
+    pub const ID_Passive: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Passive as u16);
+    pub const ID_PassiveUp: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::PassiveUp as u16);
+    pub const ID_Resolving: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Resolving as u16);
+    pub const ID_Connecting: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Connecting as u16);
+    pub const ID_Established: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Established as u16);
+    pub const ID_Backoff: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Backoff as u16);
+    pub const ID_Refused: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::Refused as u16);
+    pub const ID_NoLocator: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::NoLocator as u16);
+    pub const ID_NoSlot: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::NoSlot as u16);
+    pub const ID_IdentityMismatch: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::IdentityMismatch as u16);
+    pub const ID_AuthorityRefused: ::sce_rust_runtime::StateId = ::sce_rust_runtime::StateId(Self::AuthorityRefused as u16);
+}
+
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
@@ -139,6 +159,29 @@ pub enum PeerConnectionEvent {
     SessionLost = 12,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
     Null = 13,
+}
+
+/// Each event's number, as the runtime's queues and the policy's behaviour
+/// hooks know it: `ID_<variant>` is the variant's discriminant, and
+/// `ID_Null` is the tables' `null_event`, which asks for eventless
+/// transitions.
+// Named after the variant each one numbers, which is not upper case.
+#[allow(non_upper_case_globals)]
+impl PeerConnectionEvent {
+    pub const ID_DialEstablished: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialEstablished as u16);
+    pub const ID_DialFailed: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialFailed as u16);
+    pub const ID_DialMismatch: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialMismatch as u16);
+    pub const ID_DialNoSlot: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::DialNoSlot as u16);
+    pub const ID_InboundEstablished: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::InboundEstablished as u16);
+    pub const ID_ManualRefused: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ManualRefused as u16);
+    pub const ID_ManualStart: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ManualStart as u16);
+    pub const ID_ManualStartPassive: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ManualStartPassive as u16);
+    pub const ID_ManualStop: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ManualStop as u16);
+    pub const ID_ResolveEmpty: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ResolveEmpty as u16);
+    pub const ID_ResolveFound: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::ResolveFound as u16);
+    pub const ID_RetryDue: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::RetryDue as u16);
+    pub const ID_SessionLost: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::SessionLost as u16);
+    pub const ID_Null: ::sce_rust_runtime::EventId = ::sce_rust_runtime::EventId(Self::Null as u16);
 }
 
 // ======================================================================
@@ -703,9 +746,9 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: peer_connection.scxml:87 :: _machine"]
 // SCE-MAP: peer_connection.scxml:87 :: _machine
-    fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
-            PeerConnectionState::Backoff => {
+            PeerConnectionState::ID_Backoff => {
                 // SCE-MAP: peer_connection.scxml:157 :: Backoff :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -715,7 +758,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             self.actions.arm_retry();
                 }
             }
-            PeerConnectionState::Connecting => {
+            PeerConnectionState::ID_Connecting => {
                 // SCE-MAP: peer_connection.scxml:134 :: Connecting :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -725,7 +768,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             self.actions.dial();
                 }
             }
-            PeerConnectionState::Established => {
+            PeerConnectionState::ID_Established => {
                 // SCE-MAP: peer_connection.scxml:147 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -735,7 +778,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             self.actions.reset_retry();
                 }
             }
-            PeerConnectionState::Resolving => {
+            PeerConnectionState::ID_Resolving => {
                 // SCE-MAP: peer_connection.scxml:123 :: Resolving :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
@@ -760,7 +803,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
 // SCE-MAP: peer_connection.scxml:87 :: _machine
     fn execute_exit_actions(
         &mut self,
-        state: Self::State,
+        state: ::sce_rust_runtime::StateId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
@@ -778,24 +821,26 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // the first of `state`'s own transitions, in document order, that `event`
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::Null` asks for eventless transitions.
+    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
+    // state and the event are the numbers the tables are indexed by
+    // (docs/adr/0123).
     #[doc = "SCE-MAP: peer_connection.scxml:87 :: _machine"]
 // SCE-MAP: peer_connection.scxml:87 :: _machine
     fn first_enabled_transition(
         &mut self,
-        state: Self::State,
-        event: Self::Event,
+        state: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
-            PeerConnectionState::Backoff => {
-                if event == PeerConnectionEvent::RetryDue {
+            PeerConnectionState::ID_Backoff => {
+                if event == PeerConnectionEvent::ID_RetryDue {
                     {
                         // Backoff, transition 0
                         return Some(::sce_rust_runtime::TransitionId(19));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Backoff, transition 1
                         return Some(::sce_rust_runtime::TransitionId(20));
@@ -803,32 +848,32 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Connecting => {
-                if event == PeerConnectionEvent::DialEstablished {
+            PeerConnectionState::ID_Connecting => {
+                if event == PeerConnectionEvent::ID_DialEstablished {
                     {
                         // Connecting, transition 0
                         return Some(::sce_rust_runtime::TransitionId(12));
                     }
                 }
-                if event == PeerConnectionEvent::DialFailed {
+                if event == PeerConnectionEvent::ID_DialFailed {
                     {
                         // Connecting, transition 1
                         return Some(::sce_rust_runtime::TransitionId(13));
                     }
                 }
-                if event == PeerConnectionEvent::DialNoSlot {
+                if event == PeerConnectionEvent::ID_DialNoSlot {
                     {
                         // Connecting, transition 2
                         return Some(::sce_rust_runtime::TransitionId(14));
                     }
                 }
-                if event == PeerConnectionEvent::DialMismatch {
+                if event == PeerConnectionEvent::ID_DialMismatch {
                     {
                         // Connecting, transition 3
                         return Some(::sce_rust_runtime::TransitionId(15));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Connecting, transition 4
                         return Some(::sce_rust_runtime::TransitionId(16));
@@ -836,14 +881,14 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Established => {
-                if event == PeerConnectionEvent::SessionLost {
+            PeerConnectionState::ID_Established => {
+                if event == PeerConnectionEvent::ID_SessionLost {
                     {
                         // Established, transition 0
                         return Some(::sce_rust_runtime::TransitionId(17));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Established, transition 1
                         return Some(::sce_rust_runtime::TransitionId(18));
@@ -851,20 +896,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Idle => {
-                if event == PeerConnectionEvent::ManualStart {
+            PeerConnectionState::ID_Idle => {
+                if event == PeerConnectionEvent::ID_ManualStart {
                     {
                         // Idle, transition 0
                         return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStartPassive {
+                if event == PeerConnectionEvent::ID_ManualStartPassive {
                     {
                         // Idle, transition 1
                         return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
-                if event == PeerConnectionEvent::ManualRefused {
+                if event == PeerConnectionEvent::ID_ManualRefused {
                     {
                         // Idle, transition 2
                         return Some(::sce_rust_runtime::TransitionId(2));
@@ -872,20 +917,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Passive => {
-                if event == PeerConnectionEvent::InboundEstablished {
+            PeerConnectionState::ID_Passive => {
+                if event == PeerConnectionEvent::ID_InboundEstablished {
                     {
                         // Passive, transition 0
                         return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStart {
+                if event == PeerConnectionEvent::ID_ManualStart {
                     {
                         // Passive, transition 1
                         return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Passive, transition 2
                         return Some(::sce_rust_runtime::TransitionId(5));
@@ -893,20 +938,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::PassiveUp => {
-                if event == PeerConnectionEvent::SessionLost {
+            PeerConnectionState::ID_PassiveUp => {
+                if event == PeerConnectionEvent::ID_SessionLost {
                     {
                         // PassiveUp, transition 0
                         return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStart {
+                if event == PeerConnectionEvent::ID_ManualStart {
                     {
                         // PassiveUp, transition 1
                         return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // PassiveUp, transition 2
                         return Some(::sce_rust_runtime::TransitionId(8));
@@ -914,26 +959,26 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Refused => {
-                if event == PeerConnectionEvent::ManualStart {
+            PeerConnectionState::ID_Refused => {
+                if event == PeerConnectionEvent::ID_ManualStart {
                     {
                         // Refused, transition 0
                         return Some(::sce_rust_runtime::TransitionId(21));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStartPassive {
+                if event == PeerConnectionEvent::ID_ManualStartPassive {
                     {
                         // Refused, transition 1
                         return Some(::sce_rust_runtime::TransitionId(22));
                     }
                 }
-                if event == PeerConnectionEvent::ManualRefused {
+                if event == PeerConnectionEvent::ID_ManualRefused {
                     {
                         // Refused, transition 2
                         return Some(::sce_rust_runtime::TransitionId(23));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Refused, transition 3
                         return Some(::sce_rust_runtime::TransitionId(24));
@@ -941,20 +986,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
                 None
             }
-            PeerConnectionState::Resolving => {
-                if event == PeerConnectionEvent::ResolveFound {
+            PeerConnectionState::ID_Resolving => {
+                if event == PeerConnectionEvent::ID_ResolveFound {
                     {
                         // Resolving, transition 0
                         return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
-                if event == PeerConnectionEvent::ResolveEmpty {
+                if event == PeerConnectionEvent::ID_ResolveEmpty {
                     {
                         // Resolving, transition 1
                         return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
-                if event == PeerConnectionEvent::ManualStop {
+                if event == PeerConnectionEvent::ID_ManualStop {
                     {
                         // Resolving, transition 2
                         return Some(::sce_rust_runtime::TransitionId(11));

@@ -12,7 +12,8 @@
 //! its full name and a field by its path. [`Payload`] is that program's message:
 //! one message of a [`SchemaSet`], whose fields are set and read by path and
 //! whose bytes are what the schema says they are. The schema is read by the
-//! one schema reader ([`crate::proto_schema`]) and bytes are read by the one
+//! one schema reader (`proto_schema`, or the compiled descriptor's reader
+//! [`crate::proto_descriptor`]) and bytes are read by the one
 //! typed reader ([`crate::proto_decode`]), so this module adds the values and
 //! the writing of them, and no second reading of either.
 //!
@@ -119,9 +120,8 @@ use core::fmt;
 use crate::proto_decode::{
     FieldEvents, Item, SchemaMessage, SchemaSet, WireError, MAX_DECODE_DEPTH,
 };
-use crate::proto_parse::{Label, ScalarKind, Syntax};
 use crate::proto_range::{RangeRefusal, RangeSource, ValueRange};
-use crate::proto_schema::{FieldKind, Fld, Msg};
+use crate::proto_types::{FieldKind, Fld, Label, Msg, ScalarKind, Syntax};
 use crate::proto_write::{self, has_presence, Count, Fixed, Narrowing, Out, Wire};
 
 /// A value as the program gives it to a field.

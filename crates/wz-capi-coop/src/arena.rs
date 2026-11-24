@@ -584,8 +584,7 @@ impl HeldPlaces {
     }
 
     /// The first kind at or after the place `from` in [`EntityKind::ALL`] these places name a
-    /// layout for: its place there and the layout. A walk by it ends on the places named, as a
-    /// walk of a row of sizes by [`next_sized`] does.
+    /// layout for: its place there and the layout. A walk by it ends on the places named.
     fn next_entity(&self, from: usize) -> Option<(usize, Layout)> {
         self.entities
             .iter()
@@ -928,6 +927,9 @@ pub struct TransportRows {
     /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
     /// for a table the plan does not hold ([`ArenaPlan::holding_cells`]).
     cell_bytes: LinkCells<usize>,
+    /// The tables of `cell_bytes` the plan holds, by their place in `LinkCells::into_array`:
+    /// what the lend walks.
+    cells_held: HeldBits,
     /// How many publishes the session keeps for its other faces at once, each in a place of a
     /// link's batch (`HANDED_LEG_BYTES`).
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -989,10 +991,8 @@ impl TransportRows {
     fn cells_from(&self, lend: &mut TableLender<'_>) -> LinkCells<Option<LentByteCells>> {
         let sizes = self.cell_bytes.into_array();
         let mut cells = [None, None, None, None];
-        let mut from = 0;
-        while let Some((at, bytes)) = next_sized(&sizes, from) {
-            from = at + 1;
-            if let Some(lent) = cells.get_mut(at) {
+        for at in self.cells_held.places() {
+            if let (Some(lent), Some(&bytes)) = (cells.get_mut(at), sizes.get(at)) {
                 *lent = Some(lend.byte_cells(bytes, self.links));
             }
         }
@@ -1126,6 +1126,9 @@ pub struct PlaceRows {
     /// The bytes of each place the ABI keeps an entity of a kind in, by [`EntityKind`], none for
     /// no place.
     entity_bytes: [usize; ENTITY_KINDS],
+    /// The kinds of `entity_bytes` the plan holds places of, by their place in
+    /// [`EntityKind::ALL`]: what the lend walks.
+    held: HeldBits,
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
@@ -1143,10 +1146,10 @@ impl PlaceRows {
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>, rows: EntityRows) -> PlaceTables {
         let handle = (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1));
         let mut entities = EntityPlaces::NONE;
-        let mut from = 0;
-        while let Some((at, bytes)) = next_sized(&self.entity_bytes, from) {
-            from = at + 1;
-            if let Some(cells) = entities.cells.get_mut(at) {
+        for at in self.held.places() {
+            if let (Some(cells), Some(&bytes)) =
+                (entities.cells.get_mut(at), self.entity_bytes.get(at))
+            {
                 let count = rows.kinds.get(at).copied().unwrap_or(0);
                 *cells = Some(lend.byte_cells(bytes, count));
             }
@@ -1155,17 +1158,50 @@ impl PlaceRows {
     }
 }
 
-/// The first of `sizes` at or after the place `from` that is not `0`: its place and the size. A
-/// walk of a row of tables by it ends on the sizes, and lends only the tables a plan holds: one
-/// over every place has a constant trip count, which the compiler unrolls into a copy of the
-/// walk's body for each place.
-fn next_sized(sizes: &[usize], from: usize) -> Option<(usize, usize)> {
-    sizes
-        .iter()
-        .copied()
-        .enumerate()
-        .skip(from)
-        .find(|&(_, size)| size != 0)
+/// The places of a row of tables a plan holds, a bit at each table's place in the row: the walk
+/// that lends them ends on the mask. A walk over the row's places, or one that scans the row for
+/// the next table held, steps one place at a time on every path, so the compiler sees a loop of
+/// the row's constant length and unrolls it into a copy of the lend for each place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HeldBits(u32);
+
+// Every kind of entity has a bit of the mask its places are walked by.
+const _: () = assert!(
+    ENTITY_KINDS <= u32::BITS as usize,
+    "a kind of entity past the bits of the places' mask would never be lent its places"
+);
+
+impl HeldBits {
+    /// These places and `at`; a place past the mask's bits adds none.
+    fn with(self, at: usize) -> Self {
+        let bit = u32::try_from(at)
+            .ok()
+            .and_then(|at| 1u32.checked_shl(at))
+            .unwrap_or(0);
+        Self(self.0 | bit)
+    }
+
+    /// The places held, the lowest first.
+    fn places(self) -> HeldPlacesWalk {
+        HeldPlacesWalk(self.0)
+    }
+}
+
+/// The walk of [`HeldBits::places`]: the bits not yet walked.
+struct HeldPlacesWalk(u32);
+
+impl Iterator for HeldPlacesWalk {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.0 == 0 {
+            return None;
+        }
+        let at = self.0.trailing_zeros();
+        // The lowest bit set is cleared: the walk ends once each place held was handed out.
+        self.0 &= self.0.wrapping_sub(1);
+        usize::try_from(at).ok()
+    }
 }
 
 /// What a session's arena holds, row by row, and the rows each layer lends its tables from
@@ -1259,6 +1295,7 @@ impl ArenaPlan {
             reassembly_chains: SESSION_CHAIN_BUFFERS,
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
             cell_bytes: LinkCells::default(),
+            cells_held: HeldBits::default(),
             #[cfg(any(feature = "listen", feature = "group"))]
             handed_legs: 0,
             #[cfg(feature = "group")]
@@ -1873,6 +1910,7 @@ impl ArenaPlan {
             self.put_table(place_parts(kind), count, place.size());
             if let Some(bytes) = self.places.entity_bytes.get_mut(at) {
                 *bytes = place.size();
+                self.places.held = self.places.held.with(at);
             }
         }
         self.settled()
@@ -1887,13 +1925,21 @@ impl ArenaPlan {
     /// where it lies; a refused one is no plan to open by.
     pub fn holding_cells(&mut self, bytes: LinkCells<usize>) -> Result<(), ArenaRefused> {
         let mut laid = self.transport.cell_bytes.into_array();
-        for ((laid, asked), parts) in laid.iter_mut().zip(bytes.into_array()).zip(CELL_PARTS) {
+        let mut held = self.transport.cells_held;
+        for (at, ((laid, asked), parts)) in laid
+            .iter_mut()
+            .zip(bytes.into_array())
+            .zip(CELL_PARTS)
+            .enumerate()
+        {
             if *laid == 0 && asked != 0 {
                 *laid = asked;
+                held = held.with(at);
                 self.put_table(parts, self.transport.links, asked);
             }
         }
         self.transport.cell_bytes = LinkCells::from_array(laid);
+        self.transport.cells_held = held;
         self.settled()
     }
 
@@ -2822,6 +2868,23 @@ mod tests {
             .map(|cells| cells.as_ref().map(|cells| (cells.size(), cells.capacity())))
             .collect();
         assert_eq!(held, [None, Some((48, 3)), None, Some((64, 3))]);
+    }
+
+    /// A mask walks the places set in it once each, the lowest first, the first bit and the last
+    /// alike, and none of an empty mask; a place past its bits adds none. Turned red by a walk
+    /// that skips a place, hands one out twice, or ends before the last bit.
+    #[test]
+    fn a_mask_walks_each_place_set_in_it_once_in_order() {
+        let held = HeldBits::default()
+            .with(0)
+            .with(5)
+            .with(31)
+            .with(5)
+            .with(32);
+        let walked: alloc::vec::Vec<_> = held.places().collect();
+        assert_eq!(walked, [0, 5, 31]);
+        assert_eq!(HeldBits::default().places().next(), None);
+        assert_eq!(HeldBits::default().with(usize::MAX), HeldBits::default());
     }
 
     /// A plan reads the rows it laid out and none past them, in order, and two plans that laid

@@ -601,7 +601,7 @@ fn ends_row(link: Option<crate::link::LinkEnds<'_>>) -> (RowText, RowText) {
 
 /// The locator of one end of a link, which `write` writes, in its row: there when it fits, on
 /// the heap past it, as [`RowTextOf::of`] keeps a text.
-#[cfg(feature = "session-unicast")]
+#[cfg(any(feature = "session-unicast", feature = "session-multicast"))]
 fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
     let mut inline: crate::text_out::FixedText<{ crate::caps::MAX_LOCATOR_LEN }> =
         crate::text_out::FixedText::new();
@@ -619,13 +619,19 @@ fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
 /// `udp/<at>`, the locator a group member's end is reported by, written into its row.
 #[cfg(feature = "session-multicast")]
 fn udp_row(at: core::net::SocketAddr) -> RowText {
-    use core::fmt::Write;
-    let mut inline = heapless::String::<{ crate::caps::MAX_LOCATOR_LEN }>::new();
-    if write!(inline, "udp/{at}").is_ok() {
-        RowText::Inline(inline)
-    } else {
-        RowText::Spilled(alloc::format!("udp/{at}"))
-    }
+    end_row(|out| {
+        out.push_str("udp/");
+        out.push_socket_addr(at);
+    })
+}
+
+/// `udp/<at>`, as [`udp_row`] writes it, for a snapshot that keeps its text on the heap.
+#[cfg(feature = "session-multicast")]
+fn udp_text(at: core::net::SocketAddr) -> String {
+    use crate::text_out::TextOut as _;
+    let mut text = String::from("udp/");
+    text.push_socket_addr(at);
+    text
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,7 +685,7 @@ impl<'a> GroupMemberLink<'a> {
     ) -> Self {
         Self {
             src,
-            dst: alloc::format!("udp/{}", member.locator),
+            dst: udp_text(member.locator),
             kind: Some(LinkKind::Udp),
             group,
             endpoint,
@@ -1008,6 +1014,27 @@ mod tests {
             ..member
         };
         assert!(FaceLinkRow::of_group_member(&unknown, group, &endpoint, true).is_none());
+    }
+
+    /// A group member's end is `udp/` and the address as `Display` writes it, held in the row
+    /// when it fits and on the heap past it. Turned red by a text that differs from the
+    /// formatter's or is cut at the row's bound.
+    #[cfg(feature = "session-multicast")]
+    #[test]
+    fn a_member_end_is_written_whole_in_or_past_its_row() {
+        let widest = core::net::SocketAddr::V6(core::net::SocketAddrV6::new(
+            core::net::Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            ),
+            65535,
+            0,
+            u32::MAX,
+        ));
+        for at in [core::net::SocketAddr::from(([10, 0, 0, 1], 7447)), widest] {
+            let row = udp_row(at);
+            assert_eq!(row.as_str(), alloc::format!("udp/{at}"));
+            assert_eq!(row.is_inline(), row.len() <= crate::caps::MAX_LOCATOR_LEN);
+        }
     }
 
     #[cfg(feature = "session-multicast")]

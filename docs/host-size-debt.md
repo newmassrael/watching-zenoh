@@ -233,3 +233,6 @@ code, as labelled.
   documentation says it answers, and stop linking every scheme's parser. That changes the door's
   answer for such endpoints (today: a requirement with the endpoint listed as unknown). Estimate:
   up to 110,000 on the three `unstable-api` cooperative cases (`-unstable` 2.82 to about 2.55).
+  Done in two steps: the door is its own capability (`device-requires`), and on the cooperative
+  engine it reads each endpoint with the engine's grammar (`facilities::device_requires_of`), so a
+  cooperative build with the door links no `parse_any_locator`; the facility set itself stays.

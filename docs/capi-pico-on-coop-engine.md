@@ -722,7 +722,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `multicast-declarations` select no engine, and the cooperative engine joins a group as a face
     of its own, on the host's sockets or over a transport the program supplies, with the same
     declarations, the same keyexpr aliases and the same congestion rule on its send queue as the
-    tokio engine's group (`wz-capi-coop/src/engine/group.rs`). A `listen` that names a group
+    tokio engine's group (`wz-capi-coop/src/engine/group.rs`). With `multicast-declarations` it
+    reads each member's keyexprs by that member's own declarations, as the tokio engine's group
+    does (`wz-capi-coop`'s `multicast-declarations`, the session core's
+    `MulticastDispatcher::apply_declared_aliases`), and so reads the group's datagrams into owned
+    batches. A `listen` that names a group
     joins it, on either engine, in a build with `multicast-transport`, and is refused as an
     unknown locator scheme in one without it.
   - `open_on_coop` hands the config's `listen` to the engine, with the handshake bound pico's

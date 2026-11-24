@@ -99,11 +99,15 @@ impl Sent {
 }
 
 impl ResponseSink for Sent {
-    fn send_response(&self, response: wz_session_core::wire::ResponseOwned) {
-        self.0
-            .lock()
-            .expect("not poisoned")
-            .push(format!("reply {:?}", response.wire()));
+    // The reply as the owned record the heap path builds of it, so the log reads its wire bytes.
+    fn send_reply_parts(&self, parts: wz_session_core::reply_stage::ReplyParts<'_>) {
+        if let Ok(response) = wz_session_core::query::QueryReply::from_parts(&parts).into_response()
+        {
+            self.0
+                .lock()
+                .expect("not poisoned")
+                .push(format!("reply {:?}", response.wire()));
+        }
     }
 
     fn send_response_final(

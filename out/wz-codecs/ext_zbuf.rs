@@ -217,6 +217,19 @@ impl<'a> ExtZbufSource for ExtZbufParts<'a> {
     }
 }
 
+#[allow(dead_code)]
+impl<'a> ExtZbufParts<'a> {
+    /// The parts of what `src` says, each accessor of [`ExtZbufSource`] read
+    /// once: the one form a codec that holds this one writes it from,
+    /// whatever form the value it is handed is in (docs/adr/0058).
+    #[doc(hidden)]
+    pub fn of<S: ExtZbufSource + ?Sized>(src: &'a S) -> Self {
+        Self {
+            value: src.value(),
+        }
+    }
+}
+
 impl<S: ExtZbufStorage> ExtZbufSource for ExtZbufOwned<S> {
     fn value(&self) -> ::sce_forge_runtime::codec::Bytes<'_, 4294967295> {
         self.value.as_bytes()
@@ -292,6 +305,21 @@ impl ExtZbufWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `ExtZbuf` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct ExtZbufWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtZbufWalk {
+    type Entry<'b> = ExtZbufView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtZbufView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `ExtZbuf` holds no bounded list, embedded body or variant, so a
 // view of it would hold what it holds. Its view is the codec itself under the
 // name every codec's view has, which lets a codec that embeds, lists or

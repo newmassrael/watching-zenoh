@@ -28,6 +28,7 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
             .expect("32-byte test key"),
         policy: crate::policy::SessionPolicy::defaults(),
         limits: crate::limits::SessionLimits::BUILD,
+        region: None,
     }
 }
 

@@ -5925,6 +5925,16 @@ where
 /// everything it installs is on the wire from the InitSyn onward. It returns
 /// [`OpenError`] because the accept-side twin's staging draws OS entropy, which
 /// can fail. `timeouts` are the handshake deadlines of this open.
+/// `params` with the region `offer` names: the region is part of what a session is opened with
+/// (`SessionInitParams::region`), so it reaches the session where the session is made rather than
+/// through `apply_offer`. An offer that names none leaves the parameters' own.
+fn with_offered_region(mut params: SessionInitParams, offer: &SessionOffer) -> SessionInitParams {
+    if let Some(name) = offer.region.and_then(|region| region.name()) {
+        params.region = Some(name);
+    }
+    params
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn initiator_open_offering<S>(
     connected: DialedLink,
@@ -5967,7 +5977,7 @@ where
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(connected, params.link_rx, &params.policy, &params.limits);
-    let actions = new_session_actions(outbound, params, clock);
+    let actions = new_session_actions(outbound, with_offered_region(params, &offer), clock);
     // Staged BEFORE the handshake drives, and BEFORE any wire byte: an offer
     // this build cannot honour fails here rather than opening a session whose
     // wire form silently differs from the configuration.
@@ -6498,7 +6508,8 @@ where
     #[cfg(not(feature = "transport-lowlatency"))]
     let (inbound, outbound, writer_handle) =
         wire_dialed_link_with_rx(accepted, params.link_rx, &params.policy, &params.limits);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let (actions, mut engine) =
+        wire_session_engine(outbound, with_offered_region(params, &offer), clock);
     actions
         .apply_offer(&offer)
         .map_err(OpenError::UnsupportedCapability)?;
@@ -6994,6 +7005,35 @@ mod tests {
         let config = DialConfig::default().with_runtime_limits(stated);
         assert_eq!(config.runtime_limits, stated);
         assert_eq!(config.runtime_limits.max_locator_len(), Quota::at_most(2));
+    }
+
+    /// The region an offer names is the region the session is opened with, and an offer that
+    /// names none leaves the parameters' own, set or not.
+    #[test]
+    fn an_offer_names_the_region_a_session_is_opened_with() {
+        use wz_session_core::extregion::RegionName;
+        let north = RegionName::new("north").expect("a valid region name");
+        let south = RegionName::new("south").expect("a valid region name");
+        let fixture = wz_runtime_tokio_test_support::fixture_session_init_params;
+
+        let named = SessionOffer::universal().with_region(&north);
+        assert_eq!(
+            with_offered_region(fixture(), &named).region,
+            Some(north.clone())
+        );
+        assert_eq!(
+            with_offered_region(fixture(), &SessionOffer::universal()).region,
+            None
+        );
+        let mut own = fixture();
+        own.region = Some(south.clone());
+        assert_eq!(
+            with_offered_region(own, &SessionOffer::universal()).region,
+            Some(south.clone())
+        );
+        let mut own = fixture();
+        own.region = Some(south);
+        assert_eq!(with_offered_region(own, &named).region, Some(north));
     }
 
     /// R2944 — a dial's offer carries the QoS metadata of the ENDPOINT that

@@ -17,6 +17,7 @@
 //! last envelope extension, written by its one writer (`ts_stack::TsStack::write`).
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
+use wz_codecs::vle::zint_len as vle_len;
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{body_eid, ext_identity, EXT_ENC_Z64, EXT_FLAG_Z};
@@ -339,17 +340,6 @@ fn source_zid(info: &SourceInfo) -> Result<&[u8], CodecError> {
         return Err(CodecError::LengthOutOfRange);
     }
     Ok(zid)
-}
-
-/// The bytes the codec's `vle_u64` writes `value` in: seven bits a byte, at most nine.
-fn vle_len(value: u64) -> usize {
-    let mut len = 1usize;
-    let mut rest = value;
-    while rest >= 0x80 && len < 9 {
-        rest = rest.checked_shr(7).unwrap_or(0);
-        len = len.saturating_add(1);
-    }
-    len
 }
 
 /// A length as the wire's integer.
