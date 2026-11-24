@@ -1319,13 +1319,15 @@ impl<W: LinkWaits> LinkRooms<W> {
         set
     }
 
-    /// Whether `face` is one of `set`: it holds a place of the set, and took it no later than
-    /// the set was read.
+    /// Whether a publish dropped on `set` passes over `face`: one of the set, or one that took
+    /// its place after the set was read, as a transport that opened after a publish is not sent
+    /// it ([`DroppedOn::owes`]). A face with no place, which names no wait for its room, is sent
+    /// it.
     #[cfg(any(feature = "listen", feature = "group"))]
-    pub(crate) fn names(&self, set: &DroppedOn, face: FaceId) -> bool {
+    pub(crate) fn skips(&self, set: &DroppedOn, face: FaceId) -> bool {
         lock(&self.rooms)
             .place_of(face)
-            .is_some_and(|(at, place)| set.names(at, place.since))
+            .is_some_and(|(at, place)| !set.owes(at, place.since))
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
@@ -5068,7 +5070,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let _ = skip;
         for (face, actions) in core.ups_by_id() {
             #[cfg(any(feature = "listen", feature = "group"))]
-            if skip.is_some_and(|dropped| self.rooms.names(dropped, face)) {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, face)) {
                 continue;
             }
             #[cfg(feature = "listen")]
@@ -5152,7 +5154,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // And each group the session joined, which its task frames and sends.
         #[cfg(feature = "group")]
         for group in &core.groups {
-            if skip.is_some_and(|dropped| self.rooms.names(dropped, group.id())) {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.id())) {
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, group.id());

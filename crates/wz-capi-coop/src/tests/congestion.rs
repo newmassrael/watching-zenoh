@@ -221,14 +221,15 @@ fn a_link_that_has_gone_is_not_asked() {
     assert_eq!(rooms.within(1_000), Room::Unasked);
 }
 
-/// A face keeps its place while it is up, and a set read when a publish was dropped names the
-/// faces that held their places then: a face that takes a freed place after the drop is not named
-/// by it, so the publish kept for the other faces still reaches it. A face that holds no place is
-/// named as every face, which drops the publish on all. Turned red by a place reused without its
-/// mark, which would skip the newcomer, or a face with no place the set leaves out.
+/// A face keeps its place while it is up, and a publish dropped on a set read at one mark is sent
+/// to the faces that held their places then and are not in it: one it was dropped on, and one
+/// that takes a freed place after the drop, are passed over, as a transport that opened after a
+/// publish is not sent it. A face that holds no place is named as every face, which drops the
+/// publish on all. Turned red by a place reused without its mark, or a face with no place the set
+/// leaves out.
 #[cfg(any(feature = "listen", feature = "group"))]
 #[test]
-fn a_face_that_takes_a_place_after_a_drop_is_not_named_by_it() {
+fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
     let answers = Answers::default();
     let rooms = rooms(&answers);
     rooms.hold(1, answers.face(10, false));
@@ -236,24 +237,17 @@ fn a_face_that_takes_a_place_after_a_drop_is_not_named_by_it() {
     let Room::Congested(dropped) = rooms.within(1_000) else {
         panic!("the first face is congested");
     };
-    assert!(rooms.names(&dropped, 1));
-    assert!(
-        !rooms.names(&dropped, 2),
-        "a face with room is not dropped on"
-    );
+    assert!(rooms.skips(&dropped, 1), "the face it was dropped on");
+    assert!(!rooms.skips(&dropped, 2), "a face with room is sent it");
     rooms.forget(1);
-    assert!(
-        !rooms.names(&dropped, 1),
-        "a face that went is named by nothing"
-    );
     rooms.hold(3, answers.face(30, true));
     assert!(
-        !rooms.names(&dropped, 3),
+        rooms.skips(&dropped, 3),
         "the face that took the first face's place came after the drop"
     );
     assert!(
-        rooms.names(&rooms.dropped_on(3), 3),
-        "CONTROL: a set read now names it"
+        !rooms.skips(&rooms.dropped_on(2), 3),
+        "CONTROL: a set read now owes it"
     );
     assert!(
         rooms.dropped_on(9).is_every(),
