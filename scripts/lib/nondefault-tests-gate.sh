@@ -1501,6 +1501,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # runs in the default build on the declared range; this row runs it on the lent one.
     "wz-session-core|hook|limits-lent-at-open|\
 limits::tests::a_parameter_lent_at_the_open_stops_at_the_builds_value_where_it_is_lent"
+    # The key expressions a session declared, kept on the session for every link
+    # (`session-keeps-keyexprs`, a selector the C library's cooperative engine names): a link of such
+    # a build has no room for a table and records nothing it is told, where the default build's link
+    # records. `session-unicast` and the two declaration features are what a link's table is built
+    # with. The filter is the module path.
+    "wz-session-core|hook|session-keeps-keyexprs,session-unicast,declare-keyexpr,declare-undeclare|\
+declared_keyexprs::"
     # Three switches of the session core that no row above turned on, which the feature-legs gate
     # (`nondefault_feature_legs_gate.py`) refuses; each row runs tests that read its switch.
     #
