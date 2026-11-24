@@ -3911,12 +3911,6 @@ mod group_publications_written_from_parts {
         bytes
     }
 
-    /// `bytes` in the form the publication metadata holds an attachment in: the one place the
-    /// tests make one, so they read the same whichever form that is.
-    fn attachment_of<'a, A: From<&'a [u8]>>(bytes: &'a [u8]) -> A {
-        A::from(bytes)
-    }
-
     /// The publication written from `(mapping_id, suffix)`, as the group's publish writes it.
     fn lent(
         mapping_id: crate::wire_id::ExprId,
@@ -3946,7 +3940,7 @@ mod group_publications_written_from_parts {
         let mut metas = alloc::vec![
             PushMetadata::default(),
             PushMetadata {
-                attachment: Some(attachment_of(&[1, 2, 3])),
+                attachment: Some(&[1, 2, 3]),
                 ..PushMetadata::default()
             },
         ];
