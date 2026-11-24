@@ -536,8 +536,6 @@ pub mod e2e_receiver;
 // The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "e2e-sender")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-196 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod e2e_sender;
 // `wz_ext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
