@@ -44,9 +44,13 @@ pub(crate) fn scheme_of(endpoint: &str) -> &str {
 fn cut(text: &str, separator: u8) -> Option<(&str, &str)> {
     debug_assert!(separator.is_ascii());
     let at = text.bytes().position(|byte| byte == separator)?;
-    // SAFETY: the byte at `at` is the ASCII `separator`, a whole character, so `at` and `at + 1`
-    // both lie on character boundaries of `text`, the second at most at its end.
-    unsafe { Some((text.get_unchecked(..at), text.get_unchecked(at + 1..))) }
+    // SAFETY: the byte at `at` is the ASCII `separator`, a whole character, so `at` lies on a
+    // character boundary of `text`, and so does the end of that byte, the start of what follows it
+    // in `rest`, at most at its end.
+    unsafe {
+        let rest = text.get_unchecked(at..);
+        Some((text.get_unchecked(..at), rest.get_unchecked(1..)))
+    }
 }
 
 /// An endpoint as pico reads it with a link's `keys`: views into the endpoint's own text.
