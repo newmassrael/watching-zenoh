@@ -57,9 +57,11 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
+#[cfg(any(feature = "listen", feature = "group", test))]
+use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, OtherPeers, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf};
 
 #[cfg(feature = "query")]
 use super::{LegHold, LegSink};
