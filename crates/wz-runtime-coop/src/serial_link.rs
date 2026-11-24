@@ -7,7 +7,8 @@
 //! baud rate, and the [`SerialDevice`] it yields: write without waiting, wait, read what is
 //! queued, and throw away what is queued. The framing of zenoh's serial link (COBS, the CRC32 and
 //! the header of each frame) is the session core's (`wz_session_core::serial_link`), written once
-//! for every engine; the line under it is the platform's.
+//! for every engine; the line under it is the platform's. The link over the line, its handshake
+//! and the stack that opens it beside another's are the heap profile's (`SerialLinks`).
 
 use core::ffi::c_int;
 use core::fmt::Debug;
@@ -15,6 +16,11 @@ use core::fmt::Debug;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
 use crate::session_drive::{LinkOpenError, SerialLocator};
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+mod links;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use links::{SerialDial, SerialDriver, SerialLinks, SerialLinksDial};
 
 /// One open serial line: a platform's tty, or a UART. Only the one thread that drives the link
 /// touches it. A line keeps no message boundaries and has no peer address: what is written is read
@@ -80,4 +86,8 @@ pub trait SerialOpen {
     /// another (one plugged in later may answer) is [`LinkOpenError::Refused`]; no descriptor
     /// left is [`LinkOpenError::Exhausted`].
     fn open(&self, at: &SerialLocator) -> Result<Self::Device, LinkOpenError>;
+
+    /// The platform's monotonic clock, in microseconds: what a dial times the locator's `tout`
+    /// on, the wait after the peer's `RESET` before its `INIT` is written again.
+    fn now_us(&self) -> u64;
 }

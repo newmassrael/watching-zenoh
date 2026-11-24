@@ -286,6 +286,10 @@ impl SerialOpen for PosixSerialOpen {
         };
         PosixSerialLine::open(path, at.baudrate, at.options.exclusive).map_err(open_refused)
     }
+
+    fn now_us(&self) -> u64 {
+        crate::PosixClock.now_us()
+    }
 }
 
 #[cfg(test)]
