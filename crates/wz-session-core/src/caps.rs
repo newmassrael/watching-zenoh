@@ -598,8 +598,8 @@ const _: () = assert!(
 
 /// The bytes a session whose engine holds every face under one lock keeps of the droppable
 /// publishes it owes its other faces while one send holds it, in places of the batch it advertises,
-/// one publish to a place; a publish it has no place for is dropped on every face. `0` keeps none,
-/// as zenoh-pico, whose peers share one transmit lock, keeps none.
+/// one publish to a place; a publish it has no place for is dropped on every face. Reserved only
+/// under the `held-faces` value of the `held-publish-drop` policy. At least `1`.
 pub const HANDED_LEG_BYTES: usize = generated::HANDED_LEG_BYTES;
 
 /// How many outbound slots the links of a session whose engine lends them from its arena share at

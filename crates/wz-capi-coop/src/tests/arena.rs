@@ -930,6 +930,31 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
     );
 }
 
+/// A session that listens reserves the places of the droppable publishes it keeps for its other
+/// faces: `HANDED_LEG_BYTES` cut into places of its links' batch, with their flags, under the
+/// build's `held-faces` value of `held-publish-drop`, and none under `every-face`. Turned red
+/// by places sized by anything but the links' batch, or reserved when the policy keeps none.
+#[cfg(feature = "listen")]
+#[test]
+fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
+    use wz_session_core::policy::HeldPublishDrop;
+
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    let batch = row(&plan, "link receive buffers").entry_bytes;
+    let places = row(&plan, "handed leg places");
+    assert_eq!(places.entry_bytes, batch, "a place is a batch long");
+    let expected = match SessionPolicy::defaults().held_publish_drop() {
+        HeldPublishDrop::HeldFaces => caps::HANDED_LEG_BYTES / batch,
+        HeldPublishDrop::EveryFace => 0,
+    };
+    assert_eq!(places.count, expected);
+    assert_eq!(row(&plan, "handed leg flags").count, expected);
+}
+
 /// The session is lent one table of reassembly buffers its links share, a buffer for each chain
 /// one peer stages at once and one for the rejoined message the round keeps, however many links
 /// the session may hold, each as long as the

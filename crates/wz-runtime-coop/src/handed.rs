@@ -76,6 +76,13 @@ impl<const WORDS: usize> FaceSlots<WORDS> {
         self.every
     }
 
+    /// Whether the face that took place `at` at the table's mark `since` is one of the set: its
+    /// place is in the set and it held it when the set was read. The one reading of a set, which
+    /// a face's own send state makes as the session's table of rooms does.
+    pub fn names(&self, at: usize, since: u64) -> bool {
+        since <= self.as_of && self.contains(at)
+    }
+
     /// The mark of the table of rooms when the set was read: a face that took its place after it
     /// is in no set read before.
     pub const fn as_of(&self) -> u64 {
@@ -336,6 +343,23 @@ mod tests {
             handed.take_first().map(|leg| leg.payload() == b"two"),
             Some(true)
         );
+    }
+
+    /// A set names a place's face only when that face held the place when the set was read.
+    /// Turned red by a set that names a face that came after it.
+    #[test]
+    fn a_set_names_only_the_faces_that_held_their_places_when_it_was_read() {
+        let mut set = FaceSlots::<WORDS>::none(5);
+        set.insert(3);
+        assert!(set.names(3, 5), "the face that held the place then");
+        assert!(set.names(3, 1));
+        assert!(
+            !set.names(3, 6),
+            "a face that took the place after the set was read"
+        );
+        assert!(!set.names(4, 1), "a place the set does not hold");
+        assert_eq!(set.len(), 1);
+        assert!(!set.is_empty());
     }
 
     /// A set past its words stands for every face, and a publish dropped on every face is not

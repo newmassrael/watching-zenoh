@@ -421,7 +421,7 @@ fn clock_beside(
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
 /// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
-fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
+pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
@@ -1325,7 +1325,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     pub(crate) fn names(&self, set: &DroppedOn, face: FaceId) -> bool {
         lock(&self.rooms)
             .place_of(face)
-            .is_some_and(|(at, place)| place.since <= set.as_of() && set.contains(at))
+            .is_some_and(|(at, place)| set.names(at, place.since))
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's

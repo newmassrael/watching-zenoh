@@ -4525,7 +4525,7 @@ reason = "No key of upstream's configuration states it: the declaration-sync-pac
 id = "HANDED_LEG_BYTES"
 kconfig = "WZ_LIMIT_HANDED_LEG_BYTES"
 kind = "parameter"
-range = [0, 4294967295]
+range = [1, 4294967295]
 on_heap = "quota"
 default = 4096
 storage = "both"
@@ -4543,18 +4543,14 @@ the publish is dropped on that face and kept, in room the session took at open,
 until whoever holds the session next sends it to the others. The room is cut
 into places of the batch the session advertises, one publish to a place, its key,
 payload and attachment together; a publish longer than a place, or one that
-finds every place held, is dropped on every face. 0 keeps none: a publish that
-finds the session held is dropped on every face. A session may lower it and never
-raise it.
+finds every place held, is dropped on every face. The room is reserved only
+when the held-publish-drop policy keeps such publishes for the other faces. At
+least 1; a session may lower it and never raise it.
 '''
 
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: each zenoh transport has a transmission queue of its own (`transport/link/tx/queue/size`), so a message that one transport's full queue drops is still queued on the others. The cooperative engine holds every face under one lock, and keeps what the other faces' queues would still take here. The default keeps two batches of the session's default size (PICO_UNICAST_BATCH_BYTES, 2,048), the publishes another thread makes while one send waits at most `congestion_control/drop/wait_before_drop`."
-
-[limit.pico_preset]
-value = 0
-reason = "zenoh-pico's peers of one unicast transport share the transport's one transmit lock, and a droppable message that finds it held is dropped for every peer at once (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): the preset keeps nothing for the other faces, as pico does."
 
 [[limit]]
 id = "PICO_UNICAST_BATCH_BYTES"
@@ -5570,6 +5566,30 @@ read no id of a dictionary, with any value but `declared`. Interests and
 liveliness interests name their keys as under `declared`.
 '''
 
+[[policy]]
+id = "held-publish-drop"
+kind = "choice"
+kconfig = "WZ_POLICY_HELD_PUBLISH_DROP"
+choices = ["held-faces", "every-face"]
+default = "held-faces"
+upstream = "Gives each transport a transmission queue of its own, so a droppable message that one transport's full queue drops is still queued on the session's other transports: `held-faces`. zenoh-pico's peers of one unicast transport share one transmit lock, and a droppable message that finds it held is dropped for all of them (`vendor/zenoh-pico/src/transport/common/tx.c` @ `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`): `every-face`."
+scope = "session"
+binding = "open"
+mutability = "fixed"
+# `wire` is visible: the other faces' peers receive the publish under one value and not the other.
+wire = "visible"
+since = 2
+help = '''
+What a droppable publish is dropped on when it finds the session held by a send
+that waits on one of its faces, in an engine that holds every face under one
+lock. `held-faces` drops it on the faces the send waits on and keeps it, in
+HANDED_LEG_BYTES of room the session reserves when it opens, until whoever
+holds the session next sends it to the other faces, as each of upstream's
+transports drops only on its own queue. `every-face` drops it on every face at
+once and reserves no room, as zenoh-pico, whose peers share one transmit lock,
+does.
+'''
+
 # A profile is a named set of policy values a run-time document starts from: the document names it
 # by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
@@ -5623,6 +5643,7 @@ zid-derivation = "random"
 handshake-stray-message = "fail"
 handshake-cookie = "stateless"
 key-wire-form = "declared"
+held-publish-drop = "held-faces"
 
 # ─── Protocol facts (part of the conformance statement a build gives of itself) ───────────────
 #

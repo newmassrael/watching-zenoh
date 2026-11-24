@@ -122,6 +122,8 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(any(feature = "listen", feature = "group"))]
+use wz_session_core::policy::HeldPublishDrop;
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
@@ -905,7 +907,17 @@ impl ArenaPlan {
                 Quota::at_most(limits.handed_leg_bytes()),
                 caps::HANDED_LEG_BYTES,
             );
-            let legs = bytes.checked_div(link_bytes).unwrap_or(0);
+            // Under `every-face` a publish that finds the session held is dropped on every face,
+            // and the session reserves no place for one.
+            let keeps = matches!(
+                crate::engine::resolve_policy(config).held_publish_drop(),
+                HeldPublishDrop::HeldFaces
+            );
+            let legs = if keeps {
+                bytes.checked_div(link_bytes).unwrap_or(0)
+            } else {
+                0
+            };
             plan.transport.handed_legs = legs;
             plan.put_table(
                 ["handed leg flags", "handed leg places"],
