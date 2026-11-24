@@ -483,6 +483,32 @@ impl FrameLendCounts {
     }
 }
 
+/// The frame a lent slot opens with (`SessionLinkActions::open_lent_batch`): its SN, its
+/// reliability and its `ext_qos`, and the budget the frame must fit.
+#[cfg(all(
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Clone, Copy)]
+struct LentFrameHead {
+    sn: u64,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+    mtu: usize,
+}
+
 /// What one lend came to (`SessionLinkActions::send_lent`): the frame left as
 /// the slot, the link lent no slot, or the path refused the slot it was lent
 /// for a reason of its own.
@@ -5488,21 +5514,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn open_lent_batch<P>(
         &self,
         batch: &mut BatchTx,
-        idx: usize,
-        sn: u64,
         priority: Priority,
-        reliable: bool,
-        ext_qos: Option<Priority>,
-        mtu: usize,
+        head: LentFrameHead,
         encode_body: &P,
     ) -> LentBatchOpen
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        let idx = TxConduits::<R>::conduit_index(priority);
+        let LentFrameHead {
+            sn,
+            reliable,
+            ext_qos,
+            mtu,
+        } = head;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
@@ -5583,6 +5611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        use crate::tx_buf::TxBuf;
         let Some(open) = batch.stage.lent.take() else {
             batch.stage.count = 0;
             return false;
@@ -5602,69 +5631,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // SAFETY: `link` records the slot for this conduit, so it lent it, and every send
             // or abort of a conduit's lent slot clears the record first, under the conduit's
             // lock, which the caller holds (`batch`): the slot is still lent and unsettled.
-            let slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
-            self.append_to_lent_frame(batch, idx, link, slot, priority, reliable, mtu, encode_body)
-        })
-    }
-
-    /// ARCHITECTURE section 9.1 -- append one message to the lent frame `slot`,
-    /// which `link` lent and records for conduit `idx`: `true` when it is in, the
-    /// frame kept open in the conduit for the next one; `false` when the frame
-    /// leaves instead, its record cleared (the message would pass the batch budget
-    /// or the slot, its partial encode rolled back first, or it is of the other
-    /// reliability).
-    #[cfg(all(
-        feature = "transport-batching",
-        feature = "transport-tx-lend",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn append_to_lent_frame<P>(
-        &self,
-        batch: &mut BatchTx,
-        idx: usize,
-        link: &LinkState<R>,
-        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
-        priority: Priority,
-        reliable: bool,
-        mtu: usize,
-        encode_body: &P,
-    ) -> bool
-    where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
-    {
-        use crate::tx_buf::TxBuf;
-        let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
-        if open_channel == Reliability::from_reliable_bool(reliable) {
-            let wpos = slot.len();
-            let appended = {
-                let mut sink = crate::tx_buf::TxSink::new(&mut slot);
-                encode_body(&mut sink).is_ok()
-            } && slot.len() <= mtu;
-            if appended {
-                batch.stage.count = batch.stage.count.saturating_add(1);
-                batch.stage.lent = Some(slot.keep_open());
-                return true;
+            let mut slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
+            let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+            if open_channel == Reliability::from_reliable_bool(reliable) {
+                let wpos = slot.len();
+                let appended = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut slot);
+                    encode_body(&mut sink).is_ok()
+                } && slot.len() <= mtu;
+                if appended {
+                    batch.stage.count = batch.stage.count.saturating_add(1);
+                    batch.stage.lent = Some(slot.keep_open());
+                    return true;
+                }
+                // Overflow: roll the partial encode back before the frame
+                // leaves, exactly as the heap stage truncates its vector.
+                slot.truncate(wpos);
             }
-            // Overflow: roll the partial encode back before the frame
-            // leaves, exactly as the heap stage truncates its vector.
-            slot.truncate(wpos);
-        }
-        let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
-        batch.stage.count = 0;
-        self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
-        false
+            let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
+            batch.stage.count = 0;
+            self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
+            false
+        })
     }
 
     /// ARCHITECTURE section 9.1 -- close the frame open in a lent slot: send the
@@ -11671,12 +11659,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         #[cfg(feature = "transport-tx-lend")]
                         let heap_stage = match self.open_lent_batch(
                             batch,
-                            idx,
-                            sn,
                             priority,
-                            reliable,
-                            ext_qos,
-                            mtu,
+                            LentFrameHead {
+                                sn,
+                                reliable,
+                                ext_qos,
+                                mtu,
+                            },
                             &encode_body,
                         ) {
                             LentBatchOpen::Opened => return Ok(UnicastPush::Pushed),
@@ -12078,12 +12067,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(
                 match self.open_lent_batch(
                     batch,
-                    TxConduits::<R>::conduit_index(priority),
-                    emit.sn,
                     priority,
-                    emit.reliable,
-                    emit.ext_qos,
-                    emit.mtu,
+                    LentFrameHead {
+                        sn: emit.sn,
+                        reliable: emit.reliable,
+                        ext_qos: emit.ext_qos,
+                        mtu: emit.mtu,
+                    },
                     &encode_body,
                 ) {
                     LentBatchOpen::Opened => FrameLend::Sent,
