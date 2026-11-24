@@ -2875,9 +2875,9 @@ id = "MAX_ENCODING_SCHEMA_BYTES"
 kconfig = "WZ_LIMIT_MAX_ENCODING_SCHEMA_BYTES"
 kind = "bound"
 driven = "local"
-# An encoding kept to send later holds its schema's length in 16 bits.
-most = 65535
-default = 256
+# The protocol writes a schema's length in one byte, so no message carries a longer one.
+most = 255
+default = 255
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -2889,12 +2889,13 @@ may carry, and the room each place that keeps an encoding to send it later
 holds for one: a slot of the pool of encodings, and a publication handed on to
 the next holder of a session. A longer schema is refused with
 _Z_ERR_SYSTEM_OUT_OF_MEMORY, never cut short. A schema a peer sends is read
-where it lies and is not bound by this. At most 65,535.
+where it lies and is not bound by this. At most 255, the longest schema a
+message carries.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the schema of an encoding, and zenoh-pico copies each onto the heap at its own length (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); 256 is MAX_KEYEXPR_BYTES's default, room for a schema that names a message type by a path as long as a key."
+reason = "No key of upstream's configuration bounds the schema of an encoding, and zenoh-pico copies each onto the heap at its own length (`vendor/zenoh-pico/src/api/encoding.c` @ `encoding->schema = _z_string_copy_from_substr(schema, len);`); 255 is the longest schema the protocol carries, its length written in one byte, so the default refuses no schema a message can send."
 
 [limit.pico_preset]
 value = 32
