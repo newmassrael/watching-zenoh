@@ -3643,6 +3643,31 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the length of a locator; wz bounds it to size the locator rows of a node."
 
 [[limit]]
+id = "MAX_GROUP_ENDPOINT_LEN"
+kconfig = "WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"
+kind = "bound"
+driven = "local"
+default = 96
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The longest endpoint, in bytes, a session joins a multicast group by, its
+socket keys included (for example udp/224.0.0.224:7447#iface=eth0): the
+text a connectivity row reports a group member's link by. A longer one is
+refused when the group is joined, never cut short. Apart from
+MAX_LOCATOR_LEN, so the keys of a group endpoint do not lengthen every
+locator row of a node. The default holds a raweth group endpoint with an
+interface name of fifteen bytes and two whitelisted addresses (90 bytes).
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the length of an endpoint, and zenoh-pico keeps an endpoint's text on the heap with no constant; wz bounds it to size the row a group member's link is reported in."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"

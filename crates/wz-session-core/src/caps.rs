@@ -586,6 +586,12 @@ pub const MAX_ADMIN_KEY_BYTES: usize = 2 * MAX_KEYEXPR_BYTES;
 /// with a `proto/` prefix and port, with margin.
 pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 
+/// The longest endpoint, socket keys included, a session joins a multicast group by: the text a
+/// connectivity row holds a group member's link by. A group whose endpoint is longer is refused
+/// when it is joined. Apart from [`MAX_LOCATOR_LEN`], so the keys do not lengthen every locator
+/// row.
+pub const MAX_GROUP_ENDPOINT_LEN: usize = generated::MAX_GROUP_ENDPOINT_LEN;
+
 /// Maximum number of static-scouting peer locators
 /// ([`crate::scout_static::synth_static_locators`] output capacity =
 /// `deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
