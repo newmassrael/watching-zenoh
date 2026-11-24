@@ -316,6 +316,7 @@ mod tests {
                 limits: wz_session_core::limits::SessionLimits::BUILD,
                 cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
                     .expect("key"),
+                region: None,
             }
         }
 

@@ -216,8 +216,8 @@ impl StatePolicy for TimerProbePolicy {
     // enabled, whatever the event. The probe only schedules and fires timers.
     fn first_enabled_transition(
         &mut self,
-        _state: Self::State,
-        _event: Self::Event,
+        _state: StateId,
+        _event: EventId,
         _eng: &mut Engine<Self>,
     ) -> Option<TransitionId> {
         None
@@ -226,12 +226,12 @@ impl StatePolicy for TimerProbePolicy {
     // The fixture is a single flat state with no entry or exit actions at all.
     fn execute_entry_actions(
         &mut self,
-        _s: Self::State,
+        _s: StateId,
         _eng: &mut Engine<Self>,
         _is_default_entry: bool,
     ) {
     }
-    fn execute_exit_actions(&mut self, _s: Self::State, _eng: &mut Engine<Self>) {}
+    fn execute_exit_actions(&mut self, _s: StateId, _eng: &mut Engine<Self>) {}
 }
 
 // ─────────────────────────────────────────────────────────────

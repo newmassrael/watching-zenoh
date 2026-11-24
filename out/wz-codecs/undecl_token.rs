@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::ext_entry::ExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -385,6 +385,21 @@ impl UndeclTokenWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `UndeclToken` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct UndeclTokenWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for UndeclTokenWalk {
+    type Entry<'b> = UndeclTokenView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        UndeclTokenView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `UndeclTokenView` is what a decode of `UndeclToken` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `UndeclToken` holds it, an embedded body or a variant arm as its
@@ -394,25 +409,17 @@ impl UndeclTokenWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `UndeclToken::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct UndeclTokenExtensionsWalk;
-
-impl ListWalk<0> for UndeclTokenExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type UndeclTokenExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct UndeclTokenView<'a> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<Bounded<ListView<'a, UndeclTokenExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
 }
 
 impl<'a> Default for UndeclTokenView<'a> {

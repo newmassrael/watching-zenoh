@@ -174,11 +174,8 @@ fn write_zint<S: sce_forge_runtime::codec::SceSink>(
     sink.write_bytes(buf.get(..n).unwrap_or(&buf))
 }
 
-/// How many bytes `value` takes as a zint.
-fn zint_len(value: u64) -> usize {
-    let mut buf = [0u8; 10];
-    wz_codecs::vle::encode_zint(&mut buf, value)
-}
+// How many bytes a value takes as a zint: the codec crate's one count.
+use wz_codecs::vle::zint_len;
 
 fn push_zint(out: &mut Vec<u8>, value: u64) {
     let mut buf = [0u8; 10];

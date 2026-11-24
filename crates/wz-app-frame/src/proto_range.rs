@@ -45,8 +45,7 @@
 //! not.
 
 use crate::proto_nanopb::{field_int_size, field_type_overridden, map_entry_int_size, IntSize};
-use crate::proto_parse::ScalarKind;
-use crate::proto_schema::{FieldKind, FileOptions, Fld, Msg};
+use crate::proto_types::{FieldKind, FileOptions, Fld, Msg, ScalarKind};
 
 /// Where a field's range comes from: the words of `source`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

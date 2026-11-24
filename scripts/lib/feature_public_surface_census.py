@@ -616,19 +616,23 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `_supervise`, with the types and constants they take, declared in `wz_ext.h`; off by
         # default, as upstream has no such doors.
         # `instance-key` gates `pub mod instance_key`, whose public items are wz's own doors
-        # `wz_ext_instance_keyer_new`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
+        # `wz_ext_instance_keyer_from_descriptor_set`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
         # `_set_last`, `_loan`, `_move`, `_drop`, `wz_ext_instance_keyer_options_default` and the
         # two `wz_ext_internal_instance_keyer_*` doors, and the types and constants they take,
         # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
         # doors inside it. Off by default, as upstream has no such doors.
         # `message-payload` gates `pub mod message_payload`, whose public items are wz's own doors
-        # `wz_ext_payload_schema_new`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
+        # `wz_ext_payload_schema_from_descriptor_set`, `_loan`, `_move`, `_drop`, `wz_ext_message_payload_new`,
         # `_options_default`, `_storage_size`, `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
         # `_encode`, `_decode`, `_refusal`, `_loan`, `_move`, `_drop`, the four `wz_ext_internal_*`
         # doors of the two handles, and the types they take, declared in `wz_ext.h`; off by
-        # default, as upstream has no such doors. It and `instance-key` each gate
-        # `pub mod proto_file` (either one is enough), whose one public item is the
-        # `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`.
+        # default, as upstream has no such doors.
+        # `proto-text` gates the doors `wz_ext_payload_schema_new` (inside `message-payload`'s
+        # module) and `wz_ext_instance_keyer_new` (inside `instance-key`'s), which read a schema
+        # from `.proto` text, and, beside either of those two, `pub mod proto_file`, whose one
+        # public item is the `wz_ext_proto_file_t` struct both take, declared in `wz_ext.h`; off
+        # by default, as upstream has no such doors and a schema is otherwise read from the
+        # `FileDescriptorSet` `protoc` compiled.
         # `object-pool` gates `pub mod object_pool`, whose public items are wz's own doors
         # `wz_ext_object_pool_bytes`, `_reserve`, `_class` and `_release`, the
         # `WZ_EXT_OBJECT_POOL_CLASSES` constant and the two structs they take, declared in
@@ -660,6 +664,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "message-payload",
                 "object-pool",
                 "object-pool-region",
+                "proto-text",
                 "remote-declaration-watch",
                 "replay-cache",
                 "resource-snapshot",
@@ -677,7 +682,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # into a library of their own over the core library. Each feature here is `wz-capi-pico`'s of
     # that name: `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
     # `message-catalog`, `message-payload` and `replay-cache` gate the `pub mod` of their door
-    # files, and each of them but `message-payload` gates `pub mod additional` too; `event-ring`
+    # files, and each of them but `message-payload` gates `pub mod additional` too; `proto-text`
+    # gates the two doors that read a schema from text inside those files and `pub mod proto_file`;
+    # `event-ring`
     # and `replay-cache` gate the modules of `src/core_view.rs`, the core's C ABI as the doors
     # import it, and their re-exports at the crate root, where the door files name them. A `#[path]` module, an inline module and a re-export are
     # shapes `ABI_CONTRACT` refuses, so the row is held to `PROSE_ONLY` below.
@@ -695,6 +702,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "instance-key",
                 "message-catalog",
                 "message-payload",
+                "proto-text",
                 "replay-cache",
             }
         ),

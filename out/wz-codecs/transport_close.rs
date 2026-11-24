@@ -18,7 +18,7 @@ use sce_forge_runtime::codec::VecSink;
 
 use super::close::Close;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::close::CloseView;
 use super::ext_entry::ExtEntryView;
 
@@ -428,6 +428,21 @@ impl TransportCloseWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `TransportClose` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct TransportCloseWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for TransportCloseWalk {
+    type Entry<'b> = TransportCloseView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        TransportCloseView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `TransportCloseView` is what a decode of `TransportClose` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `TransportClose` holds it, an embedded body or a variant arm as its
@@ -437,25 +452,17 @@ impl TransportCloseWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `TransportClose::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct TransportCloseExtensionsWalk;
-
-impl ListWalk<0> for TransportCloseExtensionsWalk {
-    type Entry<'b> = ExtEntryView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        ExtEntryView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type TransportCloseExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportCloseView<'a> {
     pub header: u8,
     pub body: CloseView,
-    pub extensions: Option<Bounded<ListView<'a, TransportCloseExtensionsWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
 }
 
 impl<'a> Default for TransportCloseView<'a> {

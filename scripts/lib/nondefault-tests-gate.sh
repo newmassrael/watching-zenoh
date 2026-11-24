@@ -511,8 +511,10 @@ transport-link-unixpipe,transport-link-ws|"
     # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
     # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
-    # below.
+    # below. Alone the schema is read from a compiled descriptor set; with `proto-text` the file
+    # also reads it from text and holds that door's refusals.
     "wz-capi-pico|hook|message-payload|--test=message_payload_doors"
+    "wz-capi-pico|hook|message-payload,proto-text|--test=message_payload_doors"
     # The object pools (`wz_ext_object_pool_*`): the unit tests of the doors, of the pools' plan and
     # layout, which the tokio engine has only with the doors, and of the place an object is taken
     # from, and the file that reserves, exhausts, reuses and
@@ -526,8 +528,12 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-capi-pico|hook|object-pool-region|--test=object_pool_doors"
     # Instance keys (`wz_app_frame::instance_key`): the model tests of the keyer, its last values
     # and its two stream doors. The tests of the schema reader's tokenizer and parser are
-    # `wz-app-schema`'s, in its default build.
-    "wz-app-frame|hook|instance-key|"
+    # `wz-app-schema`'s, the leg below.
+    "wz-app-frame|hook|instance-key,proto-text|"
+    # The schema's text reader (`proto_lex`, `proto_parse`, `proto_schema`, behind `proto-text`,
+    # which the crate's default leaves off so a device image links none of it): the tokenizer's,
+    # the parser's and the linker's tests, with no comment kept.
+    "wz-app-schema|hook|proto-text|"
     # The comments a schema keeps (`wz_app_schema::proto_lex::Gap`, behind `docs`): the
     # tokenizer's tests of which comment trails a token and which leads the next.
     "wz-app-schema|hook|docs|"
@@ -536,12 +542,20 @@ transport-link-unixpipe,transport-link-ws|"
     "wz-app-schema|hook|-default|message_catalog_table::"
     # The message payload (`wz_app_frame::message_payload`): the model tests of a message set and
     # read by path, its bytes laid by hand, decoded, merged and kept, on a synthetic schema.
-    "wz-app-frame|hook|message-payload|message_payload_tests::"
+    "wz-app-frame|hook|message-payload,proto-text|message_payload_tests::"
+    # The schema compiled by protoc and read without the text reader (`proto_descriptor`, behind
+    # `proto`): the fixture's tables, a payload set, encoded, decoded and refused on them, and the
+    # refused descriptor sets. With the text reader too, the same fixture's text is held to them,
+    # and the writer's and the typed reader's own tests on schemas read from text run.
+    "wz-app-frame|hook|message-payload|proto_descriptor_tests::"
+    "wz-app-frame|hook|proto-text|"
     # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,
-    # refuses a receiver kept per sender, and reads a report of drops back as an event.
+    # refuses a receiver kept per sender, and reads a report of drops back as an event; with
+    # `proto-text`, a keyer made from the schema's text as well as from its descriptor set.
     "wz-capi-pico|hook|instance-key|--test=instance_key_doors"
+    "wz-capi-pico|hook|instance-key,proto-text|--test=instance_key_doors"
     "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring|--test=instance_key_doors"
     # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
@@ -703,6 +717,12 @@ transport-link-unixpipe,transport-link-ws|"
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
     # an owned record.
     "wz-capi-coop|hook|app-transport,group,wz-session-core/rx-lent-only|tests::group::"
+    # And with the members' keyexprs read member by member (`multicast-declarations`,
+    # `tests::group::member_keyexprs::`): two members that declare one keyexpr id for two keys each
+    # put on, and declare a subscriber on, the key that member declared. The group reads its
+    # datagrams into owned batches there, so the module's other tests, a get and its answer among
+    # them, run on that receive too.
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.

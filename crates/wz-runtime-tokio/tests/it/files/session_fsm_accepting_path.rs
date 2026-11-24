@@ -38,7 +38,7 @@ use wz_runtime_tokio::session_glue::{
     poll_and_dispatch_one, AcceptCookieState, AuthAcceptState, BoxedLinkDriver,
     CompressionAcceptState, LinkSendOutcome, LowlatencyAcceptState, MultilinkAcceptState,
     NegotiatedExtensions, PatchAcceptState, PeerInitCaps, QosAcceptState, RegionAcceptState,
-    SessionActionsBinding, SessionLinkActions, ShmAcceptState,
+    SessionActionsBinding, SessionInitParams, SessionLinkActions, ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -70,9 +70,21 @@ fn fresh_setup_recording() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     Arc<RecordingOutboundDriver>,
 ) {
+    fresh_setup_recording_with(fixture_session_init_params())
+}
+
+/// [`fresh_setup_recording`] of a session opened with `params`, for a test whose subject is
+/// something the session is opened with (its region).
+fn fresh_setup_recording_with(
+    params: SessionInitParams,
+) -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    Arc<RecordingOutboundDriver>,
+) {
     let recording = Arc::new(RecordingOutboundDriver::default());
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine, recording)
@@ -820,8 +832,9 @@ async fn the_peer_region_rides_the_cookie_between_init_ack_and_open_syn() {
     use wz_session_core::extregion::RegionName;
 
     let region = RegionName::new("eu-west").expect("a valid region name");
-    let (initiator, mut initiator_engine, initiator_wire) = fresh_setup_recording();
-    initiator.set_local_region(Some(region.clone()));
+    let mut params = fixture_session_init_params();
+    params.region = Some(region.clone());
+    let (_initiator, mut initiator_engine, initiator_wire) = fresh_setup_recording_with(params);
     initiator_engine.process_event(E::OutboundStart);
     initiator_engine.process_event(E::LinkOpened);
     let init_syn = initiator_wire

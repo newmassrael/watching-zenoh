@@ -148,8 +148,6 @@ pub mod keyexpr_canon;
 // (the `$*`-split paths became allocation-free peekable / head-tail
 // walks), so keyexpr matching exists on the MCU no-heap profile. The
 // alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
-// Totality debt TD-003 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr_match;
 
 // Ungated keyexpr non-wild-prefix SSOT (the `NonWildKeyExpr` newtype +
@@ -2247,8 +2245,6 @@ pub mod lifecycle_node;
 // The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-109 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::unreachable)]
 pub mod reset_generations;
 
 // The table every transport of the lifecycle contract is held to (decision D7), for a test of
@@ -2654,8 +2650,6 @@ mod multicast_member_scope;
     feature = "codec-join",
     feature = "storage-profile"
 ))]
-// Totality debt TD-063 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod multicast_join;
 
 // R311lv — the shared multicast RX classify + dispatch SSOT consumed by both

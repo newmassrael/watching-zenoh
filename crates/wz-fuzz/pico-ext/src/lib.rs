@@ -63,6 +63,15 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The next field behind its two-byte little-endian length, or the rest when fewer bytes are
+    /// left: the cut for bytes that may hold a NUL.
+    pub fn sized(&mut self) -> &'a [u8] {
+        let len = usize::from(self.u16()).min(self.data.len());
+        let (field, rest) = self.data.split_at(len);
+        self.data = rest;
+        field
+    }
+
     /// The next field as a C string.
     pub fn c_field(&mut self) -> CString {
         CString::new(self.field()).expect("a field holds no NUL")

@@ -908,7 +908,7 @@ impl ApplicationLayerObserver {
     }
 
     /// R311lq — drain the staged queryable data replies (`peers.replies`)
-    /// through `send_response`. Does NOT touch the terminal rids (see
+    /// through `send_reply_parts`. Does NOT touch the terminal rids (see
     /// [`Self::drain_query_finals`]); the Session-tier path drains data
     /// replies under the lock and defers the finals past the deferred-fire
     /// drain, so the two halves are separate primitives.

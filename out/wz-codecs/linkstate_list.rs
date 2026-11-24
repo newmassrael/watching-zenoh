@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
-use sce_forge_runtime::codec::{Bounded, ListView, ListWalk};
+use sce_forge_runtime::codec::{Bounded, ListView};
 use super::linkstate::LinkstateView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -304,6 +304,21 @@ impl LinkstateListWire {
 
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
+/// How a list of `LinkstateList` reads its entries when it carries nothing from one
+/// entry to the next: one walk for every such list of every codec.
+#[allow(dead_code)]
+pub struct LinkstateListWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for LinkstateListWalk {
+    type Entry<'b> = LinkstateListView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateListView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `LinkstateListView` is what a decode of `LinkstateList` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `LinkstateList` holds it, an embedded body or a variant arm as its
@@ -313,24 +328,16 @@ impl LinkstateListWire {
 // one copies a few words however long its lists may be. `decode` refuses the
 // frames `LinkstateList::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
+/// How `link_states` reads its entries: the walk of every list of `LinkstateView` that
+/// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub struct LinkstateListLinkStatesWalk;
-
-impl ListWalk<0> for LinkstateListLinkStatesWalk {
-    type Entry<'b> = LinkstateView<'b>;
-
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        LinkstateView::decode(_c)
-    }
-
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
+pub type LinkstateListLinkStatesWalk = super::linkstate::LinkstateWalk;
 
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateListView<'a> {
     pub num_link_states: u64,
-    pub link_states: Bounded<ListView<'a, LinkstateListLinkStatesWalk, 0>, { usize::MAX }>,
+    pub link_states: Bounded<ListView<'a, super::linkstate::LinkstateWalk, 0>, { usize::MAX }>,
 }
 
 #[allow(dead_code)]
