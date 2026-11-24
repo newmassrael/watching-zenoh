@@ -41,7 +41,7 @@ use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
     z_owned_bytes_t,
 };
-use crate::bytes::{ByteBuf, NoRoom};
+use crate::bytes::{Block, ByteBuf, NoRoom};
 use crate::encoding::OwnedEncoding;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{
@@ -216,22 +216,29 @@ pub(crate) struct SampleMarshal {
     loaned_encoding: crate::encoding::z_loaned_encoding_t,
 }
 
-/// Where a marshal's key lies.
-enum KeyText {
-    /// Text of the marshal's own: a reply's, a token's, a sample kept past its callback.
-    Owned(String),
-    /// The key of the view a subscriber's callback is handed, read where the view holds it for
-    /// that one call ([`SampleMarshal::lent`]).
-    Lent(*const str),
+/// Where a marshal's key lies: where the view or the reply handed to a callback holds it for that
+/// one call ([`SampleMarshal::lent`]), or for a sample kept past its callback in the one block its
+/// copy made ([`SampleMarshal::write_copy`]), which `_block` holds a share of. Read the same way
+/// wherever it lies.
+struct KeyText {
+    text: *const str,
+    /// Held for its drop alone, never read: the block a kept sample's key lies in.
+    _block: Option<Block>,
 }
 
 impl KeyText {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Owned(text) => text,
-            // SAFETY: a lent key outlives the marshal that holds it (`SampleMarshal::lent`).
-            Self::Lent(text) => unsafe { &**text },
+    /// A key read where its lender holds it.
+    fn lent(text: &str) -> Self {
+        Self {
+            text: text as *const str,
+            _block: None,
         }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: a lent key outlives the marshal that holds it (`SampleMarshal::lent`), and a kept
+        // one lies in the block this holds.
+        unsafe { &*self.text }
     }
 }
 
@@ -248,7 +255,7 @@ impl SampleMarshal {
     /// The marshal is dropped before the borrow of `keyexpr` ends.
     #[cfg(any(feature = "query", feature = "liveliness"))]
     pub(crate) unsafe fn lent_key(keyexpr: &str, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
-        Self::keyed(KeyText::Lent(keyexpr as *const str), payload, kind)
+        Self::keyed(KeyText::lent(keyexpr), payload, kind)
     }
 
     /// The marshal a subscriber's callback is handed for `view`: its key, its payload and its
@@ -265,7 +272,7 @@ impl SampleMarshal {
     /// The marshal is let go before the borrow of `view` ends.
     pub(crate) unsafe fn lent(view: &dyn SampleView) -> core::mem::ManuallyDrop<Self> {
         let mut marshal = Self::keyed(
-            KeyText::Lent(view.keyexpr() as *const str),
+            KeyText::lent(view.keyexpr()),
             ByteBuf::lent(view.payload()),
             sample_kind_of(view.kind()),
         );
@@ -414,29 +421,74 @@ impl SampleMarshal {
     /// is this marshal's bytes with the four fields it owns written over them: every other field
     /// is a plain value, the same in both, and every view is written again by [`Self::bind`].
     ///
-    /// The payload is copied last and straight into its field, so the largest part is not moved
-    /// through the stack on its way. Refused room for any part, the copy answers [`NoRoom`],
-    /// `at` holding nothing to drop and the parts copied before let go.
+    /// What was lent to this marshal is copied ONCE, into one block that each part of the copy
+    /// holds a share of ([`Block::kept_parts`]): the key, the schema, and the payload and the
+    /// attachment where they are lent. A payload or an attachment that holds a block of its own
+    /// is shared, as a clone of it is. Refused room for the block or a share of it, the copy
+    /// answers [`NoRoom`], `at` holding nothing and every part made before let go.
     ///
     /// # Safety
     /// `at` is valid for the write of a marshal and holds none, so nothing there is dropped.
     unsafe fn write_copy(&self, at: *mut Self) -> Result<(), NoRoom> {
-        let attachment = match &self.attachment {
-            Some(attachment) => Some(attachment.try_clone()?),
-            None => None,
-        };
-        let encoding = self
+        /// The bytes of a part the one copy holds: none for a part that holds a block to share.
+        fn lent(bytes: &ByteBuf) -> &[u8] {
+            if bytes.holds_block() {
+                &[]
+            } else {
+                bytes.as_slice()
+            }
+        }
+        let key = self.keyexpr.as_str();
+        let schema = self
             .encoding
             .as_ref()
-            .map(crate::encoding::EncodingState::kept)
-            .transpose()?;
-        let keyexpr = KeyText::Owned(self.keyexpr.as_str().to_owned());
+            .and_then(|encoding| encoding.view().schema)
+            .unwrap_or(&[]);
+        let mut starts = [core::ptr::null::<u8>(); 4];
+        let block = Block::kept_parts(
+            &[
+                lent(&self.payload),
+                self.attachment.as_ref().map_or(&[] as &[u8], lent),
+                schema,
+                key.as_bytes(),
+            ],
+            &mut starts,
+        )
+        .ok_or(NoRoom)?;
+        let [payload_at, attachment_at, schema_at, key_at] = starts;
+        // A part shares its block, or the one copy's at the start the copy wrote it to.
+        let kept = |bytes: &ByteBuf, start: *const u8| {
+            if bytes.holds_block() {
+                bytes.try_clone()
+            } else {
+                // SAFETY: `kept_parts` wrote the lent bytes at `start` of `block`.
+                unsafe { ByteBuf::part_of(&block, start, bytes) }
+            }
+        };
+        let payload = kept(&self.payload, payload_at)?;
+        let attachment = match &self.attachment {
+            Some(attachment) => Some(kept(attachment, attachment_at)?),
+            None => None,
+        };
+        let encoding = match &self.encoding {
+            // SAFETY: `kept_parts` wrote the schema at `schema_at` of `block`.
+            Some(encoding) => Some(unsafe { encoding.kept_in(&block, schema_at)? }),
+            None => None,
+        };
+        // SAFETY: `kept_parts` wrote the key's bytes, valid UTF-8 as they were, at `key_at`.
+        let text = unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(key_at, key.len()))
+        };
+        let keyexpr = KeyText {
+            text: text as *const str,
+            _block: Some(block),
+        };
         // SAFETY: the caller's. The bitwise copy holds this marshal's key, payload, attachment
-        // and encoding until each is written over, without a drop, by the copy's own; a refused
-        // payload leaves it so, which nothing drops, and nothing else in between can unwind.
+        // and encoding until each is written over, without a drop, by the copy's own, and nothing
+        // in between can fail or unwind.
         unsafe {
             core::ptr::copy_nonoverlapping(self, at, 1);
-            core::ptr::addr_of_mut!((*at).payload).write(self.payload.try_clone()?);
+            core::ptr::addr_of_mut!((*at).payload).write(payload);
             core::ptr::addr_of_mut!((*at).keyexpr).write(keyexpr);
             core::ptr::addr_of_mut!((*at).attachment).write(attachment);
             core::ptr::addr_of_mut!((*at).encoding).write(encoding);
@@ -4144,6 +4196,63 @@ mod tests {
         assert_ne!(attachment.as_slice().as_ptr(), view.attachment.as_ptr());
         assert_eq!(clone.as_slice(), b"payload");
         assert_ne!(clone.as_slice().as_ptr(), view.payload.as_ptr());
+    }
+
+    /// A sample kept past its callback copies what the view lent once, into one block its key,
+    /// payload and attachment each hold a share of, laid one after another; a copy of that copy
+    /// shares the payload's and the attachment's block rather than copying them again, and copies
+    /// only its key. Turned red by a copy that takes a block of its own for each part
+    /// (`SampleMarshal::write_copy`).
+    #[test]
+    fn a_kept_sample_copies_what_was_lent_into_one_block() {
+        let view = HeldView {
+            key: "demo/one",
+            payload: b"payload",
+            attachment: b"attachment",
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { SampleMarshal::lent(&view) };
+        marshal.bind();
+        let kept = marshal.deep_copy().expect("room for the copy");
+        drop(core::mem::ManuallyDrop::into_inner(marshal));
+        let attachment = kept.attachment.as_ref().expect("the view carried one");
+        assert_eq!(kept.payload.holders(), 3, "key, payload and attachment");
+        assert_eq!(attachment.holders(), 3, "the same block");
+        assert_eq!(
+            attachment.as_slice().as_ptr(),
+            kept.payload
+                .as_slice()
+                .as_ptr()
+                .wrapping_add(b"payload".len()),
+            "the attachment follows the payload in the block"
+        );
+        assert_eq!(kept.keyexpr.as_str(), "demo/one");
+        assert_eq!(attachment.as_slice(), b"attachment");
+
+        let again = kept.deep_copy().expect("room for the copy");
+        assert_eq!(
+            again.payload.as_slice().as_ptr(),
+            kept.payload.as_slice().as_ptr(),
+            "a payload that holds a block is shared"
+        );
+        assert_eq!(
+            kept.payload.holders(),
+            5,
+            "shared by the second copy's two parts"
+        );
+        assert_eq!(again.keyexpr.as_str(), "demo/one");
+        assert_ne!(
+            again.keyexpr.as_str().as_ptr(),
+            kept.keyexpr.as_str().as_ptr(),
+            "the key is the second copy's own"
+        );
+        drop(kept);
+        assert_eq!(again.payload.as_slice(), b"payload");
+        assert_eq!(
+            again.payload.holders(),
+            2,
+            "the second copy's payload and attachment"
+        );
     }
 
     /// A sample's payload view is its pico-layout payload field, as zenoh-pico's `z_sample_payload`

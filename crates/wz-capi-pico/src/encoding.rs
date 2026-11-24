@@ -171,6 +171,35 @@ impl EncodingState {
             _block: block,
         })
     }
+
+    /// [`Self::kept`] with the schema already copied to `schema_start` of `block`, the one
+    /// block a value kept past its callback copies its lent parts into
+    /// ([`Block::kept_parts`]): this state holds a share of it. Refused with [`NoRoom`] only for
+    /// a share the block cannot give.
+    ///
+    /// # Safety
+    /// The schema's bytes, when it has some, are written at `schema_start` of `block`.
+    pub(crate) unsafe fn kept_in(
+        &self,
+        block: &Block,
+        schema_start: *const u8,
+    ) -> Result<Self, NoRoom> {
+        let (schema_start, block) = match self.view().schema {
+            None => (core::ptr::null(), None),
+            // Present but empty: a start that reads nothing and outlives every lender.
+            Some([]) => (
+                core::ptr::NonNull::<u8>::dangling().as_ptr().cast_const(),
+                None,
+            ),
+            Some(_) => (schema_start, Some(block.share().ok_or(NoRoom)?)),
+        };
+        Ok(Self {
+            packed_id: self.packed_id,
+            schema_start,
+            schema_len: self.schema_len,
+            _block: block,
+        })
+    }
 }
 
 /// An encoding a program holds (`z_owned_encoding_t`), in a slot of the pool of encodings
