@@ -75,8 +75,8 @@ use crate::pubsub::{
     z_owned_subscriber_t, CClosure, SubscriberState,
 };
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_TIMESTAMP_GENERATION_FAILED,
-    Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
+    Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
@@ -742,7 +742,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
 /// `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`):
 /// a session with no time left, and the `trusted-only` policy withholding an untrusted clock's
 /// stamp, which pico has no policy for and whose sample is as unmade. A sample the queue profile
-/// dropped behind a held conduit answers pico's failed send, as a plain put does.
+/// dropped behind a held conduit answers pico's failed send, as a plain put does. A sample larger
+/// than a row of the cache answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as every fixed room of this ABI
+/// does when it is full: pico's cache would have copied it to the heap, and a cache of rows has no
+/// room for it.
 fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
@@ -750,6 +753,7 @@ fn advanced_publish_code(sent: Result<usize, PublishError>) -> ZResult {
             Z_ERR_TIMESTAMP_GENERATION_FAILED
         }
         Err(PublishError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
+        Err(PublishError::ExceedsCacheRow) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -1884,6 +1888,11 @@ mod tests {
             advanced_publish_code(Err(PublishError::HeldConduit)),
             crate::result::Z_ERR_TRANSPORT_TX_FAILED,
             "a sample dropped behind a held conduit answers pico's failed send"
+        );
+        assert_eq!(
+            advanced_publish_code(Err(PublishError::ExceedsCacheRow)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            "a sample larger than a row of the cache answers the full room's code"
         );
     }
 

@@ -704,3 +704,202 @@ fn a_sample_keeps_what_it_retains_until_the_ring_lets_it_go() {
         "dropping the store releases the sample still in it"
     );
 }
+
+/// A put of `payload` under `sn`, carrying an encoding and an attachment, as a publisher hands
+/// it to its cache.
+fn keep_numbered(store: &CacheStore, sn: u32, payload: &[u8]) {
+    store.retain(
+        SampleBody {
+            keyexpr: "demo/k",
+            payload,
+            kind: SampleKind::Put,
+            encoding: Some(EncodingRef {
+                packed_id: 0x0B,
+                schema: Some(b"utf8"),
+            }),
+            attachment: Some(b"side-band"),
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        },
+        Some(SourceInfo::new(&[0x07], 9, sn)),
+        TimestampHint::new(100 + u64::from(sn), &[1]).unwrap(),
+    );
+}
+
+/// A store of `depth` samples in rows a lender of `rows` lends.
+fn row_store(
+    depth: usize,
+    rows: usize,
+) -> (Option<CacheStore>, Arc<std::sync::atomic::AtomicUsize>) {
+    let (lender, out) = test_rows::HeapRows::new(rows);
+    let store = CacheStore::over_rows(
+        CacheConfig {
+            max_samples: depth,
+            ..CacheConfig::default()
+        },
+        Box::new(lender),
+    );
+    (store, out)
+}
+
+/// A ring of rows answers as a ring on the heap does: its newest samples of its depth, oldest
+/// first, each with its key, payload, number, encoding and attachment, the oldest let go of in its
+/// row for a new one.
+#[test]
+fn a_ring_of_rows_replies_its_newest_samples_oldest_first() {
+    use std::sync::atomic::Ordering;
+
+    let (store, out) = row_store(2, 8);
+    let store = store.expect("eight rows lend a ring of two");
+    assert_eq!(
+        out.load(Ordering::SeqCst),
+        2,
+        "a row for each sample of the depth"
+    );
+    for sn in 0..3u32 {
+        keep_numbered(&store, sn, &[sn as u8; 3]);
+    }
+    assert_eq!(store.len(), 2, "the oldest went for the third");
+    assert_eq!(
+        out.load(Ordering::SeqCst),
+        2,
+        "a new sample takes no row of its own"
+    );
+
+    let handler = store.query_handler(|| 0);
+    let mut replies = Rec::default();
+    handler(&query(None), &mut replies);
+    assert_eq!(
+        replies.keyed,
+        vec![
+            ("demo/k".to_string(), vec![1u8; 3]),
+            ("demo/k".to_string(), vec![2u8; 3]),
+        ]
+    );
+    assert_eq!(
+        replies.sourced,
+        vec![Some((vec![0x07], 9, 1)), Some((vec![0x07], 9, 2))]
+    );
+    assert_eq!(
+        replies.metas,
+        vec![
+            (
+                Some((0x0B, Some(b"utf8".to_vec()))),
+                Some(b"side-band".to_vec())
+            );
+            2
+        ]
+    );
+
+    let mut newest = Rec::default();
+    handler(&query(Some(b"_max=1")), &mut newest);
+    assert_eq!(newest.keyed, vec![("demo/k".to_string(), vec![2u8; 3])]);
+}
+
+/// A ring of rows lets every row go when it goes, and a lender with fewer rows free than the
+/// depth lends none: the rows it lent are given back.
+#[test]
+fn a_ring_of_rows_gives_its_rows_back_and_takes_none_it_cannot_fill() {
+    use std::sync::atomic::Ordering;
+
+    let (store, out) = row_store(3, 8);
+    let store = store.expect("eight rows lend a ring of three");
+    keep_numbered(&store, 0, b"x");
+    let handler = store.query_handler(|| 0);
+    drop(store);
+    assert_eq!(
+        out.load(Ordering::SeqCst),
+        3,
+        "the handler still holds the ring"
+    );
+    drop(handler);
+    assert_eq!(
+        out.load(Ordering::SeqCst),
+        0,
+        "the last holder gave every row back"
+    );
+
+    let (refused, out) = row_store(3, 2);
+    assert!(refused.is_none(), "two rows lend no ring of three");
+    assert_eq!(out.load(Ordering::SeqCst), 0, "the two it lent went back");
+
+    let (shallow, out) = row_store(0, 2);
+    assert!(shallow.is_some(), "a depth of none keeps one sample");
+    assert_eq!(out.load(Ordering::SeqCst), 1);
+}
+
+/// A row has room for a payload and an attachment of `ADVANCED_CACHE_SAMPLE_BYTES` together and
+/// no more; a ring on the heap keeps a sample of any size.
+#[test]
+fn a_row_has_room_for_its_limit_and_the_heap_for_any_sample() {
+    let (store, _out) = row_store(1, 1);
+    let store = store.expect("one row lends a ring of one");
+    let heap = CacheStore::new(CacheConfig::default());
+    let room = wz_session_core::caps::ADVANCED_CACHE_SAMPLE_BYTES;
+    let bytes = vec![0u8; room - 1];
+    let payload: &[u8] = &bytes;
+    let body = |attachment: &'static [u8]| SampleBody {
+        keyexpr: "demo/k",
+        payload,
+        kind: SampleKind::Put,
+        encoding: None,
+        attachment: Some(attachment),
+        #[cfg(feature = "transport-shm")]
+        shared: None,
+    };
+
+    assert_eq!(
+        store.check_room(&body(b"a")),
+        Ok(()),
+        "exactly the room fits"
+    );
+    assert_eq!(
+        store.check_room(&body(b"ab")),
+        Err(PublishError::ExceedsCacheRow),
+        "a byte past the room does not"
+    );
+    assert_eq!(heap.check_room(&body(b"ab")), Ok(()));
+
+    store.retain(body(b"ab"), None, TimestampHint::default());
+    assert!(store.is_empty(), "a sample past the room is not kept");
+    store.retain(body(b"a"), None, TimestampHint::default());
+    assert_eq!(store.len(), 1);
+}
+
+/// A ring holds the publisher's key for as long as it is and lets a second one go at once.
+#[test]
+fn a_ring_holds_one_key_until_it_goes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Key(Arc<AtomicUsize>);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let released = Arc::new(AtomicUsize::new(0));
+    let (store, _out) = row_store(1, 1);
+    let store = store.expect("one row lends a ring of one");
+    store.hold_key(Retained::new(Arc::new(Key(Arc::clone(&released)))));
+    assert_eq!(released.load(Ordering::SeqCst), 0, "the ring holds the key");
+    store.hold_key(Retained::new(Arc::new(Key(Arc::clone(&released)))));
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        1,
+        "a second key goes at once"
+    );
+    keep_numbered(&store, 0, b"x");
+    keep_numbered(&store, 1, b"y");
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        1,
+        "an eviction keeps the key"
+    );
+    drop(store);
+    assert_eq!(
+        released.load(Ordering::SeqCst),
+        2,
+        "the key goes with the ring"
+    );
+}

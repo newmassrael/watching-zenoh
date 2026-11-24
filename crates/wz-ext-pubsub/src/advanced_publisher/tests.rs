@@ -18,6 +18,8 @@ struct RecordingPlane {
     stamped: std::sync::Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// The node clock the plane answers with; `NodeHlc::disabled()` unless a test gives one.
     node: NodeHlc,
+    /// The rows a session lends the cache, as many as it has free; `None` keeps it on the heap.
+    rows: Option<usize>,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -44,6 +46,15 @@ impl RecordingPlane {
             order_from: None,
             stamped: std::sync::Mutex::new(Vec::new()),
             node: NodeHlc::disabled(),
+            rows: None,
+        }
+    }
+
+    /// A plane whose session lends its caches `rows` rows.
+    fn with_rows(rows: usize) -> Self {
+        Self {
+            rows: Some(rows),
+            ..Self::new(true)
         }
     }
 
@@ -195,6 +206,17 @@ impl AdvancedPublisherPlane for RecordingPlane {
             .push(format!("beacon {payload:02x?} sporadic={sporadic}"));
     }
 
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        match self.rows {
+            None => Ok(CacheStore::new(config)),
+            Some(rows) => {
+                let (lender, _out) = crate::advanced_cache::test_rows::HeapRows::new(rows);
+                CacheStore::over_rows(config, Box::new(lender))
+                    .ok_or_else(|| AdvancedPublisherError::Plane(String::from("cache rows")))
+            }
+        }
+    }
+
     fn retained_key(&self, _publisher: &Named) -> Option<Retained> {
         Some(Retained::new(Arc::new(Named {
             events: Arc::clone(&self.events),
@@ -285,6 +307,8 @@ fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_befo
             "declare beacon",
             "declare timer",
             "drop publisher",
+            // No sample was cached, so the cache never took the key: it goes with the publisher.
+            "drop retained key",
             "drop token",
             "drop timer",
             "drop beacon",
@@ -658,4 +682,63 @@ fn the_publisher_knobs_reach_the_publish_options_and_default_changes_nothing() {
          that includes not ATTACHING one where a bare put() has none, \
          which is the way this could regress silently"
     );
+}
+
+/// A cache of rows refuses a sample larger than a row before the sample takes a time or a
+/// sequence number, and nothing is sent; a sample at the room is sent and kept, numbered as if
+/// the refusal had not been.
+#[test]
+fn a_cache_of_rows_refuses_a_sample_past_its_room_before_anything_is_sent() {
+    let plane = Arc::new(RecordingPlane::with_rows(4));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig {
+            max_samples: 2,
+            ..CacheConfig::default()
+        }),
+        sequencing: Sequencing::SequenceNumber,
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/rows",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("four rows lend a cache of two");
+
+    let room = wz_session_core::caps::ADVANCED_CACHE_SAMPLE_BYTES;
+    let past = vec![0u8; room + 1];
+    assert_eq!(publisher.put(&past), Err(PublishError::ExceedsCacheRow));
+    assert!(plane.stamped().is_empty(), "nothing was sent");
+
+    let at_room = vec![0u8; room];
+    assert_eq!(publisher.put(&at_room), Ok(room));
+    assert_eq!(
+        plane.stamped().first().map(|(_, sn)| *sn),
+        Some(Some(0)),
+        "the refused sample took no sequence number"
+    );
+    assert_eq!(publisher.cache().map(CacheStore::len), Some(1));
+}
+
+/// A session with fewer rows free than the cache's depth refuses the cache before anything is
+/// declared.
+#[test]
+fn a_cache_with_too_few_rows_is_refused_before_anything_is_declared() {
+    let plane = Arc::new(RecordingPlane::with_rows(1));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig {
+            max_samples: 2,
+            ..CacheConfig::default()
+        }),
+        ..AdvancedPublisherOptions::default()
+    };
+    let refused = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/rows",
+        options,
+        SessionZid::from([0x01]),
+    );
+    assert!(matches!(refused, Err(AdvancedPublisherError::Plane(_))));
+    assert!(plane.events().is_empty(), "nothing was declared");
 }
