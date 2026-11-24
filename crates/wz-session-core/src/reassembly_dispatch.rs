@@ -25,14 +25,14 @@
 //!   The ring that "consecutive" is judged on is the caller's ([`SnRing`]):
 //!   a reader that never saw the handshake passes none, and only a step of
 //!   plain `+1` — consecutive on every ring — is then admitted.
-//! - **The wire `more` bit — the FSM.** `more` is a real per-fragment
-//!   field (`fragment_chunk_schema.scxml`), so the slot FSM guards
-//!   Continue (`more != 0`, stay Receiving) vs Final (`more == 0`,
-//!   -> Complete) natively.
+//! - **The wire `more` bit — the event the Router raises.** An in-order
+//!   fragment with M set is `fragment.more` and one with M clear is
+//!   `fragment.last`, so the slot FSM splits Continue (stay Receiving) from
+//!   Final (-> Complete) by its transitions, and no slot event carries a
+//!   payload.
 //! - **Storage — the Router; staging — the slot machine's duties.** The
 //!   Router owns the arena ([`ChainStaging`]) and each slot's handle into
-//!   it, because the payload never flows through the FSM
-//!   (`fragment_chunk_schema.scxml` carries the `more` bit only). What the
+//!   it, because the payload never flows through the FSM. What the
 //!   Router does with them is decided by the machine: every
 //!   `<sce:action effect="duty">` of `reassembly_slot.scxml` is the one
 //!   cause of its effect (below).
@@ -109,10 +109,7 @@
 
 use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
-use crate::reassembly_slot::{
-    ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
-    ReassemblySlotPayload, ReassemblySlotPolicy,
-};
+use crate::reassembly_slot::{ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotPolicy};
 use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
@@ -821,22 +818,18 @@ fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
     .unwrap_or_else(|never| match never {});
 }
 
-/// Post `event` with its typed `payload` to a slot machine, run the macrostep it starts, and
-/// drain the duties its transition ran (none when the current state does not answer it).
+/// Post `event` to a slot machine, run the macrostep it starts, and drain the duties its
+/// transition ran (none when the current state does not answer it).
 ///
 /// The one way into a slot machine after its start: every input a slot sends comes through here,
 /// so the machine's turn is compiled once for every Router type and every caller, as its start is
-/// in [`start_slot_engine`]. A second way in would carry a second copy of the turn. The typed
-/// post serves every event: `fragment.chunk` is the one whose guards read a payload, and the
-/// others carry the empty one, as an untyped post would. The chart has no `<final>` state, so a
-/// started machine runs until it is dropped and no input meets a stopped one.
+/// in [`start_slot_engine`]. A second way in would carry a second copy of the turn. No slot event
+/// carries a payload (the chart's payload type is `()`): the wire `more` bit is which event is
+/// posted. The chart has no `<final>` state, so a started machine runs until it is dropped and no
+/// input meets a stopped one.
 #[inline(never)]
-fn turn_slot_engine(
-    engine: &mut SlotEngine,
-    event: ReassemblySlotEvent,
-    payload: ReassemblySlotPayload,
-) -> u8 {
-    engine.raise_external_typed(event, payload);
+fn turn_slot_engine(engine: &mut SlotEngine, event: ReassemblySlotEvent) -> u8 {
+    engine.raise_external_typed(event, ());
     engine.step();
     engine.policy().actions().take()
 }
@@ -882,17 +875,13 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
     /// Send `event` to the slot engine and drain the duties its transition
     /// ran (none when the current state does not answer the event).
     fn drive(&mut self, event: ReassemblySlotEvent) -> u8 {
-        turn_slot_engine(&mut self.engine, event, ReassemblySlotPayload::None)
+        turn_slot_engine(&mut self.engine, event)
     }
 
-    /// Send a `fragment.chunk` carrying the wire `more` bit, which the
-    /// machine's guards split on, and drain the duties its transition ran.
+    /// Send an in-order fragment as the event its wire `more` bit names and drain the duties its
+    /// transition ran.
     fn drive_chunk(&mut self, more: u8) -> u8 {
-        turn_slot_engine(
-            &mut self.engine,
-            ReassemblySlotEvent::FragmentChunk,
-            ReassemblySlotPayload::FragmentChunk(chunk_event(more)),
-        )
+        self.drive(chunk_event(more))
     }
 
     /// Raise `slot.release` and perform `reset_slot` if the machine ran it:
@@ -1743,9 +1732,9 @@ where
         hand: Hand,
         deliver: F,
     ) -> IngestOutcome {
-        // `Empty --fragment.chunk--> { Receiving | Complete }` for a first fragment and
-        // `Receiving --fragment.chunk--> { Receiving | Complete }` for a continuation, the slot
-        // FSM's `more` guard deciding. A well-formed chain's first fragment has M=1 (a
+        // `Empty --fragment.more/last--> { Receiving | Complete }` for a first fragment and
+        // `Receiving --fragment.more/last--> { Receiving | Complete }` for a continuation, the
+        // wire `more` bit naming the event. A well-formed chain's first fragment has M=1 (a
         // single-fragment message rides T_MID_FRAME, not T_MID_FRAGMENT) and lands in
         // Receiving -> Begun. A lone M=0 first fragment — stranded when a duplicate mid-chain
         // fragment trips the channel SN gate ([`Self::abort_channel`] clears the chain) and the
@@ -1889,15 +1878,16 @@ where
     }
 }
 
-/// Build the typed `fragment.chunk` event. The slot FSM's only guard
-/// reads `more`, and the body never flows through the FSM (the Router
-/// stages it through the slot's arena handle), so the event carries just the
-/// wire M bit. R311in removed the schema's former `payload: bytes
-/// max-size 1472` field — it inlined a 1472-byte buffer into every queued
-/// event (x the per-slot queue depth x N slots) and was the no_std
-/// MCU-footprint blocker; the body was never read through the FSM.
-fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
-    ReassemblySlotFragmentChunkPayload { more }
+/// The event an in-order fragment is sent to its slot as: `fragment.more` when its wire M bit is
+/// set, `fragment.last` when it is clear. The body never flows through the FSM (the Router stages
+/// it through the slot's arena handle), so the M bit is all the machine is told, and it is told
+/// as the event.
+fn chunk_event(more: u8) -> ReassemblySlotEvent {
+    if more != 0 {
+        ReassemblySlotEvent::FragmentMore
+    } else {
+        ReassemblySlotEvent::FragmentLast
+    }
 }
 
 /// Run one reassembly deadline sweep and report the eviction count.
@@ -3072,32 +3062,69 @@ mod duty_tests {
         assert_eq!(state(&slot), State::Empty);
     }
 
-    /// The one way into a slot machine posts an event with the payload it is handed: a chunk's
-    /// guards read its `more` bit off that payload, so a chunk posted with the empty one takes
-    /// neither arm, and every other event is answered with the empty one. Each turn leaves the
-    /// outbox drained.
+    /// The wire `more` bit is the event a fragment is sent as, `fragment.more` for a set bit of
+    /// any value and `fragment.last` for a clear one, and the one way into a slot machine posts
+    /// it with no payload. From `Empty` a set bit begins a chain and a clear one begins and
+    /// finalizes it; from `Receiving` a set bit appends and a clear one finalizes; `Complete`
+    /// answers neither. Each turn leaves the outbox drained.
     #[test]
-    fn the_slot_door_judges_a_chunk_by_the_payload_it_posts() {
-        use crate::reassembly_slot::ReassemblySlotPayload as Payload;
-        let mut slot = TestSlot::new();
-        let empty_chunk = turn_slot_engine(&mut slot.engine, Event::FragmentChunk, Payload::None);
+    fn the_more_bit_is_the_event_a_fragment_is_sent_as() {
+        assert_eq!(chunk_event(1), Event::FragmentMore);
+        assert_eq!(chunk_event(0x80), Event::FragmentMore);
+        assert_eq!(chunk_event(0), Event::FragmentLast);
         assert_eq!(
-            empty_chunk, 0,
-            "no guard reads a `more` the post did not carry"
+            core::mem::size_of::<
+                <ReassemblySlotPolicy<SlotBinding> as sce_rust_runtime::StatePolicy>::Payload,
+            >(),
+            0,
+            "no slot event carries a payload"
         );
-        assert_eq!(state(&slot), State::Empty);
 
-        let first = Payload::FragmentChunk(chunk_event(1));
+        let mut slot = TestSlot::new();
+        let last = turn_slot_engine(&mut slot.engine, Event::FragmentLast);
+        assert_eq!(last, duty::BEGIN | duty::FINALIZE, "a lone last fragment");
+        assert_eq!(state(&slot), State::Complete);
+        for event in [Event::FragmentMore, Event::FragmentLast] {
+            assert_eq!(
+                turn_slot_engine(&mut slot.engine, event),
+                0,
+                "{event:?} in Complete"
+            );
+            assert_eq!(state(&slot), State::Complete, "{event:?}");
+        }
         assert_eq!(
-            turn_slot_engine(&mut slot.engine, Event::FragmentChunk, first),
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
+            duty::RESET
+        );
+
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentMore),
             duty::BEGIN
         );
         assert_eq!(state(&slot), State::Receiving);
-        let timeout = turn_slot_engine(&mut slot.engine, Event::ReassemblyTimeout, Payload::None);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentMore),
+            duty::APPEND
+        );
+        assert_eq!(state(&slot), State::Receiving);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentLast),
+            duty::FINALIZE
+        );
+        assert_eq!(state(&slot), State::Complete);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
+            duty::RESET
+        );
+
+        let timeout = {
+            assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+            turn_slot_engine(&mut slot.engine, Event::ReassemblyTimeout)
+        };
         assert_eq!(timeout, 0, "the timeout's action is a notice");
         assert_eq!(state(&slot), State::TimedOut);
         assert_eq!(
-            turn_slot_engine(&mut slot.engine, Event::SlotRelease, Payload::None),
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease),
             duty::RESET
         );
         assert_eq!(state(&slot), State::Empty);
@@ -3616,7 +3643,7 @@ mod chain_boundary_marker_tests {
     /// to `Aborted` therefore stays parked in `Receiving` while the
     /// Router-side key reads free — a desynchronised engine that every
     /// behavioural assertion still passes, because `Receiving` and `Empty`
-    /// both accept a `fragment.chunk` and both complete on `more == 0`.
+    /// both accept a `fragment.more` and both complete on a `fragment.last`.
     /// A measured damage probe confirmed it: deleting the
     /// `process_event(FragmentDrop)` line left the whole suite green until
     /// this assertion was added.
