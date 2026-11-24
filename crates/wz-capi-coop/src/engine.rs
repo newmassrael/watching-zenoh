@@ -730,7 +730,8 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
-    let mut plan = ArenaPlan::of(config, resolve_limits(config))?;
+    let mut plan = ArenaPlan::vacant();
+    plan.count(config, resolve_limits(config))?;
     lay_out_open(&mut plan, cell_bytes, held)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
@@ -2499,7 +2500,7 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
     }
 }
 
-/// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::of`]), the cells `cells` sizes
+/// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells `cells` sizes
 /// for each link and then the ABI's places `held` names, after every other row: the one plan an
 /// open reserves by. Laid out where the plan lies, which `lend_session` reads in its own frame: a
 /// plan handed back by value would be moved again, twice, by the open that reads it.
