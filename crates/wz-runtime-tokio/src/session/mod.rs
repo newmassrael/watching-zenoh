@@ -5211,9 +5211,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                             key,
                             payload,
                             meta.qos,
-                            reliable,
-                            express,
-                            opts.priority_band(),
+                            wz_session_core::session_actions::SendAs {
+                                reliable,
+                                express,
+                                priority: opts.priority_band(),
+                            },
                         )
                     }) {
                     Some(sent) => {
@@ -5767,9 +5769,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     key,
                     payload,
                     params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
+                    wz_session_core::session_actions::SendAs {
+                        reliable: params.reliable,
+                        express: params.express,
+                        priority: params.priority,
+                    },
                 )
             }) {
                 Some(sent) => Ok(sent?),

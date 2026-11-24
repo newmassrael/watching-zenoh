@@ -5420,9 +5420,11 @@ mod batch_tx_tests {
                 wz_session_core::named_key::NamedKey::literal("home/ex").expect("a key"),
                 b"EXEXEXEX",
                 None,
-                true,
-                true,
-                Priority::Data,
+                wz_session_core::session_actions::SendAs {
+                    reliable: true,
+                    express: true,
+                    priority: Priority::Data,
+                },
             )
             .expect("a session with no namespace sends the plain put")
             .expect("express push");

@@ -449,7 +449,16 @@ async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
                     .named_by(STREAM_KEY, 7)
                     .expect("the stream's key is named by its declaration");
                 init_actions
-                    .send_plain_put_qos(key, &payload, Some(block), true, false, Priority::Data)
+                    .send_plain_put_qos(
+                        key,
+                        &payload,
+                        Some(block),
+                        wz_session_core::session_actions::SendAs {
+                            reliable: true,
+                            express: false,
+                            priority: Priority::Data,
+                        },
+                    )
                     .expect("a session with no namespace sends the put plain")
                     .expect("a stream put routes");
             }

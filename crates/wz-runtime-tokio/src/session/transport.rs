@@ -519,7 +519,16 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Option<Result<(), SendWireError>> {
-        payload.send_plain_put_qos(key, value, qos, reliable, express, priority)
+        payload.send_plain_put_qos(
+            key,
+            value,
+            qos,
+            wz_session_core::session_actions::SendAs {
+                reliable,
+                express,
+                priority,
+            },
+        )
     }
 
     // The unicast bundle names the key from its own record of the session's declarations.

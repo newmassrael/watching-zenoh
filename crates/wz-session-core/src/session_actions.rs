@@ -14562,28 +14562,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The caller's own send of a plain `Put` (`send_plain_put_at`, above, says what it writes):
     /// the congestion control waits for room as the session's queue profile says.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(
-            DispatchStage::Fresh,
-            key,
-            value,
-            qos,
-            SendAs {
-                reliable,
-                express,
-                priority,
-            },
-        )
-        .map(|sent| sent.map(|_| ()))
+        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+            .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
@@ -14591,21 +14578,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is free, with nothing counted as dropped and nothing closed. A want of room the link's own
     /// stack answers is waited for as the caller's own send waits.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn try_send_plain_put_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let send = SendAs {
-            reliable,
-            express,
-            priority,
-        };
         let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send);
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
@@ -14702,30 +14681,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_publication_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_publication_at(
-            DispatchStage::Fresh,
-            key,
-            kind,
-            value,
-            meta,
-            SendAs {
-                reliable,
-                express,
-                priority,
-            },
-        )
-        .map(|sent| sent.map(|_| ()))
+        self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
+            .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_publication_qos`] that waits for nothing, as
@@ -14735,22 +14700,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     pub fn try_send_publication_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let send = SendAs {
-            reliable,
-            express,
-            priority,
-        };
         let probed = self.send_publication_at(DispatchStage::Probe, key, kind, value, meta, send);
         // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
         let probed = match probed {

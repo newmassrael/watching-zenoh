@@ -5170,11 +5170,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "listen")]
             if how == FaceSend::Probe {
                 let probed = if plain {
-                    actions
-                        .try_send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
+                    actions.try_send_plain_put_qos(
+                        key,
+                        payload,
+                        meta.qos,
+                        wz_session_core::session_actions::SendAs {
+                            reliable,
+                            express,
+                            priority,
+                        },
+                    )
                 } else {
                     actions.try_send_publication_qos(
-                        key, opts.kind, payload, meta, reliable, express, priority,
+                        key,
+                        opts.kind,
+                        payload,
+                        meta,
+                        wz_session_core::session_actions::SendAs {
+                            reliable,
+                            express,
+                            priority,
+                        },
                     )
                 };
                 let answer = match probed {
@@ -5196,10 +5212,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
             let lent = if plain {
-                actions.send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
+                actions.send_plain_put_qos(
+                    key,
+                    payload,
+                    meta.qos,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
+                )
             } else {
                 actions.send_publication_qos(
-                    key, opts.kind, payload, meta, reliable, express, priority,
+                    key,
+                    opts.kind,
+                    payload,
+                    meta,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
                 )
             };
             let sent = if let Some(lent) = lent {
@@ -6052,9 +6085,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     key_on_link(actions, named),
                     payload,
                     params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
+                    wz_session_core::session_actions::SendAs {
+                        reliable: params.reliable,
+                        express: params.express,
+                        priority: params.priority,
+                    },
                 )
                 .unwrap_or(Err(SendWireError::FeatureDisabled)));
             if sent.is_err() {
