@@ -8,9 +8,10 @@
 //!
 //! The build narrows each policy to its domain, the set of values a later stage may select: one
 //! `WZ_POLICY_<NAME>_ALLOWS_<VALUE>` per value, `on` allowing the value and `off` leaving it out.
-//! A value the build does not name is allowed on a target with an operating system, and on a
-//! target with none only when it is the build's default (`WZ_POLICY_DOMAINS`, `full` or
-//! `defaults`, forces either rule; [`Domain::from_stated`]). The build's default
+//! A value the build does not name is allowed on a target with an operating system in a build
+//! where something selects a policy after it (the `policy-selection` feature), and otherwise only
+//! when it is the build's default (`WZ_POLICY_DOMAINS`, `full` or `defaults`, forces either
+//! rule; [`Domain::from_stated`]). The build's default
 //! (`WZ_POLICY_<NAME>`) is always inside the domain; a build whose domain leaves it out does not
 //! compile. The open (or, for a policy bound `live`, a running session) then selects one value
 //! inside the domain with [`Bound::select`].

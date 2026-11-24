@@ -83,6 +83,9 @@ wz-host-sync = { path = "../wz-host-sync", optional = true }
 # on it (`wz_session_core::hlc` is), and this is the reference that clock is held to: the
 # differential test in `tests/` drives both over the same random clock traces.
 uhlc = { version = "0.8", default-features = false }
+# The tests select every value of a policy, which `policy-selection` keeps in its domain for the
+# test build alone.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["policy-selection"] }
 
 [lints]
 workspace = true

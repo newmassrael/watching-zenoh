@@ -31,7 +31,7 @@ use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
+    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
 use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
@@ -280,7 +280,7 @@ fn an_open_whose_limit_is_over_the_builds_value_dials_nothing() {
     assert_eq!(
         refused,
         Some(OpenError::Arena(ArenaRefused::Limit {
-            limit: "MAX_SUBSCRIPTIONS",
+            limit: ArenaLimit::MaxSubscriptions,
             why: UnlentRows::OverCeiling {
                 value: over,
                 ceiling: caps::MAX_SUBSCRIPTIONS,
@@ -343,27 +343,27 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
         Quota,
     ) -> Result<(), wz_session_core::limit_binding::OutsideLimitDomain>;
     type Count = fn(&ArenaPlan) -> usize;
-    let cases: [(&str, usize, Select, Count); 4] = [
+    let cases: [(ArenaLimit, usize, Select, Count); 4] = [
         (
-            "MAX_PUBLISHERS",
+            ArenaLimit::MaxPublishers,
             caps::MAX_PUBLISHERS,
             SessionLimits::select_max_publishers,
             |plan| plan.entities().publishers,
         ),
         (
-            "MAX_QUERIERS",
+            ArenaLimit::MaxQueriers,
             caps::MAX_QUERIERS,
             SessionLimits::select_max_queriers,
             |plan| plan.entities().queriers,
         ),
         (
-            "MAX_MATCHING_LISTENERS",
+            ArenaLimit::MaxMatchingListeners,
             caps::MAX_MATCHING_LISTENERS,
             SessionLimits::select_max_matching_listeners,
             |plan| plan.entities().matching_listeners,
         ),
         (
-            "MAX_DECLARED_KEYEXPRS",
+            ArenaLimit::MaxDeclaredKeyexprs,
             caps::MAX_DECLARED_KEYEXPRS,
             SessionLimits::select_max_declared_keyexprs,
             |plan| plan.entities().keyexprs,
@@ -372,11 +372,12 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     for (limit, build, select, count) in cases {
-        assert_eq!(count(&built), build, "{limit} with nothing stated");
+        let name = limit.name();
+        assert_eq!(count(&built), build, "{name} with nothing stated");
         let mut one = SessionLimits::defaults();
         if build >= 1 && select(&mut one, Quota::at_most(1)).is_ok() {
             let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
-            assert_eq!(count(&plan), 1, "{limit} stated as one");
+            assert_eq!(count(&plan), 1, "{name} stated as one");
         }
         let mut over = SessionLimits::defaults();
         // A build that sizes the table by the limit has no value over it in its domain.
@@ -390,7 +391,7 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
                         ceiling: build,
                     },
                 }),
-                "{limit} over the build's value"
+                "{name} over the build's value"
             );
         }
     }
@@ -420,7 +421,7 @@ fn the_links_batch_is_held_to_the_snapshots() {
             &lowered,
         ),
         Err(ArenaRefused::Limit {
-            limit: "PICO_UNICAST_BATCH_BYTES",
+            limit: ArenaLimit::PicoUnicastBatchBytes,
             why: UnlentRows::OverCeiling {
                 value: 513,
                 ceiling: 512,
@@ -442,7 +443,7 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
     assert_eq!(
         ArenaPlan::of(&client_config(), &raised),
         Err(ArenaRefused::Limit {
-            limit: "PICO_UNICAST_BATCH_BYTES",
+            limit: ArenaLimit::PicoUnicastBatchBytes,
             why: UnlentRows::OverCeiling {
                 value: over,
                 ceiling: caps::PICO_UNICAST_BATCH_BYTES,
@@ -754,7 +755,7 @@ fn the_plan_lays_out_the_key_arena_the_limits_state() {
         assert_eq!(
             ArenaPlan::of(&client_config(), &raised),
             Err(ArenaRefused::Limit {
-                limit: "KEY_ARENA_BYTES",
+                limit: ArenaLimit::KeyArenaBytes,
                 why: UnlentRows::OverCeiling {
                     value: over,
                     ceiling: caps::KEY_ARENA_BYTES,
@@ -952,7 +953,7 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
         assert_eq!(
             ArenaPlan::of(&client_config(), &over),
             Err(ArenaRefused::Limit {
-                limit: "MAX_PENDING_REPLIES",
+                limit: ArenaLimit::MaxPendingReplies,
                 why: UnlentRows::OverCeiling {
                     value: caps::MAX_PENDING_REPLIES + 1,
                     ceiling: caps::MAX_PENDING_REPLIES,
@@ -1055,7 +1056,10 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
             },
         })
     };
-    let (face, session) = ("MAX_REMOTE_DECLS", "SESSION_MAX_REMOTE_DECLS");
+    let (face, session) = (
+        ArenaLimit::MaxRemoteDecls,
+        ArenaLimit::SessionMaxRemoteDecls,
+    );
     assert_eq!(
         kind_rows(2, (face, MAX_POOL_ROWS), (session, MAX_POOL_ROWS + 1)),
         over(session),
@@ -1154,7 +1158,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
         assert_eq!(
             ArenaPlan::of(&config, &raised),
             Err(ArenaRefused::Limit {
-                limit: "PICO_FRAG_MAX_BYTES",
+                limit: ArenaLimit::PicoFragMaxBytes,
                 why: UnlentRows::OverCeiling {
                     value: over,
                     ceiling: caps::PICO_FRAG_MAX_BYTES,
@@ -1276,7 +1280,7 @@ fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
             &two_faces,
         ),
         Err(ArenaRefused::Limit {
-            limit: "MAX_FACES",
+            limit: ArenaLimit::MaxFaces,
             why: UnlentRows::OverCeiling {
                 value: 3,
                 ceiling: 2,
@@ -1304,7 +1308,7 @@ fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
     assert_eq!(
         ArenaPlan::of(&listener, &one_handshake),
         Err(ArenaRefused::Limit {
-            limit: "MAX_ACCEPT_PENDING",
+            limit: ArenaLimit::MaxAcceptPending,
             why: UnlentRows::OverCeiling {
                 value: 2,
                 ceiling: 1,
@@ -1329,7 +1333,7 @@ fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
             &SessionLimits::defaults(),
         ),
         Err(ArenaRefused::Limit {
-            limit: "MAX_FACES",
+            limit: ArenaLimit::MaxFaces,
             why: UnlentRows::OverCeiling {
                 value: usize::MAX,
                 ceiling: caps::MAX_FACES,

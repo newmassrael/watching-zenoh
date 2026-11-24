@@ -400,7 +400,7 @@ impl KeyMaker<String> for InlineKeys {
 impl<const N: usize> KeyMaker<heapless::String<N>> for InlineKeys {
     fn key(&self, text: &str) -> Result<heapless::String<N>, KeyUnkept> {
         let mut key = heapless::String::new();
-        heapless::String::push_str(&mut key, text).map_err(|_| KeyUnkept::TooLong)?;
+        push_text(&mut key, text).map_err(|_| KeyUnkept::TooLong)?;
         Ok(key)
     }
 }
@@ -715,6 +715,29 @@ impl TextBacking for String {
     }
 }
 
+/// Append `s` to `text` with one copy, all or nothing: refused, `text` is left as it was.
+/// heapless's own `push_str` appends a byte at a time, a loop each caller inlines; every heapless
+/// text of the crate appends through this instead.
+#[inline]
+pub fn push_text<const N: usize>(
+    text: &mut heapless::String<N>,
+    s: &str,
+) -> Result<(), CapacityFull<()>> {
+    // SAFETY: what is appended is a whole `str`, so the text stays UTF-8; the bytes are written
+    // into the buffer's room past its length, checked first, and the length is set after them.
+    unsafe {
+        let bytes = text.as_mut_vec();
+        let len = bytes.len();
+        let end = match len.checked_add(s.len()) {
+            Some(end) if end <= N => end,
+            _ => return Err(CapacityFull(())),
+        };
+        core::ptr::copy_nonoverlapping(s.as_ptr(), bytes.as_mut_ptr().add(len), s.len());
+        bytes.set_len(end);
+    }
+    Ok(())
+}
+
 impl<const N: usize> TextBacking for heapless::String<N> {
     #[inline(always)]
     fn empty() -> Self {
@@ -726,7 +749,7 @@ impl<const N: usize> TextBacking for heapless::String<N> {
     }
 
     fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
-        heapless::String::push_str(self, s).map_err(|_| CapacityFull(()))
+        push_text(self, s)
     }
 
     fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
@@ -2504,6 +2527,34 @@ mod tests {
         text_append_is_atomic_where_the_capacity_is_hard,
         default_is_empty,
     );
+
+    /// A heapless text takes a whole `str` in one copy: an append that fits lands after what the
+    /// text holds, one that fills the capacity to the byte is taken, and one past it, a character
+    /// of several bytes included, is refused with the text left as it was. Turned red by a length
+    /// set before the room is checked, or by a refused append that writes part of itself.
+    #[test]
+    fn a_heapless_text_takes_a_whole_str_or_nothing() {
+        let mut text: heapless::String<6> = heapless::String::new();
+        assert!(push_text(&mut text, "ab").is_ok());
+        assert!(push_text(&mut text, "").is_ok());
+        assert!(push_text(&mut text, "cd").is_ok());
+        assert_eq!(text.as_str(), "abcd");
+        assert!(
+            push_text(&mut text, "\u{e9}").is_ok(),
+            "two bytes into two of room"
+        );
+        assert_eq!(text.as_str().len(), 6);
+        assert!(push_text(&mut text, "x").is_err());
+        assert_eq!(text.as_str(), "abcd\u{e9}");
+
+        let mut short: heapless::String<3> = heapless::String::new();
+        assert!(push_text(&mut short, "a").is_ok());
+        assert!(
+            push_text(&mut short, "\u{20ac}").is_err(),
+            "three bytes past two of room"
+        );
+        assert_eq!(short.as_str(), "a");
+    }
 
     /// A table of the lent policy that no arena lent rows to is a defect of its maker, not a table
     /// at its limit: a debug build stops at the value put in it rather than refusing it as full.

@@ -2167,7 +2167,9 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # (`zenoh_config`, `RouterForwarder::with_south_partition`).
 # `interest-answer`: a session of this runtime answers the Interests its peer asks, in every
 # mode; its nodes take sessions and join groups.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "interest-answer"] }
+# `policy-selection`: the runtime resolves the policies of a zenoh document (`zenoh_config`), so
+# every value a build does not leave out of a policy's domain stays selectable.
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "interest-answer", "policy-selection"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.

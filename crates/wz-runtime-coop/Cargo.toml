@@ -357,6 +357,9 @@ wz-host-sync = { path = "../wz-host-sync", optional = true }
 # because `[dev-dependencies]` only activate for test builds — the
 # MCU build still requires the deploy crate to provide the impl.
 critical-section = { version = "1", features = ["std"] }
+# The tests select every value of a policy, which `policy-selection` keeps in its domain for the
+# test build alone.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["policy-selection"] }
 
 [lints]
 workspace = true
