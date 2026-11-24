@@ -1136,7 +1136,7 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = plan.links_from(&mut lend);
+    let tables = plan.transport().links_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert_eq!(session.arena_mut().high_water(), links);
     for row in plan
@@ -1176,7 +1176,7 @@ fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = plan.links_from(&mut lend);
+    let tables = plan.transport().links_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     let (rx, tx) = tables.claim().expect("the link's buffers");
     let peer = UdpSocket::bind("127.0.0.1:0").expect("a free port");
