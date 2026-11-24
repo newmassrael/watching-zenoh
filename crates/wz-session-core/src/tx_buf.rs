@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn a_vec_buffer_grows_and_truncates_like_the_vec_it_is() {
         let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let buf: &mut dyn TxBuf = &mut v;
+        let buf: &mut dyn TxBuf<Error = CodecError> = &mut v;
         buf.append(&[1, 2, 3]).unwrap();
         buf.append_byte(4).unwrap();
         assert_eq!(buf.as_slice(), &[1, 2, 3, 4]);
