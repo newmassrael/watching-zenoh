@@ -337,9 +337,11 @@ impl FaceLinkRow {
         if actions.peer_session_zid().is_none() || actions.peer_whatami_wire().is_none() {
             return 0;
         }
-        let mut links = 0;
+        let mut links: usize = 0;
         actions.visit_link_endpoints(|_| {
-            links += 1;
+            // A count of the links a face holds, each a link the session admitted: it cannot
+            // reach the width of the count, and a saturated one would still be a bound.
+            links = links.saturating_add(1);
             true
         });
         links
@@ -370,10 +372,11 @@ impl FaceLinkRow {
         #[cfg(not(feature = "transport-shm"))]
         let is_shm = false;
         let mut ends = None;
-        let mut index = 0;
+        // The links still to pass over before the one asked for.
+        let mut skip = at;
         actions.visit_link_endpoints(|link| {
-            if index < at {
-                index += 1;
+            if let Some(rest) = skip.checked_sub(1) {
+                skip = rest;
                 return true;
             }
             ends = Some((

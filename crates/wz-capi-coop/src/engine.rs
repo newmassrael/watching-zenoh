@@ -3824,26 +3824,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     #[cfg(feature = "connectivity")]
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         let mut at = at;
-        for face in self.links.faces() {
+        for face in self.transport.links.faces() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
             if !wire.actions.is_established() {
                 continue;
             }
-            let links = FaceLinkRow::links_of(&*wire.actions);
-            if at < links {
-                return FaceLinkRow::of_actions(&*wire.actions, at);
+            // Past this face's links the cursor moves on by them; within them it is the row.
+            match at.checked_sub(FaceLinkRow::links_of(&*wire.actions)) {
+                Some(rest) => at = rest,
+                None => return FaceLinkRow::of_actions(&*wire.actions, at),
             }
-            at -= links;
         }
         #[cfg(feature = "group")]
-        for group in &self.groups {
-            let rows = group.member_rows();
-            if at < rows {
-                return group.member_row(at);
+        for group in &self.transport.groups {
+            match at.checked_sub(group.member_rows()) {
+                Some(rest) => at = rest,
+                None => return group.member_row(at),
             }
-            at -= rows;
         }
         None
     }
@@ -7038,12 +7037,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             interest_rank(&tables, row.interest())
         };
-        let Some(interest_final) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
+        let Some(last_held) = unwatch_filter(&mut tables_mut(&core.session.registry), handle)
         else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (interest_final, place) {
+        if let (Some(interest), Some(at)) = (last_held, place) {
             core.retract(
                 Kind::Interest,
                 at,
