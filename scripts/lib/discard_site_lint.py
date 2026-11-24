@@ -145,6 +145,15 @@ ACCOUNTING = (
 # excuse another crate's site.
 ALLOWED = [
     (
+        "wz-capture/ros_msg.rs",
+        "inside.pop();",
+        "The check that a ROS message definition does not contain itself walks "
+        "the messages its fields name depth first, holding the path it is on; a "
+        "name leaves that path when the walk returns from it. The path is the "
+        "walk's own position, not evidence read from a capture, and a cycle it "
+        "finds is returned as the refusal before anything is popped.",
+    ),
+    (
         "wz-capture/tcp_facts.rs",
         "peer.pending.pop_front();",
         "A direction's small segment leaves the queue of segments awaiting their "
