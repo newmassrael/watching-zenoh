@@ -77,7 +77,9 @@ use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
-use core::mem::MaybeUninit;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::{self, addr_of_mut};
 
 #[cfg(any(
@@ -510,6 +512,37 @@ impl SessionFaces for Registry {
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         Registry::retract_owed(self, room)
+    }
+}
+
+/// The registry as the session's state and the dispatch of each of its links and groups share it.
+/// The last handle drops it in this crate's one body of that drop: an `Rc` in a field of an engine
+/// generic over its links is dropped where the engine is made, so each crate that makes one would
+/// carry its own copy of the drop of the registry, its tables and their rows.
+#[derive(Clone)]
+pub(super) struct SharedRegistry(ManuallyDrop<Rc<RefCell<Registry>>>);
+
+impl SharedRegistry {
+    /// `registry`, shared from here on.
+    pub(super) fn new(registry: Registry) -> Self {
+        Self(ManuallyDrop::new(Rc::new(RefCell::new(registry))))
+    }
+}
+
+impl core::ops::Deref for SharedRegistry {
+    type Target = RefCell<Registry>;
+
+    fn deref(&self) -> &RefCell<Registry> {
+        &self.0
+    }
+}
+
+impl Drop for SharedRegistry {
+    // Never inlined: a crate that drops a handle calls this body and copies none of it.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: the handle is dropped once, here, and nothing reads it after.
+        unsafe { ManuallyDrop::drop(&mut self.0) }
     }
 }
 
