@@ -111,7 +111,7 @@ use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
-    ReassemblySlotInject, ReassemblySlotPolicy,
+    ReassemblySlotPayload, ReassemblySlotPolicy,
 };
 use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::helpers::session_id::SessionId;
@@ -821,6 +821,26 @@ fn start_slot_engine(cell: &mut core::mem::MaybeUninit<SlotEngine>) {
     .unwrap_or_else(|never| match never {});
 }
 
+/// Post `event` with its typed `payload` to a slot machine, run the macrostep it starts, and
+/// drain the duties its transition ran (none when the current state does not answer it).
+///
+/// The one way into a slot machine after its start: every input a slot sends comes through here,
+/// so the machine's turn is compiled once for every Router type and every caller, as its start is
+/// in [`start_slot_engine`]. A second way in would carry a second copy of the turn. The typed
+/// post serves every event: `fragment.chunk` is the one whose guards read a payload, and the
+/// others carry the empty one, as an untyped post would. The chart has no `<final>` state, so a
+/// started machine runs until it is dropped and no input meets a stopped one.
+#[inline(never)]
+fn turn_slot_engine(
+    engine: &mut SlotEngine,
+    event: ReassemblySlotEvent,
+    payload: ReassemblySlotPayload,
+) -> u8 {
+    engine.raise_external_typed(event, payload);
+    engine.step();
+    engine.policy().actions().take()
+}
+
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: ChainPeers>
     Slot<SLOTS, CAP, S, P>
 {
@@ -862,16 +882,17 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>, P: Chain
     /// Send `event` to the slot engine and drain the duties its transition
     /// ran (none when the current state does not answer the event).
     fn drive(&mut self, event: ReassemblySlotEvent) -> u8 {
-        self.engine.process_event(event);
-        self.engine.policy().actions().take()
+        turn_slot_engine(&mut self.engine, event, ReassemblySlotPayload::None)
     }
 
     /// Send a `fragment.chunk` carrying the wire `more` bit, which the
     /// machine's guards split on, and drain the duties its transition ran.
     fn drive_chunk(&mut self, more: u8) -> u8 {
-        self.engine.raise_fragment_chunk(chunk_event(more));
-        self.engine.step();
-        self.engine.policy().actions().take()
+        turn_slot_engine(
+            &mut self.engine,
+            ReassemblySlotEvent::FragmentChunk,
+            ReassemblySlotPayload::FragmentChunk(chunk_event(more)),
+        )
     }
 
     /// Raise `slot.release` and perform `reset_slot` if the machine ran it:
@@ -2998,6 +3019,38 @@ mod duty_tests {
             "Empty has no release"
         );
         assert_eq!(state(&slot), State::Empty);
+    }
+
+    /// The one way into a slot machine posts an event with the payload it is handed: a chunk's
+    /// guards read its `more` bit off that payload, so a chunk posted with the empty one takes
+    /// neither arm, and every other event is answered with the empty one. Each turn leaves the
+    /// outbox drained.
+    #[test]
+    fn the_slot_door_judges_a_chunk_by_the_payload_it_posts() {
+        use crate::reassembly_slot::ReassemblySlotPayload as Payload;
+        let mut slot = TestSlot::new();
+        let empty_chunk = turn_slot_engine(&mut slot.engine, Event::FragmentChunk, Payload::None);
+        assert_eq!(
+            empty_chunk, 0,
+            "no guard reads a `more` the post did not carry"
+        );
+        assert_eq!(state(&slot), State::Empty);
+
+        let first = Payload::FragmentChunk(chunk_event(1));
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::FragmentChunk, first),
+            duty::BEGIN
+        );
+        assert_eq!(state(&slot), State::Receiving);
+        let timeout = turn_slot_engine(&mut slot.engine, Event::ReassemblyTimeout, Payload::None);
+        assert_eq!(timeout, 0, "the timeout's action is a notice");
+        assert_eq!(state(&slot), State::TimedOut);
+        assert_eq!(
+            turn_slot_engine(&mut slot.engine, Event::SlotRelease, Payload::None),
+            duty::RESET
+        );
+        assert_eq!(state(&slot), State::Empty);
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
     }
 
     /// No ingest path, and neither the channel abort nor the sweep, leaves a
