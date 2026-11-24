@@ -73,7 +73,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 60
+EXPECTED_VERSION = 61
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -536,7 +536,10 @@ EXPECTED_SYMBOLS: dict[str, int] = {
     # zenoh serial bytes. One symbol: a sized struct the CALLER owns in, read
     # under the `size` it writes and kept no part of (the link types are copied),
     # and the handle through a pointer the caller owns, released by
-    # `wz_dissect_live_close`. The memory rule does not move.
+    # `wz_dissect_live_close`. The memory rule does not move. ABI 61 brought no
+    # symbol: the struct this door reads grew two fields at its end (the byte
+    # ceiling of each stream direction and the reassembly window), and a caller
+    # compiled against 60 is read as having left them zero.
     "wz_dissect_live_open_with": 60,
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.

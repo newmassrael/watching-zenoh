@@ -2220,7 +2220,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 60
+#define WZ_DISSECT_ABI_REVISION 61
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -6903,7 +6903,7 @@ int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total
  *
  * `size` IS THE SIZE YOU COMPILED AGAINST. Write `sizeof` the struct and zero
  * every field you do not set (the memset above). A size below the first
- * published struct (the six fields below, 40 bytes on a 64-bit target) is
+ * published struct (its first six fields, 40 bytes on a 64-bit target) is
  * WZ_DISSECT_ERR_INVALID_ARG. A size above this library's struct is read only
  * when every byte past it is zero: a nonzero byte there is a field your newer
  * header set and this library cannot honour, and that is
@@ -6976,6 +6976,59 @@ int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total
  *                      reads a line for a long time the line's list grows
  *                      with it.
  *
+ * (ABI 61) THE BYTE CEILING AND THE WINDOW, appended to the struct; a caller
+ * compiled against revision 60 reads both as zero and keeps the preset's.
+ *
+ *   stream_bytes_per_direction
+ *                    the reassembled bytes ONE direction of ONE TCP flow keeps.
+ *                    `0` keeps the preset's: 4 MiB under
+ *                    WZ_DISSECT_LIMITS_LIVE_TAP, none under
+ *                    WZ_DISSECT_LIMITS_NONE. Memory is at most the ceiling times
+ *                    two directions times the TCP flows held (1,024 under the
+ *                    live-tap preset), and with a frame ceiling set a direction's
+ *                    stream follows the messages it holds: the bytes before its
+ *                    oldest held message are released, so this ceiling bites only
+ *                    where the held messages themselves span more. It is echoed
+ *                    as `dropped_by_limits.caps.stream_bytes_per_direction` in
+ *                    every document that carries that group. A value too large for
+ *                    size_t is WZ_DISSECT_ERR_INVALID_ARG.
+ *   reassembly_window_ms
+ *                    how long a fragment chain may stay open, in milliseconds of
+ *                    the capture's own clock (the instants you push, or the
+ *                    file's). `0` keeps the preset's: 30,000 under
+ *                    WZ_DISSECT_LIMITS_LIVE_TAP, none under
+ *                    WZ_DISSECT_LIMITS_NONE.
+ *
+ * WHAT THE BYTE CEILING TAKES, AND WHAT IT NEVER DOES. It decides which bytes
+ * the handle can still hand back, never which messages decode. A message is
+ * decoded from the reader's own copy of its unit as the unit completes, before
+ * the ceiling trims; a held message whose bytes the ceiling takes keeps its
+ * record and its rows; and from then wz_dissect_live_message_bytes answers
+ * WZ_DISSECT_ERR_BYTES_RETIRED for it. Every byte the ceiling takes is counted in
+ * `dropped_by_limits.stream_bytes`. So a message LARGER than the ceiling is
+ * decoded and has a record and rows like any other, and its bytes are retired
+ * from the moment it completes, because its first byte has already gone. To
+ * make the handle hold the bytes of every row your list holds, set
+ * `frames_total` to the list's row limit and this ceiling at least as large as
+ * the bytes those rows span in one direction: the stream then follows the rows.
+ *
+ * A FRAGMENT CHAIN HAS A CEILING OF ITS OWN, and no option moves it: a chain
+ * joins at most 65,536 bytes. A message whose fragments come to more is not
+ * reassembled. Its fragment rows say `outcome` `aborted` with `reason`
+ * `capacity_overflow`, the census counts it in
+ * `fragment_chains.aborted_capacity_overflow`, and the message has no record of
+ * its own. The byte ceiling above plays no part in it.
+ *
+ * WHAT THE WINDOW DOES TO A SLOW CHAIN. A chain's deadline is armed by its
+ * FIRST fragment and is not moved by the ones after it, so a chain whose
+ * fragments take longer than the window to arrive expires though fragments are
+ * still arriving, and its message has no record. The field document counts it
+ * under `reassembly.expired_chains` and names it in the flow's `ended_chains`
+ * with `ending` `expired`. A packet pushed with WZ_DISSECT_NO_TIMESTAMP moves no
+ * clock, so nothing expires on its account. The same window bounds how long a
+ * half-assembled IP datagram waits for its other pieces. The serial line's
+ * chains are not timed.
+ *
  * Frames that arrive before a serial handshake has settled which interface is
  * which are held undecoded, and decoded once it has (the live-tap preset stops
  * waiting after 256 frames and keeps the first-interface convention), so a
@@ -6998,6 +7051,12 @@ typedef struct wz_dissect_live_options {
     /* The most decoded messages the handle keeps in all; 0 keeps the
      * preset's. */
     uint64_t frames_total;
+    /* (ABI 61) The reassembled bytes one direction of one TCP flow keeps; 0
+     * keeps the preset's. */
+    uint64_t stream_bytes_per_direction;
+    /* (ABI 61) How long a fragment chain may stay open, in milliseconds of
+     * the capture's clock from its first fragment; 0 keeps the preset's. */
+    uint64_t reassembly_window_ms;
 } wz_dissect_live_options;
 
 int wz_dissect_live_open_with(const wz_dissect_live_options *options,

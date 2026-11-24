@@ -484,6 +484,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // and the link types read as raw zenoh serial bytes, through a sized struct
     // the caller owns. The session table moved to revision 15 on the same step
     // (a flow's `direction_basis`), which moves no symbol.
+    // 61, for the same door's struct: it grows two fields at its end, the byte
+    // ceiling of each stream direction and the reassembly window, so a caller
+    // chooses them as it chooses the frame ceilings. No symbol moves; the
+    // memory rule of the struct does, and a caller compiled against revision 60
+    // reads the two as zero, which keeps the preset's figures.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -501,7 +506,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 60;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 61;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3721,6 +3726,12 @@ pub struct WzDissectLiveOptions {
     pub frames_per_flow: u64,
     /// As [`wz_dissect_live_open_bounded`]'s argument: `0` keeps the preset's.
     pub frames_total: u64,
+    /// (ABI 61) The reassembled bytes each direction of each TCP flow keeps:
+    /// `0` keeps the preset's.
+    pub stream_bytes_per_direction: u64,
+    /// (ABI 61) How long a fragment chain may stay open, in milliseconds of the
+    /// capture's own clock from its first fragment: `0` keeps the preset's.
+    pub reassembly_window_ms: u64,
 }
 
 impl WzDissectLiveOptions {
@@ -3732,11 +3743,14 @@ impl WzDissectLiveOptions {
         serial_link_types: core::ptr::null(),
         frames_per_flow: 0,
         frames_total: 0,
+        stream_bytes_per_direction: 0,
+        reassembly_window_ms: 0,
     };
 }
 
 /// The smallest [`WzDissectLiveOptions::size`] a caller can have been compiled
-/// with: the struct as ABI 60 published it, which ends at `frames_total`.
+/// with: the struct as ABI 60 published it, which ends at `frames_total`. A
+/// caller compiled against it reads every field ABI 61 appended as zero.
 const LIVE_OPTIONS_FIRST_SIZE: usize =
     core::mem::offset_of!(WzDissectLiveOptions, frames_total) + core::mem::size_of::<u64>();
 
@@ -3823,8 +3837,19 @@ fn caller_ceiling(value: u64, preset: Option<usize>) -> Option<Option<usize>> {
 ///
 /// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `options` or `out`, a `size`
 /// below the first published struct, a nonzero byte past this library's
-/// struct, an unknown preset, a ceiling too large for `size_t`, and a nonzero
-/// `serial_link_type_count` with a null `serial_link_types`.
+/// struct, an unknown preset, a frame or byte ceiling too large for `size_t`,
+/// and a nonzero `serial_link_type_count` with a null `serial_link_types`.
+///
+/// # The byte ceiling and the window (ABI 61)
+///
+/// `stream_bytes_per_direction` is what `DissectionLimits` calls by that name:
+/// the reassembled bytes one direction of one TCP flow keeps. It decides which
+/// bytes [`wz_dissect_live_message_bytes`] can still hand back and never which
+/// messages decode: a message is decoded from the session's own copy of its unit
+/// before the ceiling trims, and a held message whose bytes the ceiling takes is
+/// kept whole first. `reassembly_window_ms` is the deadline a fragment chain
+/// gets when it opens; it also bounds how long a half-assembled IP datagram
+/// waits.
 ///
 /// # Safety
 /// `options` must point to a `wz_dissect_live_options` of at least the size
@@ -3857,6 +3882,16 @@ pub unsafe extern "C" fn wz_dissect_live_open_with(
     };
     limits.frames_per_flow = per_flow;
     limits.frames_total = total;
+    let Some(stream_bytes) = caller_ceiling(
+        options.stream_bytes_per_direction,
+        limits.stream_bytes_per_direction,
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    limits.stream_bytes_per_direction = stream_bytes;
+    if options.reassembly_window_ms != 0 {
+        limits.reassembly_window_ms = Some(options.reassembly_window_ms);
+    }
     let Ok(count) = usize::try_from(options.serial_link_type_count) else {
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
@@ -10635,7 +10670,8 @@ mod tests {
         // 60, for `wz_dissect_live_open_with`: one symbol, a sized struct the
         // caller owns in (read under the size it writes, nothing kept of it)
         // and the handle out, released by `wz_dissect_live_close`.
-        assert_eq!(wz_dissect_abi_version(), 60);
+        // 61, for that struct growing two fields at its end; no symbol moves.
+        assert_eq!(wz_dissect_abi_version(), 61);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

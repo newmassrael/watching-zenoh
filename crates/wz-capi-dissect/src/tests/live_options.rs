@@ -71,11 +71,13 @@ fn the_options_layout_is_the_one_the_header_declares() {
     assert_eq!(offset_of!(O, serial_link_types), 16);
     assert_eq!(offset_of!(O, frames_per_flow), 24);
     assert_eq!(offset_of!(O, frames_total), 32);
+    assert_eq!(offset_of!(O, stream_bytes_per_direction), 40);
+    assert_eq!(offset_of!(O, reassembly_window_ms), 48);
+    assert_eq!(size_of::<O>(), 56, "ABI 61 appended two fields");
     assert_eq!(
         LIVE_OPTIONS_FIRST_SIZE, 40,
         "the six fields the first published struct holds"
     );
-    assert!(size_of::<O>() >= LIVE_OPTIONS_FIRST_SIZE);
 }
 
 /// EVERY OPTION THIS LIBRARY CANNOT HONOUR IS REFUSED, and none quietly
@@ -331,4 +333,103 @@ fn a_serial_capture_on_one_interface_says_its_directions_are_unknown() {
         "one interface separates nothing: {table}"
     );
     unsafe { wz_dissect_live_close(handle) };
+}
+
+/// THE BYTE CEILING IS THE CALLER'S, and an old message's bytes follow it: under
+/// a ceiling of one unit the first keep-alive's bytes are gone once three more
+/// have arrived, and under a ceiling the caller raised they are still there.
+/// The message is a record under both, and `caps` names each ceiling.
+#[test]
+fn a_byte_ceiling_the_caller_raises_keeps_an_old_messages_bytes() {
+    // One framing unit: a two-byte little-endian length and a keep-alive.
+    let unit = [0x01, 0x00, 0x04];
+    let feed = |ceiling: u64| {
+        let handle = open_with(&WzDissectLiveOptions {
+            stream_bytes_per_direction: ceiling,
+            ..options(WZ_DISSECT_LIMITS_LIVE_TAP)
+        })
+        .expect("the ceiling opens");
+        for i in 0..4u32 {
+            let packet = tcp_packet(1000 + 3 * i, &unit);
+            push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        }
+        handle
+    };
+
+    let tight = feed(3);
+    let doc = live_retention(tight).expect("a fed handle");
+    assert_eq!(
+        in_group(&doc, "frames_per_flow", "stream_bytes_per_direction"),
+        "3",
+        "{doc}"
+    );
+    let records = drain_all(tight);
+    assert_eq!(
+        records.len(),
+        4,
+        "every keep-alive is a record: {records:?}"
+    );
+    assert_eq!(
+        live_bytes(tight, &records[0]),
+        Err(WZ_DISSECT_ERR_BYTES_RETIRED),
+        "the oldest message's bytes left with the stream"
+    );
+    assert_eq!(
+        live_bytes(tight, &records[3]),
+        Ok(vec![0x04]),
+        "the newest message's bytes are held"
+    );
+    unsafe { wz_dissect_live_close(tight) };
+
+    let raised = feed(1 << 20);
+    let doc = live_retention(raised).expect("a fed handle");
+    assert_eq!(
+        in_group(&doc, "frames_per_flow", "stream_bytes_per_direction"),
+        "1048576",
+        "{doc}"
+    );
+    let records = drain_all(raised);
+    assert_eq!(records.len(), 4, "{records:?}");
+    assert_eq!(
+        live_bytes(raised, &records[0]),
+        Ok(vec![0x04]),
+        "a raised ceiling keeps the oldest message's bytes"
+    );
+    unsafe { wz_dissect_live_close(raised) };
+}
+
+/// THE TWO FIELDS ABI 61 APPENDED REACH THE DISSECTION, and a caller compiled
+/// against the struct before them keeps the preset's figures whatever lies past
+/// the size it wrote.
+#[test]
+fn the_appended_fields_reach_the_handle_and_an_older_caller_keeps_the_presets() {
+    let chosen = open_with(&WzDissectLiveOptions {
+        stream_bytes_per_direction: 4096,
+        reassembly_window_ms: 1_500,
+        ..options(WZ_DISSECT_LIMITS_LIVE_TAP)
+    })
+    .expect("the options open");
+    let limits = unsafe { (*chosen).dissection().limits() };
+    assert_eq!(limits.stream_bytes_per_direction, Some(4096));
+    assert_eq!(limits.reassembly_window_ms, Some(1_500));
+    unsafe { wz_dissect_live_close(chosen) };
+
+    let older = open_with(&WzDissectLiveOptions {
+        size: LIVE_OPTIONS_FIRST_SIZE,
+        stream_bytes_per_direction: 4096,
+        reassembly_window_ms: 1_500,
+        ..options(WZ_DISSECT_LIMITS_LIVE_TAP)
+    })
+    .expect("the first published size opens");
+    let limits = unsafe { (*older).dissection().limits() };
+    let preset = wz_capture::DissectionLimits::for_live_tap();
+    assert_eq!(
+        limits.stream_bytes_per_direction, preset.stream_bytes_per_direction,
+        "a caller compiled before the field keeps the preset's byte ceiling"
+    );
+    assert_eq!(
+        limits.reassembly_window_ms, preset.reassembly_window_ms,
+        "and the preset's window"
+    );
+    unsafe { wz_dissect_live_close(older) };
 }

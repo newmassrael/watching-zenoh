@@ -1193,6 +1193,13 @@ static int check_open_with_door(void) {
               "frames_per_flow offset");
         CHECK(offsetof(wz_dissect_live_options, frames_total) == 32,
               "frames_total offset");
+        CHECK(offsetof(wz_dissect_live_options, stream_bytes_per_direction) == 40,
+              "stream_bytes_per_direction offset");
+        CHECK(offsetof(wz_dissect_live_options, reassembly_window_ms) == 48,
+              "reassembly_window_ms offset");
+        CHECK(sizeof(wz_dissect_live_options) == 56,
+              "the options are %zu bytes, expected 56",
+              sizeof(wz_dissect_live_options));
     }
 
     rc = wz_dissect_live_open_with(NULL, &h);
@@ -1225,6 +1232,23 @@ static int check_open_with_door(void) {
           "the declared line is a flow of the table: %s", doc);
     CHECK(strstr(doc, "\"direction_basis\":\"unknown\"") != NULL,
           "one interface cannot separate the wires: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    wz_dissect_live_close(h);
+    h = NULL;
+
+    /* (ABI 61) The byte ceiling is the caller's, and the document that names
+     * the ceilings echoes it. */
+    memset(&o, 0, sizeof o);
+    o.size = sizeof o;
+    o.limits = WZ_DISSECT_LIMITS_LIVE_TAP;
+    o.stream_bytes_per_direction = 3;
+    rc = wz_dissect_live_open_with(&o, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "byte ceiling open rc=%d", rc);
+    rc = wz_dissect_live_retention(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "byte ceiling retention rc=%d", rc);
+    CHECK(strstr(doc, "\"stream_bytes_per_direction\":3,") != NULL,
+          "the caller's byte ceiling is the one named: %s", doc);
     wz_dissect_string_free(doc);
     doc = NULL;
     wz_dissect_live_close(h);
