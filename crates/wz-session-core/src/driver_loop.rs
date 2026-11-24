@@ -692,26 +692,6 @@ pub const OWNED_RECORDS: bool = !cfg!(all(
     )
 ));
 
-/// Whether a group's records reach the tables tagged with the member that sent them
-/// ([`InPlaceRecord::sender`]), under whose own ids the keys they name are read and bound: the
-/// build whose group lends its records. A build that reads a group's batch owned (`transport-stats`,
-/// `routing-namespace`, `multicast-declarations`, `multicast-ingress-gate`) hands every record as
-/// the one peer's, so two members that number their keyexprs alike read each other's keys there.
-///
-/// A constant and not only a `cfg`, as [`RX_LENT_ONLY`] is, so a crate that promises each member
-/// its own keyexprs refuses a build graph that unified one of those selectors in.
-pub const GROUP_RECORDS_TAGGED_BY_MEMBER: bool = cfg!(all(
-    feature = "session-multicast",
-    feature = "alloc",
-    feature = "codec-declare",
-    feature = "session-unicast",
-    feature = "rx-lent-control",
-    not(feature = "transport-stats"),
-    not(feature = "routing-namespace"),
-    not(feature = "multicast-declarations"),
-    not(feature = "multicast-ingress-gate")
-));
-
 /// The owned messages of a delivered batch, for a table that reads them: `messages` in a build
 /// whose tables take owned records ([`OWNED_RECORDS`]), and `None` in one that lends them all,
 /// whose batches are lists of no size ([`FrameRecords`]).
