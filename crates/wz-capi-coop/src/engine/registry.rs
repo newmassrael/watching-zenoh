@@ -775,8 +775,8 @@ impl Registry {
 
     /// The tables of `face`, gone with the face as [`Self::remove_face`] takes them, its place
     /// kept for the tomb a replaying listener is still owed the departure of: no face takes it
-    /// until [`Self::free_kept`].
-    #[cfg(feature = "connectivity")]
+    /// until [`Self::free_kept`]. Only a face taken besides the dial (`listen`) departs.
+    #[cfg(all(feature = "connectivity", feature = "listen"))]
     pub(super) fn depart(&mut self, face: HeldFace) {
         self.let_go(face, KEPT);
     }
@@ -2073,7 +2073,7 @@ mod tests {
     /// A place a tomb keeps is taken by no face that comes and named by no walk until it is freed,
     /// and a face that departs keeps its place the same way. Turned red by a kept row read as
     /// free (the face that comes takes the kept place) or as a face's (the walk names it).
-    #[cfg(feature = "connectivity")]
+    #[cfg(all(feature = "connectivity", feature = "listen"))]
     #[test]
     fn a_kept_place_is_taken_by_no_face_until_it_is_freed() {
         let mut held = held(4);

@@ -3174,7 +3174,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Dialled::Exhausted(last) if walks => {
                         return self.redial_later(at, last, redial_ms)
                     }
-                    Dialled::Exhausted(last) => (Next::Remove, last),
+                    Dialled::Exhausted(last) => (life.after_failure(next), last),
                 }
             }
             FaceEffect::DialFailed { then } => {
@@ -3200,7 +3200,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// What follows a link of the face at `at` that failed or was lost (`then`), `last` the
     /// reason of the last endpoint tried: the face goes, the session ends with `last`, the face
     /// dials from an endpoint (and waits `redial_ms` to dial them all again when none answers),
-    /// or it stands by for a node another face holds.
+    /// or it stands by for a node another face holds. A face goes, and the dial role stands by,
+    /// only in a session that takes faces besides its dial (`listen`).
     fn follow(
         &mut self,
         at: usize,
@@ -3209,6 +3210,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         redial_ms: Option<u64>,
     ) -> Result<(), OpenError> {
         match then {
+            #[cfg(feature = "listen")]
             Next::Remove => {
                 self.remove_face(at);
                 Ok(())
@@ -3224,6 +3226,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // refused it (`install_link_admission`). It stands by, and dials again when no other
             // face has the node, where dialling at once would be refused again and the handshake
             // paid each time.
+            #[cfg(feature = "listen")]
             Next::StandBy { node } => {
                 self.transport.links.put_link(at, Link::Held { zid: node });
                 Ok(())
@@ -3572,7 +3575,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Take the face at `at` out of the session, with its tables. The dial role's face is never
-    /// taken out.
+    /// taken out, and is the only face of a session that takes none besides it.
+    #[cfg(feature = "listen")]
     fn remove_face(&mut self, at: usize) {
         // A face whose departure a replaying listener is owed keeps its place for its tomb.
         #[cfg(feature = "connectivity")]
