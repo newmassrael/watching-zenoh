@@ -650,9 +650,16 @@ const fn block_bytes(order: usize) -> usize {
     MIN_BLOCK << order
 }
 
-/// The order of the smallest block of at least `bytes` bytes, or `None` past the largest.
+/// The order of the smallest block of at least `bytes` bytes, or `None` past the largest: the
+/// power of two of `MIN_BLOCK`s that holds them, read off its bits rather than searched for, so
+/// no walk over the orders is laid out at each place a block is taken or given back.
 fn order_for(bytes: usize) -> Option<usize> {
-    (0..ORDERS).find(|&order| bytes <= block_bytes(order))
+    let order = bytes
+        .div_ceil(MIN_BLOCK)
+        .max(1)
+        .checked_next_power_of_two()?
+        .trailing_zeros() as usize;
+    (order < ORDERS).then_some(order)
 }
 
 /// What a free block of the payloads' area holds where it starts: the free blocks of its order
@@ -1343,6 +1350,24 @@ pub(crate) fn release() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A size takes the smallest order whose block holds it, from no bytes up to the largest block,
+    /// at each block's edge and either side of it, and none past the largest. Turned red by an
+    /// order one too small or too large at an edge, or by a size past the largest block given one.
+    #[test]
+    fn a_size_takes_the_smallest_order_whose_block_holds_it() {
+        let searched = |bytes: usize| (0..ORDERS).find(|&order| bytes <= block_bytes(order));
+        let mut sizes = alloc::vec![0, 1, usize::MAX];
+        for order in 0..ORDERS {
+            let edge = block_bytes(order);
+            sizes.extend([edge - 1, edge, edge + 1]);
+        }
+        for bytes in sizes {
+            assert_eq!(order_for(bytes), searched(bytes), "{bytes} bytes");
+        }
+        assert_eq!(order_for(block_bytes(ORDERS - 1)), Some(ORDERS - 1));
+        assert_eq!(order_for(block_bytes(ORDERS - 1) + 1), None);
+    }
 
     /// Memory for pools in a test, aligned as a slot.
     #[repr(C, align(16))]
