@@ -14,14 +14,13 @@
 //! gives a handshake no time limit; here one not done in [`OPEN_WAIT_US`] is let go, so a peer
 //! that connects and says nothing holds no buffer for good. Upstream answers one request at a
 //! time and leaves the next connection queued on its port; here as many handshakes run at once as
-//! the table the listener reserves when it opens holds ([`WsLinks::with_handshakes`]), and a
-//! connection that finds it full is closed at once and counted
-//! ([`WsLinks::handshakes_refused`]), as a link past `accept_pending` is.
+//! the table the listener reserves when it opens has rows ([`WsLinks::new`]), and while every row
+//! holds one the port is not asked for another, so the next connection waits queued on it as
+//! upstream's does.
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::ffi::c_int;
 
 use wz_session_core::byte_cells::LentByteCells;
@@ -354,7 +353,13 @@ struct WsListener<O: WsOpen> {
     /// Never longer than `handshakes`, which its capacity holds, so it never grows after the open.
     accepting: RefCell<Vec<WsAccepting<Stream<O>>>>,
     handshakes: usize,
-    refused: Rc<Cell<u32>>,
+}
+
+impl<O: WsOpen> WsListener<O> {
+    /// Whether a row of the table is free for the next connection.
+    fn has_room(&self) -> bool {
+        self.accepting.borrow().len() < self.handshakes
+    }
 }
 
 impl<O: WsOpen> LinkListener<HeapLink> for WsListener<O>
@@ -366,21 +371,21 @@ where
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
-        if let Some(stream) = self.listener.accept()? {
-            if self.accepting.borrow().len() < self.handshakes {
-                let (rx, tx) = self.shape.buffers()?;
-                self.accepting.borrow_mut().push(WsAccepting {
-                    stream,
-                    rx,
-                    tx,
-                    filled: 0,
-                    since_us: self.opener.now_us(),
-                });
-            } else {
-                // The connection, dropped here, is closed unanswered: its peer learns from the
-                // close that the node is full, where one left queued would wait for an answer.
-                self.refused.set(self.refused.get().saturating_add(1));
-            }
+        // A table with no row free leaves the next connection queued on the port until one is.
+        let next = if self.has_room() {
+            self.listener.accept()?
+        } else {
+            None
+        };
+        if let Some(stream) = next {
+            let (rx, tx) = self.shape.buffers()?;
+            self.accepting.borrow_mut().push(WsAccepting {
+                stream,
+                rx,
+                tx,
+                filled: 0,
+                since_us: self.opener.now_us(),
+            });
         }
         let now = self.opener.now_us();
         let mut accepting = self.accepting.borrow_mut();
@@ -413,9 +418,10 @@ where
     }
 
     // A connection whose request is still to come is read at the node's own pace: the
-    // listener's handle tells only of the next connection.
+    // listener's handle tells only of the next connection, which a table with no row free does
+    // not take.
     fn input_wait(&self) -> Option<WaitOn> {
-        if self.accepting.borrow().is_empty() {
+        if self.accepting.borrow().is_empty() && self.has_room() {
             self.listener.input_wait()
         } else {
             None
@@ -432,36 +438,19 @@ pub struct WsLinks<S, O> {
     opener: O,
     shape: WsShape,
     handshakes: usize,
-    refused: Rc<Cell<u32>>,
 }
 
 impl<S, O: WsOpen> WsLinks<S, O> {
-    /// The links of `links`, and WebSocket links over the connections `opener` opens.
-    pub fn new(links: S, opener: O) -> Self {
+    /// The links of `links`, and WebSocket links over the connections `opener` opens, whose
+    /// listeners each answer as many as `handshakes` requests at once (a session's
+    /// `accept_pending`), each in a row of a table a listener reserves when it opens.
+    pub fn new(links: S, opener: O, handshakes: usize) -> Self {
         Self {
             links,
             opener,
             shape: WsShape::default(),
-            handshakes: 1,
-            refused: Rc::new(Cell::new(0)),
+            handshakes,
         }
-    }
-
-    /// WebSocket listeners that answer as many as `handshakes` requests at once, each in a row
-    /// of a table a listener reserves when it opens: a session's `accept_pending`. By default
-    /// one, as upstream's listener answers one at a time
-    /// (`io/zenoh-links/zenoh-link-ws/src/unicast.rs` @
-    /// `let stream = match accept_async(MaybeTlsStream::Plain(stream)).await {`).
-    #[must_use]
-    pub fn with_handshakes(mut self, handshakes: usize) -> Self {
-        self.handshakes = handshakes;
-        self
-    }
-
-    /// The connections the stack's WebSocket listeners closed unanswered because each row of
-    /// their tables held a handshake under way.
-    pub fn handshakes_refused(&self) -> u32 {
-        self.refused.get()
     }
 
     /// WebSocket links whose owner waits for their input, as the stack's links that are told so.
@@ -594,7 +583,6 @@ where
             shape: self.shape,
             accepting: RefCell::new(Vec::with_capacity(self.handshakes)),
             handshakes: self.handshakes,
-            refused: Rc::clone(&self.refused),
         }))
     }
 

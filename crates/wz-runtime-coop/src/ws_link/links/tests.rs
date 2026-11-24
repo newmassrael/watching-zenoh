@@ -157,7 +157,7 @@ fn stack() -> (WsLinks<NoLinks, Open>, Rc<Dial>) {
         net: Rc::new(Net::default()),
         queue: Rc::new(RefCell::new(VecDeque::new())),
     });
-    (WsLinks::new(NoLinks, Open(Rc::clone(&dial))), dial)
+    (WsLinks::new(NoLinks, Open(Rc::clone(&dial)), 1), dial)
 }
 
 const SERVER: SocketAddr = SocketAddr::new(
@@ -312,69 +312,70 @@ fn a_listener_lets_go_of_a_bad_or_silent_connection() {
     );
 }
 
-/// A listener holds as many handshakes under way as its table has rows: a connection that comes
-/// while every row holds one is closed unanswered and counted, the handshakes under way go on,
-/// and a row a handshake leaves takes the next connection. Turned red by a table that grows past
-/// its rows, a full table that keeps the connection, or a refusal left uncounted.
+/// A listener takes as many connections off its port as its table has rows: while every row holds
+/// a handshake the next connection stays queued on the port, unanswered and not closed, the
+/// handshakes under way go on, and a row a handshake leaves takes the queued connection. Turned
+/// red by a listener that takes a connection its table has no row for, or that never comes back
+/// for one left queued.
 #[test]
-fn a_listener_closes_a_connection_its_full_table_has_no_row_for() {
-    let (links, dial) = stack();
-    let links = links.with_handshakes(2);
+fn a_listener_leaves_a_connection_queued_while_its_table_is_full() {
+    let (_, dial) = stack();
+    let links = WsLinks::new(NoLinks, Open(Rc::clone(&dial)), 2);
     let listener = links
         .open_listener(Locator::ws(SocketAddr::from(([0, 0, 0, 0], 7447))))
         .expect("a listener");
     let nets: Vec<Rc<Net>> = (0..3).map(|_| Rc::new(Net::default())).collect();
     for net in &nets {
         dial.queue.borrow_mut().push_back(Conn(Rc::clone(net)));
+    }
+    for _ in 0..3 {
         assert!(listener.accept().expect("no failure").is_none());
     }
+    assert_eq!(dial.queue.borrow().len(), 1, "the third waits on the port");
     assert_eq!(Rc::strong_count(&nets[0]), 2, "the first handshake is held");
     assert_eq!(
         Rc::strong_count(&nets[1]),
         2,
         "the second handshake is held"
     );
-    assert_eq!(
-        Rc::strong_count(&nets[2]),
-        1,
-        "the third connection is closed"
+    assert!(
+        listener.input_wait().is_none(),
+        "a full table waits on no port"
     );
-    assert!(nets[2].outbox.borrow().is_empty(), "and not answered");
-    assert_eq!(links.handshakes_refused(), 1);
 
     let key = client_key(b"the sample nonce");
     let mut request = [0u8; 256];
     let len = write_request(&mut request, SERVER, &key).expect("room");
     nets[1].inbox.borrow_mut().extend(&request[..len]);
     assert!(listener.accept().expect("no failure").is_some());
+    assert_eq!(
+        dial.queue.borrow().len(),
+        1,
+        "taken only once a row is free"
+    );
     assert_eq!(Rc::strong_count(&nets[0]), 2, "the first goes on");
 
-    let next = Rc::new(Net::default());
-    dial.queue.borrow_mut().push_back(Conn(Rc::clone(&next)));
-    assert!(listener.accept().expect("no failure").is_none());
-    assert_eq!(
-        Rc::strong_count(&next),
-        2,
-        "the row left takes the next one"
-    );
-    assert_eq!(links.handshakes_refused(), 1);
+    nets[2].inbox.borrow_mut().extend(&request[..len]);
+    let link = listener.accept().expect("no failure");
+    assert!(dial.queue.borrow().is_empty(), "the queued one is taken");
+    assert!(link.is_some(), "and its handshake answered");
+    let mut expected = [0u8; 256];
+    let expected_len = write_response(&mut expected, &accept_value(&key)).expect("room");
+    assert_eq!(&nets[2].outbox.borrow()[..], &expected[..expected_len]);
 }
 
-/// A stack told nothing answers one request at a time, as upstream's listener does. Turned red by
-/// a default that admits more, or none.
+/// A listener of no rows takes no connection. Turned red by a listener that takes one its table
+/// has no row for.
 #[test]
-fn a_listener_holds_one_handshake_by_default() {
-    let (links, dial) = stack();
+fn a_listener_of_no_rows_takes_no_connection() {
+    let (_, dial) = stack();
+    let links = WsLinks::new(NoLinks, Open(Rc::clone(&dial)), 0);
     let listener = links
         .open_listener(Locator::ws(SocketAddr::from(([0, 0, 0, 0], 7447))))
         .expect("a listener");
-    let first = Rc::new(Net::default());
-    let second = Rc::new(Net::default());
-    dial.queue.borrow_mut().push_back(Conn(Rc::clone(&first)));
-    dial.queue.borrow_mut().push_back(Conn(Rc::clone(&second)));
+    let net = Rc::new(Net::default());
+    dial.queue.borrow_mut().push_back(Conn(Rc::clone(&net)));
     assert!(listener.accept().expect("no failure").is_none());
-    assert!(listener.accept().expect("no failure").is_none());
-    assert_eq!(Rc::strong_count(&first), 2);
-    assert_eq!(Rc::strong_count(&second), 1);
-    assert_eq!(links.handshakes_refused(), 1);
+    assert_eq!(dial.queue.borrow().len(), 1);
+    assert!(listener.input_wait().is_none());
 }
