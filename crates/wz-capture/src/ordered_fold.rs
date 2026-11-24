@@ -335,7 +335,9 @@ impl<F: OrderedFold> Resumable<F> {
         stats: &mut FoldStats,
         progress: Option<&Progress<'_>>,
         begin: impl FnOnce() -> F,
-        mut share: Option<&mut Share<'_, '_>>,
+        #[cfg(all(feature = "dissect", feature = "network-codecs"))] mut share: Option<
+            &mut Share<'_, '_>,
+        >,
     ) -> Option<&F> {
         let origin_ms = dissection.capture_origin_ms();
         let resumed = match &self.saved {
@@ -358,6 +360,7 @@ impl<F: OrderedFold> Resumable<F> {
             }
             _ => None,
         };
+        #[cfg(all(feature = "dissect", feature = "network-codecs"))]
         if let Some(share) = share.as_deref_mut() {
             share.fed = false;
         }
@@ -374,6 +377,7 @@ impl<F: OrderedFold> Resumable<F> {
                 }
                 // The walk takes the messages after `saved.marks`: the reader that
                 // wants the messages after the same marks reads them here.
+                #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                 let mut tap =
                     share.filter(|s| matches!(s.wanted, Wanted::Since(m) if *m == saved.marks));
                 let mut stopped = false;
@@ -386,6 +390,7 @@ impl<F: OrderedFold> Resumable<F> {
                     saved
                         .fold
                         .feed(&flow, list, packet, &frame, held.as_deref(), grouping);
+                    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                     if let Some(tap) = tap.as_deref_mut() {
                         (tap.tap)(&flow, list, packet, &frame);
                     }
@@ -396,6 +401,7 @@ impl<F: OrderedFold> Resumable<F> {
                     return None;
                 }
                 saved.fold.settle();
+                #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
@@ -419,6 +425,7 @@ impl<F: OrderedFold> Resumable<F> {
                 }
                 // The walk takes every message held, which is what a reader that
                 // wants everything reads.
+                #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                 let mut tap = share.filter(|s| matches!(s.wanted, Wanted::Everything));
                 let mut fold = begin();
                 for (flow, list, packet, frame) in frames.iter() {
@@ -427,11 +434,13 @@ impl<F: OrderedFold> Resumable<F> {
                     }
                     let held = held_for_fold(&fold, &frames, dissection, list, &frame);
                     fold.feed(&flow, list, packet, &frame, held.as_deref(), grouping);
+                    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                     if let Some(tap) = tap.as_deref_mut() {
                         (tap.tap)(&flow, list, packet, &frame);
                     }
                     stats.messages_folded += F::PLANES;
                 }
+                #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                 if let Some(tap) = tap {
                     tap.fed = true;
                 }
@@ -452,12 +461,9 @@ impl<F: OrderedFold> Resumable<F> {
 
 /// Which messages a [`Share`]'s reader wants from a call.
 ///
-/// Built by the field document's pairing walk alone, so a build without it
-/// constructs none and only reads the type.
-#[cfg_attr(
-    not(all(feature = "dissect", feature = "network-codecs")),
-    allow(dead_code)
-)]
+/// Built by the field document's pairing walk alone, so it and the walk's
+/// reading of it are built with that walk.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
 pub(crate) enum Wanted<'m> {
     /// Every message the capture holds, in capture order.
     Everything,
@@ -475,10 +481,7 @@ pub(crate) enum Wanted<'m> {
 /// ([`CensusFold`]). Their lives stay their own: the reader is fed only when the
 /// fold's walk is, by its own rule, the walk the reader would have made; when it
 /// is not, `fed` stays `false` and the reader walks on its own, as it always did.
-#[cfg_attr(
-    not(all(feature = "dissect", feature = "network-codecs")),
-    allow(dead_code)
-)]
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
 pub(crate) struct Share<'m, 't> {
     pub(crate) wanted: Wanted<'m>,
     /// Takes one message: its flow, its list, the packet it resolves to, and
@@ -878,15 +881,15 @@ impl CensusMemory {
         }
         let census = nodes.nodes(dissection);
         let grouping = SessionGrouping::of(&census);
-        planes.planes.advance_with(
-            trims,
-            dissection,
-            &grouping,
-            stats,
-            progress,
-            || CensusFold::begin(dissection, &filter, &grouping),
-            None,
-        )?;
+        let begin = || CensusFold::begin(dissection, &filter, &grouping);
+        #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+        planes
+            .planes
+            .advance_with(trims, dissection, &grouping, stats, progress, begin, None)?;
+        #[cfg(not(all(feature = "dissect", feature = "network-codecs")))]
+        planes
+            .planes
+            .advance_with(trims, dissection, &grouping, stats, progress, begin)?;
         let (fold, observed) = planes.planes.folded()?;
         Some((census, fold, observed))
     }
