@@ -1134,28 +1134,14 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
             return Z_ERR_NULL;
         };
-        // The form is written where the key's text is made from, as long as the bound: a text of
-        // any length is read, and only a form past the bound is refused.
-        let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
-        match wz_session_core::keyexpr_canon::canonize_into(
-            text,
-            &mut form,
-            wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
-        ) {
+        // The text is the one part of a join with nothing on its left, so it is canonized, held
+        // to the bound and stored by the body the joins use, as a literal.
+        match store_canonized(keyexpr, core::ptr::null(), &[text.as_bytes()]) {
             Ok(written) => {
-                // The form of UTF-8 is UTF-8 (`canonize_into`).
-                let Some(canon) = form
-                    .get(..written)
-                    .and_then(|bytes| core::str::from_utf8(bytes).ok())
-                else {
-                    return Z_ERR_INVALID;
-                };
                 *len = written;
-                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon));
                 Z_OK
             }
-            Err(KeyexprCanonError::ExceedsCapacity) => Z_EINVAL,
-            Err(_) => Z_ERR_INVALID,
+            Err(code) => code,
         }
     })
 }
@@ -1283,7 +1269,9 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        store_joined(key, left, &[head.as_bytes(), tail.as_bytes()])
+        store_canonized(key, left, &[head.as_bytes(), tail.as_bytes()])
+            .err()
+            .unwrap_or(Z_OK)
     })
 }
 
@@ -1303,21 +1291,23 @@ unsafe fn extended_from(
     }
 }
 
-/// The body `z_keyexpr_concat` and `z_keyexpr_join` share, out of line so neither export holds a
-/// copy of it: the text `parts` make, read in order where each lies, canonized into a buffer of
-/// the bound and stored in `key` keeping `left`'s declaration ([`extended_from`]). The bound every
-/// key of this build is held to is held to the form and not to the text, as pico keeps only the
-/// form: a long text whose form is short is a key, and a form past the bound is refused with
-/// `Z_EINVAL`. The join takes no allocation and no copy of its text.
+/// The body `z_keyexpr_concat`, `z_keyexpr_join` and the owned canonizing constructor share, out
+/// of line so no export holds a copy of it: the text `parts` make, read in order where each lies,
+/// canonized into a buffer of the bound and stored in `key` keeping `left`'s declaration
+/// ([`extended_from`]), a literal for a null `left`. The bound every key of this build is held to
+/// is held to the form and not to the text, as pico keeps only the form: a long text whose form is
+/// short is a key, and a form past the bound is refused with `Z_EINVAL`. The form's length on
+/// success; `key` is left as it was on a refusal. The join takes no allocation and no copy of its
+/// text.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
 #[inline(never)]
-unsafe fn store_joined(
+unsafe fn store_canonized(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
     parts: &[&[u8]],
-) -> ZResult {
+) -> Result<usize, ZResult> {
     let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
     let written = match wz_session_core::keyexpr_canon::canonize_parts_into(
         parts,
@@ -1325,23 +1315,18 @@ unsafe fn store_joined(
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     ) {
         Ok(written) => written,
-        Err(KeyexprCanonError::ExceedsCapacity) => return Z_EINVAL,
-        Err(_) => return Z_ERR_INVALID,
+        Err(KeyexprCanonError::ExceedsCapacity) => return Err(Z_EINVAL),
+        Err(_) => return Err(Z_ERR_INVALID),
     };
     // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
     let Some(canon) = form
         .get(..written)
         .and_then(|bytes| core::str::from_utf8(bytes).ok())
     else {
-        return Z_ERR_INVALID;
+        return Err(Z_ERR_INVALID);
     };
-    match extended_from(left, canon) {
-        Ok(joined) => {
-            store_owned_keyexpr(key, joined);
-            Z_OK
-        }
-        Err(code) => code,
-    }
+    store_owned_keyexpr(key, extended_from(left, canon)?);
+    Ok(written)
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -1363,7 +1348,9 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        store_joined(key, left, &[l.as_bytes(), b"/".as_slice(), r.as_bytes()])
+        store_canonized(key, left, &[l.as_bytes(), b"/".as_slice(), r.as_bytes()])
+            .err()
+            .unwrap_or(Z_OK)
     })
 }
 
@@ -2171,6 +2158,50 @@ mod bound_tests {
             assert!(!z_internal_keyexpr_check(&none));
             z_keyexpr_drop(z_keyexpr_move(&mut by_str));
             z_keyexpr_drop(z_keyexpr_move(&mut by_substr));
+        }
+    }
+
+    /// The owned canonizing constructor refuses what the joins refuse, with their codes: a text
+    /// no canonizing can make a key of is `Z_ERR_INVALID`, the destination left null and no
+    /// length written back, and the key it does make names no declaration. Turned red by a
+    /// refusal mapped to another code, or by a length written back on a refusal.
+    #[test]
+    fn the_owned_canonizing_constructor_refuses_as_the_joins_do() {
+        unsafe {
+            for text in ["demo/a?b", "demo/#", "demo//a"] {
+                let mut len = text.len();
+                let mut key = z_owned_keyexpr_t::null_value();
+                assert_eq!(
+                    z_keyexpr_from_substr_autocanonize(
+                        &mut key,
+                        text.as_ptr() as *const c_char,
+                        &mut len,
+                    ),
+                    Z_ERR_INVALID,
+                    "{text}"
+                );
+                assert!(
+                    !z_internal_keyexpr_check(&key),
+                    "{text}: nothing is left behind"
+                );
+                assert_eq!(len, text.len(), "{text}: no length is written back");
+            }
+            let text = "demo/**/**";
+            let mut len = text.len();
+            let mut key = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(
+                    &mut key,
+                    text.as_ptr() as *const c_char,
+                    &mut len
+                ),
+                Z_OK
+            );
+            assert_eq!(len, "demo/**".len());
+            let made = declared_of(z_keyexpr_loan(&key)).expect("an owned key has its handle");
+            assert_eq!(made.literal(), "demo/**");
+            assert!(made.declaration.is_none(), "a literal names no declaration");
+            z_keyexpr_drop(z_keyexpr_move(&mut key));
         }
     }
 }
