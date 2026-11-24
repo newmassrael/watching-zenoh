@@ -86,7 +86,7 @@
 //! timestamp-less — a documented fidelity gap, not silent (the recovery
 //! essential is the source identity that re-keys it).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
@@ -119,7 +119,9 @@ use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_ext_pubsub::advanced_subscriber::RecoveryRequest;
-use wz_ext_pubsub::advanced_subscriber::{owned_samples, MissHandlers, State};
+use wz_ext_pubsub::advanced_subscriber::{
+    lock_state, owned_samples, MissHandlers, State, StateLock,
+};
 pub use wz_ext_pubsub::advanced_subscriber::{Miss, SampleMissListener};
 
 /// R311y90 (review C5) — why declaring an advanced subscriber failed.
@@ -266,7 +268,7 @@ impl<E> Held<E> {
 #[allow(clippy::too_many_arguments)]
 fn issue_recovery_get<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     keyexpr: &str,
     sub_keyexpr: &str,
@@ -320,10 +322,8 @@ fn issue_recovery_get<R, T>(
             // one of them). `live = false`: the GET that produced this reply is
             // the one already in flight, so a gap here must not fan another.
             if let Some(sample) = recovered_sample_from_reply(reply) {
-                let _ = reply_states
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .ingest(sample, false, reply_clock.now_monotonic_ms());
+                let _ =
+                    lock_state(&reply_states).ingest(sample, false, reply_clock.now_monotonic_ms());
             }
         },
         move |rid| {
@@ -331,9 +331,7 @@ fn issue_recovery_get<R, T>(
             // terminal Final means there is nothing left for a teardown to
             // cancel, and `finish` re-enters the state lock.
             final_pending.finish(rid);
-            let mut guard = final_states
-                .lock()
-                .expect("advanced subscriber state mutex poisoned");
+            let mut guard = lock_state(&final_states);
             final_finish(&mut guard);
         },
     );
@@ -351,9 +349,7 @@ fn issue_recovery_get<R, T>(
             }
         }
         Err(_) => {
-            let mut guard = statesref
-                .lock()
-                .expect("advanced subscriber state mutex poisoned");
+            let mut guard = lock_state(statesref);
             finish(&mut guard);
         }
     }
@@ -370,7 +366,7 @@ fn issue_recovery_get<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn issue_recovery_query<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     req: RecoveryRequest,
@@ -455,7 +451,7 @@ fn issue_recovery_query<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn issue_history_query<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     sample_depth: Option<usize>,
@@ -519,7 +515,7 @@ fn issue_history_query<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn issue_late_publisher_query<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     zid: Vec<u8>,
@@ -592,7 +588,7 @@ fn issue_late_publisher_query<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn issue_timestamped_late_publisher_query<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     token_keyexpr: &str,
@@ -655,7 +651,7 @@ fn issue_timestamped_late_publisher_query<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn issue_unidentified_late_publisher_query<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     token_keyexpr: &str,
@@ -711,7 +707,7 @@ fn issue_unidentified_late_publisher_query<R, T>(
 #[allow(clippy::too_many_arguments)]
 fn on_late_publisher_detected<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     sample_kind: LivelinessSampleKind,
@@ -752,10 +748,7 @@ fn on_late_publisher_detected<R, T>(
                 AdvPublisherSource::Timestamped { zid } => Some((zid, None)),
                 AdvPublisherSource::Unidentified => None,
             } {
-                statesref
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .set_source_alive(&zid, eid, false);
+                lock_state(statesref).set_source_alive(&zid, eid, false);
             }
         }
         return;
@@ -763,9 +756,7 @@ fn on_late_publisher_detected<R, T>(
     match parse_heartbeat_source(sample_keyexpr) {
         Some(AdvPublisherSource::Sequenced { zid, eid }) => {
             let issue = {
-                let mut states = statesref
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned");
+                let mut states = lock_state(statesref);
                 // R2621 — the token's PUT arm is where `alive` becomes true,
                 // upstream's `state.alive = true;`. Ordered before the late-
                 // publisher decision so the state exists to mark.
@@ -795,9 +786,7 @@ fn on_late_publisher_detected<R, T>(
         }
         Some(AdvPublisherSource::Timestamped { zid }) => {
             let issue = {
-                let mut states = statesref
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned");
+                let mut states = lock_state(statesref);
                 // R2621 — the `uhlc` twin of the sequenced Put arm above.
                 let issue = states.handle_late_timestamped_publisher(
                     zid.clone(),
@@ -826,10 +815,7 @@ fn on_late_publisher_detected<R, T>(
         // no per-source slot can be keyed. Upstream queries it anyway under the
         // GLOBAL count, and so does this.
         Some(AdvPublisherSource::Unidentified) => {
-            statesref
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .open_global_history_slot();
+            lock_state(statesref).open_global_history_slot();
             issue_unidentified_late_publisher_query(
                 session,
                 statesref,
@@ -858,7 +844,7 @@ fn on_late_publisher_detected<R, T>(
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn run_periodic_tick<R, T>(
     session: &Session<R, T, Unicast>,
-    statesref: &Arc<Mutex<State>>,
+    statesref: &Arc<StateLock>,
     pending: &Arc<PendingGets>,
     base_keyexpr: &str,
     dest: Locality,
@@ -870,9 +856,7 @@ fn run_periodic_tick<R, T>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     let requests = {
-        let mut state = statesref
-            .lock()
-            .expect("advanced subscriber state mutex poisoned");
+        let mut state = lock_state(statesref);
         state.periodic_requests()
     };
     for req in requests {
@@ -1012,7 +996,7 @@ pub struct AdvancedSubscriber<
     /// recovery tick, and R311y95 then gated it `cfg(test)` because production
     /// never read it; [`Self::sample_miss_listener`] is the production reader
     /// that makes it a real field in every build.
-    statesref: Arc<Mutex<State>>,
+    statesref: Arc<StateLock>,
     /// R311y83 — the periodic recovery task (RAII abort-on-drop), `Some` only
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -1342,10 +1326,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     where
         F: FnMut(Miss) + Send + 'static,
     {
-        let id = self
-            .statesref
-            .lock()
-            .expect("advanced subscriber state mutex poisoned")
+        let id = lock_state(&self.statesref)
             .miss_handlers()
             .register(Box::new(callback));
         SampleMissListener::new(id, Arc::downgrade(&self.statesref))
@@ -1529,7 +1510,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        let state = Arc::new(Mutex::new(State::new(
+        let state = Arc::new(StateLock::new(State::new(
             owned_samples(on_sample),
             MissHandlers::default(),
         )));
@@ -1543,10 +1524,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             &form,
             SubscribeOptions::default().with_allowed_origin(allowed_origin),
             move |view: &dyn SampleView| {
-                cb_state
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle(view, cb_clock.now_monotonic_ms());
+                lock_state(&cb_state).handle(view, cb_clock.now_monotonic_ms());
             },
         )?;
         let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref());
@@ -1586,7 +1564,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        let state = Arc::new(Mutex::new(State::new(
+        let state = Arc::new(StateLock::new(State::new(
             owned_samples(on_sample),
             MissHandlers::default(),
         )));
@@ -1600,10 +1578,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 // RecoveryRequest, so the callback neither captures the session nor
                 // spawns. Identical behaviour to the recovery-OFF `handle`
                 // (forward gap = Miss + deliver), with no spawn-requiring bounds.
-                let _ = cb_state
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle_live(view, cb_clock.now_monotonic_ms());
+                let _ = lock_state(&cb_state).handle_live(view, cb_clock.now_monotonic_ms());
             },
         )?;
         let id = global_id_of(session.zid(), &subscriber);
@@ -1787,7 +1762,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 .and_then(|h| h.sample_depth)
                 .unwrap_or(usize::MAX),
         );
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(StateLock::new(state));
         // R311y592 — the in-flight GET registry every issuing site below shares,
         // and that the returned subscriber cancels through on drop.
         let pending = Arc::new(PendingGets::new());
@@ -1815,10 +1790,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             // locality (zenoh's `conf.origin`, faithful; default `Any`).
             SubscribeOptions::default().with_allowed_origin(sub_origin),
             move |view: &dyn SampleView| {
-                let request = cb_state
-                    .lock()
-                    .expect("advanced subscriber state mutex poisoned")
-                    .handle_live(view, cb_clock.now_monotonic_ms());
+                let request = lock_state(&cb_state).handle_live(view, cb_clock.now_monotonic_ms());
                 // Issue the recovery GET OUTSIDE the state lock: Session::query
                 // re-enters the session (the loopback fan drains the cache's
                 // replies, which lock `cb_state` again). R311lh deferred-fire
@@ -1868,9 +1840,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                         let Some(r_state) = r_state.upgrade() else {
                             return;
                         };
-                        r_state
-                            .lock()
-                            .expect("advanced subscriber state mutex poisoned")
+                        lock_state(&r_state)
                             .reclaim_expired_sources(clock.now_monotonic_ms(), period);
                     }
                 }),
@@ -1990,10 +1960,12 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                                 let Ok(hb_sn) = z_deserialize::<u32>(hb_view.payload()) else {
                                     return;
                                 };
-                                let request = hb_state
-                                    .lock()
-                                    .expect("advanced subscriber state mutex poisoned")
-                                    .handle_heartbeat(zid, eid, hb_sn, hb_clock.now_monotonic_ms());
+                                let request = lock_state(&hb_state).handle_heartbeat(
+                                    zid,
+                                    eid,
+                                    hb_sn,
+                                    hb_clock.now_monotonic_ms(),
+                                );
                                 if let Some(request) = request {
                                     if let Some(hb_session) = hb_session.upgrade() {
                                         issue_recovery_query(
@@ -2223,6 +2195,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Mutex;
 
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
