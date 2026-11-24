@@ -6011,6 +6011,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.core.lock().0.session.take_entity_id()
     }
 
+    #[inline(never)]
     fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
         let core = self.live()?;
         // A face's id is its key: faces are numbered as they come and keep their id while they
@@ -6035,6 +6036,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     /// A member's key is its group's place in the session's groups above its own place in the
     /// group's member table.
     #[cfg(feature = "group")]
+    #[inline(never)]
     fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
         let core = self.live()?;
         let (first_group, first_member) = member_places(from);
@@ -6196,6 +6198,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .is_some_and(|core| core.0.transport.holds_transport())
     }
 
+    #[inline(never)]
     fn has_router_peer(&self) -> bool {
         self.live().is_some_and(|core| {
             core.0
@@ -6522,6 +6525,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.matching_declared(guard, declared)
     }
 
+    #[inline(never)]
     fn declare_filter_matching_listener(
         &self,
         filter: FilterId,
@@ -6710,6 +6714,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.put_through_filter(filter, keyexpr, payload, Some((mapping_id, *params)))
     }
 
+    #[inline(never)]
     fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
         let Some(core) = self.live() else {
             return;
