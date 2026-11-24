@@ -242,6 +242,173 @@ impl SampleView for BorrowedSample<'_> {
     }
 }
 
+/// The sample the session hands its subscribers, as one value: each part a borrow of where it
+/// lies (the datagram a link lent, a rejoined message, the session's key arena, a frame of the
+/// dispatch) or a value read off it. It is a [`SampleView`] like any other to a subscriber; a
+/// reader that keeps its parts (the session's round of deliveries) reads them as fields, with no
+/// call through a view.
+///
+/// The timestamp and the encoding are held as their parts. The owned hints
+/// (`SampleView::timestamp`, `SampleView::encoding`) own heap, so a sample answers them only
+/// when it was made to ([`Self::of`], and the sample of a Push read in place), each built from its
+/// parts the first time it is asked for; one made by [`Self::new`] answers none, which is what a
+/// sample of the delivery lane is.
+#[cfg(feature = "storage-profile")]
+pub struct SampleRef<'a> {
+    /// Resolved keyexpr literal.
+    pub keyexpr: &'a str,
+    /// The key of the session's key arena `keyexpr` is the whole text of, when it is one
+    /// ([`SampleView::keyexpr_held`]).
+    pub held: Option<&'a crate::key_arena::KeyRef>,
+    /// Payload bytes. Empty for a Del sample.
+    pub payload: &'a [u8],
+    /// Put vs Del discriminant.
+    pub kind: SampleKind,
+    /// Link-layer reliability classification of the carrying frame.
+    pub reliability: Reliability,
+    /// QoS level the message carried, if any.
+    pub qos: Option<crate::sample::QosLevel>,
+    /// Body-level attachment, if present.
+    pub attachment: Option<&'a [u8]>,
+    /// The packed encoding id and the schema's bytes, if an encoding is present.
+    pub encoding: Option<(u32, Option<&'a [u8]>)>,
+    /// The NTP64 time word and the clock id's bytes, if a timestamp is present.
+    pub timestamp: Option<(u64, &'a [u8])>,
+    /// Body-level source identification, if present.
+    pub source_info: Option<&'a crate::sample::SourceInfo>,
+    /// Whether the message came in over a link ([`SampleView::routed`]).
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub routed: bool,
+    /// The hints built from the parts, for a sample that answers them.
+    #[cfg(feature = "alloc")]
+    pub(crate) hints: Option<Hints>,
+}
+
+/// The owned hints a [`SampleRef`] that answers them builds from its parts, each once.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+pub(crate) struct Hints {
+    timestamp: core::cell::OnceCell<crate::sample::TimestampHint>,
+    encoding: core::cell::OnceCell<crate::sample::EncodingHint>,
+}
+
+#[cfg(feature = "storage-profile")]
+impl<'a> SampleRef<'a> {
+    /// A sample of `kind` on `keyexpr` with `payload`, carrying nothing else and answering no
+    /// hint.
+    pub fn new(
+        keyexpr: &'a str,
+        payload: &'a [u8],
+        kind: SampleKind,
+        reliability: Reliability,
+    ) -> Self {
+        Self {
+            keyexpr,
+            held: None,
+            payload,
+            kind,
+            reliability,
+            qos: None,
+            attachment: None,
+            encoding: None,
+            timestamp: None,
+            source_info: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: false,
+            #[cfg(feature = "alloc")]
+            hints: None,
+        }
+    }
+
+    /// What `view` hands, read once: its timestamp and encoding where it holds them or off its
+    /// hints (`timestamp_carried`, `encoding_carried`), answering the hints as a view that
+    /// holds them owned does.
+    pub fn of(view: &'a dyn SampleView) -> Self {
+        Self {
+            keyexpr: view.keyexpr(),
+            held: view.keyexpr_held(),
+            payload: view.payload(),
+            kind: view.kind(),
+            reliability: view.reliability(),
+            qos: view.qos(),
+            attachment: view.attachment(),
+            #[cfg(feature = "alloc")]
+            encoding: encoding_carried(view),
+            #[cfg(not(feature = "alloc"))]
+            encoding: view.encoding_parts(),
+            #[cfg(feature = "alloc")]
+            timestamp: timestamp_carried(view),
+            #[cfg(not(feature = "alloc"))]
+            timestamp: view.timestamp_parts(),
+            source_info: view.source_info(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: view.routed(),
+            #[cfg(feature = "alloc")]
+            hints: Some(Hints::default()),
+        }
+    }
+}
+
+#[cfg(feature = "storage-profile")]
+impl SampleView for SampleRef<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn keyexpr_held(&self) -> Option<&crate::key_arena::KeyRef> {
+        self.held
+    }
+    fn payload(&self) -> &[u8] {
+        self.payload
+    }
+    fn kind(&self) -> SampleKind {
+        self.kind
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.qos
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment
+    }
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.source_info
+    }
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        self.timestamp
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding
+    }
+    #[cfg(feature = "alloc")]
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        let (time, zid) = self.timestamp?;
+        let hints = self.hints.as_ref()?;
+        Some(
+            hints
+                .timestamp
+                .get_or_init(|| crate::sample::TimestampHint {
+                    time,
+                    zid: crate::sample::TimestampZid::new(zid).unwrap_or_default(),
+                }),
+        )
+    }
+    #[cfg(feature = "alloc")]
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        let (packed_id, schema) = self.encoding?;
+        let hints = self.hints.as_ref()?;
+        Some(hints.encoding.get_or_init(|| crate::sample::EncodingHint {
+            packed_id,
+            schema: schema.map(<[u8]>::to_vec),
+        }))
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        self.routed
+    }
+}
+
 /// Sample-delivery sink: the Dependency-Inversion seam a subscriber
 /// registry dispatches matched samples through. See the [module
 /// docs](self) for the AP ([`BoxedSink`]) vs MCU (consumer-supplied
@@ -740,6 +907,118 @@ mod tests {
         let neither = view(false, false);
         assert_eq!(timestamp_carried(&neither), None);
         assert_eq!(encoding_carried(&neither), None);
+    }
+
+    /// A view with every part, its timestamp held only as a hint.
+    #[cfg(feature = "alloc")]
+    struct Every {
+        source: crate::sample::SourceInfo,
+        timestamp: crate::sample::TimestampHint,
+    }
+
+    #[cfg(feature = "alloc")]
+    impl SampleView for Every {
+        fn keyexpr(&self) -> &str {
+            "demo/every"
+        }
+        fn payload(&self) -> &[u8] {
+            b"pay"
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn qos(&self) -> Option<crate::sample::QosLevel> {
+            Some(crate::sample::QosLevel::from_raw(0x1a))
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            Some(&b"att"[..])
+        }
+        fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+            Some(&self.source)
+        }
+        fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+            Some(&self.timestamp)
+        }
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            Some((3, Some(&b"sch"[..])))
+        }
+    }
+
+    /// The session's sample of a view holds every part the view hands, its timestamp read off the
+    /// hint where the view holds it only so, and answers the same through its own view. Turned red
+    /// by a part `SampleRef::of` drops, or by a timestamp read only where it lies.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_sample_of_a_view_holds_every_part_it_hands() {
+        let view = Every {
+            source: crate::sample::SourceInfo::new(&[0x51, 0x52], 9, 41),
+            timestamp: crate::sample::TimestampHint::new(7, &[0x22, 0x23]).expect("a short id"),
+        };
+        let sample = SampleRef::of(&view);
+        assert_eq!(
+            (sample.keyexpr, sample.payload),
+            ("demo/every", &b"pay"[..])
+        );
+        assert_eq!(
+            (sample.kind, sample.reliability),
+            (SampleKind::Put, Reliability::Reliable)
+        );
+        assert_eq!(sample.qos, Some(crate::sample::QosLevel::from_raw(0x1a)));
+        assert_eq!(sample.attachment, Some(&b"att"[..]));
+        assert_eq!(sample.encoding, Some((3, Some(&b"sch"[..]))));
+        assert_eq!(sample.timestamp, Some((7, &[0x22u8, 0x23][..])));
+        assert_eq!(sample.source_info, Some(&view.source));
+        assert!(sample.held.is_none());
+        let seen: &dyn SampleView = &sample;
+        assert_eq!(seen.keyexpr(), "demo/every");
+        assert_eq!(seen.timestamp_parts(), Some((7, &[0x22u8, 0x23][..])));
+        assert_eq!(seen.encoding_parts(), Some((3, Some(&b"sch"[..]))));
+        assert_eq!(seen.attachment(), Some(&b"att"[..]));
+        assert_eq!(seen.source_info(), Some(&view.source));
+        assert_eq!(seen.timestamp(), Some(&view.timestamp));
+    }
+
+    /// A sample made to answer the owned hints builds each from its parts the first time it is
+    /// asked for; one made bare answers none while it holds the parts. Turned red by a hint built
+    /// before it is asked for, or by a bare sample that answers one.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_hints_are_built_only_when_asked_and_only_by_a_sample_that_answers_them() {
+        let zid = [0x07u8];
+        let mut bare = SampleRef::new("k", b"", SampleKind::Put, Reliability::Reliable);
+        bare.timestamp = Some((1, &zid[..]));
+        bare.encoding = Some((5, Some(&b"s"[..])));
+        assert!(bare.timestamp().is_none() && bare.encoding().is_none());
+        assert_eq!(bare.timestamp_parts(), Some((1, &zid[..])));
+        assert_eq!(bare.encoding_parts(), Some((5, Some(&b"s"[..]))));
+
+        let hinted = SampleRef {
+            hints: Some(Hints::default()),
+            ..bare
+        };
+        let cells = hinted.hints.as_ref().expect("made to answer");
+        assert!(
+            cells.timestamp.get().is_none() && cells.encoding.get().is_none(),
+            "not built before asked"
+        );
+        assert_eq!(
+            hinted.timestamp(),
+            crate::sample::TimestampHint::new(1, &zid).as_ref()
+        );
+        assert_eq!(
+            hinted.encoding(),
+            Some(&crate::sample::EncodingHint {
+                packed_id: 5,
+                schema: Some(b"s".to_vec()),
+            })
+        );
+        assert!(
+            cells.timestamp.get().is_some() && cells.encoding.get().is_some(),
+            "built once asked"
+        );
     }
 
     // A no-heap-style concrete sink: the shape an MCU consumer `enum`
