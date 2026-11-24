@@ -1134,8 +1134,8 @@ pub(crate) struct OpenConfig<'cfg> {
 /// pico reads whatever its fixed indexes land on, so what it opens as is not an id the caller
 /// named, and a caller that stated an id and silently got another is worse off than one whose
 /// open failed, as with the TLS keys.
-pub(crate) fn session_zid(open: &OpenConfig<'_>) -> Result<Option<Vec<u8>>, ZResult> {
-    stated_zid(open.zid).map(|zid| zid.map(|zid| zid.to_vec()))
+pub(crate) fn session_zid(open: &OpenConfig<'_>) -> Result<Option<SessionZid>, ZResult> {
+    stated_zid(open.zid)
 }
 
 /// The id the text of `Z_CONFIG_SESSION_ZID_KEY` names, `None` when the config states none, and
@@ -1143,13 +1143,8 @@ pub(crate) fn session_zid(open: &OpenConfig<'_>) -> Result<Option<Vec<u8>>, ZRes
 /// reads the key through this too, so a Scout names the node a later open stands on and is
 /// refused the id the open is refused.
 pub(crate) fn stated_zid(text: Option<&str>) -> Result<Option<SessionZid>, ZResult> {
-    match text {
-        None => Ok(None),
-        Some(text) => pico_uuid_wire(text)
-            .and_then(|wire| SessionZid::new(&wire).ok())
-            .map(Some)
-            .ok_or(crate::result::Z_ERR_INVALID),
-    }
+    text.map(|text| pico_uuid_wire(text).ok_or(crate::result::Z_ERR_INVALID))
+        .transpose()
 }
 
 /// The wire form of the id zenoh-pico's `Z_CONFIG_SESSION_ZID_KEY` names, or `None` for text it
@@ -1162,7 +1157,7 @@ pub(crate) fn stated_zid(text: Option<&str>) -> Result<Option<SessionZid>, ZResu
 /// the string, so what it makes of it is not an id anyone named: this takes the one shape the
 /// reader was written for and refuses the rest, and an id of sixteen zero bytes, which zenoh
 /// refuses.
-fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
+fn pico_uuid_wire(text: &str) -> Option<SessionZid> {
     let digits = text.as_bytes();
     if digits.len() != 36 {
         return None;
@@ -1188,7 +1183,9 @@ fn pico_uuid_wire(text: &str) -> Option<Vec<u8>> {
     }
     // Written up to the last non-zero byte, as zenoh writes an id.
     let last = bytes.iter().rposition(|byte| *byte != 0)?;
-    bytes.get(..=last).map(<[u8]>::to_vec)
+    bytes
+        .get(..=last)
+        .and_then(|wire| SessionZid::new(wire).ok())
 }
 
 #[cfg(test)]
@@ -1374,9 +1371,9 @@ struct OpenRequest {
     #[cfg(not(feature = "engine-tokio"))]
     scouted: Vec<String>,
     dial_whatami: WhatAmI,
-    /// The id the config names for the session, as the bytes an INIT carries, `None` for one the
+    /// The id the config names for the session, as an INIT carries it, `None` for one the
     /// engine mints.
-    zid: Option<Vec<u8>>,
+    zid: Option<SessionZid>,
     // The cooperative engine's single-threaded arm starts no read task: the program steps it.
     #[cfg_attr(
         all(not(feature = "engine-tokio"), not(feature = "multi-thread")),
@@ -1853,8 +1850,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         &tx_queue,
         &limits,
     );
-    // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
-    // carries.
+    // The engine takes the id in the form an INIT carries, which the door made it in.
     let zid = request.zid;
     // The locator pico's one transport is opened on, which its admin space reports as the
     // transport's link: the listen locator when there is one, a group's included, the first

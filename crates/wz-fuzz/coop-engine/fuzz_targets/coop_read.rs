@@ -48,7 +48,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
-use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
+use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, SessionZid, TxQueueConf};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::sink::SampleView;
 use wz_session_core::WhatAmI;
@@ -143,7 +143,7 @@ fn config() -> CoopConfig {
     CoopConfig {
         endpoints: vec!["udp/127.0.0.1:7447".to_owned()],
         whatami: WhatAmI::Client,
-        zid: Some(vec![0xb1; 4]),
+        zid: Some(SessionZid::from([0xb1; 4])),
         batch_size: BATCH,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,

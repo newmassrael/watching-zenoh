@@ -17,6 +17,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 
+use super::config_zid;
 use super::listen::{client, eventually, listening, Stepped};
 
 /// A subscriber on `demo/one/**` of `session`, and what it has heard.
@@ -100,8 +101,8 @@ fn two_nodes_that_dial_each_other_at_once_keep_one_link() {
         } else {
             (high, low)
         };
-        let (first, first_at) = listening(|config| config.zid = Some(vec![first_id; 4]));
-        let (second, second_at) = listening(|config| config.zid = Some(vec![second_id; 4]));
+        let (first, first_at) = listening(|config| config.zid = config_zid(first_id));
+        let (second, second_at) = listening(|config| config.zid = config_zid(second_id));
         let first_heard = hearing(&first);
         let second_heard = hearing(&second);
         let first_faces = counting_faces(&first);
@@ -190,11 +191,11 @@ fn the_dial_role_stands_by_for_a_held_node_and_dials_again_when_it_is_lost() {
         .port();
     let low_at = format!("tcp/127.0.0.1:{port}");
     let (low, _) = listening(|config| {
-        config.zid = Some(vec![0x11; 4]);
+        config.zid = config_zid(0x11);
         config.listen = vec![low_at.clone()];
     });
     let (high, high_at) = listening(|config| {
-        config.zid = Some(vec![0x99; 4]);
+        config.zid = config_zid(0x99);
         config.endpoints = vec![low_at.clone()];
         config.redial_ms = Some(50);
     });
@@ -208,7 +209,7 @@ fn the_dial_role_stands_by_for_a_held_node_and_dials_again_when_it_is_lost() {
     drop(low);
     eventually("the high node to lose its face", || high.faces_up() == 0);
     let (back, _) = listening(|config| {
-        config.zid = Some(vec![0x11; 4]);
+        config.zid = config_zid(0x11);
         config.listen = vec![low_at.clone()];
     });
     eventually("the high node to dial the node that came back", || {

@@ -30,7 +30,7 @@ use wz_session_core::sink::SampleView;
 use wz_session_core::wire_const::T_MID_JOIN;
 use wz_session_core::WhatAmI;
 
-use super::client_config;
+use super::{client_config, config_zid};
 use crate::app_link::AppLinks;
 use crate::{CoopConfig, CoopEngine, OpenError};
 
@@ -198,7 +198,7 @@ fn profile() -> GroupProfile {
 fn member_config(member: u8, endpoint: &str) -> CoopConfig {
     CoopConfig {
         whatami: WhatAmI::Peer,
-        zid: Some(vec![member; 4]),
+        zid: config_zid(member),
         groups: vec![GroupJoin {
             endpoint: endpoint.to_owned(),
             profile: profile(),
