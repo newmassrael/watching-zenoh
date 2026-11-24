@@ -673,8 +673,6 @@ mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]
-// Totality debt TD-171 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod session_memory;
 // The structs the doors write into memory the program sized: each starts with its size.
 #[cfg(any(
