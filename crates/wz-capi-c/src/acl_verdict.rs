@@ -352,7 +352,7 @@ fn answers_document(
                 DecidedBy::Rule(i) => Decider::Origin(canonical.get(i).copied().unwrap_or(i)),
             };
             for q in questions {
-                let answer = policy.judge(&q.subject, q.flow, q.message, &q.key_expr, &key);
+                let answer = policy.judge(&q.subject, q.flow, q.message, &q.key_expr, key);
                 answers.push(answer);
             }
         }
