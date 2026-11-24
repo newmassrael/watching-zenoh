@@ -1355,6 +1355,21 @@ impl<P: Storage> Declaring<'_, P> {
         })
     }
 
+    /// The id and the key of an entity declared on `text` as `form` asks, into a table with
+    /// room for its row (`room`): the first refusal met when there is none, with nothing kept.
+    fn keyed(
+        &mut self,
+        room: bool,
+        text: &str,
+        form: KeyForm,
+    ) -> Result<(EntityId, EntityKey<P::Key>), RegisterError> {
+        if !room {
+            return Err(RegisterError::TableFull);
+        }
+        let key = self.entity_key(text, form)?;
+        Ok((self.mint()?, key))
+    }
+
     /// The next entity id.
     fn mint(&mut self) -> Result<EntityId, RegisterError> {
         let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
@@ -1384,18 +1399,10 @@ impl<P: Storage> Declaring<'_, P> {
         make: impl FnOnce(EntityId, EntityKey<P::Key>, C) -> R,
         back: impl FnOnce(R) -> C,
     ) -> Result<Declared<K>, Refused<C>> {
-        if table.is_full() {
-            return Err(Refused {
-                why: RegisterError::TableFull,
-                callback,
-            });
-        }
-        let key = match self.entity_key(text, form) {
-            Ok(key) => key,
-            Err(why) => return Err(Refused { why, callback }),
-        };
-        let id = match self.mint() {
-            Ok(id) => id,
+        // One refusal hands `callback` back for a full table, a key not kept and the ids run out
+        // alike: each of its own would move the callback into the refusal once more.
+        let (id, key) = match self.keyed(!table.is_full(), text, form) {
+            Ok(keyed) => keyed,
             Err(why) => return Err(Refused { why, callback }),
         };
         let prefix = key.prefix;
