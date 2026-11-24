@@ -1390,6 +1390,105 @@ fn a_retraction_names_what_its_declaration_stated() {
     );
 }
 
+/// An entity whose retraction names a declaration holds it as it holds the one its key is named
+/// by: the program's letting go of it leaves it declared, and the entity's going retracts it after
+/// the entity, by the id the retraction named.
+///
+/// # Control
+///
+/// Holding no declaration for a named retraction (`Declaring::declare` without `hold(named)`)
+/// reds the first `undeclare_keyexpr` (the program's release retracts it); releasing none in
+/// `undeclare_entity` reds `named`.
+#[test]
+fn a_named_retraction_holds_its_declaration_until_the_entity_goes() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/n").unwrap();
+    let key = "demo/n/**";
+    let form = KeyForm {
+        prefix: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
+    };
+    let sub = tables
+        .declare_subscriber(key, Locality::Any, form, 1)
+        .unwrap();
+    assert_eq!(tables.keyexprs().get(own.handle).unwrap().holds(), 2);
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the subscriber still holds it"
+    );
+    let row = tables.subscribers().get(sub.handle).unwrap().key();
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((own.id, "/**"))
+    );
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert_eq!(undeclared.keyexpr, None, "its key was named whole");
+    assert_eq!(undeclared.named, Some(own.id));
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+}
+
+/// A declaration an entity's key is named by and its retraction names alike is held once, and
+/// retracted once with it.
+///
+/// # Control
+///
+/// Holding the named declaration even when it is the key's (`EntityKey::holds` without its
+/// filter) reds the count, and the entity's going then leaves it declared.
+#[test]
+fn one_declaration_named_twice_by_an_entity_is_held_once() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/t").unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        retraction: Retraction::Named(RetractionKey::declared(declared.id, "")),
+    };
+    let token = tables.declare_token("demo/t", form).unwrap();
+    assert_eq!(tables.keyexprs().get(declared.handle).unwrap().holds(), 2);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    let undeclared = tables.undeclare_token(token.handle).unwrap();
+    assert_eq!(undeclared.keyexpr, Some(declared.id));
+    assert_eq!(undeclared.named, None);
+    assert_eq!(tables.keyexpr_by_id(declared.id), None);
+}
+
+/// A named retraction whose declaration no longer stands holds nothing and retracts the key
+/// whole; one whose declaration is retracted whatever held it does too.
+///
+/// # Control
+///
+/// Reading the stated id back unchecked (`retraction_of` returning the named key as stated)
+/// reds both literal assertions.
+#[test]
+fn a_named_retraction_without_its_declaration_names_the_key_whole() {
+    let mut tables = Tables::new();
+    let key = "demo/w/x";
+    let gone = KeyForm {
+        prefix: None,
+        retraction: Retraction::Named(RetractionKey::declared(77, "/x")),
+    };
+    let token = tables.declare_token(key, gone).unwrap();
+    let row = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(row.holds(), (None, None));
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((0, key))
+    );
+    let own = tables.declare_keyexpr("demo/w").unwrap();
+    let named = KeyForm {
+        prefix: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/x")),
+    };
+    let held = tables.declare_token(key, named).unwrap();
+    assert_eq!(tables.retract_keyexpr(own.handle), Some(own.id));
+    let row = tables.tokens().get(held.handle).unwrap().key();
+    assert_eq!(
+        tables.retraction_of(row).map(|names| names.names(key)),
+        Some((0, key))
+    );
+    assert_eq!(tables.undeclare_token(held.handle).unwrap().named, None);
+}
+
 #[test]
 fn a_retracted_declaration_goes_whatever_holds_it() {
     let mut tables = Tables::new();
