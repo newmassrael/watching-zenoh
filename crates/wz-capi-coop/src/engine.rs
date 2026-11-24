@@ -720,6 +720,9 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
+    /// The rows the stack's udp ports keep their peers and their datagrams in, the stack's.
+    #[cfg(feature = "listen")]
+    port_rows: wz_runtime_coop::udp_link::PortRows,
     arena: SessionArena,
 }
 
@@ -783,6 +786,8 @@ fn lend_session(
         endpoints,
         #[cfg(any(feature = "listen", feature = "group"))]
         handed,
+        #[cfg(feature = "listen")]
+        port_rows,
     } = plan.transport().lent_from(&mut lend);
     // Taken apart at once, as each layer's tables are: a table held as a field of a set the open
     // moves the others out of one by one would need its own drop on each refusal below.
@@ -884,6 +889,8 @@ fn lend_session(
         handed,
         #[cfg(feature = "advanced-cache")]
         cache,
+        #[cfg(feature = "listen")]
+        port_rows,
         arena,
     })
 }
@@ -3213,47 +3220,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Signals,
         Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
     ) {
+        let phase = self
+            .links
+            .faces()
+            .get(at)
+            .map_or(Phase::Waiting { at_us: u64::MAX }, |face| face.link.phase());
         let mut signals = Signals::default();
         let mut answer = None;
-        let phase = match self
+        match self
             .links
             .faces_mut()
             .get_mut(at)
             .map(|face| &mut face.link)
         {
-            Some(Link::Up(wire)) => {
-                signals.ended = wire.finished();
-                Phase::Up
-            }
-            Some(Link::Opening {
-                wire,
-                next,
-                deadline_us,
-            }) => {
+            Some(Link::Up(wire)) => signals.ended = wire.finished(),
+            Some(Link::Opening { wire, .. }) => {
                 signals.ended = wire.finished();
                 signals.established = wire.established();
-                Phase::Opening {
-                    next: *next,
-                    deadline_us: *deadline_us,
-                }
             }
-            Some(Link::Dialing {
-                dial,
-                next,
-                deadline_us,
-            }) => {
+            Some(Link::Dialing { dial, .. }) => {
                 answer = dial.answer();
                 signals.dial = answer.as_ref().map(Result::is_ok);
-                Phase::Dialing {
-                    endpoint: dial.endpoint().clone(),
-                    next: *next,
-                    deadline_us: *deadline_us,
-                }
             }
-            Some(Link::Waiting { at_us }) => Phase::Waiting { at_us: *at_us },
-            Some(Link::Held { zid }) => Phase::Held { node: *zid },
-            None => Phase::Waiting { at_us: u64::MAX },
-        };
+            _ => {}
+        }
         if let Phase::Held { node } = &phase {
             signals.node_held = self.links.node_is_held(node.as_slice(), id);
         }
@@ -4320,6 +4310,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             key_forms,
         } = decided;
         links.lend_buffers(lent.link_tables);
+        #[cfg(feature = "listen")]
+        links.lend_port_rows(lent.port_rows);
         if let Some(driver_cells) = lent.cells.driver {
             links.lend_cells(driver_cells);
         }
