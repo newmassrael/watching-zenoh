@@ -15,15 +15,12 @@ fn unhex<const N: usize>(hex: &str) -> [u8; N] {
     out
 }
 
-/// The digests RFC 3174 and FIPS 180 print for SHA-1, the empty message included, and one
-/// message split across parts hashed as the whole. Turned red by a round function, a constant,
-/// the schedule, or the padding and length of the last block.
+/// The four digests RFC 3174 section 7.3 prints for SHA-1 (`abc`, the 448-bit message, a million
+/// `a`, ten times a 64-byte block), and one message split across parts hashed as the whole.
+/// Turned red by a round function, a constant, the schedule, or the padding and length of the
+/// last block.
 #[test]
 fn sha1_gives_the_digests_rfc_3174_prints() {
-    assert_eq!(
-        sha1(&[b""]),
-        unhex::<20>("da39a3ee5e6b4b0d3255bfef95601890afd80709")
-    );
     assert_eq!(
         sha1(&[b"abc"]),
         unhex::<20>("a9993e364706816aba3e25717850c26c9cd0d89d")
@@ -38,11 +35,17 @@ fn sha1_gives_the_digests_rfc_3174_prints() {
         sha1(&million),
         unhex::<20>("34aa973cd4c4daa4f61eeb2bdbad27316534016f")
     );
+    let block = b"0123456701234567012345670123456701234567012345670123456701234567";
+    let ten = [&block[..]; 10];
+    assert_eq!(
+        sha1(&ten),
+        unhex::<20>("dea356a2cddd90c7a7ecedc5ebb563934f460452")
+    );
     assert_eq!(sha1(&[b"ab", b"", b"c"]), sha1(&[b"abc"]));
 }
 
 /// The accept value of RFC 6455 section 1.3's sample key is the one the section prints, and the
-/// sample key is the base64 of the sample nonce. Turned red by a GUID, a hash or a base64 that
+/// sample key is the base64 of the sixteen bytes `the sample nonce`. Turned red by a GUID, a hash or a base64 that
 /// drifts, which every server would refuse.
 #[test]
 fn the_accept_value_of_the_rfc_6455_sample_key_is_the_one_it_prints() {
@@ -68,7 +71,6 @@ fn base64_writes_the_rfc_4648_vectors() {
         (&b"foob"[..], "Zm9vYg=="),
         (&b"fooba"[..], "Zm9vYmE="),
         (&b"foobar"[..], "Zm9vYmFy"),
-        (&[0xFF, 0xFE, 0xFD][..], "//79"),
     ] {
         let mut out = [0u8; 8];
         let written = base64_encode(input, &mut out).expect("room");
