@@ -24,8 +24,6 @@ use sce_forge_runtime::codec::CodecError;
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
 use sce_forge_runtime::codec::SceSink;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
-#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::lent::{ExtEntry, ExtEntryVariant};
@@ -188,17 +186,14 @@ pub fn put_with_qos<'a>(
     };
     #[cfg(feature = "pubsub-qos")]
     if qos != crate::sample::QosLevel::DEFAULT {
-        let mut chain: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
         // One extension: no `Z` bit on it, which only says another follows.
-        let _ = chain.push(ExtEntry {
+        push.extensions = Some(Bounded::one(ExtEntry {
             // ENC_ZINT(0x20) | id_qos(0x01); no `M`, qos is informational.
             header: 0x20 | 0x01,
             body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
                 value: u64::from(qos.raw),
             }),
-        });
-        push.extensions =
-            Some(Bounded::new(chain).expect("one entry is within the chain's bounds"));
+        }));
         // The Push header says an outer chain follows.
         push.header |= 0x80;
     }
