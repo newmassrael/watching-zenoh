@@ -914,9 +914,8 @@ const ENDED_KINDS: [Kind; 8] = [
 ];
 
 /// The fields of an [`EndedChains`] word: where each starts, or its one bit.
-/// The head's are read only by a build with the field-tree walker.
+/// The head's are read only by a build with the field-tree walker, and only it has them.
 #[cfg(feature = "reassembly")]
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 mod ended_word {
     /// The chain travelled in direction `B`.
     pub const DIRECTION_B: u64 = 1 << 0;
@@ -935,16 +934,22 @@ mod ended_word {
     /// It staged a fragment, whose sequence number is kept.
     pub const LAST_SN: u64 = 1 << 12;
     /// Its first fragment's head was read.
+    #[cfg(feature = "dissect")]
     pub const HEAD: u64 = 1 << 13;
     /// The head names a network message.
+    #[cfg(feature = "dissect")]
     pub const MESSAGE: u64 = 1 << 14;
     /// Five bits: that message's network MID.
+    #[cfg(feature = "dissect")]
     pub const MID: u32 = 15;
     /// The head names a key.
+    #[cfg(feature = "dissect")]
     pub const KEYEXPR: u64 = 1 << 20;
     /// The key's `M` bit.
+    #[cfg(feature = "dissect")]
     pub const MAPPING: u64 = 1 << 21;
     /// The key has a suffix, kept beside the columns.
+    #[cfg(feature = "dissect")]
     pub const SUFFIX: u64 = 1 << 22;
 }
 
