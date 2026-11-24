@@ -2475,6 +2475,18 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     >()
 }
 
+/// The waits a read of a session `config` opens makes at once, reserved at its open so that none
+/// grows after it: the link of each face the session may hold (the dial role's and each one
+/// `max_faces` admits, accepted or attached after the open), each port, each group, and the
+/// clock's word waited on beside them.
+pub(crate) fn read_wait_room(config: &CoopConfig<impl EndpointList>) -> usize {
+    config
+        .max_faces
+        .saturating_add(2)
+        .saturating_add(config.listen.count())
+        .saturating_add(config.groups.len())
+}
+
 /// What a session's runtime reserves when the session opens (`Self::runtime`), from the build's
 /// limits and the faces its config admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3759,11 +3771,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         let session_time = CoopTime::new(&runtime);
-        // The dial role's link, each port, each group and the clock's word: what a session waits on
-        // from its open. A face accepted or attached later grows the buffer once.
-        let wait_room = 2usize
-            .saturating_add(config.listen.count())
-            .saturating_add(config.groups.len());
+        let wait_room = read_wait_room(&config);
         let limits = resolve_limits(&config);
         #[cfg(feature = "time-base")]
         let clock_wake = config.clock_moves.as_ref().and_then(|moves| {

@@ -11,8 +11,35 @@ use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
 use super::client_config;
-use crate::engine::{link_task_bytes, RuntimeTables};
+use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables};
 use crate::CoopConfig;
+
+/// A read's waits are reserved at the open for every link the session may wait on at once: each
+/// face's (the dial role's and each `max_faces` admits), each port's, each group's and the
+/// clock's word beside them, so a face accepted after the open grows nothing. Turned red by a
+/// room that leaves out the faces past the dial role's, which the first wait over them grows.
+#[test]
+fn a_reads_waits_are_reserved_for_every_face_the_session_admits() {
+    let client = CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    };
+    assert_eq!(
+        read_wait_room(&client),
+        2,
+        "the dial role's link and the clock's word"
+    );
+    let listener = CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned(), "udp/127.0.0.1:0".to_owned()],
+        max_faces: 3,
+        ..client_config()
+    };
+    assert_eq!(
+        read_wait_room(&listener),
+        1 + 3 + 2 + 1,
+        "four faces, two ports and the clock's word"
+    );
+}
 
 /// A client that attaches no face holds the one link it dials, and its runtime one cell for that
 /// link's session, of the bytes the session's task takes.
