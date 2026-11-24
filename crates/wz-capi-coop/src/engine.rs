@@ -1036,7 +1036,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
     ))]
-    decl_watches: Arc<DeclWatches>,
+    decl_watches: DeclWatches,
     zid: SessionZid,
     closed: AtomicBool,
     /// The ids of what the session holds for the program and never names to a peer: the legs
@@ -2421,7 +2421,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
             ))]
-            registry.settle_decl_events(|| actions.peer_zid());
+            registry.settle_decl_events(|| actions.peer_session_zid());
             registry.flush_pending_replies(face, actions);
             registry.take_pending_final_rids(face)
         };
@@ -2449,7 +2449,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        registry.settle_decl_events(|| actions.peer_zid());
+        registry.settle_decl_events(|| actions.peer_session_zid());
     }
 
     /// A rejoined message's records are read where its chain's buffer lies, which the round keeps
@@ -6531,9 +6531,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Err(Declined::Closed);
         };
         let core = &guard.0;
+        // What the peers hold now is told first, so the ring must have the rows for it before
+        // the watch is declared.
+        let mut held = 0;
+        {
+            let registry = core.registry.borrow();
+            for face in core.links.faces() {
+                if !matches!(&face.link, Link::Up(_) | Link::Opening { .. }) {
+                    continue;
+                }
+                if let Some(tables) = registry.tables_of(face.id) {
+                    held += decl_watch::held(plane, tables);
+                }
+            }
+        }
         let added = self
             .decl_watches
-            .add(&mut core.registry.borrow_mut().app, plane, sink);
+            .add(&mut core.registry.borrow_mut().app, plane, sink, held);
         let id = match added {
             Ok(id) => id,
             Err((refused, sink)) => {
@@ -6549,7 +6563,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             if let Some(tables) = registry.tables_of(face.id) {
                 self.decl_watches
-                    .tell_held(id, plane, tables, || wire.actions.peer_zid());
+                    .tell_held(id, plane, tables, || wire.actions.peer_session_zid());
             }
         }
         Ok(id)
