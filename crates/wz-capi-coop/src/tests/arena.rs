@@ -2344,10 +2344,30 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
 /// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
 /// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does
-/// not count, or counts one it does not put, turns this red.
+/// not count, or counts one it does not put, turns this red. A build that joins groups names one,
+/// since a config that names none plans no group receive table.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
     use crate::arena::{EntityKind, HeldPlaces};
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    let join = GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    };
+    let groups = usize::from(cfg!(feature = "group"));
     let place = core::alloc::Layout::new::<u64>();
     let held = EntityKind::ALL
         .into_iter()
@@ -2358,6 +2378,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     let plan = ArenaPlan::of(
         &CoopConfig {
             max_faces: 3,
+            groups: vec![join; groups],
             ..client_config()
         },
         &SessionLimits::defaults(),
