@@ -307,6 +307,14 @@ pub mod ip_stack;
     target_has_atomic = "ptr"
 ))]
 pub mod faces;
+// The decisions of a face's life as a value, beside the faces whose links the executor holds.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod face_life;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket

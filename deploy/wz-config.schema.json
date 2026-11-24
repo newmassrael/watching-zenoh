@@ -1416,6 +1416,19 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "UDP_PORT_SLOTS": {
+              "description": "How many datagrams the udp ports a session listens on hold at once, read off their sockets and waiting for the links of their peers to take them, in slots of the batch the session advertises that it reserves when it opens.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 64,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "PICO_UNICAST_BATCH_BYTES": {
               "description": "The batch size, in bytes, a session of the zenoh-pico interface advertises when it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE.",
               "type": "integer",

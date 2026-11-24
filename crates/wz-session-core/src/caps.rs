@@ -602,6 +602,11 @@ const _: () = assert!(
 /// under the `held-faces` value of the `held-publish-drop` policy. At least `1`.
 pub const HANDED_LEG_BYTES: usize = generated::HANDED_LEG_BYTES;
 
+/// How many datagrams the udp ports a session listens on hold at once, read off their sockets and
+/// waiting for the links of their peers, in slots of the batch it advertises that its engine lends
+/// from its arena; a datagram that finds every slot held is dropped and counted. At least `1`.
+pub const UDP_PORT_SLOTS: usize = generated::UDP_PORT_SLOTS;
+
 /// How many outbound slots the links of a session whose engine lends them from its arena share at
 /// most: a link holds one from a frame's encode to its write, a frame its stream took in part
 /// until the rest is written, and a batch frame left open only while the pool keeps another free,

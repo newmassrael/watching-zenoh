@@ -458,6 +458,44 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
     }
 }
 
+/// A session that listens is lent the slots its udp ports share for their datagrams, each a
+/// link's batch long, with the links' tables; one that listens on nothing is lent none. Turned
+/// red by slots of anything but the links' batch, or slots reserved for a session with no port.
+#[cfg(feature = "listen")]
+#[test]
+fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
+    let listening = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["udp/127.0.0.1:0".to_owned()],
+            max_faces: 2,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let batch = row(&listening, "link receive buffers").entry_bytes;
+    let slots = row(&listening, "link port datagram slots");
+    assert_eq!(slots.count, caps::UDP_PORT_SLOTS);
+    assert_eq!(slots.entry_bytes, batch, "a slot is a batch long");
+    assert_eq!(
+        row(&listening, "link port datagram flags").count,
+        slots.count
+    );
+    let mut session =
+        SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = listening.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    let table = tables.port_rx().expect("a table for the ports");
+    assert_eq!(
+        (table.capacity(), table.size()),
+        (caps::UDP_PORT_SLOTS, batch)
+    );
+
+    let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(row(&dialling, "link port datagram slots").count, 0);
+}
+
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
 /// batch a group it names sends, under the build's multicast batch, with the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the

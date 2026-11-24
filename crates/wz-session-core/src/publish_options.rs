@@ -1032,9 +1032,11 @@ mod plain_put_tests {
             packed_id: 7,
             schema: Some(&schema),
         };
-        let (_, lent, _) = PublishOptions::put().with_encoding_ref(held).lend_apart();
+        let lending = PublishOptions::put().with_encoding_ref(held);
+        let (_, lent, _) = lending.lend_apart();
         assert_eq!(lent, Some(held), "a lent encoding is lent on as it was");
-        let (_, none, nothing) = PublishOptions::put().lend_apart();
+        let plain = PublishOptions::put();
+        let (_, none, nothing) = plain.lend_apart();
         assert_eq!((none, nothing), (None, None));
     }
 

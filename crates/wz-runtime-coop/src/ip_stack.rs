@@ -649,8 +649,15 @@ where
             #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
             LinkProto::Udp if U::CARRIED => {
                 let socket = U::bind(at.at).map_err(bind_refused::<U>)?;
+                // A session that lent its ports a table of datagram slots has the port read into
+                // them, and a port that finds none free to read into is not opened; without the
+                // table the port reads into memory of its own.
+                let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
+                    Some(table) => UdpPort::lent(socket, table).ok_or(LinkOpenError::Exhausted)?,
+                    None => UdpPort::new(socket, self.shape.datagram_rx),
+                };
                 Ok(Box::new(IpUdpListener {
-                    port: Rc::new(UdpPort::new(socket, self.shape.datagram_rx)),
+                    port: Rc::new(port),
                     shape: self.shape,
                 }))
             }
@@ -2652,6 +2659,53 @@ mod tests {
                 .expect("B's link once the buffers are back");
             assert_eq!(b.sink.link_rx_capacity(), rx_len);
             assert_eq!(tables.in_use(), 1);
+        }
+
+        /// A stack whose session lent its ports a table of datagram slots opens each port over it,
+        /// the port taking a slot to read into, and refuses a port the table has no slot left for as
+        /// exhausted. The CONTROL is the same stack lent no table, whose ports read into memory of
+        /// their own however many there are.
+        #[test]
+        fn a_port_reads_into_the_slots_its_session_lent() {
+            use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+            #[derive(Clone, Copy)]
+            #[repr(C, align(16))]
+            struct Block([u8; ARENA_ALIGN]);
+
+            let at = Locator::udp(SocketAddr::new(NODE, 0));
+            let own = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            for _ in 0..2 {
+                assert!(own.open_listener(at).is_ok(), "CONTROL: a port of its own");
+            }
+
+            let (rx_len, slot_len, port_len) = (66, 34, 64);
+            let bytes = Arena::byte_cells_bytes(rx_len, 1)
+                .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+                .and_then(|both| Arena::byte_cells_bytes(port_len, 1).map(|port| both + port))
+                .expect("within the address space");
+            let region: &'static mut [Block] =
+                vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+            // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+            // leaked, so nothing else uses it and it outlives every slot claimed from it.
+            let mut arena =
+                unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+            let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
+            let tx = arena
+                .lend_byte_cells(2 * slot_len, 1)
+                .expect("the outbound table");
+            let ports = arena.lend_byte_cells(port_len, 1).expect("the port table");
+            let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            lent.lend_buffers(LinkTables::new(rx, tx, slot_len).with_port_rx(ports));
+            let first = lent.open_listener(at);
+            assert!(first.is_ok(), "a port over the table");
+            assert_eq!(ports.in_use(), 1, "the port took a slot to read into");
+            assert!(matches!(
+                lent.open_listener(at),
+                Err(LinkOpenError::Exhausted)
+            ));
+            drop(first);
+            assert_eq!(ports.in_use(), 0, "a port that goes gives its slot back");
         }
 
         /// A stack listens on `udp/` where its datagram socket binds, at the port the socket chose,
