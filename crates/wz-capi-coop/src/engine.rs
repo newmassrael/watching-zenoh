@@ -51,8 +51,8 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, PlaceTables,
-    SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, EntityRows, HandlePlace, HeldPlaces, LinkCells, OpenStorage,
+    PlaceTables, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{LetGo, Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, KeyBacking, Lent, TableLender};
@@ -1402,6 +1402,18 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 }
 
+/// The answer of a face's dial under way: the link it made, the refusal, or `None` while it is
+/// still being made.
+type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
+
+/// What the session read of a face at a step (`Core::read_face`): where its link stands, what it
+/// did since, and the answer of its dial, kept for the link it made.
+struct FaceRead<P> {
+    phase: Phase,
+    signals: Signals,
+    answer: DialAnswer<P>,
+}
+
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
 struct Publication<'a> {
     keyexpr: &'a str,
@@ -1473,10 +1485,11 @@ impl RowCallbacks for CoopRows {
 
 /// A matching listener's callback as its row holds it. A change of the listener's status is found
 /// under the session's lock and queued by the listener's id (`MatchFlips`); the delivery after the
-/// lock copies the callback out of the row and calls it, so no call reads the row and the row is
-/// let go of as soon as it is undeclared.
+/// lock takes the callback out of the row, calls it and puts it back, so no call reads the row and
+/// the row is let go of as soon as it is undeclared, its callback by the thread that called it when
+/// it was out. `None` while it is out for a call.
 pub(crate) struct MatchingCall {
-    sink: MatchingSink,
+    sink: Option<MatchingSink>,
 }
 
 impl RowCallback for MatchingCall {
@@ -2145,10 +2158,12 @@ fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
     actions
         .send_interest_kinds(
             u64::from(row.id()),
-            kinds(row.kind()),
-            /* current */ true,
-            /* future */ true,
-            row.aggregate(),
+            wz_session_core::session_actions::InterestAsk {
+                kinds: kinds(row.kind()),
+                current: true,
+                future: true,
+                aggregate: row.aggregate(),
+            },
             mapping_id,
             suffix,
         )
@@ -3032,7 +3047,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         } else {
             FaceRole::Taken
         };
-        let (phase, signals, answer) = self.read_face(at, id);
+        let FaceRead {
+            phase,
+            signals,
+            answer,
+        } = self.read_face(at, id);
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
         // A dial that is over is let go of now, with what it held for its link (a socket, the
@@ -3048,15 +3067,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// What the face at `at`, numbered `id`, holds: where its link stands, what it did since
     /// (`Signals`), and the answer of a dial under way, which is asked here and kept for the link it
     /// made.
-    fn read_face(
-        &mut self,
-        at: usize,
-        id: FaceId,
-    ) -> (
-        Phase,
-        Signals,
-        Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
-    ) {
+    fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
         let phase = self
             .links
             .faces()
@@ -3084,7 +3095,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Phase::Held { node } = &phase {
             signals.node_held = self.links.node_is_held(node.as_slice(), id);
         }
-        (phase, signals, answer)
+        FaceRead {
+            phase,
+            signals,
+            answer,
+        }
     }
 
     /// The node a handshake that is over reached, when another face holds it or brings a link to
@@ -3116,7 +3131,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         life: &FaceLife,
         effect: FaceEffect,
-        answer: Option<Result<OpenedLink<L::Pump>, LinkOpenError>>,
+        answer: DialAnswer<L::Pump>,
         redial_ms: Option<u64>,
         now_us: u64,
     ) -> Result<(), OpenError> {
@@ -4027,8 +4042,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             || config,
             policy,
             key_ids,
-            memory,
-            HeldPlaces::NONE,
+            OpenStorage {
+                memory,
+                held: HeldPlaces::NONE,
+            },
         )
     }
 
@@ -4046,12 +4063,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
     ///
-    /// The arena also holds the places `held` names, lent after every table
+    /// The arena also holds the places `storage.held` names, lent after every table
     /// ([`ArenaPlan::holding`]): a place for the ABI's own handle of the session
     /// ([`CoopDrive::handle_place`]) and places for its objects of the session's entities
     /// ([`PlaceLender::claim_place`]). They are reserved with the session, and an open whose arena cannot
     /// hold them opens nothing.
-    #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
         links: L,
         clock: C,
@@ -4059,10 +4075,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
-        memory: &'static dyn ArenaMemory,
-        held: HeldPlaces,
+        storage: OpenStorage,
     ) -> Result<Arc<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, memory, held)?;
+        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
         engine.open_links()?;
         Ok(engine)
     }
@@ -4073,7 +4088,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// this frame and moved into the engine's allocation, and the frame has returned before the
     /// first link is opened.
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
     fn assemble(
         links: L,
         clock: C,
@@ -4081,9 +4095,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
-        memory: &'static dyn ArenaMemory,
-        held: HeldPlaces,
+        storage: OpenStorage,
     ) -> Result<Arc<Self>, OpenError> {
+        let OpenStorage { memory, held } = storage;
         let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
@@ -4872,25 +4886,52 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        while let Some((sink, told)) = self.decl_watches.next() {
-            sink(told.event());
+        if let Some(mut turn) = self.decl_watches.begin_handing() {
+            while let Some((id, sink, told)) = turn.next() {
+                sink.call(told.event());
+                // Put back in its row, or let go of here, with no lock held, when the watch went
+                // during the call.
+                let gone = self.decl_watches.put_back(id, sink);
+                drop(gone);
+            }
         }
-        while self.matching.is_pending() {
-            // Popped under the queue's lock alone, which is released before the sink runs.
-            let next = self.matching.lock().next();
-            let Some((id, matching)) = next else {
-                break;
-            };
-            handed = true;
-            // The callback is copied out of the listener's row under the session's lock and called
-            // after it; a listener undeclared since the change was found is handed nothing.
-            let sink = self.live().and_then(|core| {
-                let tables = tables(&core.0.registry);
-                let row = tables.matching_listeners().get(row_of(id)?)?;
-                Some(Arc::clone(&row.callback().sink))
-            });
-            if let Some(sink) = sink {
-                sink(matching);
+        // One thread hands the changes out at a time; another that finds it doing so leaves what
+        // it queued to it.
+        if let Some(mut turn) = self.matching.begin_handing() {
+            while let Some((id, matching)) = turn.next() {
+                handed = true;
+                // The callback is taken out of the listener's row under the session's lock and
+                // called after it; a listener undeclared since the change was found is handed
+                // nothing.
+                let sink = self.live().and_then(|core| {
+                    let mut tables = tables_mut(&core.0.registry);
+                    tables
+                        .matching_listener_callback_mut(row_of(id)?)?
+                        .sink
+                        .take()
+                });
+                let Some(sink) = sink else {
+                    continue;
+                };
+                sink.call(matching);
+                // Put back in its row, or let go of here, with no lock held, when the row went
+                // during the call (an undeclare from inside it, or the session's close): the
+                // handle's generation tells a row that took the slot since from the listener's.
+                let gone = match self.live() {
+                    Some(core) => {
+                        let mut tables = tables_mut(&core.0.registry);
+                        match row_of(id).and_then(|row| tables.matching_listener_callback_mut(row))
+                        {
+                            Some(call) => {
+                                call.sink = Some(sink);
+                                None
+                            }
+                            None => Some(sink),
+                        }
+                    }
+                    None => Some(sink),
+                };
+                drop(gone);
             }
         }
         handed
@@ -5163,11 +5204,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "listen")]
             if how == FaceSend::Probe {
                 let probed = if plain {
-                    actions
-                        .try_send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
+                    actions.try_send_plain_put_qos(
+                        key,
+                        payload,
+                        meta.qos,
+                        wz_session_core::session_actions::SendAs {
+                            reliable,
+                            express,
+                            priority,
+                        },
+                    )
                 } else {
                     actions.try_send_publication_qos(
-                        key, opts.kind, payload, meta, reliable, express, priority,
+                        key,
+                        opts.kind,
+                        payload,
+                        meta,
+                        wz_session_core::session_actions::SendAs {
+                            reliable,
+                            express,
+                            priority,
+                        },
                     )
                 };
                 let answer = match probed {
@@ -5189,10 +5246,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
             let lent = if plain {
-                actions.send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
+                actions.send_plain_put_qos(
+                    key,
+                    payload,
+                    meta.qos,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
+                )
             } else {
                 actions.send_publication_qos(
-                    key, opts.kind, payload, meta, reliable, express, priority,
+                    key,
+                    opts.kind,
+                    payload,
+                    meta,
+                    wz_session_core::session_actions::SendAs {
+                        reliable,
+                        express,
+                        priority,
+                    },
                 )
             };
             let sent = if let Some(lent) = lent {
@@ -5974,9 +6048,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     key_on_link(actions, named),
                     payload,
                     params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
+                    wz_session_core::session_actions::SendAs {
+                        reliable: params.reliable,
+                        express: params.express,
+                        priority: params.priority,
+                    },
                 )
                 .unwrap_or(Err(SendWireError::FeatureDisabled)));
             if sent.is_err() {
@@ -6555,7 +6631,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             plane_of(plane),
             keyexpr,
             counts_own(plane, count_local),
-            MatchingCall { sink },
+            MatchingCall { sink: Some(sink) },
         );
         let watching = match declared {
             Ok(watching) => watching,

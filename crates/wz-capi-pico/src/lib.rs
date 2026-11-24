@@ -667,6 +667,7 @@ pub mod querier;
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+mod refusal;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
 pub mod replay_publisher;
@@ -699,6 +700,23 @@ mod session_place;
 // Totality debt TD-171 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod session_memory;
+// The structs the doors write into memory the program sized: each starts with its size.
+#[cfg(any(
+    feature = "object-pool",
+    feature = "session-memory",
+    feature = "event-ring",
+    feature = "segment-sender",
+    all(
+        not(wz_additional_apart),
+        any(
+            feature = "e2e-receiver",
+            feature = "instance-key",
+            feature = "message-catalog",
+            feature = "replay-cache"
+        )
+    )
+))]
+mod sized;
 #[cfg(feature = "resource-snapshot")]
 pub mod snapshot;
 // Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the

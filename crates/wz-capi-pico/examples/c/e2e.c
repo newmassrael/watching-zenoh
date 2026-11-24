@@ -76,7 +76,7 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
         z_slice_drop(z_slice_move(&slice));
         return;
     }
-    wz_ext_e2e_verdict_t verdict;
+    wz_ext_e2e_verdict_t verdict = {.struct_size = sizeof(wz_ext_e2e_verdict_t)};
     uint64_t now_ms = (uint64_t)z_clock_elapsed_ms(&started);
     z_result_t rc = wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
     z_mutex_lock(z_mutex_loan_mut(&judged.lock));
@@ -148,7 +148,7 @@ int main(void) {
     uint64_t next = 99;
     CHECK(wz_ext_e2e_sender_next(tx, 0, &next) && next == 0, "a refused protect consumed a counter (next %llu)",
           (unsigned long long)next);
-    wz_ext_e2e_verdict_t none;
+    wz_ext_e2e_verdict_t none = {.struct_size = sizeof(wz_ext_e2e_verdict_t)};
     CHECK(wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 5, small, sizeof small, 0, &none) ==
               Z_EINVAL,
           "a stream the receiver does not have was judged");

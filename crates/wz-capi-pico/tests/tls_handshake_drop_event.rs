@@ -86,7 +86,7 @@ static LOG: Mutex<()> = Mutex::new(());
 unsafe fn log_end() -> u64 {
     let mut cursor = 0u64;
     loop {
-        let mut event: wz_ext_event_t = std::mem::zeroed();
+        let mut event = wz_ext_event_t::default();
         let mut args = [0u64; 4];
         assert_eq!(
             wz_ext_event_read(&mut cursor, &mut event, args.as_mut_ptr(), args.len()),
@@ -103,7 +103,7 @@ unsafe fn log_end() -> u64 {
 unsafe fn dropped_handshake_event(cursor: &mut u64) -> Option<[u64; 2]> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let mut event: wz_ext_event_t = std::mem::zeroed();
+        let mut event = wz_ext_event_t::default();
         let mut args = [0u64; 4];
         assert_eq!(
             wz_ext_event_read(cursor, &mut event, args.as_mut_ptr(), args.len()),

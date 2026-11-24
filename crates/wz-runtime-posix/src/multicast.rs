@@ -710,7 +710,7 @@ pub struct HostGroupTransport<S: MulticastSocket> {
     /// The group and its port, where every datagram is sent.
     group: SocketAddr,
     /// What each datagram is read into: a buffer the session lent, or the transport's own.
-    rx: GroupRx,
+    rx: GroupRx<Vec<u8>>,
     /// The length and source of the datagram the last receive lent, which lies in `rx` until the
     /// next receive reads into it.
     lent: Option<(usize, SocketAddr)>,
@@ -732,7 +732,7 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
             read: Some(read),
             write: Some(write),
             group,
-            rx: GroupRx::lent_or_own(rx, UDP_RX_CAPACITY),
+            rx: GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]),
             lent: None,
             kept: None,
             failed: false,
@@ -1270,7 +1270,7 @@ mod tests {
                 read: None,
                 write: Some(write),
                 group: peer.local(),
-                rx: GroupRx::lent_or_own(None, 0),
+                rx: GroupRx::lent_or_own(None, Vec::new),
                 lent: None,
                 kept: None,
                 failed: false,
@@ -1316,7 +1316,7 @@ mod tests {
                 read: Some(read),
                 write: None,
                 group: to,
-                rx: GroupRx::lent_or_own(None, 64),
+                rx: GroupRx::lent_or_own(None, || alloc::vec![0; 64]),
                 lent: None,
                 kept: None,
                 failed: false,

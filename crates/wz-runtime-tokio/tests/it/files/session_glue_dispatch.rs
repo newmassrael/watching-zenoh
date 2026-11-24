@@ -133,11 +133,17 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // The start duties arm the link's liveness: the counters asserted below
     // only record that they ran.
     assert!(
-        *actions.link.lease_armed.lock().unwrap(),
+        actions
+            .link
+            .lease_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "start_lease_monitor arms the lease monitor"
     );
     assert!(
-        *actions.link.keepalive_armed.lock().unwrap(),
+        actions
+            .link
+            .keepalive_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "start_keepalive_worker arms the keepalive worker"
     );
 
@@ -146,11 +152,17 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     binding.stop_keepalive_worker();
     binding.stop_lease_monitor();
     assert!(
-        !*actions.link.keepalive_armed.lock().unwrap(),
+        !actions
+            .link
+            .keepalive_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "stop_keepalive_worker disarms the keepalive worker"
     );
     assert!(
-        !*actions.link.lease_armed.lock().unwrap(),
+        !actions
+            .link
+            .lease_armed
+            .load(core::sync::atomic::Ordering::SeqCst),
         "stop_lease_monitor disarms the lease monitor"
     );
     binding.send_close_frame_with_reason();

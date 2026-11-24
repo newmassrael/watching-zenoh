@@ -226,6 +226,30 @@ pub const MAX_MATCHING_LISTENERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_DECL_WATCHES`] is bound.
+pub const MAX_DECL_WATCHES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_TRANSPORT_EVENTS_LISTENERS`] is bound.
+pub const MAX_TRANSPORT_EVENTS_LISTENERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_DECLARED_KEYEXPRS`] is bound.
 pub const MAX_DECLARED_KEYEXPRS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -619,6 +643,30 @@ pub const ADVANCED_CACHE_BYTES: LimitBinding = LimitBinding {
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_PUBLISHERS`] is bound.
+pub const MAX_ADVANCED_PUBLISHERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ADVANCED_SUBSCRIBERS`] is bound.
+pub const MAX_ADVANCED_SUBSCRIBERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 

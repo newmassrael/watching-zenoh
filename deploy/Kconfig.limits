@@ -194,6 +194,23 @@ config WZ_LIMIT_MAX_MATCHING_LISTENERS
 	  The matching listeners a session holds at once, over all its publishers
 	  and queriers. Declaring one more is refused while the table is full.
 
+config WZ_LIMIT_MAX_DECL_WATCHES
+	int "MAX_DECL_WATCHES"
+	default 4
+	help
+	  The declaration watches a session holds at once (what its peers declare
+	  and retract, told to the program), over every kind of entity watched.
+	  Declaring one more is refused while the table is full.
+
+config WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS
+	int "MAX_TRANSPORT_EVENTS_LISTENERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  The transport events listeners a session holds at once, each told when a
+	  transport to a peer opens or closes. Declaring one more is refused while
+	  the table is full.
+
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
 	default 306 if WZ_LIMITS_ZENOH_PICO
@@ -517,6 +534,26 @@ config WZ_LIMIT_ADVANCED_CACHE_BYTES
 	  are. A cache keeps at most its own max_samples records; a new record that finds
 	  no room lets the oldest records go first. A put whose record is longer than the
 	  whole ring is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY, nothing sent.
+
+config WZ_LIMIT_MAX_ADVANCED_PUBLISHERS
+	int "MAX_ADVANCED_PUBLISHERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced publishers a session holds at once, each the C object over
+	  the publisher, its cache and its detection token, which are counted in
+	  their own tables. Declaring one more is refused with
+	  _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
+
+config WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS
+	int "MAX_ADVANCED_SUBSCRIBERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The advanced subscribers a session holds at once, owned or background,
+	  each the C object over the subscriber, its history and recovery and its
+	  detection token, which are counted in their own tables. Declaring one more
+	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY while every one is held.
 
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"

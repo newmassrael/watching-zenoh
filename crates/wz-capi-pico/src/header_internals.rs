@@ -31,9 +31,9 @@
 //! reaches `_z_cancellation_token_clear` only through `_z_cancellation_token_rc_drop`, after
 //! `_z_rc_decrease_strong` on the counter slot returns `true`; on a null counter it returns
 //! `false`, so that path never runs for a wz token. wz hands out no pending query's cancellation
-//! data and no sync group notifier: its gets hold their registration on the token as a value
-//! that unregisters when it is dropped (`wz_capi_port::cancellation::Registration`), not under
-//! an id a program can name. The functions keep pico's contract over what wz can hand them.
+//! data and no sync group notifier: a get's registration on the token is its fan, lying in the
+//! get's place, which unlinks itself when it is dropped
+//! (`wz_capi_port::cancellation::CancellableFan`), not under an id a program can name. The functions keep pico's contract over what wz can hand them.
 
 use core::ffi::c_void;
 
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn _z_cancellation_token_clear(_ct: *mut c_void) {}
 
 /// Remove an on-cancel handler by its id (pico `_z_cancellation_token_remove_on_cancel_handler`).
 ///
-/// wz registers no handler under an id: a get's registration is a value that unregisters itself
+/// wz registers no handler under an id: a get's registration is its fan, which unlinks itself
 /// when dropped. Every id is therefore absent, and pico removes an absent id from its handler
 /// map without error. A null token is refused, as this crate's token functions refuse one.
 ///

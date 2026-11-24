@@ -449,15 +449,21 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
     type Chain = LentChain;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
-        if self.held() >= self.chains {
+        let cells = self.cells?;
+        // One walk of the places: how many hold a buffer, and the first that does not.
+        let mut held = 0usize;
+        let mut free = None;
+        for (at, buf) in self.bufs.iter_mut().enumerate() {
+            if buf.is_some() {
+                held = held.wrapping_add(1);
+            } else if free.is_none() {
+                free = Some((at, buf));
+            }
+        }
+        if held >= self.chains {
             return None;
         }
-        let cells = self.cells?;
-        let (at, slot) = self
-            .bufs
-            .iter_mut()
-            .enumerate()
-            .find(|(_, buf)| buf.is_none())?;
+        let (at, slot) = free?;
         *slot = Some(cells.claim()?);
         Some(LentChain {
             at,

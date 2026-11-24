@@ -1473,7 +1473,7 @@ impl Engine {
     /// What stops the legs of a query that is about to be asked.
     fn new_query_fan(&self) -> Arc<QueryFan> {
         match self {
-            Engine::Tokio(_) | Engine::Router(_) => QueryFan::new(),
+            Engine::Tokio(_) | Engine::Router(_) => Arc::new(QueryFan::new()),
         }
     }
 
@@ -1562,7 +1562,7 @@ impl Engine {
                     tokio_engine::router_plane_of(kind),
                     key,
                     tokio_engine::engine_locality(destination),
-                    Box::new(move |matching| sink(matching)),
+                    Box::new(move |matching| sink.call(matching)),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a matching listener {id}, more than an id holds")
@@ -4104,7 +4104,7 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> MatchingSink {
         let ordered = Ordered::new(callback, notifier);
-        Arc::new(move |matching| ordered.deliver(MatchingStatus { matching }))
+        MatchingSink::shared(move |matching| ordered.deliver(MatchingStatus { matching }))
     }
 
     /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a

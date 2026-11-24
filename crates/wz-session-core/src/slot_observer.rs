@@ -3256,10 +3256,12 @@ mod lent_tests {
             }
         }
         let querier =
-            crate::declare::queryable::QuerierCriterion::new("demo/q", Locality::Remote, false);
+            crate::declare::queryable::QuerierCriterion::new("demo/q", Locality::Remote, false)
+                .expect("a short key");
         assert!(!SubscribersOnly.answers(&querier));
         let publisher =
-            crate::declare::subscriber::PublisherCriterion::new("demo/q", Locality::Remote);
+            crate::declare::subscriber::PublisherCriterion::new("demo/q", Locality::Remote)
+                .expect("a short key");
         assert!(
             SubscribersOnly.subscribes(&publisher),
             "CONTROL: the method the faces do say is theirs"

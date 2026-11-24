@@ -84,9 +84,6 @@ fn a_router_holding_no_more_than_it_keeps_closes_nothing() {
 #[cfg(all(feature = "transport-keepalive", feature = "codec-close"))]
 #[test]
 fn a_session_ordered_closed_stops_its_keepalives_and_tells_its_peer_at_once() {
-    use crate::runtime_impl::TokioRuntime;
-    use wz_runtime_core::runtime::Runtime;
-
     let fwd = RouterForwarder::new(zid(0x01));
     let (kept_link, shed_link) = (RoomLink::new(false), RoomLink::new(false));
     let kept = client_over(&kept_link, zid(0x10));
@@ -94,14 +91,20 @@ fn a_session_ordered_closed_stops_its_keepalives_and_tells_its_peer_at_once() {
     fwd.register(FaceId(0), &kept);
     fwd.register(FaceId(1), &shed);
     for actions in [&kept, &shed] {
-        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed = true);
+        actions
+            .link
+            .keepalive_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
     }
     let (kept_before, shed_before) = (kept_link.sent(), shed_link.sent());
 
     assert_eq!(fwd.shed_registry().shed_newest(1), 1);
 
     let armed = |actions: &SessionLinkActions| {
-        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed)
+        actions
+            .link
+            .keepalive_armed
+            .load(core::sync::atomic::Ordering::SeqCst)
     };
     assert!(
         armed(&kept),

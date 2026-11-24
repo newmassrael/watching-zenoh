@@ -42,7 +42,7 @@
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
 
-use wz_capi_port::cancellation::CancellationToken;
+use wz_capi_port::cancellation::{CancellationToken, TokenRef};
 use wz_capi_port::FilterPlane;
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
@@ -57,6 +57,9 @@ use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
 };
+// A build of one engine calls the engine through its own type, so the port's trait is in scope.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
+use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
@@ -252,8 +255,9 @@ pub(crate) struct QuerierState {
     encoding: Option<crate::encoding::OwnedEncoding>,
     /// Cancels the gets this querier still has pending when it is undeclared, as pico's
     /// `_z_unregister_pending_queries_from_querier` does. Every get takes it, unless the program
-    /// gave that get a token of its own.
-    cancel: Arc<wz_capi_port::cancellation::CancellationToken>,
+    /// gave that get a token of its own. It lies in the querier's place, and each get's fan is
+    /// registered on it there.
+    cancel: CancellationToken,
 }
 
 impl QuerierState {
@@ -454,7 +458,7 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
-            cancel: wz_capi_port::cancellation::CancellationToken::new(),
+            cancel: CancellationToken::default(),
         }));
         // The querier is the first thing in its place, so the place is its handle.
         let state = state.cast::<QuerierState>();
@@ -587,7 +591,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                 .map(crate::encoding::OwnedEncoding::view),
             source_info,
         };
-        let token = token.or_else(|| Some(state.cancel.clone()));
+        let token = Some(match token {
+            Some(token) => TokenRef::shared(token),
+            // SAFETY: the querier's token lies in its place, which is not given back before
+            // `free_querier` has cancelled the token, and that waits for every fan on it.
+            None => unsafe { TokenRef::placed(&state.cancel) },
+        });
         let ask = crate::get::GetAsk {
             parameters: params_in,
             target: state.target,

@@ -244,6 +244,14 @@ pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
 /// declaration past it is refused, having sent nothing.
 pub const MAX_MATCHING_LISTENERS: usize = generated::MAX_MATCHING_LISTENERS;
 
+/// The declaration watches a session holds at once, over every kind of entity watched. A watch
+/// past it is refused, having installed nothing.
+pub const MAX_DECL_WATCHES: usize = generated::MAX_DECL_WATCHES;
+
+/// The transport events listeners a session holds at once. A listener past it is refused, having
+/// been told nothing.
+pub const MAX_TRANSPORT_EVENTS_LISTENERS: usize = generated::MAX_TRANSPORT_EVENTS_LISTENERS;
+
 /// The distinct key expressions a session declares to its peers at once (each held by every
 /// entity that names it). A declaration of one more distinct key is refused, having sent nothing.
 pub const MAX_DECLARED_KEYEXPRS: usize = generated::MAX_DECLARED_KEYEXPRS;
@@ -295,6 +303,14 @@ pub const MAX_ENCODING_SCHEMA_BYTES: usize = generated::MAX_ENCODING_SCHEMA_BYTE
 /// keep their records in together, each as long as its sample. A put whose record is longer than
 /// the ring is refused; one that finds no room lets the oldest records go.
 pub const ADVANCED_CACHE_BYTES: usize = generated::ADVANCED_CACHE_BYTES;
+
+/// The advanced publishers a session holds at once, each in a place of the session's own. A
+/// declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_PUBLISHERS: usize = generated::MAX_ADVANCED_PUBLISHERS;
+
+/// The advanced subscribers a session holds at once, owned and background, each in a place of the
+/// session's own. A declaration past it is refused, having declared nothing.
+pub const MAX_ADVANCED_SUBSCRIBERS: usize = generated::MAX_ADVANCED_SUBSCRIBERS;
 
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.

@@ -355,7 +355,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -370,7 +370,7 @@ impl SessionEngine for RouterState {
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink(matching)),
+            Box::new(move |matching| sink.call(matching)),
         ))
     }
 
@@ -583,7 +583,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -619,7 +619,7 @@ impl SessionEngine for RouterState {
             .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
-            fan.record(move || face.cancel_query(id));
+            crate::fan_undo::record(fan, Box::new(move || face.cancel_query(id)));
         }
         Ok(1)
     }
@@ -671,7 +671,9 @@ impl SessionEngine for RouterState {
         let id = face.tokens_get_id();
         let cancel_face = Arc::clone(&face);
         // A fan already cancelled issues no leg: the get is over, having asked nobody.
-        if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
+        if fan.is_some_and(|fan| {
+            !crate::fan_undo::record(fan, Box::new(move || cancel_face.end_tokens_get(id)))
+        }) {
             return Ok(0);
         }
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());

@@ -223,13 +223,21 @@ const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
-/// (`query`) and pending liveliness gets (`liveliness-get`), as many as the ABI asks places of,
-/// at most these.
+/// (`query`), pending liveliness gets (`liveliness-get`), matching listeners, declaration watches
+/// (`remote-declaration-watch` or `declarations-synced-event`), transport events listeners
+/// (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the ABI asks
+/// places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
-    * (3 + cfg!(feature = "queryable") as usize
+    * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
         + cfg!(feature = "query") as usize
-        + cfg!(feature = "liveliness-get") as usize);
+        + cfg!(feature = "liveliness-get") as usize
+        + cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) as usize
+        + cfg!(feature = "connectivity") as usize
+        + 2 * cfg!(feature = "advanced") as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -293,6 +301,31 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "pending liveliness get places",
             "MAX_PENDING_LIVELINESS_GETS",
         ),
+        EntityKind::MatchingListener => (
+            "matching listener place flags",
+            "matching listener places",
+            "MAX_MATCHING_LISTENERS",
+        ),
+        EntityKind::DeclWatch => (
+            "declaration watch place flags",
+            "declaration watch places",
+            "MAX_DECL_WATCHES",
+        ),
+        EntityKind::TransportEventsListener => (
+            "transport events listener place flags",
+            "transport events listener places",
+            "MAX_TRANSPORT_EVENTS_LISTENERS",
+        ),
+        EntityKind::AdvancedPublisher => (
+            "advanced publisher place flags",
+            "advanced publisher places",
+            "MAX_ADVANCED_PUBLISHERS",
+        ),
+        EntityKind::AdvancedSubscriber => (
+            "advanced subscriber place flags",
+            "advanced subscriber places",
+            "MAX_ADVANCED_SUBSCRIBERS",
+        ),
     }
 }
 
@@ -305,6 +338,15 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
 pub struct HeldPlaces {
     handle: Option<Layout>,
     entities: [Option<Layout>; ENTITY_KINDS],
+}
+
+/// Where an open's arena comes from and which places of the ABI's it holds beside the session's
+/// tables ([`CoopEngine::open_made_in`](crate::CoopEngine::open_made_in)).
+pub struct OpenStorage {
+    /// The memory the session's arena is reserved from.
+    pub memory: &'static dyn ArenaMemory,
+    /// The ABI's places the arena holds after every table.
+    pub held: HeldPlaces,
 }
 
 impl HeldPlaces {
@@ -416,6 +458,18 @@ pub struct EntityRows {
     /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
     /// without `liveliness-get`.
     pub pending_liveliness_gets: usize,
+    /// The declaration watches (`MAX_DECL_WATCHES`); none in a build with neither
+    /// `remote-declaration-watch` nor `declarations-synced-event`.
+    pub decl_watches: usize,
+    /// The transport events listeners (`MAX_TRANSPORT_EVENTS_LISTENERS`); none in a build
+    /// without `connectivity`.
+    pub transport_events_listeners: usize,
+    /// The advanced publishers (`MAX_ADVANCED_PUBLISHERS`), which the engine keeps no row of: the
+    /// ABI's places of them only; none in a build without `advanced`.
+    pub advanced_publishers: usize,
+    /// The advanced subscribers, owned and background (`MAX_ADVANCED_SUBSCRIBERS`), as the
+    /// advanced publishers; none in a build without `advanced`.
+    pub advanced_subscribers: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -506,6 +560,11 @@ impl EntityRows {
             EntityKind::Querier => self.queriers,
             EntityKind::PendingGet => self.pending_gets,
             EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
+            EntityKind::MatchingListener => self.matching_listeners,
+            EntityKind::DeclWatch => self.decl_watches,
+            EntityKind::TransportEventsListener => self.transport_events_listeners,
+            EntityKind::AdvancedPublisher => self.advanced_publishers,
+            EntityKind::AdvancedSubscriber => self.advanced_subscribers,
         }
     }
 
@@ -1651,6 +1710,38 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
             lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                 "MAX_PENDING_LIVELINESS_GETS",
                 limits.max_pending_liveliness_gets(),
+            )?
+        } else {
+            0
+        },
+        decl_watches: if cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) {
+            lent::<{ caps::MAX_DECL_WATCHES }>("MAX_DECL_WATCHES", limits.max_decl_watches())?
+        } else {
+            0
+        },
+        transport_events_listeners: if cfg!(feature = "connectivity") {
+            lent::<{ caps::MAX_TRANSPORT_EVENTS_LISTENERS }>(
+                "MAX_TRANSPORT_EVENTS_LISTENERS",
+                limits.max_transport_events_listeners(),
+            )?
+        } else {
+            0
+        },
+        advanced_publishers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+                "MAX_ADVANCED_PUBLISHERS",
+                limits.max_advanced_publishers(),
+            )?
+        } else {
+            0
+        },
+        advanced_subscribers: if cfg!(feature = "advanced") {
+            lent::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+                "MAX_ADVANCED_SUBSCRIBERS",
+                limits.max_advanced_subscribers(),
             )?
         } else {
             0

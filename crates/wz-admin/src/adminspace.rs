@@ -7224,10 +7224,12 @@ mod tests {
         metrics.inc_bytes(StatsDirection::Tx, slot, 140);
         metrics.observe_network_message_payload(
             StatsDirection::Tx,
-            wz_session_core::stats::StatSpace::User,
-            wz_session_core::qos::Priority::DEFAULT,
-            wz_session_core::stats_registry::MessageLabel::Put,
-            false,
+            wz_session_core::stats_registry::NetworkMessagePayloadLabels {
+                space: wz_session_core::stats::StatSpace::User,
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                message: wz_session_core::stats_registry::MessageLabel::Put,
+                shm: false,
+            },
             12,
             ["demo/**"],
         );

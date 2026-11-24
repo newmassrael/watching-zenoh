@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 20
+#define WZ_CAPI_C_ABI_REVISION 21
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -1264,7 +1264,12 @@ uint8_t wz_capi_c_supervision_state(uint8_t checkpoint);
  * that wrap. A hosted node serves the same record as JSON at
  * wz/@/<zid>/snapshot on its own. */
 
+/* The library hands the source this struct with struct_size set to its
+ * bytes, every field zeroed, and the source writes no byte past
+ * struct_size: a field is only ever added at the end, so a source
+ * compiled before it leaves it unanswered. Since revision 21. */
 typedef struct wz_capi_c_resource_reading_t {
+    size_t struct_size;
     uint8_t available; /* WZ_CAPI_C_SNAPSHOT_HAS_*: which of the readings below the source answers */
     uint8_t reserved;
     uint16_t cpu_permille; /* busy share of the CPU since the last reading, in thousandths */

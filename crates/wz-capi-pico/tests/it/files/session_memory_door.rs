@@ -68,6 +68,7 @@ unsafe fn report(session: *const z_loaned_session_t) -> (wz_ext_session_memory_t
     let rows = (0..summary.rows)
         .map(|index| {
             let mut door: wz_ext_session_memory_row_t = std::mem::zeroed();
+            door.struct_size = std::mem::size_of::<wz_ext_session_memory_row_t>();
             assert_eq!(wz_ext_session_memory_row(session, index, &mut door), Z_OK);
             Row {
                 part: CStr::from_ptr(door.part).to_str().unwrap().to_owned(),
@@ -231,6 +232,7 @@ fn a_row_past_the_last_and_null_arguments_are_refused() {
         let mut summary = wz_ext_session_memory_t::default();
         assert_eq!(wz_ext_session_memory(dialer, &mut summary), Z_OK);
         let mut out: wz_ext_session_memory_row_t = std::mem::zeroed();
+        out.struct_size = std::mem::size_of::<wz_ext_session_memory_row_t>();
         out.entry_bytes = 7;
         assert_eq!(
             wz_ext_session_memory_row(dialer, summary.rows, &mut out),

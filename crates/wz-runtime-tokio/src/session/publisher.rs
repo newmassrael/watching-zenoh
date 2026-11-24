@@ -261,13 +261,11 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             let locality = self.options.allowed_destination;
-            obs.face_ref().remote_subscribers.has_matching_for(
-                &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                    &self.keyexpr,
-                    locality,
-                ),
-            ) || (locality.allows_local()
-                && obs.read_app(|app| app.subscribers.has_local_matching(&self.keyexpr)))
+            obs.face_ref()
+                .remote_subscribers
+                .has_matching_at(&self.keyexpr, locality)
+                || (locality.allows_local()
+                    && obs.read_app(|app| app.subscribers.has_local_matching(&self.keyexpr)))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
@@ -333,6 +331,13 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
         {
             use super::matching_listener::{BoxedMatchingCallback, MatchingListenerCell};
+            // The watch holds its key in place: a key it cannot hold is refused before
+            // anything is registered or asked of the peer.
+            let criterion = wz_session_core::declare::subscriber::PublisherCriterion::new(
+                &self.keyexpr,
+                self.options.allowed_destination,
+            )
+            .map_err(|_| MatchingListenerError::KeyexprTooLong)?;
             let erased: BoxedMatchingCallback = Box::new(callback);
             let cell: MatchingListenerCell<R> =
                 wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
@@ -356,10 +361,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 obs.with_parts(|app, face| {
                     app.remote_subscribers.declare_matching_listener_seeded(
                         &*face.remote_subscribers,
-                        wz_session_core::declare::subscriber::PublisherCriterion::new(
-                            &self.keyexpr,
-                            self.options.allowed_destination,
-                        ),
+                        criterion,
                         local,
                         sink,
                     )
@@ -416,10 +418,12 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 // Recorded for reconnect replay and sent through the seam, as one step.
                 let emit = self.session.actions().declare_matching_interest_recorded(
                     interest_id,
-                    wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
-                    /*current=*/ true,
-                    /*future=*/ true,
-                    /*aggregate=*/ false,
+                    wz_session_core::session_actions::InterestAsk {
+                        kinds: wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
+                        current: true,
+                        future: true,
+                        aggregate: false,
+                    },
                     /*keyexpr_mapping_id=*/ 0,
                     Some(&self.keyexpr),
                     || {

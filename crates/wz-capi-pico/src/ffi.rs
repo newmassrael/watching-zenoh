@@ -23,6 +23,8 @@ use alloc::sync::Arc;
 
 use wz_capi_port::os::{Condvar, Mutex};
 
+// What the list of latches the advanced plane waits on is made of.
+#[cfg(feature = "advanced")]
 use crate::prelude::*;
 
 // The guard and the thread-crossing pointer are compiled by every library of the ABI for itself.
@@ -184,6 +186,7 @@ impl<C> CClosure<C> {
     /// engine let go, which is how an undeclare returns only when the callback is finished. A
     /// closure an owner counts ([`Self::count_in`]) is waited on through the count, and its latch
     /// is open from the start.
+    #[cfg(feature = "advanced")]
     pub(crate) fn release_latch(&self) -> Arc<ReleaseLatch> {
         match &self.released {
             Released::Latch(latch) => latch.clone(),
@@ -252,11 +255,10 @@ impl OpenClosures {
     pub(crate) fn close_one(&self) -> bool {
         let mut state = self.state.lock();
         state.held = state.held.saturating_sub(1);
-        if state.held != 0 {
-            return false;
-        }
+        // Every close is told, as a waiter may wait for fewer held rather than none
+        // ([`Self::wait_at_most`]).
         self.none_open.notify_all();
-        state.retired
+        state.held == 0 && state.retired
     }
 
     /// The owner lets go of its place: `true` when no closure counted here is held, so the owner
@@ -272,11 +274,18 @@ impl OpenClosures {
     /// program's callbacks: that callback holds a closure, so waiting would wait for itself, as
     /// [`ReleaseLatch::wait`] says.
     pub(crate) fn wait_none(&self) {
+        self.wait_at_most(0);
+    }
+
+    /// Block until at most `kept` are held here: the holds the caller has itself and lets go of
+    /// after, so it waits for every other one, closures among them, and not for its own. Returns
+    /// at once inside one of the program's callbacks, as [`Self::wait_none`] does.
+    pub(crate) fn wait_at_most(&self, kept: usize) {
         if InCallback::here() {
             return;
         }
         let mut state = self.state.lock();
-        while state.held != 0 {
+        while state.held > kept {
             state = self.none_open.wait(state);
         }
     }
@@ -301,6 +310,7 @@ impl ReleaseLatch {
     /// Block until the closure is released, unless this thread is inside one of the program's
     /// callbacks: that callback holds the closure, so waiting would wait for itself. The
     /// closure is then released when the callback returns, as it was before there was a wait.
+    #[cfg(feature = "advanced")]
     pub(crate) fn wait(&self) {
         if InCallback::here() {
             return;
@@ -312,6 +322,7 @@ impl ReleaseLatch {
     }
 }
 
+#[cfg(feature = "advanced")]
 impl ReleaseLatch {
     fn is_open(&self) -> bool {
         *self.open.lock()
@@ -320,13 +331,11 @@ impl ReleaseLatch {
 
 /// Waits for a closure's release when it is dropped. A struct that holds what the closure's
 /// callbacks run through declares this LAST: fields drop in declaration order, so the wait comes
-/// after everything before it has let go, which a `Drop::drop` body cannot say. The default waits
-/// for nothing, which is what an owner whose callbacks are not the program's holds.
+/// after everything before it has let go, which a `Drop::drop` body cannot say.
 ///
-/// Its holders are the advanced publisher's and subscriber's states, so it exists where they do;
-/// a build without `advanced` (the client-only and reduced builds) would carry it unused.
+/// Its holder is an advanced subscriber's sample-miss listener, so it exists where that does; a
+/// build without `advanced` (the client-only and reduced builds) would carry it unused.
 #[cfg(feature = "advanced")]
-#[derive(Default)]
 pub(crate) struct AwaitRelease(LatchList);
 
 #[cfg(feature = "advanced")]
@@ -335,17 +344,6 @@ impl AwaitRelease {
         let list = LatchList::default();
         list.keep(latch);
         Self(list)
-    }
-
-    /// Wait for one more closure as well, one the owner came to hold after it was made.
-    pub(crate) fn add(&self, latch: Arc<ReleaseLatch>) {
-        self.0.keep(latch);
-    }
-
-    /// Take the latches, so that dropping this waits for nothing: the owner hands them to
-    /// whoever will wait (a session's close) because the state outlives the handle.
-    pub(crate) fn disarm(&mut self) -> Vec<Arc<ReleaseLatch>> {
-        self.0.take_all()
     }
 }
 
@@ -356,12 +354,14 @@ impl Drop for AwaitRelease {
     }
 }
 
-/// The latches of the closures an owner is answerable for, to wait on together. An owner that
-/// hands out many (a querier's gets, a session's background declarations) keeps only the ones
-/// still closed, so the list is as long as what is still running and not as what ever ran.
+/// The latches of the closures an owner is answerable for, to wait on together, keeping only the
+/// ones still closed, so the list is as long as what is still running and not as what ever ran.
+/// Its one holder is [`AwaitRelease`], so it exists where that does.
+#[cfg(feature = "advanced")]
 #[derive(Default)]
 pub(crate) struct LatchList(Mutex<Vec<Arc<ReleaseLatch>>>);
 
+#[cfg(feature = "advanced")]
 impl LatchList {
     pub(crate) fn keep(&self, latch: Arc<ReleaseLatch>) {
         let mut list = self.0.lock();
@@ -631,5 +631,39 @@ mod closure_tests {
             "the wait outlasted the drop"
         );
         release.join().expect("the releasing thread ends");
+    }
+
+    /// A wait for all but the waiter's own hold returns once the other closure is let go of on
+    /// another thread, and leaves that hold counted. Turned red by a close that tells a waiter
+    /// only when none is held, which leaves this wait waiting on its own hold.
+    #[test]
+    fn a_wait_for_all_but_its_own_hold_returns_when_the_others_go() {
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        let owner = std::sync::Arc::new(Owner::default());
+        let own = owner_of(&owner).hold();
+        let mut other = closure(&DROPPED);
+        other.count_in(owner_of(&owner));
+        assert_eq!(held(&owner), 2);
+        let kept = std::sync::Arc::clone(&owner);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(other);
+            drop(kept);
+        });
+        owner.open.wait_at_most(1);
+        assert_eq!(
+            DROPPED.load(Ordering::SeqCst),
+            1,
+            "the wait outlasted the other closure's drop"
+        );
+        assert_eq!(held(&owner), 1, "the waiter's own hold is still counted");
+        release.join().expect("the releasing thread ends");
+        drop(own);
+        assert_eq!(held(&owner), 0);
+        assert_eq!(
+            owner.given_back.load(Ordering::SeqCst),
+            0,
+            "an owner still held keeps its place"
+        );
     }
 }

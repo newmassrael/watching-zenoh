@@ -315,6 +315,7 @@ int main(void) {
 
                 wz_ext_replay_subscriber_counts_t counts;
                 memset(&counts, 0, sizeof counts);
+                counts.struct_size = sizeof counts;
                 CHECK(wz_ext_replay_subscriber_counts(sub, &counts) == Z_OK, "the subscriber's counts");
                 CHECK(counts.duplicates == 0 && counts.stale == 0 && counts.abandoned == 0 &&
                           counts.late_replies == 0,
@@ -334,6 +335,7 @@ int main(void) {
 
         wz_ext_replay_publisher_counts_t served;
         memset(&served, 0, sizeof served);
+        served.struct_size = sizeof served;
         CHECK(wz_ext_replay_publisher_counts(pub_cache, &served) == Z_OK, "the cache's counts");
         CHECK(served.recorded == SENT_BEFORE + LIVE && served.answers >= 1,
               "the cache recorded %llu frames and answered %llu queries",

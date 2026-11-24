@@ -67,6 +67,27 @@ pub(crate) enum Kind {
     /// A liveliness get the program issued, held as a get is.
     #[cfg(feature = "liveliness-get")]
     LivelinessGet = 16,
+    /// A matching listener of a publisher or a querier, held while its write filter can reach it
+    /// (`crate::matching::MatchingPlace`).
+    MatchingListener = 17,
+    /// A watch of what the peers declare, held until its handle and the engine let go of it
+    /// (`crate::decl_watch::WatchPlace`).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclWatch = 18,
+    /// A transport events listener, held while its session's hub can reach it
+    /// (`crate::connectivity::TransportPlace`).
+    #[cfg(feature = "connectivity")]
+    TransportEventsListener = 19,
+    /// An advanced publisher (`crate::advanced::AdvPubState`). Its number follows those the
+    /// listeners and the watches take.
+    #[cfg(feature = "advanced")]
+    AdvancedPublisher = 20,
+    /// An advanced subscriber, owned or background (`crate::advanced::AdvSubPlace`).
+    #[cfg(feature = "advanced")]
+    AdvancedSubscriber = 21,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -290,6 +311,33 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::PendingLivelinessGet,
             InSession::<crate::get::GetPlace>::LAYOUT,
         )),
+        Kind::MatchingListener => Some((
+            EntityKind::MatchingListener,
+            InSession::<crate::matching::MatchingPlace>::LAYOUT,
+        )),
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        Kind::DeclWatch => Some((
+            EntityKind::DeclWatch,
+            InSession::<crate::decl_watch::WatchPlace>::LAYOUT,
+        )),
+        #[cfg(feature = "connectivity")]
+        Kind::TransportEventsListener => Some((
+            EntityKind::TransportEventsListener,
+            InSession::<crate::connectivity::TransportPlace>::LAYOUT,
+        )),
+        #[cfg(feature = "advanced")]
+        Kind::AdvancedPublisher => Some((
+            EntityKind::AdvancedPublisher,
+            InSession::<crate::advanced::AdvPubState>::LAYOUT,
+        )),
+        #[cfg(feature = "advanced")]
+        Kind::AdvancedSubscriber => Some((
+            EntityKind::AdvancedSubscriber,
+            InSession::<crate::advanced::AdvSubPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -313,6 +361,33 @@ const QUERIER: [Option<Kind>; 2] = [None, None];
 const LIVELINESS_GET: Option<Kind> = Some(Kind::LivelinessGet);
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness-get")))]
 const LIVELINESS_GET: Option<Kind> = None;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )
+))]
+const DECL_WATCH: Option<Kind> = Some(Kind::DeclWatch);
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))
+))]
+const DECL_WATCH: Option<Kind> = None;
+#[cfg(all(not(feature = "engine-tokio"), feature = "connectivity"))]
+const TRANSPORT_EVENTS: Option<Kind> = Some(Kind::TransportEventsListener);
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "connectivity")))]
+const TRANSPORT_EVENTS: Option<Kind> = None;
+#[cfg(all(not(feature = "engine-tokio"), feature = "advanced"))]
+const ADVANCED: [Option<Kind>; 2] = [
+    Some(Kind::AdvancedPublisher),
+    Some(Kind::AdvancedSubscriber),
+];
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "advanced")))]
+const ADVANCED: [Option<Kind>; 2] = [None, None];
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
@@ -320,6 +395,7 @@ const LIVELINESS_GET: Option<Kind> = None;
 fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
     let [token, liveliness_subscriber] = LIVELINESS;
     let [querier, get] = QUERIER;
+    let [advanced_publisher, advanced_subscriber] = ADVANCED;
     [
         Some(Kind::Publisher),
         Some(Kind::Subscriber),
@@ -329,6 +405,11 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         querier,
         get,
         LIVELINESS_GET,
+        Some(Kind::MatchingListener),
+        DECL_WATCH,
+        TRANSPORT_EVENTS,
+        advanced_publisher,
+        advanced_subscriber,
     ]
     .into_iter()
     .flatten()
@@ -417,18 +498,38 @@ pub(crate) unsafe fn count_in_entity<T, K, C>(
     object: *const T,
     closure: &mut crate::ffi::CClosure<C>,
 ) {
+    // SAFETY: the caller's.
+    closure.count_in(unsafe { count_of::<T, K>(object) });
+}
+
+/// Hold the place of the entity whose object is at `object` open as a closure counted in it does:
+/// for what reaches the place apart from its owner (a write filter's list of its listeners), so
+/// the place stands until the hold is dropped, which gives it back if its owner and every closure
+/// went first.
+///
+/// # Safety
+/// As [`count_in_entity`].
+pub(crate) unsafe fn hold_entity<T, K>(object: *const T) -> crate::ffi::HeldIn {
+    // SAFETY: the caller's.
+    unsafe { count_of::<T, K>(object) }.hold()
+}
+
+/// The count of the entity whose object is at `object`, and how its place is given back.
+///
+/// # Safety
+/// As [`count_in_entity`].
+unsafe fn count_of<T, K>(object: *const T) -> crate::ffi::CountIn {
     let at = object.cast::<Answering<T, K>>();
     // SAFETY: the caller's: the place holds an `Answering<T, K>`, whose count stands until the
     // place goes back, which only `give_back_answering` does, called by whichever of the owner's
-    // release and the last closure counted goes last.
-    let owner = unsafe {
+    // release and the last hold counted goes last.
+    unsafe {
         crate::ffi::CountIn::new(
             &(*at).open,
             NonNull::new_unchecked(at.cast_mut().cast()),
             give_back_answering::<T, K>,
         )
-    };
-    closure.count_in(owner);
+    }
 }
 
 /// Let go of an entity's object for its owner: drop the object, and give its place back now when

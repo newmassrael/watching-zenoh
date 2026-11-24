@@ -368,7 +368,7 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
             crate::publisher::PublisherHandle::Registry(state) => {
                 let id = state
                     .shared
-                    .declare_matching_listener(state.keyexpr.keyexpr.clone(), sink);
+                    .declare_matching_listener(state.keyexpr.keyexpr.clone(), registry_sink(sink));
                 state.attach_matching(MatchingHold::new(state.shared.clone(), id));
             }
             // A node's own face is told whether anything of the subscribers matches the key.
@@ -461,6 +461,13 @@ fn matching_sink(closure: Arc<CMatchClosure>) -> Arc<dyn Fn(bool) + Send + Sync>
     })
 }
 
+/// The verdict callback as a session's registry takes it: shared, as every face's watch calls it.
+pub(crate) fn registry_sink(
+    sink: Arc<dyn Fn(bool) + Send + Sync>,
+) -> wz_capi_core::faces::MatchingSink {
+    wz_capi_core::faces::MatchingSink::Shared(sink)
+}
+
 /// Install a declared listener into the caller's owned slot.
 ///
 /// # Safety
@@ -507,7 +514,7 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
                 shared: state.shared.clone(),
                 id: state.shared.declare_matching_listener(
                     state.keyexpr.keyexpr.clone(),
-                    matching_sink(closure),
+                    registry_sink(matching_sink(closure)),
                 ),
             },
             #[cfg(feature = "router-node")]
@@ -573,7 +580,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
         };
         let target = match host {
             crate::advanced::AdvMatchHost::Registry(shared) => {
-                let id = shared.declare_matching_listener(keyexpr, matching_sink(closure));
+                let id = shared
+                    .declare_matching_listener(keyexpr, registry_sink(matching_sink(closure)));
                 MatchTarget::Registry { shared, id }
             }
             // A node's own face is told whether anything of the subscribers matches the key.
@@ -690,7 +698,7 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
                 shared: state.shared.clone(),
                 id: state.shared.declare_querier_matching_listener(
                     state.keyexpr.literal().to_owned(),
-                    matching_sink(closure),
+                    registry_sink(matching_sink(closure)),
                     state.matching_needs_complete(),
                 ),
             },

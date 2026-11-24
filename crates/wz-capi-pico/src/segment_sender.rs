@@ -48,6 +48,7 @@ use crate::pubsub::{
     z_publisher_put_options_t, z_timestamp_t,
 };
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
+use crate::sized::{Out, SizedOut};
 
 /// What a sender does after the message that carried the largest transfer number its field holds.
 pub type wz_ext_segment_rollover_t = u8;
@@ -77,16 +78,50 @@ pub struct wz_ext_moved_segment_sender_t {
     pub(crate) _this: wz_ext_owned_segment_sender_t,
 }
 
-/// How far one put or split went.
+/// How far one put or split went, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct wz_ext_segment_result_t {
+    /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
+    /// wrote.
+    pub struct_size: usize,
     /// The transfer number every piece carried; 0 when the message was refused before any piece.
     pub transfer: u64,
     /// How many pieces the message was cut into; 0 when it was refused.
     pub pieces: usize,
     /// How many pieces went out.
     pub sent: usize,
+}
+
+impl Default for wz_ext_segment_result_t {
+    /// Nothing sent, in a struct of this build's size.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            transfer: 0,
+            pieces: 0,
+            sent: 0,
+        }
+    }
+}
+
+// SAFETY: `#[repr(C)]`, `struct_size` first.
+unsafe impl SizedOut for wz_ext_segment_result_t {
+    const BASE: usize = core::mem::size_of::<Self>();
+}
+
+/// The program's result struct, or none when it passed null: `Z_EINVAL` for one whose
+/// `struct_size` is short of the struct.
+///
+/// # Safety
+/// `result` is null or a struct of `struct_size` writable bytes.
+unsafe fn result_out(
+    result: *mut wz_ext_segment_result_t,
+) -> Result<Option<Out<wz_ext_segment_result_t>>, ZResult> {
+    if result.is_null() {
+        return Ok(None);
+    }
+    Out::of(result).map(Some)
 }
 
 /// The options of [`wz_ext_segment_sender_put`].
@@ -264,13 +299,13 @@ unsafe fn split_reporting(
     message: *const u8,
     len: usize,
     chunk_bytes: usize,
-    result: *mut wz_ext_segment_result_t,
+    result: Option<&Out<wz_ext_segment_result_t>>,
     refusal: *mut z_owned_string_t,
     emit: impl FnMut(&[u8]) -> Result<(), ZResult>,
 ) -> ZResult {
     clear_refusal(refusal);
-    if !result.is_null() {
-        *result = wz_ext_segment_result_t::default();
+    if let Some(result) = result {
+        result.put(&wz_ext_segment_result_t::default());
     }
     let Some(sender) = sender_of(this_) else {
         return Z_ERR_NULL;
@@ -283,6 +318,7 @@ unsafe fn split_reporting(
         Ok(Split { transfer, pieces }) => (
             Z_OK,
             wz_ext_segment_result_t {
+                struct_size: 0,
                 transfer,
                 pieces,
                 sent: pieces,
@@ -309,6 +345,7 @@ unsafe fn split_reporting(
             (
                 error,
                 wz_ext_segment_result_t {
+                    struct_size: 0,
                     transfer,
                     pieces,
                     sent,
@@ -316,8 +353,8 @@ unsafe fn split_reporting(
             )
         }
     };
-    if !result.is_null() {
-        *result = report;
+    if let Some(result) = result {
+        result.put(&report);
     }
     code
 }
@@ -331,12 +368,14 @@ unsafe fn split_reporting(
 /// Returns `Z_OK` when every piece was put; `Z_EINVAL` when the message was refused before any
 /// piece (`refusal` says why, and no transfer number was used); the code of the put that failed,
 /// after `result.sent` pieces, when one did (the transfer number is used); `Z_ERR_NULL` for a null
-/// sender or publisher, the gravestone, or a null message with a length.
+/// sender or publisher, the gravestone, or a null message with a length. A `result` whose
+/// `struct_size` is short of the struct is refused with `Z_EINVAL` before anything is sent, with
+/// nothing written to it and `refusal` left the gravestone.
 ///
 /// # Safety
 /// `this_` is null or a loaned sender; `publisher` is null or a loaned publisher; `message` is
 /// readable for `len` bytes; `options` is null or valid, its timestamp null or valid for the call;
-/// `result` and `refusal` are null or writable.
+/// `refusal` is null or writable; `result` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wz_ext_segment_sender_put(
@@ -350,10 +389,17 @@ pub unsafe extern "C" fn wz_ext_segment_sender_put(
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
+        let result = match result_out(result) {
+            Ok(result) => result,
+            Err(code) => {
+                clear_refusal(refusal);
+                return code;
+            }
+        };
         if publisher.is_null() {
             clear_refusal(refusal);
-            if !result.is_null() {
-                *result = wz_ext_segment_result_t::default();
+            if let Some(result) = &result {
+                result.put(&wz_ext_segment_result_t::default());
             }
             return Z_ERR_NULL;
         }
@@ -378,7 +424,15 @@ pub unsafe extern "C" fn wz_ext_segment_sender_put(
                 code => Err(code),
             }
         };
-        split_reporting(this_, message, len, chunk_bytes, result, refusal, put)
+        split_reporting(
+            this_,
+            message,
+            len,
+            chunk_bytes,
+            result.as_ref(),
+            refusal,
+            put,
+        )
     })
 }
 
@@ -389,11 +443,14 @@ pub unsafe extern "C" fn wz_ext_segment_sender_put(
 /// Returns `Z_OK` when `emit` accepted every piece; `Z_EINVAL` when the message was refused before
 /// any piece (`refusal` says why, and no transfer number was used); what `emit` returned, after
 /// `result.sent` pieces, when it returned anything but `Z_OK` (the transfer number is used);
-/// `Z_ERR_NULL` for a null sender or `emit`, the gravestone, or a null message with a length.
+/// `Z_ERR_NULL` for a null sender or `emit`, the gravestone, or a null message with a length. A
+/// `result` whose `struct_size` is short of the struct is refused with `Z_EINVAL` before any piece,
+/// with nothing written to it and `refusal` left the gravestone.
 ///
 /// # Safety
 /// `this_` is null or a loaned sender; `message` is readable for `len` bytes; `emit` is safe to call
-/// with `context`; `result` and `refusal` are null or writable.
+/// with `context`; `refusal` is null or writable; `result` is null or a struct of `struct_size`
+/// writable bytes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wz_ext_segment_sender_split(
@@ -407,10 +464,17 @@ pub unsafe extern "C" fn wz_ext_segment_sender_split(
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
+        let result = match result_out(result) {
+            Ok(result) => result,
+            Err(code) => {
+                clear_refusal(refusal);
+                return code;
+            }
+        };
         let Some(emit) = emit else {
             clear_refusal(refusal);
-            if !result.is_null() {
-                *result = wz_ext_segment_result_t::default();
+            if let Some(result) = &result {
+                result.put(&wz_ext_segment_result_t::default());
             }
             return Z_ERR_NULL;
         };
@@ -420,7 +484,15 @@ pub unsafe extern "C" fn wz_ext_segment_sender_split(
                 code => Err(code),
             }
         };
-        split_reporting(this_, message, len, chunk_bytes, result, refusal, hand)
+        split_reporting(
+            this_,
+            message,
+            len,
+            chunk_bytes,
+            result.as_ref(),
+            refusal,
+            hand,
+        )
     })
 }
 
@@ -534,4 +606,51 @@ pub unsafe extern "C" fn wz_ext_internal_segment_sender_check(
     this_: *const wz_ext_owned_segment_sender_t,
 ) -> bool {
     guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both doors refuse, untouched, a result a byte short of its struct, before the sender is
+    /// read. Turned red by a write before the size is read.
+    #[test]
+    fn a_result_short_of_its_struct_is_refused_untouched() {
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_segment_result_t, _>(
+            |result| {
+                // SAFETY: `result` is a live struct of this build's size; nothing else is named.
+                unsafe {
+                    wz_ext_segment_sender_put(
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        0,
+                        1,
+                        core::ptr::null(),
+                        result,
+                        core::ptr::null_mut(),
+                    )
+                }
+            },
+            Z_EINVAL,
+        );
+        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_segment_result_t, _>(
+            |result| {
+                // SAFETY: as above.
+                unsafe {
+                    wz_ext_segment_sender_split(
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        0,
+                        1,
+                        None,
+                        core::ptr::null_mut(),
+                        result,
+                        core::ptr::null_mut(),
+                    )
+                }
+            },
+            Z_EINVAL,
+        );
+    }
 }

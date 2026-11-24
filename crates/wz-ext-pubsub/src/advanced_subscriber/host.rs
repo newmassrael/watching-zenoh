@@ -39,7 +39,7 @@
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{
     LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId,
     WireKey,
@@ -155,8 +155,9 @@ impl<E: SessionEngine + ?Sized> Shared<E> {
 struct GetEnd<E: SessionEngine + ?Sized> {
     shared: Arc<Shared<E>>,
     finish: Box<dyn Fn(&mut State) + Send + Sync>,
-    /// Held to the end of the get, so a teardown waits for it.
-    _registration: Registration,
+    /// The get's legs as one thing to cancel, and its registration on the teardown's token: held
+    /// to the end of the get, after `finish` has run, so a teardown waits for it.
+    fan: CancellableFan,
 }
 
 impl<E: SessionEngine + ?Sized> Drop for GetEnd<E> {
@@ -718,16 +719,19 @@ fn issue_get<E: SessionEngine + ?Sized>(
     let Some(engine) = shared.engine.upgrade() else {
         return;
     };
-    // Registered before the first leg is issued, as upstream orders it, so a teardown that
-    // starts now stops the issuing. `None` is a teardown already under way.
-    let Some((fan, registration)) = register_fan(&shared.token) else {
-        return;
-    };
     let end = Arc::new(GetEnd {
         shared: Arc::clone(shared),
         finish: Box::new(finish),
-        _registration: registration,
+        fan: CancellableFan::new(),
     });
+    // Registered before the first leg is issued, as upstream orders it, so a teardown that
+    // starts now stops the issuing. A refusal is a teardown already under way, which marks the
+    // subscriber closing first, so the end dropped here runs no `finish`.
+    // SAFETY: the fan lies in the end's allocation, which does not move, and no engine has it yet.
+    let token = TokenRef::shared(Arc::clone(&shared.token));
+    if !unsafe { end.fan.register(token) } {
+        return;
+    }
     let mut leg = || -> ReplyCallback {
         let end = Arc::clone(&end);
         ReplyCallback::shared(move |reply: &dyn ReplyView| {
@@ -749,7 +753,13 @@ fn issue_get<E: SessionEngine + ?Sized>(
             }
         })
     };
-    let _ = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, Some(&fan), &mut leg);
+    let _ = engine.get_on_wire(
+        keyexpr,
+        &WireKey::literal(),
+        &opts,
+        Some(&end.fan),
+        &mut leg,
+    );
     // The reference held while issuing goes last: a get with no leg ends here, and one whose legs
     // all ended during the call ends here too, after the call returned.
     drop(end);

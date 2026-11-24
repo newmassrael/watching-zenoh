@@ -483,6 +483,32 @@ impl FrameLendCounts {
     }
 }
 
+/// The frame a lent slot opens with (`SessionLinkActions::open_lent_batch`): its SN, its
+/// reliability and its `ext_qos`, and the budget the frame must fit.
+#[cfg(all(
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Clone, Copy)]
+struct LentFrameHead {
+    sn: u64,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+    mtu: usize,
+}
+
 /// What one lend came to (`SessionLinkActions::send_lent`): the frame left as
 /// the slot, the link lent no slot, or the path refused the slot it was lent
 /// for a reason of its own.
@@ -1607,6 +1633,20 @@ impl FrameTxConduits {
 /// budget (at most 65535: both advertisements are `u16`), 24-55 the tag; zero is empty.
 pub struct TxLimitsCache {
     writes: AtomicU32,
+    // Read and written by the sends alone, as `current_tag` says.
+    #[cfg(any(
+        test,
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     packed: AtomicU64,
 }
 
@@ -1614,6 +1654,19 @@ impl TxLimitsCache {
     pub(crate) fn new() -> Self {
         Self {
             writes: AtomicU32::new(0),
+            #[cfg(any(
+                test,
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            ))]
             packed: AtomicU64::new(0),
         }
     }
@@ -2686,7 +2739,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// machine releases on leaving `Established` stops the emits with it: a
     /// session in `Closing` sends nothing after its Close frame.
     #[cfg(feature = "transport-keepalive")]
-    pub keepalive_armed: R::Mutex<bool>,
+    pub keepalive_armed: core::sync::atomic::AtomicBool,
     /// Whether this link's lease monitor runs: set by the FSM's
     /// `start_lease_monitor` on `Established` entry and cleared by
     /// `stop_lease_monitor` on its exit (and by
@@ -2694,7 +2747,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// lease deadline ([`crate::drive::lease_wake_deadline`] is `None`) and
     /// [`crate::drive::check_lease_deadline`] raises nothing, so the machine
     /// is never told `lease.expired` outside the state that handles it.
-    pub lease_armed: R::Mutex<bool>,
+    pub lease_armed: core::sync::atomic::AtomicBool,
     /// The reason this link's Close frame carries: written by the FSM's
     /// `set_close_reason_*` on the transition into `Closing`, read by
     /// `send_close_frame_with_reason` on its entry. `None` until a
@@ -3157,6 +3210,27 @@ pub struct BlockFirstJob {
     qos: crate::sample::QosLevel,
     stats_class: crate::stats::NetworkStatsClass,
     body: alloc::vec::Vec<u8>,
+}
+
+/// The conduit a network message is sent on
+/// ([`SessionLinkActions::dispatch_network_message_at`]): its priority and whether its reliable
+/// channel. Two bytes, passed in a register.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Conduit {
+    priority: Priority,
+    reliable: bool,
 }
 
 /// R2952 — which pass through [`SessionLinkActions::dispatch_network_message_at`]
@@ -3651,6 +3725,36 @@ enum Dispatched {
     Chain,
 }
 
+/// What an interest asks of its peer ([`SessionLinkActions::send_interest_kinds`]): which kinds
+/// of declaration, whether those that stand now (`current`) and those to come (`future`), and
+/// whether as one aggregated reply (R2962).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterestAsk {
+    /// The kinds of declaration asked for.
+    pub kinds: InterestKinds,
+    /// The declarations that stand now.
+    pub current: bool,
+    /// The declarations to come.
+    pub future: bool,
+    /// Answered as one aggregated reply.
+    pub aggregate: bool,
+}
+
+/// How a publication is sent ([`SessionLinkActions::send_plain_put_qos`] and its twins): on
+/// the reliable or the best-effort channel of `priority`'s conduit, and flushed at once when
+/// `express`, past the batching window.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendAs {
+    /// The reliable channel, or the best-effort one.
+    pub reliable: bool,
+    /// Sent at once, past the batching window.
+    pub express: bool,
+    /// The conduit's priority.
+    pub priority: Priority,
+}
+
 /// What a send that does not wait for a slot did
 /// ([`SessionLinkActions::try_send_plain_put_qos`]).
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
@@ -3845,6 +3949,14 @@ impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
 use crate::tx_deadline::PushDeadline;
 use crate::tx_deadline::TxExpiry;
 
+/// A link's millisecond value held under its runtime's lock (a stamp of the link's clock, or the
+/// lease its peer advertised), read. Out of line: one copy of the read for every reader of these,
+/// where each read inlined was a copy of the lock.
+#[inline(never)]
+pub(crate) fn read_ms<R: SessionRuntime>(slot: &R::Mutex<Option<u64>>) -> Option<u64> {
+    R::with_mutex_mut(slot, |ms| *ms)
+}
+
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
     #[inline]
@@ -4016,8 +4128,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                qos.priority(),
-                /*reliable=*/ true,
+                Conduit {
+                    priority: qos.priority(),
+                    reliable: true,
+                },
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -4127,8 +4241,10 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Priority::Control,
-                /*reliable=*/ true,
+                Conduit {
+                    priority: Priority::Control,
+                    reliable: true,
+                },
                 crate::sample::QosLevel::DEFAULT,
                 crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id),
                 crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -4166,8 +4282,10 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 };
                 let _ = self.dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Priority::Control,
-                    /*reliable=*/ true,
+                    Conduit {
+                        priority: Priority::Control,
+                        reliable: true,
+                    },
                     crate::sample::QosLevel::DEFAULT,
                     crate::tx_buf::encoded_len(as_encoder(&reply)),
                     crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -4598,8 +4716,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: crate::send_gate::SendGate::new(true),
                 #[cfg(feature = "transport-keepalive")]
-                keepalive_armed: R::new_mutex(false),
-                lease_armed: R::new_mutex(false),
+                keepalive_armed: core::sync::atomic::AtomicBool::new(false),
+                lease_armed: core::sync::atomic::AtomicBool::new(false),
                 close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
                 transport_deletion_taken: R::new_mutex(false),
@@ -5499,21 +5617,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn open_lent_batch<P>(
         &self,
         batch: &mut BatchTx,
-        idx: usize,
-        sn: u64,
         priority: Priority,
-        reliable: bool,
-        ext_qos: Option<Priority>,
-        mtu: usize,
+        head: LentFrameHead,
         encode_body: &P,
     ) -> LentBatchOpen
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        let idx = TxConduits::<R>::conduit_index(priority);
+        let LentFrameHead {
+            sn,
+            reliable,
+            ext_qos,
+            mtu,
+        } = head;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
@@ -5594,6 +5714,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        use crate::tx_buf::TxBuf;
         let Some(open) = batch.stage.lent.take() else {
             batch.stage.count = 0;
             return false;
@@ -5613,69 +5734,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // SAFETY: `link` records the slot for this conduit, so it lent it, and every send
             // or abort of a conduit's lent slot clears the record first, under the conduit's
             // lock, which the caller holds (`batch`): the slot is still lent and unsettled.
-            let slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
-            self.append_to_lent_frame(batch, idx, link, slot, priority, reliable, mtu, encode_body)
-        })
-    }
-
-    /// ARCHITECTURE section 9.1 -- append one message to the lent frame `slot`,
-    /// which `link` lent and records for conduit `idx`: `true` when it is in, the
-    /// frame kept open in the conduit for the next one; `false` when the frame
-    /// leaves instead, its record cleared (the message would pass the batch budget
-    /// or the slot, its partial encode rolled back first, or it is of the other
-    /// reliability).
-    #[cfg(all(
-        feature = "transport-batching",
-        feature = "transport-tx-lend",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn append_to_lent_frame<P>(
-        &self,
-        batch: &mut BatchTx,
-        idx: usize,
-        link: &LinkState<R>,
-        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
-        priority: Priority,
-        reliable: bool,
-        mtu: usize,
-        encode_body: &P,
-    ) -> bool
-    where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
-    {
-        use crate::tx_buf::TxBuf;
-        let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
-        if open_channel == Reliability::from_reliable_bool(reliable) {
-            let wpos = slot.len();
-            let appended = {
-                let mut sink = crate::tx_buf::TxSink::new(&mut slot);
-                encode_body(&mut sink).is_ok()
-            } && slot.len() <= mtu;
-            if appended {
-                batch.stage.count = batch.stage.count.saturating_add(1);
-                batch.stage.lent = Some(slot.keep_open());
-                return true;
+            let mut slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
+            let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+            if open_channel == Reliability::from_reliable_bool(reliable) {
+                let wpos = slot.len();
+                let appended = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut slot);
+                    encode_body(&mut sink).is_ok()
+                } && slot.len() <= mtu;
+                if appended {
+                    batch.stage.count = batch.stage.count.saturating_add(1);
+                    batch.stage.lent = Some(slot.keep_open());
+                    return true;
+                }
+                // Overflow: roll the partial encode back before the frame
+                // leaves, exactly as the heap stage truncates its vector.
+                slot.truncate(wpos);
             }
-            // Overflow: roll the partial encode back before the frame
-            // leaves, exactly as the heap stage truncates its vector.
-            slot.truncate(wpos);
-        }
-        let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
-        batch.stage.count = 0;
-        self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
-        false
+            let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
+            batch.stage.count = 0;
+            self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
+            false
+        })
     }
 
     /// ARCHITECTURE section 9.1 -- close the frame open in a lent slot: send the
@@ -6002,7 +6082,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// it waits `wait_before_drop` (`.wait_timeout(self.manager.config.wait_before_drop)`).
     /// The core decides which link and how long; the link driver does the
     /// waiting, because the sans-IO core has no primitive that blocks.
-    #[allow(clippy::too_many_arguments)]
     #[cfg(all(
         feature = "alloc",
         not(feature = "tx-lend-only"),
@@ -6022,8 +6101,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn schedule_block_first<P>(
         &self,
         priority: Priority,
-        route: Priority,
-        reliable: bool,
+        route: Conduit,
         qos: crate::sample::QosLevel,
         worst_case_payload: usize,
         stats_class: crate::stats::NetworkStatsClass,
@@ -6032,6 +6110,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        let Conduit {
+            priority: route,
+            reliable,
+        } = route;
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
         let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
@@ -6117,8 +6199,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session's own machinery.
         let _ = self.dispatch_network_message_at(
             DispatchStage::Scheduled,
-            priority,
-            reliable,
+            Conduit { priority, reliable },
             qos,
             body.len(),
             stats_class,
@@ -8900,16 +8981,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the initiator the InitAck's — the both-sides shape
     /// [`Self::negotiate_patch_against_peer`] has.
     pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
-        self.admit_peer_region_in(extensions)
+        self.admit_read_peer_region(crate::extregion::peer_region(extensions))
     }
 
-    /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRead`).
-    pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
+    /// [`Self::admit_peer_region`] over the region as a walk of the chain read it
+    /// ([`crate::extregion::peer_patch_and_region_in`]), for the handshake that reads the
+    /// patch level off the same walk.
+    pub fn admit_read_peer_region(
         &self,
-        extensions: impl IntoIterator<Item = E>,
+        region: Result<Option<crate::extregion::RegionName>, crate::extregion::RegionNameError>,
     ) -> bool {
-        match crate::extregion::peer_region_in(extensions) {
+        match region {
             Ok(region) => {
                 R::with_mutex_mut(&self.peer_region, |s| *s = region);
                 true
@@ -10451,7 +10533,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 if let Some(cookie) = init.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                        crate::session_init_params::store_session_bytes(slot, cookie);
                     });
                 }
                 // R311kb — capture the InitAck's sizing caps too: the
@@ -10520,7 +10602,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
                 R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                    *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                    crate::session_init_params::store_session_bytes(slot, cookie);
                 });
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
                 // here, because the admission predicate needs it. The RX SN
@@ -10768,12 +10850,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Stop asking for keepalives for this session: the worker the machine starts on `Established`
-    /// and stops when it leaves it, stopped from outside, at the cost of one lock. The first step
+    /// and stops when it leaves it, stopped from outside, at the cost of one store. The first step
     /// of [`Self::close_for_capacity`], on its own so that a node closing many sessions can take
     /// them all off its keepalive service before it spends the time the closes take.
     pub fn stop_keepalives(&self) {
         #[cfg(feature = "transport-keepalive")]
-        R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
+        self.link
+            .keepalive_armed
+            .store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Close this session because the node that holds it can no longer serve it: it is one of
@@ -11149,13 +11233,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn dispatch_network_message_at<P>(
         &self,
         stage: DispatchStage,
-        priority: Priority,
-        reliable: bool,
+        conduit: Conduit,
         qos: crate::sample::QosLevel,
         worst_case_payload: usize,
         stats_class: crate::stats::NetworkStatsClass,
@@ -11168,8 +11250,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if stage == DispatchStage::Fresh {
             self.dispatch_network_message_in::<false, P>(
                 stage,
-                priority,
-                reliable,
+                conduit,
                 qos,
                 worst_case_payload,
                 stats_class,
@@ -11178,8 +11259,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             self.dispatch_network_message_in::<true, P>(
                 stage,
-                priority,
-                reliable,
+                conduit,
                 qos,
                 worst_case_payload,
                 stats_class,
@@ -11235,7 +11315,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     // The encoder is handed over by reference through [`as_encoder`], as a trait object: a
     // closure of its own for each kind of message sent made a copy of this body (some 7 KB on a
@@ -11245,8 +11324,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_network_message_in<const STAGED: bool, P>(
         &self,
         stage: DispatchStage,
-        priority: Priority,
-        reliable: bool,
+        conduit: Conduit,
         // R2923 — the message's congestion control, off its own ext_qos:
         // `Drop` may be dropped when its conduit's link is congested, `Block`
         // waits and closes the session if the link never frees.
@@ -11262,6 +11340,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        let Conduit { priority, reliable } = conduit;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
@@ -11458,8 +11537,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
                 message_priority,
-                priority,
-                reliable,
+                Conduit { priority, reliable },
                 qos,
                 worst_case_payload,
                 _stats_class,
@@ -11713,12 +11791,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         #[cfg(feature = "transport-tx-lend")]
                         let heap_stage = match self.open_lent_batch(
                             batch,
-                            idx,
-                            sn,
                             priority,
-                            reliable,
-                            ext_qos,
-                            mtu,
+                            LentFrameHead {
+                                sn,
+                                reliable,
+                                ext_qos,
+                                mtu,
+                            },
                             &encode_body,
                         ) {
                             LentBatchOpen::Opened => return Ok(UnicastPush::Pushed),
@@ -12141,12 +12220,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(
                 match self.open_lent_batch(
                     batch,
-                    TxConduits::<R>::conduit_index(priority),
-                    emit.sn,
                     priority,
-                    emit.reliable,
-                    emit.ext_qos,
-                    emit.mtu,
+                    LentFrameHead {
+                        sn: emit.sn,
+                        reliable: emit.reliable,
+                        ext_qos: emit.ext_qos,
+                        mtu: emit.mtu,
+                    },
                     &encode_body,
                 ) {
                     LentBatchOpen::Opened => FrameLend::Sent,
@@ -12472,7 +12552,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let mut emitted = 0usize;
         let mut deadline = deadline;
-        while plan.remaining_fragments() > 0 {
+        // A chain abandoned once some of it is on the wire ends in one place: the stop fragment
+        // at the SN the abandoned fragment would have had, reserved first unless the fragment
+        // reserved it already, and the answer the abandon gives.
+        let (stop_sn, reserve_stop, abandoned) = loop {
+            if plan.remaining_fragments() == 0 {
+                return Ok(UnicastPush::Pushed);
+            }
             // Read the SN BEFORE drawing, so it names the fragment
             // this iteration is about to send — which is also the SN
             // the stop fragment takes if the draw fails, keeping the
@@ -12496,18 +12582,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
-                    self.outbound_frame_sn.reserve_next(priority, reliable);
                     // (A stop marker the link lends no slot for is lost, and the
                     // peer's staged chain with it: there is nothing more to send
                     // it on a profile that has no heap frame to fall back to.)
-                    let _ = self.send_fragment(
-                        batch,
-                        &crate::frame_encode::FragmentSpan::stop(this_sn),
-                        body,
-                        reliable,
-                        ext_qos,
-                    );
-                    return Ok(UnicastPush::Congested);
+                    break (this_sn, true, Ok(UnicastPush::Congested));
                 }
             }
             if !self.take_fragment_tx_credit() {
@@ -12529,23 +12607,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // is outside its pool for the same reason). It does
                 // spend an SN, which zenoh's receive-side `SeqNum::roll`
                 // requires of every accepted transport message.
-                self.outbound_frame_sn.reserve_next(priority, reliable);
-                let _ = self.send_fragment(
-                    batch,
-                    &crate::frame_encode::FragmentSpan::stop(this_sn),
-                    body,
-                    reliable,
-                    ext_qos,
-                );
-                return Err(SendWireError::FragmentTxBudgetExhausted);
+                break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
             }
-            let span = match plan.next_span() {
-                Some(span) => span,
-                // `remaining_fragments() > 0` and `next_span() == None`
-                // are the same predicate negated, so this arm is
-                // unreachable; breaking rather than panicking keeps the
-                // no_std profiles free of a formatter.
-                None => break,
+            // `remaining_fragments() > 0` and `next_span() == None` are the same predicate
+            // negated, so the `None` arm is unreachable; answering rather than panicking keeps
+            // the no_std profiles free of a formatter.
+            let Some(span) = plan.next_span() else {
+                return Ok(UnicastPush::Pushed);
             };
             if emitted > 0 {
                 self.outbound_frame_sn.reserve_next(priority, reliable);
@@ -12564,21 +12632,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // what it staged, and the message is refused, counted.
             #[cfg(feature = "tx-lend-only")]
             if let Err(refused) = self.send_fragment(batch, &span, body, reliable, ext_qos) {
-                if emitted > 0 {
-                    let _ = self.send_fragment(
-                        batch,
-                        &crate::frame_encode::FragmentSpan::stop(this_sn),
-                        body,
-                        reliable,
-                        ext_qos,
-                    );
+                if emitted == 0 {
+                    return Err(refused);
                 }
-                return Err(refused);
+                break (this_sn, false, Err(refused));
             }
             emitted = emitted.saturating_add(1);
             deadline.next_fragment();
+        };
+        if reserve_stop {
+            self.outbound_frame_sn.reserve_next(priority, reliable);
         }
-        Ok(UnicastPush::Pushed)
+        let _ = self.send_fragment(
+            batch,
+            &crate::frame_encode::FragmentSpan::stop(stop_sn),
+            body,
+            reliable,
+            ext_qos,
+        );
+        abandoned
     }
 
     /// Put ONE fragment of a chain on its conduit's link: written straight into
@@ -12934,8 +13006,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_push_class(&push);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            priority,
-            reliable,
+            Conduit { priority, reliable },
             // R2923 — every arm's congestion control comes off the message's
             // OWN ext_qos, as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
@@ -12963,8 +13034,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = crate::frame_encode::push_body(push);
         self.dispatch_network_message_at(
             stage,
-            priority,
-            reliable,
+            Conduit { priority, reliable },
             crate::declare_ext_qos::read_push_qos(push),
             // What THIS message can encode to, and not the codec's reserve hint for any message
             // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
@@ -13381,8 +13451,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
             DispatchStage::Probe,
-            priority,
-            reliable,
+            Conduit { priority, reliable },
             encoded.qos(),
             push.encoded_len(),
             class,
@@ -13966,8 +14035,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
-            Priority::Control,
-            reliable,
+            Conduit {
+                priority: Priority::Control,
+                reliable,
+            },
             crate::declare_ext_qos::read_declare_qos(declare),
             len,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
@@ -14004,8 +14075,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Priority::Control,
-            /*reliable=*/ true,
+            Conduit {
+                priority: Priority::Control,
+                reliable: true,
+            },
             crate::declare_ext_qos::QOS_DECLARE,
             what.encoded_len(),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -14057,8 +14130,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
-            Priority::Control,
-            reliable,
+            Conduit {
+                priority: Priority::Control,
+                reliable,
+            },
             crate::declare_ext_qos::read_oam_qos(oam),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
@@ -14106,8 +14181,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::request::RequestWire::measure(request).len();
         let ended = self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
+            Conduit {
+                priority: qos.priority(),
+                reliable,
+            },
             qos,
             len,
             class,
@@ -14166,8 +14243,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::response::ResponseWire::measure(response).len();
         let ended = self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
+            Conduit {
+                priority: qos.priority(),
+                reliable,
+            },
             qos,
             len,
             class,
@@ -14219,8 +14298,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = wz_codecs::response_final::ResponseFinalWire::measure(response_final).len();
         self.dispatch_network_message_at(
             stage,
-            qos.priority(),
-            reliable,
+            Conduit {
+                priority: qos.priority(),
+                reliable,
+            },
             qos,
             len,
             // A pure correlation marker — no key expression and no payload, so
@@ -14273,8 +14354,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
-            Priority::Control,
-            reliable,
+            Conduit {
+                priority: Priority::Control,
+                reliable,
+            },
             crate::declare_ext_qos::read_interest_qos(interest),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -14300,8 +14383,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Priority::Control,
-            /*reliable=*/ true,
+            Conduit {
+                priority: Priority::Control,
+                reliable: true,
+            },
             qos,
             crate::tx_buf::encoded_len(as_encoder(&encode_body)),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -14524,17 +14609,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
     /// every session that has none.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     fn send_plain_put_at(
         &self,
         stage: DispatchStage,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Dispatched, SendWireError>> {
+        let SendAs {
+            reliable,
+            express,
+            priority,
+        } = send;
         if self.rewrites_originated_keys() {
             return None;
         }
@@ -14560,8 +14647,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
         let sent = self.dispatch_network_message_at(
             stage,
-            priority,
-            reliable,
+            Conduit { priority, reliable },
             qos,
             size,
             class,
@@ -14585,26 +14671,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The caller's own send of a plain `Put` (`send_plain_put_at`, above, says what it writes):
     /// the congestion control waits for room as the session's queue profile says.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(
-            DispatchStage::Fresh,
-            key,
-            value,
-            qos,
-            reliable,
-            express,
-            priority,
-        )
-        .map(|sent| sent.map(|_| ()))
+        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+            .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
@@ -14612,37 +14687,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is free, with nothing counted as dropped and nothing closed. A want of room the link's own
     /// stack answers is waited for as the caller's own send waits.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn try_send_plain_put_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_plain_put_at(
-            DispatchStage::Probe,
-            key,
-            value,
-            qos,
-            reliable,
-            express,
-            priority,
-        );
+        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send);
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
         let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
-                DispatchStage::Fresh,
-                key,
-                value,
-                qos,
-                reliable,
-                express,
-                priority,
-            ),
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
+                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+            }
             other => other,
         };
         probed.map(|sent| sent.map(Probed::of))
@@ -14663,7 +14721,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn send_publication_at(
         &self,
         stage: DispatchStage,
@@ -14671,17 +14728,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
-            let _ = (stage, key, kind, value, meta, reliable, express, priority);
+            let _ = (stage, key, kind, value, meta, send);
             None
         }
         #[cfg(not(feature = "transport-stats"))]
         {
+            let SendAs {
+                reliable,
+                express,
+                priority,
+            } = send;
             if self.rewrites_originated_keys() {
                 return None;
             }
@@ -14700,8 +14760,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let size = crate::tx_buf::encoded_len(encode);
             let sent = self.dispatch_network_message_at(
                 stage,
-                priority,
-                reliable,
+                Conduit { priority, reliable },
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -14728,28 +14787,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_publication_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_publication_at(
-            DispatchStage::Fresh,
-            key,
-            kind,
-            value,
-            meta,
-            reliable,
-            express,
-            priority,
-        )
-        .map(|sent| sent.map(|_| ()))
+        self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
+            .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_publication_qos`] that waits for nothing, as
@@ -14759,39 +14806,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc",
         feature = "transport-tx-lend"
     ))]
-    #[allow(clippy::too_many_arguments)]
     pub fn try_send_publication_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
-        reliable: bool,
-        express: bool,
-        priority: Priority,
+        send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_publication_at(
-            DispatchStage::Probe,
-            key,
-            kind,
-            value,
-            meta,
-            reliable,
-            express,
-            priority,
-        );
+        let probed = self.send_publication_at(DispatchStage::Probe, key, kind, value, meta, send);
         // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
         let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
-                DispatchStage::Fresh,
-                key,
-                kind,
-                value,
-                meta,
-                reliable,
-                express,
-                priority,
-            ),
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
+                self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
+            }
             other => other,
         };
         probed.map(|sent| sent.map(Probed::of))
@@ -14833,17 +14861,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let class = crate::stats::NetworkStatsClass::unread();
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                priority,
-                reliable,
+                Conduit { priority, reliable },
                 // A Put built here carries no extension, so no `ext_qos`: the
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
                 crate::lent_push::literal_put_len(keyexpr_suffix, value),
                 class,
                 as_encoder(
-                    &// The borrowed composition the multicast TX of a build with no
-                // allocator encodes too (`multicast_tx::MulticastTxPut`).
-                |sink| crate::lent_push::literal_put(keyexpr_suffix, value)?.encode(sink),
+                    // The borrowed composition the multicast TX of a build with no
+                    // allocator encodes too (`multicast_tx::MulticastTxPut`).
+                    &|sink| crate::lent_push::literal_put(keyexpr_suffix, value)?.encode(sink),
                 ),
             )
             .map(|_| ())
@@ -15054,8 +15081,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Priority::DEFAULT,
-                reliable,
+                Conduit {
+                    priority: Priority::DEFAULT,
+                    reliable,
+                },
                 crate::sample::QosLevel::DEFAULT,
                 crate::lent_push::literal_del_len(keyexpr_suffix),
                 crate::stats::NetworkStatsClass::unread(),
@@ -16167,7 +16196,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// arrival (unicast/transport.c:193/269) and every task reads the
     /// same `_common._lease`.
     pub fn adopted_lease_ms(&self) -> u64 {
-        let peer = R::with_mutex_mut(&self.peer_open_lease_ms, |g| *g);
+        let peer = read_ms::<R>(&self.peer_open_lease_ms);
         match peer {
             Some(advertised) => advertised.min(self.params.lease_ms),
             None => self.params.lease_ms,
@@ -16807,10 +16836,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.send_interest_kinds(
                 interest_id,
-                InterestKinds::SUBSCRIBERS,
-                current,
-                future,
-                /*aggregate=*/ false,
+                InterestAsk {
+                    kinds: InterestKinds::SUBSCRIBERS,
+                    current,
+                    future,
+                    aggregate: false,
+                },
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -16848,10 +16879,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.send_interest_kinds(
                 interest_id,
-                InterestKinds::QUERYABLES,
-                current,
-                future,
-                /*aggregate=*/ false,
+                InterestAsk {
+                    kinds: InterestKinds::QUERYABLES,
+                    current,
+                    future,
+                    aggregate: false,
+                },
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -16898,17 +16931,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::interest_build::build_interest_kinds_with_aggregate`]): a request to the peer, recorded
     /// in the reconnect cache so a replay re-asks identically.
     #[cfg(feature = "alloc")]
-    #[allow(clippy::too_many_arguments)]
     pub fn send_interest_kinds(
         &self,
         interest_id: u64,
-        kinds: InterestKinds,
-        current: bool,
-        future: bool,
-        aggregate: bool,
+        ask: InterestAsk,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
+        let InterestAsk {
+            kinds,
+            current,
+            future,
+            aggregate,
+        } = ask;
         // A lend-only session writes it from its parts. An interest with neither CURRENT nor
         // FUTURE is the Final form, which carries no keyexpr: the owned builder refuses it, and
         // so does this.
@@ -16930,10 +16965,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             )?;
             self.declare_matching_interest_recorded(
                 interest_id,
-                kinds,
-                current,
-                future,
-                aggregate,
+                ask,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
                 || self.dispatch_interest_lent(&interest, crate::sample::QosLevel::DEFAULT),
@@ -16953,10 +16985,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A4 — record for post-reconnect replay and send, as one step.
             self.declare_matching_interest_recorded(
                 interest_id,
-                kinds,
-                current,
-                future,
-                aggregate,
+                ask,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
                 || self.dispatch_interest(interest, /*reliable=*/ true),
@@ -16987,18 +17016,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// while every matching listener stays registered — the silent half-dead
     /// state.
     #[cfg(all(feature = "declare-interest", feature = "alloc"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn declare_matching_interest_recorded<E>(
         &self,
         interest_id: u64,
-        kinds: InterestKinds,
-        current: bool,
-        future: bool,
-        aggregate: bool,
+        ask: InterestAsk,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
         emit: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
+        let InterestAsk {
+            kinds,
+            current,
+            future,
+            aggregate,
+        } = ask;
         #[cfg(feature = "session-reconnect")]
         {
             self.record_and_send(
@@ -17148,8 +17179,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            qos.priority(),
-            /*reliable=*/ true,
+            Conduit {
+                priority: qos.priority(),
+                reliable: true,
+            },
             qos,
             size,
             crate::stats::NetworkStatsClass::unread(),
@@ -17248,8 +17281,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    qos.priority(),
-                    /*reliable=*/ true,
+                    Conduit {
+                        priority: qos.priority(),
+                        reliable: true,
+                    },
                     qos,
                     crate::lent_control::response_final_len(request_id, qos),
                     crate::stats::NetworkStatsClass::control(
@@ -17912,8 +17947,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // established: the replacement link's Established entry starts
             // its own, and none runs over the re-dial window.
             #[cfg(feature = "transport-keepalive")]
-            R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
-            R::with_mutex_mut(&self.link.lease_armed, |armed| *armed = false);
+            self.link
+                .keepalive_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
+            self.link
+                .lease_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
@@ -18117,7 +18156,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if progress == u64::MAX {
             return None;
         }
-        let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
+        let established = read_ms::<R>(&self.link.established_at)?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),
@@ -18620,6 +18659,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
+    // Out of line: each of the actions inlined it whole.
+    #[inline(never)]
     fn stage_close_reason(&self, reason: CloseReason) {
         self.inner
             .note_action(|t| t.set_close_reason_count = t.set_close_reason_count.saturating_add(1));
@@ -19240,14 +19281,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             .note_action(|t| t.start_lease_monitor = t.start_lease_monitor.saturating_add(1));
         // The monitor is the drive loop's lease deadline; arming it is what
         // gives this link one (`drive::lease_wake_deadline`).
-        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
+        self.link()
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
         self.inner
             .note_action(|t| t.stop_lease_monitor = t.stop_lease_monitor.saturating_add(1));
-        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
+        self.link()
+            .lease_armed
+            .store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[inline(never)]
@@ -19263,7 +19308,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             });
             // The worker is the drive loops' keepalive deadline and the AP
             // pacer; both emit only while this is set.
-            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
+            self.link()
+                .keepalive_armed
+                .store(true, core::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -19274,7 +19321,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             self.inner.note_action(|t| {
                 t.stop_keepalive_worker = t.stop_keepalive_worker.saturating_add(1)
             });
-            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
+            self.link()
+                .keepalive_armed
+                .store(false, core::sync::atomic::Ordering::SeqCst);
         }
     }
 

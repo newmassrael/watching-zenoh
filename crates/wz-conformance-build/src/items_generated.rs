@@ -129,6 +129,12 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_MAX_MATCHING_LISTENERS",
         16,
     ),
+    ("MAX_DECL_WATCHES", "WZ_LIMIT_MAX_DECL_WATCHES", 4),
+    (
+        "MAX_TRANSPORT_EVENTS_LISTENERS",
+        "WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS",
+        4,
+    ),
     (
         "MAX_DECLARED_KEYEXPRS",
         "WZ_LIMIT_MAX_DECLARED_KEYEXPRS",
@@ -201,6 +207,16 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "ADVANCED_CACHE_BYTES",
         "WZ_LIMIT_ADVANCED_CACHE_BYTES",
         1712,
+    ),
+    (
+        "MAX_ADVANCED_PUBLISHERS",
+        "WZ_LIMIT_MAX_ADVANCED_PUBLISHERS",
+        8,
+    ),
+    (
+        "MAX_ADVANCED_SUBSCRIBERS",
+        "WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS",
+        8,
     ),
     ("MAX_LOCATOR_LEN", "WZ_LIMIT_MAX_LOCATOR_LEN", 64),
     ("MAX_STATIC_CONNECT", "WZ_LIMIT_MAX_STATIC_CONNECT", 8),

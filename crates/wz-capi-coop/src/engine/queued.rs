@@ -91,15 +91,44 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
 /// back before the first was handed leave the listener where it stood, so the second takes the
 /// first's row away rather than a row of its own, and the table needs a row for each listener the
 /// build admits and no more.
+///
+/// One thread hands them out at a time ([`Self::begin`]): a listener's callback is taken out of its
+/// row for its call, and only the thread that took it puts it back, so two calls of one callback
+/// never overlap and a change is never handed to a row whose callback is out.
 pub(crate) struct MatchFlips {
     flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
+    /// Whether a thread is handing the changes out.
+    handing: bool,
 }
 
 impl MatchFlips {
     pub(crate) fn new() -> Self {
         Self {
             flips: BoundedVec::new_static(),
+            handing: false,
         }
+    }
+
+    /// Whether this caller hands the changes out: `false` when another thread is, which hands
+    /// out what this one queued too ([`Self::next_or_end`]).
+    pub(crate) fn begin(&mut self) -> bool {
+        !core::mem::replace(&mut self.handing, true)
+    }
+
+    /// The change found first, for the thread that began ([`Self::begin`]); when none is owed,
+    /// that thread's turn ends here, under the same lock a change is queued under, so no change
+    /// queued meanwhile is left with no thread to hand it.
+    pub(crate) fn next_or_end(&mut self) -> Option<(MatchId, bool)> {
+        let next = self.next();
+        if next.is_none() {
+            self.handing = false;
+        }
+        next
+    }
+
+    /// The turn that began is over before its changes are all handed (its thread unwound).
+    fn end(&mut self) {
+        self.handing = false;
     }
 
     /// The status of `listener` changed to `matching`. A change back takes the waiting row away;
@@ -136,6 +165,45 @@ impl MatchFlips {
     /// Whether no change is owed.
     pub(crate) fn is_empty(&self) -> bool {
         self.flips.is_empty()
+    }
+}
+
+impl Queued<MatchFlips> {
+    /// This thread's turn to hand the matching changes out, or `None` when none is owed or
+    /// another thread's turn is running, which hands out what this one queued too.
+    pub(super) fn begin_handing(&self) -> Option<HandingTurn<'_>> {
+        (self.is_pending() && self.lock().begin()).then_some(HandingTurn {
+            queue: self,
+            over: false,
+        })
+    }
+}
+
+/// One thread's turn of handing the matching changes out ([`Queued::begin_handing`]): it ends
+/// when no change is left, or, should the thread unwind out of a callback, when it is dropped, so
+/// the next thread that queues a change hands it.
+pub(super) struct HandingTurn<'a> {
+    queue: &'a Queued<MatchFlips>,
+    /// Whether the turn ended with no change left ([`MatchFlips::next_or_end`]).
+    over: bool,
+}
+
+impl HandingTurn<'_> {
+    /// The change to hand next, taken under the queue's lock alone and released before the
+    /// caller hands it; `None` ends the turn.
+    pub(super) fn next(&mut self) -> Option<(MatchId, bool)> {
+        let next = self.queue.lock().next_or_end();
+        self.over = next.is_none();
+        next
+    }
+}
+
+impl Drop for HandingTurn<'_> {
+    fn drop(&mut self) {
+        // A turn that ended itself is another thread's to begin again, and is not ended twice.
+        if !self.over {
+            self.queue.lock().end();
+        }
     }
 }
 

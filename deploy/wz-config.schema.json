@@ -710,6 +710,44 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "MAX_DECL_WATCHES": {
+              "description": "The declaration watches a session holds at once (what its peers declare and retract, told to the program), over every kind of entity watched.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_TRANSPORT_EVENTS_LISTENERS": {
+              "description": "The transport events listeners a session holds at once, each told when a transport to a peer opens or closes.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "MAX_DECLARED_KEYEXPRS": {
               "description": "The key expressions a session declares to its peers at once, each held by the entities that name it and by the program's declarations.",
               "oneOf": [
@@ -917,6 +955,44 @@
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MAX_ADVANCED_PUBLISHERS": {
+              "description": "The advanced publishers a session holds at once, each the C object over the publisher, its cache and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "MAX_ADVANCED_SUBSCRIBERS": {
+              "description": "The advanced subscribers a session holds at once, owned or background, each the C object over the subscriber, its history and recovery and its detection token, which are counted in their own tables.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_LOCATOR_LEN": {

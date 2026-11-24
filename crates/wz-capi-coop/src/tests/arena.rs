@@ -2151,6 +2151,91 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     );
 }
 
+/// The ABI's places of matching listeners are as many as the rows of the engine's table of them,
+/// counted by `MAX_MATCHING_LISTENERS`, in every build. Turned red by places counted by another
+/// limit, or none laid out for the kind.
+#[test]
+fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::MatchingListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().matching_listeners;
+    assert!(rows > 0, "the build's limits admit matching listeners");
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "matching listener places")
+        .map(|row| (row.basis, row.count));
+    assert_eq!(laid, Some(("MAX_MATCHING_LISTENERS", rows)));
+    assert_eq!(plan.entities().of_kind(EntityKind::MatchingListener), rows);
+}
+
+/// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
+/// with the watch, and none without it. Turned red by places counted by another limit, or laid
+/// out in a build that has no watch to hold.
+#[test]
+fn the_places_of_declaration_watches_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::DeclWatch, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().decl_watches;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "declaration watch places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )) {
+        assert!(rows > 0, "the build's limits admit declaration watches");
+        assert_eq!(laid, Some(("MAX_DECL_WATCHES", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without the watch holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(plan.entities().of_kind(EntityKind::DeclWatch), rows);
+}
+
+/// The ABI's places of transport events listeners are as many as
+/// `MAX_TRANSPORT_EVENTS_LISTENERS` admits in a build with `connectivity`, and none without it.
+/// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+#[test]
+fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::TransportEventsListener, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().transport_events_listeners;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "transport events listener places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(feature = "connectivity") {
+        assert!(
+            rows > 0,
+            "the build's limits admit transport events listeners"
+        );
+        assert_eq!(laid, Some(("MAX_TRANSPORT_EVENTS_LISTENERS", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without connectivity holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(
+        plan.entities().of_kind(EntityKind::TransportEventsListener),
+        rows
+    );
+}
+
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
 /// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
 /// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does

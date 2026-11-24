@@ -250,8 +250,8 @@ fn a_lent_queryable_declaration_carries_its_completeness_as_the_owned_one_does()
     );
     // Completeness is what a querier that demands it asks of the table: only the
     // declaration whose extension says complete answers it.
-    let complete = QuerierCriterion::new("q/complete", Locality::Any, true);
-    let partial = QuerierCriterion::new("q/partial", Locality::Any, true);
+    let complete = QuerierCriterion::new("q/complete", Locality::Any, true).expect("a short key");
+    let partial = QuerierCriterion::new("q/partial", Locality::Any, true).expect("a short key");
     assert_eq!(
         (
             owned.has_matching_for(&complete),

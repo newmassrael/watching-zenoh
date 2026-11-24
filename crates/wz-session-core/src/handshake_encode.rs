@@ -572,6 +572,9 @@ pub(crate) fn encode_open_head_into(
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
+// Out of line: its sizer (`ext_chain_len`) runs it over a counting buffer, and inlined there it
+// was a second copy of the writer beside the one the send calls.
+#[inline(never)]
 pub(crate) fn encode_held_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     entries: ChainRef<'_>,

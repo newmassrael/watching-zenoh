@@ -64,7 +64,7 @@ use wz_session_core::sorted_chunks::SortedChunks;
 
 use crate::e2e_profile::Profile;
 use crate::e2e_slots::{
-    read_unjudged, Outcome, Reception, SlotLedger, SlotSender, Unjudged, UNREADABLE_PAYLOAD,
+    read_unjudged, Outcome, Reception, SlotLedger, Unjudged, UNREADABLE_PAYLOAD,
 };
 use crate::e2e_words::E2eWords;
 use crate::payload::formats::{first_covering, first_segment_covering, SegmentKey};
@@ -144,7 +144,6 @@ pub(crate) struct Sample<'a> {
 ///
 /// The outcome is read by the field document, which only a build with the
 /// field layer has.
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct Judged {
     /// The words a selector's `e2e` terms read; `None` where whether a profile
@@ -153,27 +152,30 @@ pub(crate) struct Judged {
     /// The frame's outcome, which the field document writes its block from;
     /// `None` for a sample that carried no frame a profile rule covers (no such
     /// rule, a piece that completed nothing, a key that did not resolve).
+    #[cfg(feature = "dissect")]
     pub(crate) outcome: Option<Outcome>,
 }
 
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 impl Judged {
     /// A sample no profile rule judges.
     const NONE: Self = Self {
         words: Some(E2eWords::NONE),
+        #[cfg(feature = "dissect")]
         outcome: None,
     };
 
     /// A sample whose key did not resolve, so no rule can be said to cover it.
     const UNDECIDED: Self = Self {
         words: None,
+        #[cfg(feature = "dissect")]
         outcome: None,
     };
 
-    /// A frame the judge read, and its outcome.
+    /// A frame the judge read, and its outcome, which only the field document reads.
     fn frame(outcome: Outcome) -> Self {
         Self {
             words: Some(E2eWords::of(&outcome)),
+            #[cfg(feature = "dissect")]
             outcome: Some(outcome),
         }
     }
@@ -181,7 +183,9 @@ impl Judged {
     /// Bytes the outcome owns on the heap, allocated: the opened frame's box,
     /// its header fields and its slot. The names of a slot's message fields are
     /// the profile's and are not counted, so this is a lower bound.
+    #[cfg(feature = "dissect")]
     fn heap_bytes(&self) -> usize {
+        use crate::e2e_slots::SlotSender;
         use wz_session_core::heap_account::vec_bytes;
         let Some(Outcome::Opened(opened)) = &self.outcome else {
             return 0;
@@ -216,7 +220,6 @@ pub struct E2eJudgements {
 pub type E2eTable = Arc<E2eJudgements>;
 
 // What a handle reports and trims is read by the field layer's builds only.
-#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
 impl E2eJudgements {
     /// What was judged of the record at place `record` of the row `produced` of
     /// the list at `list`, when the judge met it.
@@ -235,11 +238,13 @@ impl E2eJudgements {
     }
 
     /// How many samples have a judgement kept.
+    #[cfg(feature = "dissect")]
     pub fn len(&self) -> usize {
         self.kept.len()
     }
 
     /// Whether no sample has a judgement kept.
+    #[cfg(feature = "dissect")]
     pub fn is_empty(&self) -> bool {
         self.kept.is_empty()
     }
@@ -247,6 +252,7 @@ impl E2eJudgements {
     /// Bytes the judgements hold, allocated: the sorted chunks they are kept in
     /// and what each outcome owns. It follows the samples a profile rule covers
     /// in the rows the lists hold.
+    #[cfg(feature = "dissect")]
     pub fn memory(&self) -> usize {
         self.kept.allocated_bytes() + self.kept.values().map(Judged::heap_bytes).sum::<usize>()
     }
@@ -259,6 +265,7 @@ impl E2eJudgements {
 
     /// Let go of the judgements of the rows of the list at `list` older than
     /// `first_held`, which no reader can ask for again.
+    #[cfg(feature = "dissect")]
     fn forget_before(&mut self, list: usize, first_held: u64) {
         self.kept
             .retain(|&(at, produced, _), _| at != list || produced >= first_held);

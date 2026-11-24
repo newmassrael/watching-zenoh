@@ -108,7 +108,7 @@ fn field<'m>(msg: &'m Msg, name: &str) -> &'m Fld {
 }
 
 fn put(wire: &Wire<'_>) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     wire.put(&mut out);
     out
 }
@@ -169,7 +169,7 @@ fn each_scalar_takes_its_wire_form() {
 
 #[test]
 fn a_field_without_presence_is_left_out_at_its_default_and_negative_zero_is_not() {
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_singular(&mut out, 1, false, &Wire::Varint(0));
     put_singular(&mut out, 2, false, &Wire::delimited(Vec::<u8>::new()));
     put_singular(&mut out, 4, false, &Wire::Fixed64(0));
@@ -182,18 +182,18 @@ fn a_field_without_presence_is_left_out_at_its_default_and_negative_zero_is_not(
 #[test]
 fn a_repeated_field_is_one_run_when_packed_and_a_tag_each_when_not() {
     let numbers = [Wire::Varint(1), Wire::Varint(300)];
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_repeated(&mut out, 4, true, &numbers);
     assert_eq!(out, [0x22, 0x03, 0x01, 0xAC, 0x02]);
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_repeated(&mut out, 4, false, &numbers);
     assert_eq!(out, [0x20, 0x01, 0x20, 0xAC, 0x02]);
     let words = [Wire::delimited(&b"a"[..]), Wire::delimited(&b""[..])];
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_repeated(&mut out, 7, false, &words);
     assert_eq!(out, [0x3A, 0x01, b'a', 0x3A, 0x00]);
     // No element writes nothing, packed or not.
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_repeated(&mut out, 4, true, &[]);
     put_repeated(&mut out, 4, false, &[]);
     assert!(out.is_empty(), "{out:02X?}");
@@ -203,11 +203,11 @@ fn a_repeated_field_is_one_run_when_packed_and_a_tag_each_when_not() {
 fn a_map_entry_writes_its_key_and_value_even_at_their_defaults() {
     let entry = map_entry(&Wire::delimited(&b""[..]), &Wire::Varint(0));
     assert_eq!(entry, [0x0A, 0x00, 0x10, 0x00]);
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_field(&mut out, 11, &Wire::delimited(entry));
     assert_eq!(out, [0x5A, 0x04, 0x0A, 0x00, 0x10, 0x00]);
     // A field number whose tag takes two bytes.
-    let mut out = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     put_field(&mut out, 16, &Wire::Varint(1));
     assert_eq!(out, [0x80, 0x01, 0x01]);
 }
