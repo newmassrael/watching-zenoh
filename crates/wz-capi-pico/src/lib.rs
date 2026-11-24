@@ -615,8 +615,6 @@ pub mod message_payload;
 // The doors through which a program reserves the process pools itself and reads them: wz doors
 // (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "object-pool")]
-// Totality debt TD-188 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod object_pool;
 // Where an object a program holds outside a session is placed and let go: a slot of the process
 // pools where the build has them, the heap's otherwise.

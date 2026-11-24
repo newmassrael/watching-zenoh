@@ -133,6 +133,9 @@ pub struct wz_ext_object_pool_counts_t {
 /// when it took its size, so a `struct_size` under it is no struct of this door.
 const COUNTS_BASE_BYTES: usize = offset_of!(wz_ext_object_pool_counts_t, gets);
 
+/// The bytes of one count of the struct: a word of the host.
+const WORD_BYTES: usize = size_of::<usize>();
+
 impl Default for wz_ext_object_pool_counts_t {
     /// No count stated, in a struct of this build's size.
     fn default() -> Self {
@@ -275,14 +278,15 @@ unsafe fn stated(
     if declared < COUNTS_BASE_BYTES {
         return Err(Z_EINVAL);
     }
-    // A count the struct holds only in part is not read: the words, not the bytes, that fit.
-    let words = declared.min(size_of::<wz_ext_object_pool_counts_t>()) / size_of::<usize>();
+    // A count the struct holds only in part is not read: the bytes of the whole words that fit, a
+    // word's bytes being a power of two.
+    let bytes = declared.min(size_of::<wz_ext_object_pool_counts_t>()) & !(WORD_BYTES - 1);
     let mut read = wz_ext_object_pool_counts_t::default();
     // Copied as bytes, which need no alignment of the program's struct.
     ptr::copy_nonoverlapping(
         counts.cast::<u8>(),
         ptr::addr_of_mut!(read).cast::<u8>(),
-        words * size_of::<usize>(),
+        bytes,
     );
     Ok(read)
 }
