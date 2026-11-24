@@ -49,6 +49,10 @@ impl RowCallbacks for Latched {
     type LivelinessSubscriber = CClosure<u32>;
     type Matching = CClosure<u32>;
     type Reply = CClosure<u32>;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 /// The tables of the lent policy, whose rows lie in the arena, with latched callbacks.
@@ -76,6 +80,10 @@ impl RowCallbacks for Calls {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 type Tables = SessionTables<Calls>;
@@ -976,6 +984,130 @@ fn a_refused_table_leaves_the_tables_after_it_unlent() {
     assert_eq!(whole.high_water(), bytes, "CONTROL: every table is lent");
 }
 
+/// The rows of a session that keeps no queryable.
+struct NoQueryables;
+
+impl RowCallbacks for NoQueryables {
+    type Subscriber = u32;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+    type QueryablePresence = Absent;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
+}
+
+/// Tables that keep no queryable lend no table of them, find none and refuse one, handing its
+/// callback back. The CONTROL is the same rows on tables that keep queryables, which lend the
+/// queryables' table and take the declaration.
+#[test]
+fn tables_that_keep_no_queryable_lend_none_and_refuse_one() {
+    let rows = small_rows();
+    let kept = SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap();
+    let absent = SessionTables::<NoQueryables, Lent>::arena_bytes(&rows).unwrap();
+    assert_eq!(
+        kept - absent,
+        <Queryables<Calls, Lent>>::arena_bytes(rows.queryables).unwrap(),
+        "the queryables' table is all the difference"
+    );
+    let mut lent = arena(absent);
+    let mut tables =
+        SessionTables::<NoQueryables, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(lent.high_water(), absent);
+    assert!(tables.kept_queryables().is_none());
+    let refused = tables
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 7)
+    );
+    assert!(!tables.local_declares(
+        Plane::Queryables {
+            complete_required: false
+        },
+        "q"
+    ));
+    let mut whole = arena(kept);
+    let mut control = SessionTables::<Calls, Lent>::lent(&mut whole, keys(256), &rows).unwrap();
+    assert!(
+        control
+            .declare_queryable("q", Locality::Any, false, KeyForm::default(), 7)
+            .is_ok(),
+        "CONTROL: tables that keep queryables take one"
+    );
+}
+
+/// The rows of a session that keeps none of the kinds a build may leave out.
+struct NoneKept;
+
+impl RowCallbacks for NoneKept {
+    type Subscriber = u32;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+    type QueryablePresence = Absent;
+    type LivelinessPresence = Absent;
+    type FilterPresence = Absent;
+    type GetPresence = Absent;
+}
+
+/// Tables that keep none of the kinds a build may leave out lend the key expressions, the
+/// subscribers and the reply hold alone, and refuse a token, a liveliness subscriber, a write
+/// filter and a get, finding none of them. The CONTROL is the same rows on tables that keep every
+/// kind, which take each declaration.
+#[test]
+fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
+    let rows = small_rows();
+    let none = SessionTables::<NoneKept, Lent>::arena_bytes(&rows).unwrap();
+    let kept_alone = <Keyexprs<Lent>>::arena_bytes(rows.keyexprs).unwrap()
+        + <Subscribers<Calls, Lent>>::arena_bytes(rows.subscribers).unwrap()
+        + held_arena_bytes(rows.held_replies).unwrap();
+    assert_eq!(none, kept_alone, "the optional kinds take no byte");
+    let mut lent = arena(none);
+    let mut tables = SessionTables::<NoneKept, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(lent.high_water(), none);
+    assert_eq!(
+        tables.declare_token("t", KeyForm::default()),
+        Err(RegisterError::TableFull)
+    );
+    let refused = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), 3)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 3)
+    );
+    assert_eq!(
+        tables
+            .declare_write_filter(Plane::Subscribers, "w", false)
+            .unwrap_err(),
+        RegisterError::TableFull
+    );
+    let refused = tables
+        .begin_get(ReplyAcceptance::Any, 1, 10, 5)
+        .unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 5)
+    );
+    assert_eq!(tables.tokens_for("t").count(), 0);
+    assert_eq!(tables.next_get_deadline(), None);
+    let mut whole = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let mut control = SessionTables::<Calls, Lent>::lent(&mut whole, keys(256), &rows).unwrap();
+    assert!(
+        control.declare_token("t", KeyForm::default()).is_ok(),
+        "CONTROL: tables that keep tokens take one"
+    );
+    assert!(control
+        .declare_write_filter(Plane::Subscribers, "w", false)
+        .is_ok());
+    assert!(control.begin_get(ReplyAcceptance::Any, 1, 10, 5).is_ok());
+}
+
 #[test]
 fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
     let mut tables = Tables::new();
@@ -1105,6 +1237,10 @@ impl RowCallbacks for Sinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 #[test]
@@ -1449,6 +1585,10 @@ impl RowCallbacks for FrameSinks {
     type LivelinessSubscriber = u32;
     type Matching = u32;
     type Reply = u32;
+    type QueryablePresence = Present;
+    type LivelinessPresence = Present;
+    type FilterPresence = Present;
+    type GetPresence = Present;
 }
 
 /// The end of a plain frame is told to every subscriber, whatever it hears.

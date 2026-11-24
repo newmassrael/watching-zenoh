@@ -902,6 +902,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
+    // Out of line: every hold of the session is let go through it.
+    #[inline(never)]
     fn drop(&mut self) {
         // Before the lock is let go of, which the guard's own drop does after this body.
         self.guard.0.keys.owner_lock_released();
@@ -1158,6 +1160,20 @@ impl RowCallbacks for CoopRows {
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
+    // A session that answers no query keeps no table of queryables.
+    #[cfg(feature = "queryable")]
+    type QueryablePresence = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "queryable"))]
+    type QueryablePresence = wz_session_core::session_tables::Absent;
+    // A session without liveliness keeps neither tokens nor liveliness subscribers.
+    #[cfg(feature = "liveliness")]
+    type LivelinessPresence = wz_session_core::session_tables::Present;
+    #[cfg(not(feature = "liveliness"))]
+    type LivelinessPresence = wz_session_core::session_tables::Absent;
+    // The engine keeps its write filters, their Interests and listeners, and its pending gets in
+    // its own core, so the tables keep none of them.
+    type FilterPresence = wz_session_core::session_tables::Absent;
+    type GetPresence = wz_session_core::session_tables::Absent;
 }
 
 /// The session's one table set, its rows lent from the session's arena: the application's tables
@@ -1199,6 +1215,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
+    // Out of line, as `CoopEngine::live` is: every operation lets the session go through it.
+    #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the session's lock is held: `core` is let go after this body.
         unsafe { self.lane.seal() };
