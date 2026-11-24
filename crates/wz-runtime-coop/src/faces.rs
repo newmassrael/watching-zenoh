@@ -471,6 +471,10 @@ pub enum IdleWait {
     /// Nothing to wait on: the next dial, or the next look at a port that gives no wait, for at
     /// most this many milliseconds.
     Sleep(u32),
+    /// Another read waits on the links with the session's buffer: wait for it to hand the buffer
+    /// back ([`LinkSupervisor::waited`]), for at most this many milliseconds. A caller that hears
+    /// of no hand-back sleeps for as long.
+    Behind(u32),
 }
 
 impl IdleWait {
@@ -487,7 +491,7 @@ impl IdleWait {
                 waits.wait(on, *ms);
                 on.clear();
             }
-            IdleWait::Sleep(ms) => sleep(*ms),
+            IdleWait::Sleep(ms) | IdleWait::Behind(ms) => sleep(*ms),
         }
     }
 }
@@ -851,8 +855,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// that the session's clock moved on), ends whatever wait the links make, a sleep to the next
     /// dial among them; it makes no wait where they make none. `now_us` reads the clock, which
     /// only a face with such a time asks, once. A read that finds another read waiting with the
-    /// session's buffer sleeps for `most` instead: the links are that read's, whose step reads
-    /// what arrives on them, and a second wait on them would need a buffer of the heap.
+    /// session's buffer waits for it to be handed back instead, for `most` at the longest
+    /// ([`IdleWait::Behind`]): the links are that read's, whose step reads what arrives on them,
+    /// and a second wait on them would need a buffer of the heap.
     pub fn idle_wait(
         &mut self,
         most: u32,
@@ -862,7 +867,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     ) -> IdleWait {
         let Some(mut waits) = self.waits.take() else {
             return if most > 0 {
-                IdleWait::Sleep(most)
+                IdleWait::Behind(most)
             } else {
                 IdleWait::None
             };
@@ -1755,12 +1760,12 @@ mod tests {
         }
     }
 
-    /// A read on another thread while one waits with the session's buffer sleeps its bound and
-    /// allocates nothing, and the buffer handed back serves the next read whole. CONTROL: the
-    /// first read waits on the link. Turned red by a second read that gathers its waits into a
-    /// buffer of its own, which after the open is one of the heap.
+    /// A read on another thread while one waits with the session's buffer waits for it to be
+    /// handed back and allocates nothing, and the buffer handed back serves the next read whole.
+    /// CONTROL: the first read waits on the link. Turned red by a second read that gathers its
+    /// waits into a buffer of its own, which after the open is one of the heap.
     #[test]
-    fn a_read_while_another_waits_with_the_buffer_sleeps_and_allocates_nothing() {
+    fn a_read_while_another_waits_with_the_buffer_waits_behind_and_allocates_nothing() {
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
         let link = LinkWait::input(WaitOn::Socket(3));
@@ -1772,7 +1777,10 @@ mod tests {
         );
         let (second, made) =
             crate::table_tests::allocations(|| faces.idle_wait(10, &mut || 0u64, [], None));
-        assert!(matches!(second, IdleWait::Sleep(10)), "the second sleeps");
+        assert!(
+            matches!(second, IdleWait::Behind(10)),
+            "the second waits for the buffer"
+        );
         assert_eq!(made, 0, "the second read makes no buffer");
         assert!(
             matches!(faces.idle_wait(0, &mut || 0u64, [], None), IdleWait::None),

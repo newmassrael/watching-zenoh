@@ -960,6 +960,8 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// work out under the session's lock, since that wait would be none. Written by the step, under
     /// the lock; a stale `true` costs one step that finds nothing, after which the read waits.
     input_held: AtomicBool,
+    /// Where a read waits for another read to hand back the session's buffer of waits.
+    hand_back: HandBack,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
@@ -1055,9 +1057,63 @@ impl Takes {
     fn wait(&self, wait: &IdleWait) {
         let counter = match wait {
             IdleWait::Input { .. } => &self.polls,
-            IdleWait::None | IdleWait::Sleep(_) => return,
+            IdleWait::None | IdleWait::Sleep(_) | IdleWait::Behind(_) => return,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Where a read that found another read waiting with the session's buffer of waits
+/// ([`IdleWait::Behind`]) waits for the buffer to be handed back: woken then, it steps and its
+/// next wait is on the links, so a read task behind a program's read does not sleep out its bound
+/// while what arrives after that read waits for it.
+struct HandBack {
+    /// The reads waiting here now: a hand-back with none takes no lock.
+    behind: core::sync::atomic::AtomicUsize,
+    /// How many times the buffer was handed back to a read waiting here, under the lock its wait
+    /// is made with, so that a hand-back before the wait begins ends it at once.
+    handed: Mutex<u64>,
+    back: os::Condvar,
+}
+
+impl HandBack {
+    fn new() -> Self {
+        Self {
+            behind: core::sync::atomic::AtomicUsize::new(0),
+            handed: Mutex::new(0),
+            back: os::Condvar::new(),
+        }
+    }
+
+    /// Count in a read that waits here, under the session's lock, which a hand-back is made
+    /// under too: the count of hand-backs it waits to see move.
+    fn enter(&self) -> u64 {
+        self.behind.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.handed)
+    }
+
+    /// Wait, with nothing of the session held, for a hand-back after `seen`, for at most `ms`
+    /// milliseconds. A wake that comes early ends it as well: the read steps, and looks again.
+    fn wait(&self, seen: u64, ms: u32) {
+        let handed = lock(&self.handed);
+        let handed = if *handed == seen {
+            self.back.wait_timeout_ms(handed, u64::from(ms)).0
+        } else {
+            handed
+        };
+        drop(handed);
+        self.behind.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The buffer was handed back, under the session's lock: wake every read waiting for it.
+    fn handed_back(&self) {
+        if self.behind.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let mut handed = lock(&self.handed);
+        *handed = handed.wrapping_add(1);
+        drop(handed);
+        self.back.notify_all();
     }
 }
 
@@ -3997,6 +4053,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(any(feature = "listen", feature = "group"))]
                 owed: AtomicBool::new(false),
                 input_held: AtomicBool::new(false),
+                hand_back: HandBack::new(),
                 #[cfg(any(feature = "listen", feature = "group"))]
                 handed_limits,
                 #[cfg(feature = "transport-stats")]
@@ -7806,6 +7863,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
         // under a stream of batches each read takes the session once, for its step.
+        // A read behind another's wait counts itself in under the session's lock, which the
+        // hand-back it waits for is made under too.
+        let mut seen = None;
         let mut wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
         } else {
@@ -7814,12 +7874,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             // before the session is.
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-                core.0.idle_wait()
+                let wait = core.0.idle_wait();
+                if matches!(wait, IdleWait::Behind(_)) {
+                    seen = Some(self.hand_back.enter());
+                }
+                wait
             })
         };
         #[cfg(test)]
         self.takes.wait(&wait);
-        wait.wait(self.rooms.waits(), sleep_ms);
+        match (&wait, seen) {
+            (IdleWait::Behind(ms), Some(seen)) => self.hand_back.wait(seen, *ms),
+            _ => wait.wait(self.rooms.waits(), sleep_ms),
+        }
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         // One take of the session for the step: its links, what publishes handed to it, and
@@ -7828,7 +7895,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // program that only reads its session sends it; let go of once the session is.
         let (stepped, jobs_due_ms) = match self.live() {
             Some(mut core) => {
+                let handed = matches!(wait, IdleWait::Input { .. });
                 core.0.transport.links.waited(wait);
+                if handed {
+                    self.hand_back.handed_back();
+                }
                 let stepped = self.step(&mut core.0);
                 self.input_held.store(
                     stepped.is_some() && core.0.transport.holds_input(),
@@ -8274,5 +8345,60 @@ mod member_key_tests {
         assert_eq!(member_key(u32::MAX, u32::MAX), u64::MAX);
         assert_eq!(member_places(u64::MAX), (u32::MAX, u32::MAX));
         assert_eq!(member_places(member_key(3, u32::MAX) + 1), (4, 0));
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod hand_back_tests {
+    use super::{lock, HandBack};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A read waiting for another read's buffer wakes when the buffer is handed back, well
+    /// before its bound, and is counted out after. Turned red by a hand-back that wakes no one,
+    /// which leaves a read task asleep for its whole bound behind a program's read.
+    #[test]
+    fn a_read_waiting_for_the_buffer_wakes_when_it_is_handed_back() {
+        let back = Arc::new(HandBack::new());
+        let seen = back.enter();
+        let handing = {
+            let back = back.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                back.handed_back();
+            })
+        };
+        let started = Instant::now();
+        back.wait(seen, 5_000);
+        let took = started.elapsed();
+        handing
+            .join()
+            .expect("the thread that hands the buffer back");
+        assert!(
+            took < Duration::from_millis(2_500),
+            "the read slept out its bound ({took:?})"
+        );
+        assert_eq!(back.behind.load(core::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A hand-back made after a read counted itself in and before its wait began ends that wait
+    /// at once. Turned red by a wait that looks for a notification alone, which this one missed.
+    #[test]
+    fn a_hand_back_before_the_wait_begins_ends_it_at_once() {
+        let back = HandBack::new();
+        let seen = back.enter();
+        back.handed_back();
+        let started = Instant::now();
+        back.wait(seen, 5_000);
+        assert!(started.elapsed() < Duration::from_millis(2_500));
+    }
+
+    /// A hand-back with no read waiting takes no lock and moves no count. Turned red by one
+    /// that counts a hand-back no read waits for.
+    #[test]
+    fn a_hand_back_with_no_read_waiting_counts_nothing() {
+        let back = HandBack::new();
+        back.handed_back();
+        assert_eq!(*lock(&back.handed), 0);
     }
 }
