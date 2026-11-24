@@ -282,6 +282,36 @@ fn a_cancellable_get_allocates_nothing_and_its_fan_ends_it() {
     assert_eq!(token.active(), 0);
 }
 
+/// The legs of the get that accepts any key, ended: a counter of its own, as the leg may end after
+/// its test returns.
+static ANY_KEY_ENDS: AtomicUsize = AtomicUsize::new(0);
+
+/// A get that accepts replies on any key, its parameters lent, is asked with no allocation: the
+/// reply-keyexpr-any flag is written after the parameters where the query is written, so neither
+/// is copied. The CONTROL is the query reaching the router.
+#[test]
+fn a_get_that_accepts_any_key_allocates_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let opts = remote_get().with_parameters_lent_anyke(b"_sn=7..", true);
+    let context = core::ptr::from_ref(&ANY_KEY_ENDS)
+        .cast_mut()
+        .cast::<core::ffi::c_void>();
+    let mut issued = Ok(0);
+    let allocations = super::redial_heap::counted(|| {
+        issued = engine.get_on_wire("demo/g/a", &WireKey::literal(), &opts, None, &mut || {
+            // SAFETY: the counter is a static, which outlives every leg.
+            unsafe { ReplyCallback::raw(ignore_reply, context, Some(count_end)) }
+        });
+    });
+    assert_eq!(issued, Ok(1));
+    assert_eq!(allocations, 0, "an any-key get is asked with no allocation");
+    until(&engine, "the query to reach the router", || {
+        router.seen(|s| s.queries) == 1
+    });
+}
+
 /// A get whose fan was cancelled before it is asked issues no leg: no callback is minted and no
 /// query sent. The CONTROL is a get asked after it with no fan, the one query the router sees.
 #[test]

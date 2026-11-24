@@ -512,6 +512,9 @@ impl Drop for OwnFinalHold<'_> {
 pub(super) struct OwnGet<'a> {
     keyexpr: &'a str,
     opts: &'a QueryOptionsOf<'a>,
+    /// The parameters as the get sends them (`QueryOptionsOf::sent_parameters`): the options' own
+    /// bytes, copied only for a get that appends the reply-keyexpr-any flag to stated ones.
+    parameters: Option<alloc::borrow::Cow<'a, [u8]>>,
     /// The value's encoding as the view hands it to a queryable of the session: the one the get
     /// states, else the default one when it carries a value. A view hands an encoding out as a
     /// hint, so a lent one is copied for the session's own queryables.
@@ -537,6 +540,7 @@ impl<'a> OwnGet<'a> {
         Self {
             keyexpr,
             opts,
+            parameters: opts.sent_parameters(),
             encoding: carries_value.then(|| {
                 stated
                     .map(|encoding| encoding.to_hint())
@@ -555,8 +559,7 @@ impl QueryView for OwnGet<'_> {
         self.keyexpr
     }
     fn parameters(&self) -> Option<&[u8]> {
-        self.opts
-            .parameters
+        self.parameters
             .as_deref()
             .filter(|parameters| !parameters.is_empty())
     }

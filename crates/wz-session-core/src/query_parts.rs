@@ -22,6 +22,10 @@ use crate::wire_key::WireKey;
 pub struct QueryParts<'a> {
     /// The selector parameters.
     pub parameters: &'a [u8],
+    /// Whether the reply-keyexpr-any flag is sent after the parameters
+    /// ([`crate::selector_params::anyke_suffix`]): set by whoever read that the parameters do not
+    /// carry it, so the flag is written where they are and nothing is copied.
+    pub anyke: bool,
     /// The consolidation the asker states, or none for the default.
     pub consolidation: Option<ConsolidationMode>,
     /// The target of the query, or none for the default.
@@ -46,6 +50,7 @@ impl<'a> QueryParts<'a> {
     /// A query that states nothing beyond its key: every slot at the value the wire leaves out.
     pub const PLAIN: Self = Self {
         parameters: &[],
+        anyke: false,
         consolidation: None,
         target: None,
         timeout_ms: 0,
@@ -64,6 +69,7 @@ impl<'a> QueryParts<'a> {
     pub fn of_metadata(meta: &'a crate::metadata::QueryMetadata) -> Self {
         Self {
             parameters: meta.parameters.as_deref().unwrap_or(&[]),
+            anyke: false,
             consolidation: meta.consolidation,
             target: meta.target,
             timeout_ms: meta.timeout_ms,
@@ -79,6 +85,21 @@ impl<'a> QueryParts<'a> {
         }
     }
 
+    /// The parameters as they are sent, in one piece: those stated, followed by the flag when
+    /// [`Self::anyke`] asks for it; none when that is nothing.
+    fn sent_parameters(&self) -> Option<alloc::vec::Vec<u8>> {
+        let suffix = if self.anyke {
+            crate::selector_params::anyke_suffix(self.parameters)
+        } else {
+            &[]
+        };
+        let mut sent =
+            alloc::vec::Vec::with_capacity(self.parameters.len().saturating_add(suffix.len()));
+        sent.extend_from_slice(self.parameters);
+        sent.extend_from_slice(suffix);
+        (!sent.is_empty()).then_some(sent)
+    }
+
     /// The same query as owned metadata: what the owned builder
     /// (`request_build::build_request_query_with_meta`) is handed.
     pub fn metadata(&self) -> crate::metadata::QueryMetadata {
@@ -86,7 +107,7 @@ impl<'a> QueryParts<'a> {
             target: self.target,
             consolidation: self.consolidation,
             attachment: (!self.attachment.is_empty()).then(|| self.attachment.to_vec()),
-            parameters: (!self.parameters.is_empty()).then(|| self.parameters.to_vec()),
+            parameters: self.sent_parameters(),
             source_info: self.source_info.cloned(),
             value: self.value.map(|(encoding, payload)| {
                 (
@@ -127,7 +148,14 @@ impl GetParts<'_> {
     pub fn owned_request(
         &self,
     ) -> Result<crate::wire::RequestOwned, sce_forge_runtime::codec::CodecError> {
-        if self.query.parameters.len() > crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN {
+        let suffix = if self.query.anyke {
+            crate::selector_params::anyke_suffix(self.query.parameters)
+        } else {
+            &[]
+        };
+        if self.query.parameters.len().saturating_add(suffix.len())
+            > crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN
+        {
             return Err(sce_forge_runtime::codec::CodecError::LengthOutOfRange);
         }
         crate::request_build::build_request_query_with_meta(
