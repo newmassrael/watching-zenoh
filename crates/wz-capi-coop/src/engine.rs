@@ -2996,13 +2996,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             endpoint,
         } = step;
         let id = life.id();
-        match effect {
-            FaceEffect::Stay => Ok(()),
+        // Every arm that does not end here names what follows and the reason the last endpoint
+        // gave, and one call carries them out.
+        let (then, last) = match effect {
+            FaceEffect::Stay => return Ok(()),
             // The face table decides whether the node is held already, and installs the link
             // itself.
             FaceEffect::BringUp => {
                 self.bring_up(at, now_us);
-                Ok(())
+                return Ok(());
             }
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router
@@ -3010,20 +3012,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // `return _zp_unicast_failed_result(ztu, executor);`).
             FaceEffect::Lose { then } => {
                 self.lose_face_link(at, id, now_us);
-                if then == Next::EndSession {
-                    return Err(OpenError::Unreachable(EndpointRefusal::new(
-                        "",
-                        Refusal::LinkLost,
-                    )));
-                }
-                self.follow(at, then, OpenError::NoEndpoint, redial_ms)
+                let last = if then == Next::EndSession {
+                    OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
+                } else {
+                    OpenError::NoEndpoint
+                };
+                (then, last)
             }
             // The link's task, told to stop, ends in the pass of the tasks before its link goes.
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
                 let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
-                self.follow(at, then, last, redial_ms)
+                (then, last)
             }
             // The dial under way was asked, never waited for: its link's handshake begins once
             // it is made. Refused, or not answered by its deadline, the dial role's face dials the
@@ -3039,9 +3040,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     ))),
                 };
                 match answered {
-                    Ok(()) => Ok(()),
-                    Err(OpenError::EntropyUnavailable) => Err(OpenError::EntropyUnavailable),
-                    Err(last) => self.follow(at, life.after_failure(next), last, redial_ms),
+                    Ok(()) => return Ok(()),
+                    Err(OpenError::EntropyUnavailable) => {
+                        return Err(OpenError::EntropyUnavailable)
+                    }
+                    Err(last) => (life.after_failure(next), last),
                 }
             }
             FaceEffect::DialFailed { then } => {
@@ -3053,19 +3056,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     self.transport.endpoint_text(endpoint.as_ref()),
                     why,
                 ));
-                self.follow(at, then, last, redial_ms)
+                (then, last)
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
             // the face that held the node is gone, and so is any link in the making to it. Read
             // from the face table each step and not told by the face that goes, so a link that
             // dies in its handshake frees the node as well.
-            FaceEffect::Dial { from } => self.follow(
-                at,
-                Next::DialFrom { from },
-                OpenError::NoEndpoint,
-                redial_ms,
-            ),
-        }
+            FaceEffect::Dial { from } => (Next::DialFrom { from }, OpenError::NoEndpoint),
+        };
+        self.follow(at, then, last, redial_ms)
     }
 
     /// What follows a link of the face at `at` that failed or was lost (`then`), `last` the
