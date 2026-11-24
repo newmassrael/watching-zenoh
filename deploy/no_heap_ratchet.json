@@ -28,6 +28,11 @@
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
     },
+    "group-receive": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-TBD"
+    },
     "idle": {
       "allocs_per_round": 0.06,
       "locked": false,

@@ -72,6 +72,8 @@ use wz_capi_pico::{
 #[path = "support/pipe_pair.rs"]
 mod pipe_pair;
 
+#[cfg(feature = "multicast-transport")]
+use pipe_pair::GroupPair;
 use pipe_pair::{
     close_window, count_panics, get, mark_calling_thread, open_window, payload, put, reply_closure,
     view, wait_for, Injecting, Pair, Seen, DATA_KEY, PANICS, WAIT_BOUND,
@@ -264,11 +266,12 @@ enum Round {
     ConfigClone,
     PublisherPut,
     Delete,
+    GroupReceive,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 20] = [
+    const ALL: [Round; 21] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -289,6 +292,7 @@ impl Round {
         Round::ConfigClone,
         Round::PublisherPut,
         Round::Delete,
+        Round::GroupReceive,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -302,6 +306,7 @@ impl Round {
             Round::QueryableDeclare => cfg!(feature = "queryable"),
             Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
+            Round::GroupReceive => cfg!(feature = "multicast-transport"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
@@ -329,7 +334,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 23] = [
+const FAMILIES: [(&str, Round, Part); 24] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -357,6 +362,9 @@ const FAMILIES: [(&str, Round, Part); 23] = [
     ("config-clone", Round::ConfigClone, Part::All),
     ("publisher-put", Round::PublisherPut, Part::Calling),
     ("delete", Round::Delete, Part::Calling),
+    // What a group member's receive takes: the datagram read where it lies and handed to the
+    // subscriber, on the receiving member's threads.
+    ("group-receive", Round::GroupReceive, Part::Others),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -634,6 +642,9 @@ struct Bench {
     e2e: E2e,
     #[cfg(feature = "replay-cache")]
     replay: Replay,
+    /// Two members of one group over the program's transport.
+    #[cfg(feature = "multicast-transport")]
+    group: GroupPair,
 }
 
 impl Bench {
@@ -705,6 +716,8 @@ impl Bench {
             e2e,
             #[cfg(feature = "replay-cache")]
             replay,
+            #[cfg(feature = "multicast-transport")]
+            group: GroupPair::open(),
         }
     }
 
@@ -726,6 +739,10 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
+            Round::GroupReceive => {
+                #[cfg(feature = "multicast-transport")]
+                self.group_put_and_hear();
+            }
             Round::KeyexprDeclare => self.keyexpr_declare(),
             Round::LivelinessToken => {
                 #[cfg(feature = "liveliness")]
@@ -986,6 +1003,24 @@ impl Bench {
         assert!(
             wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
             "a put did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Put on the group from its sending member and wait until the receiving member's subscriber
+    /// hears it: the round's control, so a round that heard nothing fails whatever it allocated.
+    #[cfg(feature = "multicast-transport")]
+    unsafe fn group_put_and_hear(&self) {
+        let counts = &self.group.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            put(self.group.sender(), &mut bytes),
+            Z_OK,
+            "a put on the group is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a put on the group was not heard within {WAIT_BOUND:?}"
         );
     }
 
