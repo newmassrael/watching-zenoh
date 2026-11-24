@@ -326,8 +326,6 @@ pub mod timestamp_visibility;
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,
 /// never cut short in silence) on the fixed one. Unconditional, like [`bounded`].
-// Totality debt TD-055 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod text_out;
 
 /// Fixed-memory step S9a — the id-keyed tables a PEER writes (its keyexpr
