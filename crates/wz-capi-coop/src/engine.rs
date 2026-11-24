@@ -994,6 +994,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
+    /// The run of read tasks, one past each stop: a read task steps the session while the run is
+    /// the one it was started in, so a stop needs no word made for it (`ReaderBody`).
+    reader_run: core::sync::atomic::AtomicUsize,
     /// The threads handing deliveries out for this engine now, and the callbacks each runs
     /// ([`Deliveries`]): a callback that steps its session again from one of them queues what it
     /// delivers for the outer delivery, and the session's own put or get tells a callback it can
@@ -1541,13 +1544,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
 
 /// The read task: a thread that steps the session until it is told to stop.
 struct ReadTask {
-    stop: Arc<AtomicBool>,
     thread: JoinHandle,
     id: ThreadId,
 }
 
-/// What the read task's thread runs, handed to whatever makes the thread.
-pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
+/// What the read task's thread runs, handed to whatever makes the thread: a hold of the engine,
+/// stepped until the engine's run of read tasks is no longer this one's (`reader_run`). A value
+/// of a type that can be named, so the start boxes nothing and makes no word for the stop.
+pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: Arc<CoopEngine<L, C>>,
+    run: usize,
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> {
+    /// Step the session until the task is told to stop or the session ends.
+    pub(crate) fn run(self) {
+        while self.engine.reader_run.load(Ordering::Acquire) == self.run
+            && self.engine.read(false).is_ok()
+        {}
+    }
+}
 
 /// A table of the session's own declarations: rows lent from the session's arena at its open, as
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
@@ -3948,6 +3964,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(any(feature = "query", feature = "ticker"))]
                 next_local: AtomicU64::new(1),
                 reader: Mutex::new(None),
+                reader_run: core::sync::atomic::AtomicUsize::new(0),
                 deliveries: Deliveries::new(),
                 arena_bytes,
                 handle_place,
@@ -5772,7 +5789,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// leave the C caller nothing to read on a build that aborts on one.
     pub(crate) fn start_reader(
         &self,
-        spawn: impl FnOnce(ReaderBody) -> Option<(JoinHandle, ThreadId)>,
+        spawn: impl FnOnce(ReaderBody<L, C>) -> Option<(JoinHandle, ThreadId)>,
     ) -> Result<(), ReadTaskStartRefused> {
         let mut reader = lock(&self.reader);
         if let Some(task) = reader.as_ref() {
@@ -5784,16 +5801,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(engine) = self.this.upgrade() else {
             return Ok(());
         };
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let body: ReaderBody =
-            Box::new(
-                move || {
-                    while !stopped.load(Ordering::Acquire) && engine.read(false).is_ok() {}
-                },
-            );
-        let (thread, id) = spawn(body).ok_or(ReadTaskStartRefused::NoThread)?;
-        *reader = Some(ReadTask { stop, thread, id });
+        // Read under the reader's lock, which every stop moves the run under too.
+        let run = self.reader_run.load(Ordering::Acquire);
+        let (thread, id) =
+            spawn(ReaderBody { engine, run }).ok_or(ReadTaskStartRefused::NoThread)?;
+        *reader = Some(ReadTask { thread, id });
         Ok(())
     }
 
@@ -5804,11 +5816,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             match reader.as_ref() {
                 None => return Ok(()),
                 Some(task) if task.id == os::current() => return Err(CalledFromReadTask),
-                Some(_) => reader.take(),
+                Some(_) => {
+                    // The task's run is over: it ends after the step it is in.
+                    self.reader_run.fetch_add(1, Ordering::AcqRel);
+                    reader.take()
+                }
             }
         };
         if let Some(task) = task {
-            task.stop.store(true, Ordering::Release);
             task.thread.join();
         }
         Ok(())
@@ -7664,7 +7679,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     }
 
     fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
-        self.start_reader(os::spawn)
+        self.start_reader(|body| os::spawn(move || body.run()))
     }
 
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
