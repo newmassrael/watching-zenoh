@@ -286,6 +286,7 @@ fn message_mut(held: &mut Held) -> &mut Fields {
 
 /// One step of a path: the field, the message that holds it, its index, and
 /// where the step ends in the path's text.
+#[derive(Clone, Copy)]
 struct Step<'s> {
     holder: &'s Msg,
     field: &'s Fld,
@@ -320,8 +321,82 @@ fn segment(part: &str) -> Option<(&str, Option<usize>)> {
     word.then_some((name, index))
 }
 
-/// The steps `path` takes from the message `root`.
-fn steps<'s>(schema: &'s SchemaSet, root: &'s Msg, path: &str) -> Result<Vec<Step<'s>>, Refusal> {
+/// The steps a path takes from a message, judged whole when it is made ([`route`]) and walked
+/// again from its text as often as a call needs, so that no list of them is kept.
+#[derive(Clone, Copy)]
+struct Route<'s, 'p> {
+    schema: &'s SchemaSet,
+    root: &'s Msg,
+    path: &'p str,
+    /// How many steps the path takes.
+    parts: usize,
+    /// The last step: the field the path names.
+    last: Step<'s>,
+}
+
+impl<'s, 'p> Route<'s, 'p> {
+    /// Every step but the last, from the root: the messages that hold the field.
+    fn inner(&self) -> Inner<'s, 'p> {
+        Inner {
+            schema: self.schema,
+            holder: self.root,
+            parts: self.path.split('.'),
+            end: 0,
+            first: true,
+            left: self.parts.saturating_sub(1),
+        }
+    }
+
+    /// Every step, the last included.
+    fn all(&self) -> core::iter::Chain<Inner<'s, 'p>, core::iter::Once<Step<'s>>> {
+        self.inner().chain(core::iter::once(self.last))
+    }
+}
+
+/// The steps of a [`Route`] before its last, read again from the path's text, which [`route`]
+/// judged: a part that does not read is never met, and ends the walk where it would be.
+struct Inner<'s, 'p> {
+    schema: &'s SchemaSet,
+    holder: &'s Msg,
+    parts: core::str::Split<'p, char>,
+    end: usize,
+    first: bool,
+    left: usize,
+}
+
+impl<'s> Iterator for Inner<'s, '_> {
+    type Item = Step<'s>;
+
+    fn next(&mut self) -> Option<Step<'s>> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let part = self.parts.next()?;
+        self.end += part.len() + usize::from(!self.first);
+        self.first = false;
+        let (name, index) = segment(part)?;
+        let field = self.holder.fields.iter().find(|f| f.name == name)?;
+        let step = Step {
+            holder: self.holder,
+            field,
+            index,
+            end: self.end,
+        };
+        self.holder = match field.kind {
+            FieldKind::Message(inner) => self.schema.linked_at(inner)?,
+            _ => return None,
+        };
+        Some(step)
+    }
+}
+
+/// The route `path` takes from the message `root`, every part of it judged.
+fn route<'s, 'p>(
+    schema: &'s SchemaSet,
+    root: &'s Msg,
+    path: &'p str,
+) -> Result<Route<'s, 'p>, Refusal> {
     let refused = |reason: String| Refusal::Path {
         path: String::from(path),
         reason,
@@ -333,7 +408,7 @@ fn steps<'s>(schema: &'s SchemaSet, root: &'s Msg, path: &str) -> Result<Vec<Ste
         )));
     }
     let mut holder = root;
-    let mut out = Vec::with_capacity(parts);
+    let mut last = None;
     let mut end = 0usize;
     for (at, part) in path.split('.').enumerate() {
         end += part.len() + usize::from(at > 0);
@@ -367,7 +442,7 @@ fn steps<'s>(schema: &'s SchemaSet, root: &'s Msg, path: &str) -> Result<Vec<Ste
                 "`{name}` is not repeated, so it has no element to index"
             )));
         }
-        out.push(Step {
+        last = Some(Step {
             holder,
             field,
             index,
@@ -392,7 +467,17 @@ fn steps<'s>(schema: &'s SchemaSet, root: &'s Msg, path: &str) -> Result<Vec<Ste
         };
         holder = inner;
     }
-    Ok(out)
+    // `split` yields at least one part, and an empty one is refused above.
+    let Some(last) = last else {
+        return Err(refused(String::from("the path is empty")));
+    };
+    Ok(Route {
+        schema,
+        root,
+        path,
+        parts,
+        last,
+    })
 }
 
 /// The type of a field as the schema writes it.
@@ -713,18 +798,16 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// narrowing cannot know; the payload is then as it was.
     pub fn set(&mut self, path: &str, value: Given<'_>) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
-        let steps = steps(schema, schema.linked(self.message), path)?;
-        let Some((last, inner)) = steps.split_last() else {
-            return Err(empty_path(path));
-        };
+        let route = route(schema, schema.linked(self.message), path)?;
+        let last = route.last;
         if last.repeated() && last.index.is_none() {
-            return Err(list_named(path, last));
+            return Err(list_named(path, &last));
         }
         let held = held_of(schema, last.holder, last.field, value, self.narrowing, path)?;
-        reach(&self.fields, &steps, path)?;
+        reach(&self.fields, route.all(), path)?;
         let mut fields = &mut self.fields;
-        for step in inner {
-            fields = descend(fields, step);
+        for step in route.inner() {
+            fields = descend(fields, &step);
         }
         fields.clear_oneof(last.holder, last.field);
         let list = fields.known.entry(last.field.number).or_default();
@@ -748,22 +831,20 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// [`Refusal::Absent`].
     pub fn get(&self, path: &str, wanted: Wanted) -> Result<Got<'_>, Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
-        let steps = steps(schema, schema.linked(self.message), path)?;
-        let Some((last, inner)) = steps.split_last() else {
-            return Err(empty_path(path));
-        };
+        let route = route(schema, schema.linked(self.message), path)?;
+        let last = route.last;
         if last.repeated() && last.index.is_none() {
-            return Err(list_named(path, last));
+            return Err(list_named(path, &last));
         }
-        let Some(fields) = holder_of(&self.fields, inner, path)? else {
-            return Err(absent(path, inner, &self.fields));
+        let Some(fields) = holder_of(&self.fields, route.inner(), path)? else {
+            return Err(absent(path, route.inner(), &self.fields));
         };
         let index = last.index.unwrap_or(0);
         if let Some(held) = fields.value(last.field.number, index) {
             return got(schema, last.field, view(held), wanted, path);
         }
         if last.index.is_some() {
-            return Err(past_end(path, last, fields.len(last.field.number)));
+            return Err(past_end(path, &last, fields.len(last.field.number)));
         }
         if has_presence(last.holder, last.field) {
             return Err(Refusal::Absent {
@@ -790,10 +871,8 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// end of its list.
     pub fn count(&self, path: &str) -> Result<usize, Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
-        let steps = steps(schema, schema.linked(self.message), path)?;
-        let Some((last, inner)) = steps.split_last() else {
-            return Err(empty_path(path));
-        };
+        let route = route(schema, schema.linked(self.message), path)?;
+        let last = route.last;
         if !last.repeated() {
             return Err(Refusal::Path {
                 path: String::from(path),
@@ -809,7 +888,7 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
                 ),
             });
         }
-        Ok(holder_of(&self.fields, inner, path)?.map_or(0, |f| f.len(last.field.number)))
+        Ok(holder_of(&self.fields, route.inner(), path)?.map_or(0, |f| f.len(last.field.number)))
     }
 
     /// Clear the field `path` names (every element of a repeated one), or the
@@ -822,22 +901,20 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     /// list.
     pub fn clear(&mut self, path: &str) -> Result<(), Refusal> {
         let schema: &SchemaSet = self.schema.borrow();
-        let steps = steps(schema, schema.linked(self.message), path)?;
-        let Some((last, inner)) = steps.split_last() else {
-            return Err(empty_path(path));
-        };
-        let Some(holder) = holder_of(&self.fields, inner, path)? else {
+        let route = route(schema, schema.linked(self.message), path)?;
+        let last = route.last;
+        let Some(holder) = holder_of(&self.fields, route.inner(), path)? else {
             return Ok(());
         };
         let len = holder.len(last.field.number);
         if let Some(index) = last.index {
             if index >= len {
-                return Err(past_end(path, last, len));
+                return Err(past_end(path, &last, len));
             }
         }
         let mut fields = &mut self.fields;
-        for step in inner {
-            fields = descend(fields, step);
+        for step in route.inner() {
+            fields = descend(fields, &step);
         }
         let number = last.field.number;
         match last.index {
@@ -897,13 +974,6 @@ impl<S: Borrow<SchemaSet>> Payload<S> {
     }
 }
 
-fn empty_path(path: &str) -> Refusal {
-    Refusal::Path {
-        path: String::from(path),
-        reason: String::from("the path is empty"),
-    }
-}
-
 fn list_named(path: &str, last: &Step<'_>) -> Refusal {
     let name = &last.field.name;
     Refusal::Path {
@@ -925,9 +995,9 @@ fn past_end(path: &str, step: &Step<'_>, len: usize) -> Refusal {
 
 /// The message that holds the last step's field, `None` when one along the
 /// way is not there.
-fn holder_of<'f>(
+fn holder_of<'f, 's>(
     fields: &'f Fields,
-    inner: &[Step<'_>],
+    inner: impl Iterator<Item = Step<'s>>,
     path: &str,
 ) -> Result<Option<&'f Fields>, Refusal> {
     let mut at = fields;
@@ -937,7 +1007,7 @@ fn holder_of<'f>(
             Some(Held::Message(next)) => at = next,
             Some(_) => return Ok(None),
             None if step.index.is_some() => {
-                return Err(past_end(path, step, at.len(step.field.number)))
+                return Err(past_end(path, &step, at.len(step.field.number)))
             }
             None => return Ok(None),
         }
@@ -947,7 +1017,7 @@ fn holder_of<'f>(
 
 /// The refusal of a read whose holder is not there, naming the first part of
 /// the path that is absent.
-fn absent(path: &str, inner: &[Step<'_>], fields: &Fields) -> Refusal {
+fn absent<'s>(path: &str, inner: impl Iterator<Item = Step<'s>>, fields: &Fields) -> Refusal {
     let mut at = fields;
     for step in inner {
         match at.value(step.field.number, step.index.unwrap_or(0)) {
@@ -968,7 +1038,11 @@ fn absent(path: &str, inner: &[Step<'_>], fields: &Fields) -> Refusal {
 
 /// Whether a set of `steps` can be made: every index at most the length of its
 /// list, a list that is not there yet being empty.
-fn reach(fields: &Fields, steps: &[Step<'_>], path: &str) -> Result<(), Refusal> {
+fn reach<'s>(
+    fields: &Fields,
+    steps: impl Iterator<Item = Step<'s>>,
+    path: &str,
+) -> Result<(), Refusal> {
     let mut at = Some(fields);
     for step in steps {
         let number = step.field.number;

@@ -722,3 +722,29 @@ fn a_narrowed_payload_keeps_its_narrowing_and_decodes_bytes_as_they_are() {
     assert_eq!(p.get("small", Wanted::Unsigned), Ok(Got::Unsigned(256)));
     assert_eq!(bytes(&p), [0x10, 0x80, 0x02]);
 }
+
+#[test]
+fn a_path_is_walked_again_to_the_step_where_it_stops() {
+    let schema = schema();
+    let mut p = payload(&schema, "syn.payload.Sample");
+    assert_eq!(
+        p.get("path[0].x", Wanted::Signed),
+        Err(Refusal::Range {
+            path: String::from("path[0].x"),
+            reason: String::from("`path` has 0 element(s), so the index 0 is past its end"),
+        })
+    );
+    set(&mut p, "path[0].y", Given::Signed(3));
+    assert_eq!(p.get("path[0].x", Wanted::Signed), Ok(Got::Signed(0)));
+    assert_eq!(p.count("path"), Ok(1));
+    p.clear("path[0].y").expect("an element's field is cleared");
+    assert_eq!(p.get("path[0].y", Wanted::Signed), Ok(Got::Signed(0)));
+    assert!(matches!(
+        p.get("", Wanted::Signed),
+        Err(Refusal::Path { .. })
+    ));
+    assert!(matches!(
+        p.get("origin..x", Wanted::Signed),
+        Err(Refusal::Path { .. })
+    ));
+}
