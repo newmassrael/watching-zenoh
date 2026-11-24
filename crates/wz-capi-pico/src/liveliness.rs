@@ -54,7 +54,7 @@ use crate::pubsub::{
 };
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{engine_of, z_loaned_session_t, Engine};
+use crate::session::{engine_held, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         // The token's place is taken from its session before it is declared, so a session with
         // no place left refuses the declaration and declares nothing.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &engine_of(handle),
+            engine_held(handle),
             crate::object_slot::Kind::LivelinessToken,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -382,15 +382,15 @@ unsafe fn declare_liveliness_subscriber_with(
     let ke = keyexpr_str(keyexpr).ok_or(Z_ERR_INVALID)?;
     // A NULL options pointer is pico's "defaults", not an error.
     let history = !options.is_null() && (*options).history;
-    let engine = engine_of(handle);
+    let engine = engine_held(handle);
     let slot = crate::object_slot::Slot::<SubscriberPlace>::take_entity(
-        &engine,
+        engine,
         crate::object_slot::Kind::LivelinessSubscriber,
     )
     .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
     let session = background.then(|| crate::session::session_count(zs).hold());
     declare_liveliness_subscriber_in(
-        &engine,
+        engine,
         slot,
         ke,
         declared_of(keyexpr),
@@ -624,8 +624,8 @@ pub unsafe extern "C" fn z_liveliness_get(
         // could drift.
         // The gate keeps the one copy of the key the get asks under, where the session keeps its
         // keys, and the get is sent naming the gate's, as `z_get` sends its own: one text.
-        let engine = engine_of(handle);
-        let gate = match crate::keyexpr::KeyText::of_session(&engine, ke) {
+        let engine = engine_held(handle);
+        let gate = match crate::keyexpr::KeyText::of_session(engine, ke) {
             Ok(query_keyexpr) => crate::get::ReplyGate {
                 query_keyexpr,
                 anyke: false,
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // `_z_send_n_msg`), an already cancelled token answering `Z_ERR_CANCELLED` with no
         // Interest sent.
         crate::get::fan_get(
-            &engine,
+            engine,
             crate::object_slot::Kind::LivelinessGet,
             closure,
             gate,

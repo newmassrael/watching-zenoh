@@ -29,7 +29,7 @@ use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION,
     Z_ERR_NULL, Z_OK,
 };
-use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
 
 /// Whether `key` is no longer than the longest key a row of a session's tables stores: the
 /// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
@@ -873,7 +873,7 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Keyexpr) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        match DeclaredKeyexpr::declare(&engine_of(state), literal, declared_of(keyexpr)) {
+        match DeclaredKeyexpr::declare(engine_held(state), literal, declared_of(keyexpr)) {
             Ok(key) => {
                 owned_keyexpr_at(declared, slot.fill(key));
                 Z_OK
@@ -2402,8 +2402,8 @@ mod key_text_tests {
 mod arena_key_tests {
     use super::*;
     use crate::session::{
-        listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
-        z_session_loan_mut, z_session_move,
+        engine_of, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
+        z_session_loan, z_session_loan_mut, z_session_move,
     };
 
     /// A session that listens on a port of the loopback, opened as a program opens one, and the

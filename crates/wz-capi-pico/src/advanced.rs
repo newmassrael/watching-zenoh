@@ -77,7 +77,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
     Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
-use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
 
@@ -1438,9 +1438,9 @@ unsafe fn declare_subscriber_state(
     // A closed session takes no declaration; the closure consumed above runs its drop.
     let handle = crate::session::open_session_handle(zs)?;
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
-    let engine = engine_of(handle);
+    let engine = engine_held(handle);
     let slot = crate::object_slot::Slot::<AdvSubPlace>::take_entity(
-        &engine,
+        engine,
         crate::object_slot::Kind::AdvancedSubscriber,
     )
     .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
@@ -1451,13 +1451,13 @@ unsafe fn declare_subscriber_state(
     // session keeps its key, so the subscriber's entities share its block and copy no text.
     let base = match declared_of(keyexpr) {
         Some(declared) => declared.share(),
-        None => DeclaredKeyexpr::literal_of_session(&engine, ke)?,
+        None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             AdvSubState {
-                engine: Arc::clone(&engine),
+                engine: Arc::clone(engine),
                 subscriber: None,
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
@@ -1515,7 +1515,7 @@ unsafe fn declare_subscriber_state(
     // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
     // set is read through a shared borrow, which it admits from any thread.
     let misses = unsafe { MissHandlers::lent(fire_adv_miss, lent_miss, Some(let_go_miss_set)) };
-    let declared = EngineSubscriber::declare_in(&engine, ke, opts, on_sample, misses, core);
+    let declared = EngineSubscriber::declare_in(engine, ke, opts, on_sample, misses, core);
     match declared {
         Ok(subscriber) => {
             (*state).subscriber = Some(subscriber);

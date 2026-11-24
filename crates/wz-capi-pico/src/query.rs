@@ -1652,7 +1652,7 @@ unsafe fn queryable_place<'a>(
         }
     };
     match crate::object_slot::Slot::take_entity(
-        &crate::session::engine_of(handle),
+        crate::session::engine_held(handle),
         crate::object_slot::Kind::Queryable,
     ) {
         Some(slot) => Ok((handle, slot)),

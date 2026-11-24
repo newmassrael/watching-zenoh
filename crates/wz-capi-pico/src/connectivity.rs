@@ -115,7 +115,7 @@ use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
 use crate::session::{
-    engine_of, engine_ref, session_handle, z_loaned_session_t, Engine, PicoSessionHandle,
+    engine_held, engine_ref, session_handle, z_loaned_session_t, Engine, PicoSessionHandle,
 };
 use crate::string_array::z_owned_string_array_t;
 use crate::whatami::z_whatami_t;
@@ -2354,7 +2354,7 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
             return Z_ERR_SESSION_CLOSED;
         }
         let history = !options.is_null() && (*options).history;
-        match hub.declare_transport(&engine_of(handle), history, closure) {
+        match hub.declare_transport(engine_held(handle), history, closure) {
             Ok(object) => {
                 *listener = z_owned_transport_events_listener_t::of(object.cast());
                 Z_OK
@@ -2452,7 +2452,7 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
         if handle.drive.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        match hub.declare_link(&engine_of(handle), history, filter, closure) {
+        match hub.declare_link(engine_held(handle), history, filter, closure) {
             Ok(object) => {
                 *listener = z_owned_link_events_listener_t::of(object.cast());
                 Z_OK
@@ -3670,8 +3670,8 @@ mod place_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::session::{
-        listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
-        z_session_loan_mut, z_session_move,
+        engine_of, listening_on_loopback, z_close, z_owned_session_t, z_session_drop,
+        z_session_loan, z_session_loan_mut, z_session_move,
     };
 
     unsafe extern "C" fn on_event(_: *mut z_loaned_transport_event_t, _: *mut c_void) {}

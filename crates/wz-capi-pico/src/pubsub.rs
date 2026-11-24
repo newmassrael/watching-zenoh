@@ -53,7 +53,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
-use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
@@ -3445,20 +3445,20 @@ unsafe fn declare_subscriber_with(
     // no copy is made for the call. One the outbound gate refuses is refused before anything is
     // declared.
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
-    let engine = engine_of(handle);
+    let engine = engine_held(handle);
     let Some(slot) = crate::object_slot::Slot::<SubscriberPlace>::take_entity(
-        &engine,
+        engine,
         crate::object_slot::Kind::Subscriber,
     ) else {
         return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
     let session = background.then(|| crate::session::session_count(zs).hold());
-    let state = fill_subscriber_place(slot, &engine, closure, session);
+    let state = fill_subscriber_place(slot, engine, closure, session);
     // The row calls the closure where the place keeps it; a refusal drops the sink, which lets
     // the closure go.
     let declared = declare_subscriber_in(
         handle,
-        &engine,
+        engine,
         keyexpr,
         ke,
         options,
@@ -4035,7 +4035,7 @@ mod tests {
     fn a_subscribers_place_goes_back_when_its_row_lets_go_of_the_closure() {
         use crate::object_slot::{retire_entity, Kind, Slot};
         use crate::session::{
-            listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            engine_of, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
 
