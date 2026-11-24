@@ -2925,7 +2925,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.poll_groups(redial_ms);
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
-        for at in (0..self.transport.links.faces().len()).rev() {
+        for at in (0..self.transport.links.places()).rev() {
             self.poll_face(at, redial_ms, now_us)?;
         }
         Ok(())
@@ -2950,7 +2950,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_us: u64,
     ) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
-        let Some(face) = self.transport.links.faces().get(at) else {
+        let Some(face) = self.transport.links.face(at) else {
             return Ok(());
         };
         let id = face.id;
@@ -3107,8 +3107,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let lost = self
             .transport
             .links
-            .faces()
-            .get(at)
+            .face(at)
             .and_then(|face| face.link.wire());
         if let Some(wire) = lost.filter(|_| self.session.faces_watched()) {
             FaceLinkRow::each_of_actions(&*wire.actions, |row| {
@@ -3123,7 +3122,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
-        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+        if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.discard();
         }
         self.rooms.forget(id);
@@ -3137,8 +3136,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// next pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
-        let faces = self.transport.links.faces().len();
-        (0..faces)
+        let places = self.transport.links.places();
+        (0..places)
             .filter(|&at| self.redeclare_on(at, now_ms))
             .count()
     }
@@ -3146,16 +3145,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
     /// whether it was told, which a place with no face, or a face whose link is not up, is not.
     fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
-        let actions = match self.transport.links.faces().get(at).map(|face| &face.link) {
+        let actions = match self.transport.links.face(at).map(|face| &face.link) {
             Some(Link::Up(wire)) => wire.actions.clone(),
             _ => return false,
         };
         match self.begin_replay(at, &actions, now_ms) {
             TurnEnd::Kept => true,
             TurnEnd::EndsLink => {
-                if let Some(Link::Up(wire)) =
-                    self.transport.links.faces().get(at).map(|face| &face.link)
-                {
+                if let Some(Link::Up(wire)) = self.transport.links.face(at).map(|face| &face.link) {
                     wire.abort();
                 }
                 false
@@ -3170,7 +3167,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// turn the replay is given up on ends the link at once, and the next pass over the faces
     /// takes it as lost (`poll_face`).
     fn bring_up(&mut self, at: usize, now_us: u64) {
-        let Some(face) = self.transport.links.faces().get(at) else {
+        let Some(face) = self.transport.links.face(at) else {
             return;
         };
         let Some(wire) = face.link.wire() else {
@@ -3207,9 +3204,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // a query whose key they cannot resolve by the session's policy. The open lent a set
             // for each group the task cells hold, so a group past them is refused as its spawn
             // would be: no task cell is left for it.
-            if self.session.registry.borrow_mut().add_face(id).is_err() {
+            let Ok(held) = self.session.registry.borrow_mut().add_face(id) else {
                 return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
-            }
+            };
             self.session
                 .registry
                 .borrow_mut()
@@ -3225,7 +3222,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             match self.join_group(id, join) {
                 Ok(face) => self.transport.add_group(face),
                 Err(refused) => {
-                    self.session.registry.borrow_mut().remove_face(id);
+                    self.session.registry.borrow_mut().remove_face(held);
                     return Err(refused);
                 }
             }
@@ -3449,8 +3446,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.keep_departed(at) {
             return;
         }
-        if let Some(face) = self.transport.links.remove_face(at) {
-            self.session.registry.borrow_mut().remove_face(face.id);
+        if let Some(face) = self.transport.links.take_face(at) {
+            self.session
+                .registry
+                .borrow_mut()
+                .remove_face(HeldFace::new(at, face.id));
         }
     }
 
@@ -3494,7 +3494,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let tables = &*registry;
         let links = &self.transport.links;
         let faces = move || {
-            links.faces().iter().filter_map(move |face| {
+            links.faces().filter_map(move |face| {
                 let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
                     return None;
                 };
@@ -3644,14 +3644,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // first, so no connection is taken while the faces are ended.
         self.transport.links.end_dials_and_ports();
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
-        // leaves and lets the group's link go; its tables go with it.
+        // leaves and lets the group's link go; its tables go with the other faces' below.
         #[cfg(feature = "group")]
         if self.transport.stop_groups() {
             self.run_tasks();
-            let mut registry = self.session.registry.borrow_mut();
-            for group in self.transport.groups.drain(..) {
-                registry.remove_face(group.id());
-            }
+            self.transport.groups.clear();
         }
         self.transport.links.end_faces(|face| face.replay.discard());
         self.rooms.forget_all();
@@ -3839,6 +3836,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         #[cfg(feature = "connectivity")]
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
+        // The faces' links keep the places the registry lends their tables at: one table of them.
+        let places = lent.registry.places();
         // Each field is made in the order its makers need: the rooms ask the links' waits before the
         // supervisor takes the links, and the config and policy are read before they are moved.
         let core = Core {
@@ -3856,7 +3855,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,
-                // A face for each the config admits beside the dial role's, each with its dial, and
+                // A place for each face the registry lent a set for, each face with its dial, and
                 // the waits a read makes at once, reserved here: none grows after.
                 links: LinkSupervisor::new(
                     links,
@@ -3867,7 +3866,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         #[cfg(feature = "connectivity")]
                         told: FaceTold::default(),
                     },
-                    config.max_faces.saturating_add(1),
+                    places,
                     wait_room,
                 ),
                 endpoints: lent.transport.endpoints,

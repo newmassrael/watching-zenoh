@@ -184,7 +184,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport
             .links
             .faces()
-            .iter()
             .any(|face| face.told.owes(plane, listener, key))
     }
 
@@ -204,9 +203,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let Some(at) = self
             .transport
             .links
-            .faces_mut()
+            .places_mut()
             .iter_mut()
-            .position(|face| face.told.tell_went(plane, listener, key))
+            .position(|place| {
+                place
+                    .as_mut()
+                    .is_some_and(|face| face.told.tell_went(plane, listener, key))
+            })
         else {
             return false;
         };
@@ -221,7 +224,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .transport
             .links
             .faces()
-            .iter()
             .find_map(|face| face.told.first_gone(plane, listener))
         {
             return Some(row.clone());
@@ -244,10 +246,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         for face in self.transport.links.faces_mut() {
             face.told.forget(plane, listener);
         }
-        // From the last place, so a place let go of moves none still to be looked at.
-        let mut at = self.transport.links.faces().len();
-        while let Some(before) = at.checked_sub(1) {
-            at = before;
+        // A place let go of moves no other face.
+        for at in 0..self.transport.links.places() {
             self.let_go_if_spent(at);
         }
         #[cfg(feature = "group")]
@@ -258,9 +258,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The face at `at`, whose link is lost, went: the listeners told its row are owed its
     /// departure, read before the link is let go of. A tomb its place has no room for takes a
-    /// free place of the table as a departed face, and is not kept when there is none.
+    /// free place of the session's as a departed face, kept from every face that comes until the
+    /// tomb is owed to no one, and is not kept when there is none.
     pub(super) fn face_went(&mut self, at: usize) {
-        let Some(face) = self.transport.links.faces_mut().get_mut(at) else {
+        let Some(face) = self.transport.links.face_mut(at) else {
             return;
         };
         if face.told.bits.is_empty() {
@@ -273,6 +274,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let Some(apart) = face.told.went(row) else {
             return;
         };
+        let Some(place) = self.session.registry.borrow_mut().keep_place() else {
+            return;
+        };
         let id = self.transport.links.next_face_id();
         let departed = Face {
             id,
@@ -280,16 +284,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             replay: Replay::idle(),
             told: FaceTold::departed(apart),
         };
-        if self.transport.links.push_face(departed).is_ok() {
+        if self.transport.links.place_face(place, departed).is_ok() {
             self.transport.links.advance_face_id();
+        } else {
+            self.session.registry.borrow_mut().free_kept(place);
         }
     }
 
     /// Keep the taken face at `at`, whose link went, as a departed place while its tomb is owed:
-    /// its tables go now, as a removed face's do, and its place once no listener is owed its
-    /// departure. `false` for a face with no tomb, and for the dial role's, which stays.
+    /// its tables go now, as a removed face's do, and its place, which no face takes meanwhile,
+    /// once no listener is owed its departure. `false` for a face with no tomb, and for the dial
+    /// role's, which stays.
     pub(super) fn keep_departed(&mut self, at: usize) -> bool {
-        let Some(face) = self.transport.links.faces_mut().get_mut(at) else {
+        let Some(face) = self.transport.links.face_mut(at) else {
             return false;
         };
         if face.id == DIAL_FACE || face.told.tomb.is_none() {
@@ -299,7 +306,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A wait that is never due: the face is not dialled, and its value stays as it is.
         face.link = Link::Waiting { at_us: u64::MAX };
         let id = face.id;
-        self.session.registry.borrow_mut().remove_face(id);
+        self.session
+            .registry
+            .borrow_mut()
+            .depart(HeldFace::new(at, id));
         true
     }
 
@@ -308,12 +318,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self
             .transport
             .links
-            .faces()
-            .get(at)
+            .face(at)
             .is_some_and(|face| face.told.is_spent())
         {
-            self.transport.links.remove_face(at);
+            self.let_go_departed(at);
         }
+    }
+
+    /// Free the place at `at` a departed face kept, in the face table and the registry alike.
+    fn let_go_departed(&mut self, at: usize) {
+        self.transport.links.take_face(at);
+        self.session.registry.borrow_mut().free_kept(at);
     }
 
     /// Give up the first departed place, whose listeners are then not told its row left: what a
@@ -323,11 +338,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(at) = self
             .transport
             .links
-            .faces()
-            .iter()
-            .position(|face| face.told.is_departed())
+            .placed()
+            .find_map(|(at, face)| face.told.is_departed().then_some(at))
         {
-            self.transport.links.remove_face(at);
+            self.let_go_departed(at);
         }
     }
 }

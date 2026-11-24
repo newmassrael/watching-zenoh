@@ -32,11 +32,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let id = self.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step. A link past
         // the sets the open lent is closed unread, as one past `max_faces` is.
-        if self.session.registry.borrow_mut().add_face(id).is_err() {
+        let Ok(held) = self.session.registry.borrow_mut().add_face(id) else {
             return;
-        }
+        };
         let Ok(wire) = self.open_wire(id, opened, SessionRole::Acceptor, endpoint.as_ref()) else {
-            self.session.registry.borrow_mut().remove_face(id);
+            self.session.registry.borrow_mut().remove_face(held);
             return;
         };
         self.transport.links.advance_face_id();
@@ -49,7 +49,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .saturating_mul(1000),
         );
         self.push_face(
-            id,
+            held,
             Link::Opening {
                 wire,
                 next: 0,
@@ -58,34 +58,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
     }
 
-    /// Whether the table holds as many faces as `max_faces` admits beside the dial role's. A place
-    /// kept for a departed face's tomb alone is given up first: a face that comes outweighs a
-    /// departure owed to a listener's replay (`told`).
+    /// Whether the table holds as many faces as `max_faces` admits beside the dial role's, a place
+    /// kept for a departed face's tomb counted among them. Such a place is given up first: a face
+    /// that comes outweighs a departure owed to a listener's replay (`told`).
     fn faces_full(&mut self) -> bool {
         #[cfg(feature = "connectivity")]
-        if self.transport.links.faces().len() > self.config.max_faces {
+        if self.transport.links.held() > self.config.max_faces {
             self.give_up_a_departure();
         }
-        self.transport.links.faces().len() > self.config.max_faces
+        self.transport.links.held() > self.config.max_faces
     }
 
-    /// Add a face whose link is `link`: a dial under way or a handshake. It is told the session's
-    /// declarations at the session's pace, as every face is. Every face the open admits has its
-    /// place in the table; one past them, which the callers refuse before they make it, is let go
-    /// of with its tables.
-    fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Dial>) {
+    /// Add a face whose link is `link` at the place its tables were lent at (`held`): a dial
+    /// under way or a handshake. It is told the session's declarations at the session's pace, as
+    /// every face is. A place the table has no room at, which the callers refuse before they make
+    /// the face, lets the face go with its tables.
+    fn push_face(&mut self, held: HeldFace, link: Link<LinkSession<C>, L::Dial>) {
         let face = Face {
-            id,
+            id: held.id(),
             link,
             replay: Replay::idle(),
             #[cfg(feature = "connectivity")]
             told: FaceTold::default(),
         };
-        if let Err(face) = self.transport.links.push_face(face) {
+        if let Err(face) = self.transport.links.place_face(held.at(), face) {
             if let Some(wire) = face.link.wire() {
                 wire.abort();
             }
-            self.session.registry.borrow_mut().remove_face(face.id);
+            self.session.registry.borrow_mut().remove_face(held);
         }
     }
 }
@@ -125,25 +125,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let id = core.transport.links.next_face_id();
         // The tables first: the link's task dispatches to them from its first step.
-        if core.session.registry.borrow_mut().add_face(id).is_err() {
+        let Ok(held) = core.session.registry.borrow_mut().add_face(id) else {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
                 endpoint,
                 Refusal::FacesFull,
             )));
-        }
+        };
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
         let pending = match core.transport.begin_dial(endpoint) {
             Ok(pending) => pending,
             Err(refused) => {
-                core.session.registry.borrow_mut().remove_face(id);
+                core.session.registry.borrow_mut().remove_face(held);
                 return Err(refused.into());
             }
         };
         core.transport.links.advance_face_id();
         let deadline_us = core.open_deadline_us();
         core.push_face(
-            id,
+            held,
             Link::Dialing {
                 dial: Dial::new(DialEndpoint::Named(named), pending),
                 next: 0,
