@@ -97,11 +97,13 @@ z_result_t wz_ext_config_document(z_loaned_config_t *config,
  * of this function after it answers Z_EINVAL and the process keeps the
  * limits it took.
  *
- * Text that is no JSON5 object, a wz member of a refused shape, a profile, a
- * policy, key ids, a limit of a session, a limit the build does not have or
- * decides alone, and a value the build's domain leaves out or that is over
- * the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever the call
- * comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
+ * Text that is no JSON5 object, a document nested deeper than
+ * CONFIG_DOCUMENT_DEPTH (the outermost object being 1), as
+ * wz_ext_config_document refuses one, a wz member of a refused shape, a
+ * profile, a policy, key ids, a limit of a session, a limit the build does
+ * not have or decides alone, and a value the build's domain leaves out or
+ * that is over the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever
+ * the call comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
 z_result_t wz_ext_runtime_limits_document(const char *json5);
 
 /* A clock the program registers, which z_timestamp_new then stamps with in
