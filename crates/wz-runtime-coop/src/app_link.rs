@@ -837,21 +837,25 @@ impl PendingDial<HeapLink> for PendingAppLink {
                     heap_link(
                         self.cells.as_ref(),
                         datagram_ends_fit(&socket, Some(self.to)),
-                        |place| {
+                    )
+                    .and_then(|cell| {
+                        cell.open(|place| {
                             self.owner_waits.datagram(
                                 place.write(UdpDriver::initiator_in(socket, self.to, rx, tx)),
                             )
-                        },
-                    )
+                        })
+                    })
                 } else {
                     let stream = AppStreamSocket {
                         held,
                         local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                         peer: self.to,
                     };
-                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-                        self.owner_waits
-                            .stream(place.write(StreamDriver::over(stream, rx, tx)))
+                    heap_link(self.cells.as_ref(), stream_ends_fit(&stream)).and_then(|cell| {
+                        cell.open(|place| {
+                            self.owner_waits
+                                .stream(place.write(StreamDriver::over(stream, rx, tx)))
+                        })
                     })
                 })
             }
@@ -1360,9 +1364,7 @@ impl SessionLinks for AppLinks {
                     to.at,
                     self.open_bound.as_ref(),
                 )?;
-                heap_link(
-                    self.cells.as_ref(),
-                    datagram_ends_fit(&socket, Some(to.at)),
+                heap_link(self.cells.as_ref(), datagram_ends_fit(&socket, Some(to.at)))?.open(
                     |place| {
                         self.owner_waits
                             .datagram(place.write(UdpDriver::initiator_in(socket, to.at, rx, tx)))
@@ -1372,7 +1374,7 @@ impl SessionLinks for AppLinks {
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
                 let stream = self.dial.dial(to.at)?;
-                heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
+                heap_link(self.cells.as_ref(), stream_ends_fit(&stream))?.open(|place| {
                     self.owner_waits
                         .stream(place.write(StreamDriver::over(stream, rx, tx)))
                 })
@@ -1530,15 +1532,12 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        heap_link(
-            self.cells.as_ref(),
-            datagram_ends_fit(&socket, Some(peer)),
-            |place| {
+        heap_link(self.cells.as_ref(), datagram_ends_fit(&socket, Some(peer)))?
+            .open(|place| {
                 self.owner_waits
                     .datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
-            },
-        )
-        .map(Some)
+            })
+            .map(Some)
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1569,11 +1568,12 @@ impl LinkListener<HeapLink> for AppLinkListener {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        heap_link(self.cells.as_ref(), stream_ends_fit(&stream), |place| {
-            self.owner_waits
-                .stream(place.write(StreamDriver::over(stream, rx, tx)))
-        })
-        .map(Some)
+        heap_link(self.cells.as_ref(), stream_ends_fit(&stream))?
+            .open(|place| {
+                self.owner_waits
+                    .stream(place.write(StreamDriver::over(stream, rx, tx)))
+            })
+            .map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {

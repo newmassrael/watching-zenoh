@@ -6,7 +6,8 @@
 //!
 //! A door wz has and zenoh-pico does not, so it is `wz_ext_*` and declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
-//! build without `unstable-api` (the size-measured client builds) carries none of it.
+//! build without `device-requires` (the zenoh-pico preset, the size-measured client builds)
+//! carries none of it, whether or not it has pico's unstable API.
 //!
 //! It reads the config as [`z_open`](crate::session::z_open) does (`open_config`, the TLS
 //! material, pico's group rule) into the engine-neutral facts of `wz_session_core::facilities`, and

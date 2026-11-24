@@ -213,35 +213,14 @@ impl<K> CellRc<K> {
         }
     }
 
-    /// The value `make` writes in the place it is handed, a cell of `cells` when a table is lent
-    /// and one of its own on the heap when none is ([`Self::in_cells`]), and lends back: the cell
-    /// is made first and the value written in it, so it is made where it stays and not in a frame
-    /// that is then moved into it, and what `make` does to it after (a link its owner waits on) is
-    /// done there too. `None` when no cell of the table takes it, `make` then not called and let
-    /// go of with what it holds; `None` too, the cell given back and nothing in it dropped, for a
-    /// `make` that lends back anything but the place it was handed, which it has not written. A
-    /// `make` that unwinds keeps the cell, which is then never given back.
-    pub fn made_in(
-        cells: Option<&LentByteCells>,
-        make: impl FnOnce(&mut MaybeUninit<K>) -> &mut K,
-    ) -> Option<Self> {
+    /// A cell for a value of `K`, claimed and not yet written: one of `cells` when a table is
+    /// lent, `None` when every cell is taken or a cell is too small or not aligned for it, and one
+    /// of its own on the heap when none is ([`Self::in_cells`]). Its value is written in it where
+    /// it stays ([`CellClaim::made`]); one let go of unwritten goes back.
+    pub fn claim(cells: Option<&LentByteCells>) -> Option<CellClaim<K>> {
         let head = head_in(cells, Layout::new::<Slot<K>>(), drop_whole::<K>)?;
-        let slot = head.cast::<Slot<K>>().as_ptr();
-        // SAFETY: the head heads a cell of `Slot<K>`'s layout that only this call reaches.
-        let at = unsafe { core::ptr::addr_of_mut!((*slot).value) };
-        // SAFETY: the value's place is aligned for `K`, not yet written and reached by nothing
-        // else, and `MaybeUninit<K>` lays out as a `K`.
-        let made: *mut K = make(unsafe { &mut *at.cast::<MaybeUninit<K>>() });
-        if !core::ptr::eq(made, at) {
-            // SAFETY: no handle names the cell, and its value is not read: whatever the maker
-            // wrote elsewhere stays the maker's.
-            unsafe { give_back(head) };
-            return None;
-        }
-        Some(Self {
+        Some(CellClaim {
             head,
-            // SAFETY: the place of a cell's value, which is never null.
-            value: unsafe { NonNull::new_unchecked(at) },
             _owns: PhantomData,
         })
     }
@@ -287,6 +266,52 @@ impl<K> CellRc<K> {
             Some(bytes) => bytes,
             None => usize::MAX,
         }
+    }
+}
+
+/// A cell claimed for a value of `K` and not yet written ([`CellRc::claim`]). The cell is had
+/// before its value's maker is formed, so what the value is made of goes into the cell from where
+/// it lies, and a refused cell lets go of it there, never gathered into a maker first. Let go of
+/// unwritten, the cell goes back where it came from.
+pub struct CellClaim<K> {
+    head: NonNull<CellHead>,
+    _owns: PhantomData<K>,
+}
+
+impl<K> CellClaim<K> {
+    /// The value `make` writes in the place it is handed, the claimed cell's, and lends back: made
+    /// where it stays and not in a frame that is then moved into it, and what `make` does to it
+    /// after (a link its owner waits on) is done there too. `None`, the cell given back and nothing
+    /// in it dropped, for a `make` that lends back anything but the place it was handed, which it
+    /// has not written; a `make` that unwinds gives the cell back the same way.
+    pub fn made(self, make: impl FnOnce(&mut MaybeUninit<K>) -> &mut K) -> Option<CellRc<K>> {
+        let slot = self.head.cast::<Slot<K>>().as_ptr();
+        // SAFETY: the claim heads a cell of `Slot<K>`'s layout that only it reaches.
+        let at = unsafe { core::ptr::addr_of_mut!((*slot).value) };
+        // SAFETY: the value's place is aligned for `K`, not yet written and reached by nothing
+        // else, and `MaybeUninit<K>` lays out as a `K`.
+        let made: *mut K = make(unsafe { &mut *at.cast::<MaybeUninit<K>>() });
+        if !core::ptr::eq(made, at) {
+            // Whatever the maker wrote elsewhere stays the maker's: the claim, let go of here,
+            // gives the cell back without reading its value.
+            return None;
+        }
+        let head = self.head;
+        core::mem::forget(self);
+        Some(CellRc {
+            head,
+            // SAFETY: the place of a cell's value, which is never null.
+            value: unsafe { NonNull::new_unchecked(at) },
+            _owns: PhantomData,
+        })
+    }
+}
+
+impl<K> Drop for CellClaim<K> {
+    fn drop(&mut self) {
+        // SAFETY: a claim still held is of a cell no handle names, whose value is not written
+        // whole and is not dropped: it is not read before the cell goes back.
+        unsafe { give_back(self.head) }
     }
 }
 
@@ -595,7 +620,7 @@ mod tests {
 
     /// A value made in a cell is made only once a cell is had for it: past the table's cells it is
     /// not made and what its maker holds is let go of, and with no table it is made on the heap.
-    /// Turned red by a maker called before its cell is claimed, or one kept past a refusal.
+    /// Turned red by a claim that calls a maker before its cell is had, or one kept past a refusal.
     #[test]
     fn a_value_is_made_in_its_cell_and_not_made_when_no_cell_takes_it() {
         let cells = table(CellRc::<Counted>::cell_bytes());
@@ -610,19 +635,20 @@ mod tests {
             }
         }
         let made = Cell::new(0u32);
-        let first =
-            CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
-        let second =
-            CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
+        let made_in = |cells: Option<&LentByteCells>, maker| {
+            CellRc::<Counted>::claim(cells).and_then(|cell| cell.made(maker))
+        };
+        let first = made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
+        let second = made_in(Some(&cells), make(&made, Counted(drops.clone()))).expect("a cell");
         assert_eq!((made.get(), cells.in_use()), (2, 2));
-        let refused = CellRc::made_in(Some(&cells), make(&made, Counted(drops.clone())));
+        let refused = made_in(Some(&cells), make(&made, Counted(drops.clone())));
         assert!(refused.is_none(), "past the table's cells");
         assert_eq!(
             (made.get(), drops.get()),
             (2, 1),
             "the refused value was never made, and what its maker held is dropped"
         );
-        let boxed = CellRc::made_in(None, make(&made, Counted(drops.clone()))).expect("the heap");
+        let boxed = made_in(None, make(&made, Counted(drops.clone()))).expect("the heap");
         assert_eq!(
             (made.get(), cells.in_use()),
             (3, 2),
@@ -641,11 +667,13 @@ mod tests {
         let cells = table(CellRc::<Counted>::cell_bytes());
         let drops = Rc::new(Cell::new(0));
         let mut handed: *const Counted = core::ptr::null();
-        let made = CellRc::made_in(Some(&cells), |place| {
-            handed = place.as_ptr();
-            place.write(Counted(drops.clone()))
-        })
-        .expect("a cell");
+        let made = CellRc::claim(Some(&cells))
+            .expect("a cell")
+            .made(|place| {
+                handed = place.as_ptr();
+                place.write(Counted(drops.clone()))
+            })
+            .expect("made in its cell");
         assert!(
             core::ptr::eq(handed, &*made),
             "made where its handle names it"
@@ -664,7 +692,9 @@ mod tests {
         let elsewhere: *mut Counted = Box::into_raw(Box::new(Counted(drops.clone())));
         // SAFETY: the box is this test's alone until it is taken back below, and nothing else
         // reaches it while the maker lends it.
-        let refused = CellRc::made_in(Some(&cells), |_place| unsafe { &mut *elsewhere });
+        let refused = CellRc::claim(Some(&cells))
+            .expect("a cell")
+            .made(|_place| unsafe { &mut *elsewhere });
         assert!(refused.is_none(), "a value not written in its cell");
         assert_eq!(
             (drops.get(), cells.in_use()),
@@ -674,6 +704,25 @@ mod tests {
         // SAFETY: the box came from `Box::into_raw` above, and nothing holds it now.
         drop(unsafe { Box::from_raw(elsewhere) });
         assert_eq!(drops.get(), 1);
+    }
+
+    /// A cell claimed and let go of before anything is made in it goes back to its table, and a
+    /// table claimed full refuses one more. Turned red by a claim that keeps its cell when it is
+    /// let go of unwritten.
+    #[test]
+    fn a_claim_let_go_of_unwritten_gives_its_cell_back() {
+        let cells = table(CellRc::<Counted>::cell_bytes());
+        let first = CellRc::<Counted>::claim(Some(&cells)).expect("a cell");
+        let second = CellRc::<Counted>::claim(Some(&cells)).expect("a cell");
+        assert_eq!(cells.in_use(), 2);
+        assert!(
+            CellRc::<Counted>::claim(Some(&cells)).is_none(),
+            "past the table's cells"
+        );
+        drop(first);
+        assert_eq!(cells.in_use(), 1, "the unwritten claim went back");
+        drop(second);
+        assert_eq!(cells.in_use(), 0);
     }
 
     /// A value larger than a cell is refused, with the value handed back, and takes no cell.

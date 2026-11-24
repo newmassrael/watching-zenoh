@@ -11,7 +11,7 @@ deploy/pico_perf_ceiling_mcu.json.
 
     mcu_speed.py run --images DIR --peer FILE --pacer FILE --zenohd FILE --run DIR [--board mps2/an385]
                      [--qemu-machine MACHINE] [--qemu qemu-system-arm] [--reps 3] [--sizes 8,64,1024]
-                     [--threads st,mt] [--workloads put,sub,rtt] [--puts 2000] [--window-ms 2000]
+                     [--threads st,mt] [--workloads put,sub,rtt,frag-rel,frag-be] [--puts 2000] [--window-ms 2000]
                      [--warmup-ms 500] [--offer-rate 1000] [--offer-bytes 128000] [--round-trips 500]
                      [--warmup-round-trips 50] [--timeout-ms 200] [--router-log FILTER]
         the matrix; DIR (--images) holds <arm>-<threads>.elf for each arm and threading arm asked, --peer the
@@ -56,6 +56,11 @@ QEMU's user network and runs the workload against the host probe, which is a pee
          byte budget is the 64-byte rate both arms are carried at: 1,000 samples a second of 1,024
          bytes stopped the emulated card for both, so a large size is offered the same bytes a second
          (117 samples at 1,024 bytes), not the same count.
+  * frag-rel, frag-be  the sub workload at FRAG_SIZE bytes, past the batch both libraries advertise, so the
+         router sends every sample in fragments and both rejoin it; the pacer publishes reliable in one and
+         best effort in the other, so each reliability's chain is rejoined. Their heap is the two libraries'
+         under the same reassembly: zenoh-pico's buffer of a reliability taken when its first fragment comes,
+         wz's reserved at the open. The --sizes list does not apply to them.
   * rtt  the probe answers perf/ping on perf/pong; the image times --round-trips after
          --warmup-round-trips, each waited for up to --timeout-ms: the percentiles in microseconds and the
          instructions per round trip.
@@ -105,8 +110,17 @@ TABLE = ROOT / "deploy" / "pico_perf_ceiling_mcu.json"
 PAIR = "W/P"
 ARMS = ("P", "W")
 THREADS = ("st", "mt")
-WORKLOADS = ("put", "sub", "rtt")
+WORKLOADS = ("put", "sub", "rtt", "frag-rel", "frag-be")
 DEFAULT_SIZES = (8, 64, 1024)
+#: The workloads that receive samples rejoined from fragments, each the image's `sub` offered by a
+#: publisher of one reliability: zenoh-pico keeps a defragmentation buffer for each reliability and takes
+#: it when a chain's first fragment comes
+#: (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`),
+#: so a heap read under them holds the buffer the other workloads never make it take.
+FRAG_WORKLOADS = {"frag-rel": "reliable", "frag-be": "best-effort"}
+#: The payload of a fragmenting cell: past the 2,048-byte batch both libraries advertise, so it is sent
+#: in fragments, and within the 4,096-byte message both rejoin, with its key and headers.
+FRAG_SIZE = 3072
 #: The guest's clock advances 2^ICOUNT_SHIFT ns per instruction. At 0 the emulated core is faster than the
 #: host emulates it, so a busy guest's clock runs behind the host's and no lease the guest holds expires
 #: early; and the busy nanoseconds are the instructions themselves.
@@ -144,7 +158,19 @@ GATED = {
     "put": ("instr_per_put", "put_msgs_per_s", "stack_bytes", "heap_peak_bytes"),
     "sub": ("instr_per_sample", "sub_msgs_per_busy_s", "stack_bytes", "heap_peak_bytes"),
     "rtt": ("rtt_p50_us", "rtt_p99_us", "instr_per_rtt", "stack_bytes", "heap_peak_bytes"),
+    "frag-rel": ("instr_per_sample", "sub_msgs_per_busy_s", "stack_bytes", "heap_peak_bytes"),
+    "frag-be": ("instr_per_sample", "sub_msgs_per_busy_s", "stack_bytes", "heap_peak_bytes"),
 }
+
+
+def image_workload(workload: str) -> str:
+    """The workload the image runs for a cell of `workload`: a fragmenting cell is its `sub`."""
+    return "sub" if workload in FRAG_WORKLOADS else workload
+
+
+def sizes_of(workload: str, sizes) -> tuple[int, ...]:
+    """The payload sizes a workload's cells run at: a fragmenting one at FRAG_SIZE alone."""
+    return (FRAG_SIZE,) if workload in FRAG_WORKLOADS else tuple(sizes)
 
 TAG = "MCU-SPEED"
 RESULT_KEYS = {
@@ -329,13 +355,14 @@ def cell_figures(workload: str, console: str, probe: str, shift: int) -> dict[st
     why = failure_of(console)
     if why is not None:
         raise Lost(f"the image failed: {why}")
-    result = result_of(console, workload)
+    kind = image_workload(workload)
+    result = result_of(console, kind)
     if result is None:
         raise Lost("the image gave no result line")
     memory = memory_of(console)
-    if workload == "put":
+    if kind == "put":
         return put_figures(result, memory, probe_total(probe), shift)
-    if workload == "sub":
+    if kind == "sub":
         return sub_figures(result, memory, shift)
     return rtt_figures(result, memory, shift)
 
@@ -450,13 +477,14 @@ class Plan:
 
 def cell_args(plan: Plan, workload: str, size: int) -> list[str]:
     """The image's command line for one cell (src/main.c of deploy/zephyr-mcu-speed)."""
-    if workload == "put":
+    kind = image_workload(workload)
+    if kind == "put":
         tail = [plan.puts, 0, 0]
-    elif workload == "sub":
+    elif kind == "sub":
         tail = [plan.window_ms, plan.warmup_ms, 0]
     else:
         tail = [plan.round_trips, plan.warmup_round_trips, plan.timeout_ms]
-    return ["mcu-speed", plan.locator, workload, str(size)] + [str(v) for v in tail]
+    return ["mcu-speed", plan.locator, kind, str(size)] + [str(v) for v in tail]
 
 
 def qemu_argv(plan: Plan, image: pathlib.Path, args: list[str]) -> list[str]:
@@ -482,15 +510,16 @@ def offered_rate(plan: Plan, size: int) -> int:
     return max(1, min(plan.offer_rate, plan.offer_bytes // (size + WIRE_OVERHEAD)))
 
 
-def probe_argv(plan: Plan, role: str, size: int) -> list[str]:
-    """The host probe in its role, a peer of the router. Its long durations are ended by the run."""
+def probe_argv(plan: Plan, role: str, size: int, best_effort: bool = False) -> list[str]:
+    """The host probe in its role, a peer of the router. Its long durations are ended by the run. The
+    pacer publishes best effort when `best_effort` is set, reliable otherwise."""
     base = [plan.peer, role, "-m", "peer", "-e", plan.endpoint]
     if role == "sub":
         return base + ["-w", "0", "-t", "3600"]
     if role == "pub":
         # The pacer reads its options from the first word, and waits for its publisher to match.
         return [plan.pacer, "-m", "peer", "-e", plan.endpoint, "-k", "perf/thr", "-s", str(size),
-                "-r", str(offered_rate(plan, size)), "-t", "3600", "-w"]
+                "-r", str(offered_rate(plan, size)), "-t", "3600", "-w"] + (["-u"] if best_effort else [])
     return base
 
 
@@ -516,7 +545,8 @@ def run_cell(plan: Plan, image: pathlib.Path, workload: str, size: int, stem: pa
                 raise Lost(f"the image said nothing ready in {READY_S:.0f} s")
             if ready.startswith(f"{TAG} FAIL"):
                 raise Lost(f"the image failed: {words(ready).get('why', 'no reason given')}")
-            probe = Probe(probe_argv(plan, "pub", size), stem.with_name(stem.name + ".probe"))
+            best_effort = FRAG_WORKLOADS.get(workload) == "best-effort"
+            probe = Probe(probe_argv(plan, "pub", size, best_effort), stem.with_name(stem.name + ".probe"))
         if console.wait_for(("DONE", "FAIL"), CELL_S) is None:
             raise Lost(f"the image did not finish in {CELL_S:.0f} s")
         if workload == "put":
@@ -699,7 +729,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 order = ARMS if rep % 2 else tuple(reversed(ARMS))
                 for thread_arm in threads:
                     for workload in workloads:
-                        for size in sizes:
+                        for size in sizes_of(workload, sizes):
                             for arm in order:
                                 if router.poll() is not None:
                                     print(f"mcu-speed: refused: the router exited ({router.returncode})",
@@ -707,7 +737,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     return 2
                                 cell = {"arm": arm, "threads": thread_arm, "workload": workload, "size": size,
                                         "rep": rep}
-                                if workload == "sub":
+                                if image_workload(workload) == "sub":
                                     cell["offered_rate"] = offered_rate(plan, size)
                                 try:
                                     cell["figures"] = run_cell(
@@ -748,7 +778,8 @@ def row_key(machine: str, threads: str, workload: str, size: int, metric: str) -
 def population(machine: str, sizes: tuple[int, ...] = DEFAULT_SIZES) -> list[str]:
     """Every row a full run of the matrix on one machine gives: each threading arm, workload, size and held
     figure."""
-    return [row_key(machine, t, w, s, m) for t in THREADS for w in WORKLOADS for s in sizes for m in GATED[w]]
+    return [row_key(machine, t, w, s, m) for t in THREADS for w in WORKLOADS for s in sizes_of(w, sizes)
+            for m in GATED[w]]
 
 
 def cost_ratio(metric: str, wz: list[float], ref: list[float]) -> tuple[float, float, float]:
@@ -1038,6 +1069,8 @@ def cmd_selftest() -> int:
     expect("samples a second over the window", math.isclose(figs["sub_msgs_per_s"], 250.0))
     expect("samples a second of busy time are the core's capacity",
            math.isclose(figs["sub_msgs_per_busy_s"], 500.0))
+    expect("a fragmenting cell is read from the image's sub lines, as a sub cell is",
+           cell_figures("frag-rel", sub, "", 0) == figs and cell_figures("frag-be", sub, "", 0) == figs)
     rtt = _console("rtt", "round_trips=100 lost=0 attempts=100 p50_cycles=2500 p90_cycles=5000 p99_cycles=25000 "
                           "min_cycles=2000 max_cycles=30000 mean_cycles=3000 busy_cycles=250000 hz=25000000")
     figs = cell_figures("rtt", rtt, "", 0)
@@ -1071,6 +1104,14 @@ def cmd_selftest() -> int:
            "enable=on,target=native,arg=mcu-speed,arg=udp/10.0.2.2:1,arg=rtt,arg=64,arg=500,arg=50,arg=200")
     expect("a put cell carries its puts", cell_args(plan, "put", 8)[4:] == ["2000", "0", "0"])
     expect("a sub cell carries its window and warm-up", cell_args(plan, "sub", 8)[4:] == ["2000", "500", "0"])
+    expect("a fragmenting cell runs the image's sub workload at its size",
+           cell_args(plan, "frag-be", FRAG_SIZE)[2:] == ["sub", str(FRAG_SIZE), "2000", "500", "0"])
+    expect("the best-effort cell's pacer publishes best effort, and every other publishes reliable",
+           probe_argv(plan, "pub", FRAG_SIZE, True)[-1] == "-u" and "-u" not in probe_argv(plan, "pub", FRAG_SIZE))
+    expect("a fragmenting size is offered the bytes a second of the small sizes",
+           offered_rate(plan, FRAG_SIZE) == 128000 // (FRAG_SIZE + WIRE_OVERHEAD) == 40)
+    expect("the fragmenting size is past the batch and within the largest rejoined message",
+           2048 < FRAG_SIZE <= 4096 - 1024)
     pacer = probe_argv(plan, "pub", 64)
     expect("the sub cell's publisher is the pacer, at the offered rate, on the probe's key",
            pacer[0] == "/q" and pacer[pacer.index("-r") + 1] == "1000" and pacer[pacer.index("-k") + 1] == "perf/thr")
@@ -1113,8 +1154,12 @@ def cmd_selftest() -> int:
 
     # The table.
     machine = BOARDS[DEFAULT_BOARD].machine
-    expect("the default matrix is two threading arms, three workloads, three sizes and their figures",
-           len(population(machine)) == len(THREADS) * len(DEFAULT_SIZES) * sum(len(v) for v in GATED.values()))
+    expect("the default matrix is two threading arms, each workload at its sizes, and their figures",
+           len(population(machine)) == len(THREADS) * sum(len(sizes_of(w, DEFAULT_SIZES)) * len(GATED[w])
+                                                           for w in WORKLOADS))
+    expect("a fragmenting workload's rows are at its one size past the batch",
+           f"{machine}/st/frag-be/{FRAG_SIZE}/heap_peak_bytes" in population(machine)
+           and f"{machine}/st/frag-be/8/heap_peak_bytes" not in population(machine))
 
     def table_text(rows: dict, **head) -> str:
         doc = {"schema": TABLE_SCHEMA, "pair": PAIR, "platform": platform_of(DEFAULT_BOARD, 0),

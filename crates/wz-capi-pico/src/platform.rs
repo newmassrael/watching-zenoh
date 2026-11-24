@@ -364,9 +364,13 @@ pub unsafe extern "C" fn z_realloc(ptr: *mut c_void, size: usize) -> *mut c_void
 /// (`system.c:95-96`), and the operating system's generator on Windows. Each is in
 /// the backend; the export is the null and length guard.
 ///
+/// Out of line: the four `z_random_u<n>` read their word through it, and inlined each would
+/// carry a copy of the backend's loop.
+///
 /// # Safety
 /// `buf` must be null or point at `len` writable bytes.
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn z_random_fill(buf: *mut c_void, len: usize) {
     let _ = guarded(|| {
         if buf.is_null() || len == 0 {

@@ -202,6 +202,10 @@ GATE_RUSTFLAGS = ["-C", "linker=cc", "-C", f"link-arg={GNU_LD}"]
 # What `comment_linker` answers for a library whose `.comment` names no linker, as GNU ld's.
 NO_LINKER_NAMED = "no linker named in .comment"
 
+# The profile every artifact a deployer receives is built with (`crates/Cargo.toml`: fat LTO, one
+# codegen unit). A case measures what ships, so it is built with this profile or one inheriting it;
+# the optimized build of daily work (`release`, thin LTO) carries copies a shipped library does not.
+SHIP_PROFILE = "ship"
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
@@ -300,9 +304,9 @@ class Case:
     forbid: tuple[str, ...] = ()
     require: tuple[str, ...] = ()
     exports: int | None = None
-    # The cargo profile (`crates/Cargo.toml`). It is not a capability, so it leaves the pico
-    # reference alone: that is derived from the features only.
-    profile: str = "release"
+    # The cargo profile (`crates/Cargo.toml`): the shipping one or one inheriting it. It is not a
+    # capability, so it leaves the pico reference alone: that is derived from the features only.
+    profile: str = SHIP_PROFILE
     # Patterns no symbol the library leaves UNDEFINED may match (`nm -u`): a name the library
     # expects whoever loads it to define, which no C program linking it does.
     forbid_undefined: tuple[str, ...] = ()
@@ -2059,6 +2063,39 @@ class CaseBuild:
     link_args: tuple[str, ...]
 
 
+def cargo_profiles(manifest: str) -> dict[str, dict[str, str]]:
+    """The keys of each `[profile.<name>]` table of a Cargo manifest, each value as written; the
+    tables of a profile's package overrides are not the profile's."""
+    out: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for line in manifest.splitlines():
+        head = re.match(r"^\[profile\.([\w-]+)\]\s*$", line)
+        if head:
+            current = out.setdefault(head.group(1), {})
+        elif line.startswith("["):
+            current = None
+        elif current is not None:
+            pair = re.match(r"^([\w-]+)\s*=\s*(.+?)\s*$", line)
+            if pair:
+                current[pair.group(1)] = pair.group(2)
+    return out
+
+
+def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, str]]) -> bool:
+    """Whether `profile` is `base` or reaches it through its `inherits` chain in `profiles`
+    (`cargo_profiles`); a chain that loops or ends elsewhere does not."""
+    seen: set[str] = set()
+    while profile not in seen:
+        if profile == base:
+            return True
+        seen.add(profile)
+        parent = profiles.get(profile, {}).get("inherits")
+        if parent is None:
+            return False
+        profile = parent.strip('"')
+    return False
+
+
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
                cfg: set[str] | None = None) -> CaseBuild:
     """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
@@ -2599,9 +2636,9 @@ def cmd_selftest() -> int:
     # The plan of a case's build, which the performance matrix builds its arm W by.
     plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {})
     expect("a case of no configuration file is built for the default target, by the gate's linker",
-           plain.cmd[:6] == ("cargo", "build", "--profile", "release", "-p", "wz-capi-pico")
+           plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico")
            and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
-           and "--target" not in plain.cmd and plain.lib == TARGET / "release" / "libt.so"
+           and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
            and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
     expect("a case of the crate's default features names none",
@@ -2792,6 +2829,22 @@ def cmd_selftest() -> int:
     expect("every case's profile is one crates/Cargo.toml defines",
            {c.profile for c in CASES} <= {"release"} | set(
                re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
+    # THE SHIPPING PROFILE: a case reads the library a deployer receives, not the daily build.
+    profiles = cargo_profiles((CRATES / "Cargo.toml").read_text(encoding="utf-8"))
+    expect("the shipping profile links one program: fat LTO and one codegen unit",
+           profiles.get(SHIP_PROFILE, {}).get("lto") == '"fat"'
+           and profiles.get(SHIP_PROFILE, {}).get("codegen-units") == "1")
+    expect("every size case is built with the shipping profile or one inheriting it",
+           all(inherits_from(c.profile, SHIP_PROFILE, profiles) for c in CASES))
+    chain = cargo_profiles('[profile.a]\nlto = "fat"\n[profile.b]\ninherits = "c"\n[profile.c]\n'
+                           'inherits = "a"\n[profile.c.package.x]\nopt-level = "s"\n'
+                           '[profile.d]\ninherits = "e"\n[profile.e]\ninherits = "d"\n')
+    expect("a profile inherits through its chain, and a loop or another base is no inheritance",
+           inherits_from("b", "a", chain) and inherits_from("a", "a", chain)
+           and not inherits_from("d", "a", chain) and not inherits_from("release", "a", chain)
+           and chain["c"] == {"inherits": '"a"'})
+    expect("the Windows lane builds its packages and its client with std by the same profile",
+           pico_windows_package.SHIP_PROFILE == SHIP_PROFILE)
     # THE PICO CEILING (D9): synthetic readings against each kind of row, and the committed table.
     def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
         return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)

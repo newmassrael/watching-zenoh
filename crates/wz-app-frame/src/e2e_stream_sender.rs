@@ -35,14 +35,16 @@
 //! unchanged payload is then the kept frame with the new counter written in,
 //! and its CRC is the kept register fed only the pieces from the counter on. It
 //! is the same CRC by construction, because feeding is associative
-//! ([`crate::e2e_crc::Crc::resume`]); the tests compare it, byte for byte, with
+//! ([`crate::e2e_crc::Digest::resume`]); the tests compare it, byte for byte, with
 //! the full computation of [`crate::e2e_frame::build`], which stays the
 //! reference.
 
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::e2e_crc::Digest;
 use crate::e2e_frame::{build, crc_over, feed, write_be, BuildError, Values};
 use crate::e2e_profile::{Cover, Profile};
 
@@ -195,7 +197,9 @@ pub struct Protected {
 /// The sender of one message under one profile.
 #[derive(Debug, Clone)]
 pub struct StreamSender {
-    profile: Profile,
+    /// Shared, not copied: a profile does not change once read, and a catalog
+    /// hands one to every sender and receiver of its message.
+    profile: Arc<Profile>,
     /// The header every frame starts from, made when the sender is: each field written from the
     /// values, the counter, the length and the CRC written again for each frame.
     header: Vec<u8>,
@@ -217,7 +221,17 @@ impl StreamSender {
     /// derived field with no address, are refused now and not at the first
     /// send.
     pub fn new(
-        profile: Profile,
+        profile: impl Into<Arc<Profile>>,
+        values: Values,
+        options: SenderOptions,
+    ) -> Result<Self, SendError> {
+        Self::with_profile(profile.into(), values, options)
+    }
+
+    /// [`Self::new`] for a profile already shared: one body, whichever form
+    /// the caller held the profile in.
+    fn with_profile(
+        profile: Arc<Profile>,
         values: Values,
         options: SenderOptions,
     ) -> Result<Self, SendError> {
@@ -402,7 +416,7 @@ impl StreamSender {
         let crc = crc_over(&self.profile, out);
         write(out, crc_at, crc);
         if self.crc_cache {
-            let mut digest = self.profile.crc().engine.start();
+            let mut digest = Digest::start(&self.profile.crc().engine);
             for &item in &self.profile.crc().cover[..self.prefix] {
                 feed(&self.profile, &mut digest, item, out);
             }
@@ -434,7 +448,7 @@ impl StreamSender {
             counter ^ field.xor,
         );
         let crc = self.profile.crc();
-        let mut digest = crc.engine.resume(register);
+        let mut digest = Digest::resume(&crc.engine, register);
         for &item in &crc.cover[self.prefix..] {
             feed(&self.profile, &mut digest, item, out);
         }

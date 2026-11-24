@@ -13,7 +13,7 @@
 //! profile to the next; the CRC is taken over some of those fields and the
 //! body in an order that is FIXED by the profile and is generally not the wire
 //! order. A receiver judges each frame: CRC, then counter, then timeout
-//! ([`crate::e2e_judge`]). [`crate::e2e_frame`] builds and opens such frames.
+//! (`wz_app_frame::e2e_judge`). `wz_app_frame::e2e_frame` builds and opens such frames.
 //!
 //! # Why nothing is hard-coded
 //!
@@ -22,7 +22,7 @@
 //! every call, and the workspace's tests run on synthetic profiles whose
 //! widths, orders, masks and names are deliberately unlike any real one. The
 //! only fixed constants are the published CRC definitions in
-//! [`crate::e2e_crc`]'s tests.
+//! `wz_app_frame::e2e_crc`'s tests.
 //!
 //! # The description
 //!
@@ -67,7 +67,7 @@
 //!   accepts and the silence it tolerates. A `timeout_ms` of 0 states no limit
 //!   on the silence: a receiver never reports a timeout on a stream of the
 //!   profile, which is what a message sent on an event, with no period, needs.
-//!   A periodic message's profile states its limit (see [`crate::e2e_judge`]).
+//!   A periodic message's profile states its limit (see `wz_app_frame::e2e_judge`).
 //! * `slot` (optional) says which frames of a CAPTURE share one counter, for
 //!   the pipeline that keeps a judge per slot (`e2e_slots`, in the capture
 //!   crate); the stateless doors ignore it. A slot is the key expression the
@@ -142,16 +142,31 @@
 //! of that meaning would be a second, unchecked one. A rule that depends on a
 //! value (for instance "a result is forced to zero when the kind is a query")
 //! is the caller's: it decides the part values it passes.
+//!
+//! # Where it lives
+//!
+//! A profile is read once, when a node is handed it, so the data model and its
+//! reader are this crate's, built for size; `wz_app_frame::e2e_profile` names
+//! this module. What runs per frame under a profile (building, opening and
+//! judging a frame, the CRC digest) is `wz-app-frame`'s; the small accessors it
+//! reads the profile by are `#[inline]`, so their code is made where they are
+//! called.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use wz_session_core::json5::{self, Json5Value};
-use wz_session_core::json5_lex::{Json5Error, Lexer};
+use wz_session_core::json5::Json5Value;
 
-use crate::e2e_crc::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
-use crate::e2e_judge::{CounterRules, Judge, JudgeConfig};
+use crate::crc_table::{width_mask, Crc, CrcParams, CrcParamsError, SUPPORTED_WIDTHS};
+use crate::judge_config::{CounterRules, JudgeConfig};
+
+// The reader of such documents, the pointer a reader walks one with and the refusal it gives are
+// re-exported here, where the profile readers have always named them.
+pub use crate::json_doc::{
+    array, at, check_distinct, check_keys, child, object, optional, read_bool, read_json,
+    read_string, read_uint, required, DocError, Entries, Pointer, MAX_JSON_DEPTH,
+};
 
 /// Most fields a profile may declare.
 pub const MAX_FIELDS: usize = 32;
@@ -161,52 +176,6 @@ pub const MAX_PARTS: usize = 64;
 pub const MAX_NAME_BYTES: usize = 64;
 /// The `cover` entry that stands for the body.
 pub const PAYLOAD: &str = "@payload";
-/// Deepest nesting a profile or a values text may have. The deepest legitimate
-/// profile has five levels (the document, `fields`, a field, `split`, a part);
-/// a values text has three.
-pub const MAX_JSON_DEPTH: usize = 8;
-
-/// Why a document was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DocError {
-    /// The text is not JSON, and this is the byte where reading stopped.
-    Syntax {
-        /// Offset into the text.
-        offset: usize,
-        /// What the reader expected there.
-        expected: &'static str,
-    },
-    /// The text is JSON and not what was asked for.
-    Invalid {
-        /// An RFC 6901 JSON pointer to the place: empty for the document
-        /// itself, `/fields/2/split/0/lsb` for a value inside it.
-        path: String,
-        /// The reason, as a sentence.
-        reason: String,
-    },
-}
-
-impl DocError {
-    pub fn invalid(path: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Invalid {
-            path: path.into(),
-            reason: reason.into(),
-        }
-    }
-}
-
-impl core::fmt::Display for DocError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Syntax { offset, expected } => {
-                write!(f, "not JSON at byte {offset}: expected {expected}")
-            }
-            Self::Invalid { path, reason } if path.is_empty() => f.write_str(reason),
-            Self::Invalid { path, reason } => write!(f, "{path}: {reason}"),
-        }
-    }
-}
-
 /// The source a derived value is taken from. The node's address is the only one
 /// today; the profile names it, so that a later source is a new word and not a
 /// new reading of an old one.
@@ -227,6 +196,7 @@ pub struct Derive {
 impl Derive {
     /// The value for `address`. It fits the field or part the rule is on,
     /// because the mask and the xor were refused when they did not.
+    #[inline]
     pub fn apply(&self, address: u64) -> u64 {
         (address & self.mask) ^ self.xor
     }
@@ -248,6 +218,7 @@ pub struct Part {
 
 impl Part {
     /// The largest value the part holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask(self.width)
     }
@@ -273,6 +244,7 @@ pub struct Field {
 
 impl Field {
     /// The largest value the field holds.
+    #[inline]
     pub fn max_value(&self) -> u64 {
         width_mask((self.bytes * 8) as u8)
     }
@@ -281,6 +253,7 @@ impl Field {
     /// field, and the bits the parts own of a split one. A sender writes the
     /// others as the `xor` gives them and another sender may write them
     /// otherwise, so nothing that judges the field reads them.
+    #[inline]
     pub fn owned_bits(&self) -> u64 {
         if self.parts.is_empty() {
             return self.max_value();
@@ -305,7 +278,8 @@ pub enum Cover {
 pub struct CrcSpec {
     /// Index of the field the CRC is written to.
     pub field: usize,
-    /// The engine, built from the profile's parameters.
+    /// The engine, built from the profile's parameters once, when the profile
+    /// is read.
     pub engine: Crc,
     /// What is fed, in this order.
     pub cover: Vec<Cover>,
@@ -459,7 +433,7 @@ impl Profile {
             ],
         )?;
 
-        let name = doc.key("name").read_name(doc.required(entries, "name")?)?;
+        let name = read_name(&doc.key("name"), doc.required(entries, "name")?)?;
         let fields = read_fields(doc.required(entries, "fields")?)?;
         let header_bytes = fields.iter().map(|f| f.bytes).sum();
 
@@ -514,6 +488,7 @@ impl Profile {
     }
 
     /// The header fields in wire order.
+    #[inline]
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
@@ -524,36 +499,43 @@ impl Profile {
     }
 
     /// The header's size; the body starts at this offset.
+    #[inline]
     pub fn header_bytes(&self) -> usize {
         self.header_bytes
     }
 
     /// The CRC rules.
+    #[inline]
     pub fn crc(&self) -> &CrcSpec {
         &self.crc
     }
 
     /// The length rules.
+    #[inline]
     pub fn length(&self) -> &LengthSpec {
         &self.length
     }
 
     /// The counter rules.
+    #[inline]
     pub fn counter(&self) -> &CounterSpec {
         &self.counter
     }
 
     /// What the profile says about which frames share a counter.
+    #[inline]
     pub fn slot(&self) -> &SlotSpec {
         &self.slot
     }
 
     /// The rules a receiver judges a frame by beyond the CRC and the step.
+    #[inline]
     pub fn rules(&self) -> &JudgeRules {
         &self.rules
     }
 
     /// The message cell, when the profile names one.
+    #[inline]
     pub fn cell(&self) -> Option<&CellSpec> {
         self.cell.as_ref()
     }
@@ -583,17 +565,11 @@ impl Profile {
         }
     }
 
-    /// A judge for one stream of this profile's frames, configured from its
-    /// counter rules. A stream is the caller's to define, so the caller keeps
-    /// one judge per stream; see [`crate::e2e_judge`].
-    pub fn judge(&self) -> Judge {
-        Judge::with_rules(self.judge_config(), self.counter_rules())
-    }
-
     /// The value the length field carries for a body of `payload_bytes`.
     ///
     /// It may be larger than the length field can hold; the builder checks
     /// that and refuses with the numbers.
+    #[inline]
     pub fn length_for(&self, payload_bytes: usize) -> u64 {
         let total = (self.header_bytes + payload_bytes) as u64;
         match &self.length.counts {
@@ -606,319 +582,13 @@ impl Profile {
     }
 }
 
-/// The workspace's JSON reader, with its refusal in this module's terms.
-///
-/// The document is first walked by the lexer's bounded skip, which checks the
-/// whole grammar and refuses nesting past [`MAX_JSON_DEPTH`] without recursing
-/// beyond it; only then is the tree built, by a parser that has no bound of its
-/// own. Both refusals carry the byte they stopped at.
-///
-/// Out of line, as the readers of [`Pointer`] are: every kind of document is
-/// read through it.
+/// The name `path` points at: a profile's, a field's or a part's. Out of
+/// line: every kind of profile reads its names through it.
 #[inline(never)]
-pub fn read_json(text: &str) -> Result<Json5Value, DocError> {
-    let syntax = |e: Json5Error| DocError::Syntax {
-        offset: e.offset,
-        expected: e.expected,
-    };
-    let mut lexer = Lexer::new(text);
-    lexer.skip_trivia().map_err(syntax)?;
-    lexer.skip_value(MAX_JSON_DEPTH).map_err(syntax)?;
-    json5::parse(text).map_err(syntax)
-}
-
-/// Where a reader stands in a document: an RFC 6901 JSON pointer that is
-/// written out only when a refusal names it. A reader descends by borrowing
-/// the step above, so a document that is accepted builds no path at all.
-#[derive(Debug, Clone, Copy)]
-pub struct Pointer<'a> {
-    parent: Option<&'a Pointer<'a>>,
-    step: Step<'a>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Step<'a> {
-    /// A pointer already written out.
-    Text(&'a str),
-    /// A member of an object, by its key.
-    Key(&'a str),
-    /// An item of an array, by its index.
-    Index(usize),
-}
-
-// The readers below are out of line: each kind of document calls them at many
-// places, and every inlined copy carried the member search, the comparison of
-// its text and the building of the refusal. A document is read once, when it is
-// handed over, so the call costs nothing a sample pays.
-impl<'a> Pointer<'a> {
-    /// A pointer already written out: `""` is the document itself.
-    pub const fn text(text: &'a str) -> Self {
-        Self {
-            parent: None,
-            step: Step::Text(text),
-        }
-    }
-
-    /// The member `key` of the object this points at.
-    pub fn key<'b>(&'b self, key: &'b str) -> Pointer<'b> {
-        Pointer {
-            parent: Some(self),
-            step: Step::Key(key),
-        }
-    }
-
-    /// The item `index` of the array this points at.
-    pub fn index(&self, index: usize) -> Pointer<'_> {
-        Pointer {
-            parent: Some(self),
-            step: Step::Index(index),
-        }
-    }
-
-    /// The pointer written out, a key's `~` and `/` escaped as RFC 6901 says.
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        self.write_into(&mut out);
-        out
-    }
-
-    fn write_into(&self, out: &mut String) {
-        use core::fmt::Write as _;
-        if let Some(parent) = self.parent {
-            parent.write_into(out);
-        }
-        match self.step {
-            Step::Text(text) => out.push_str(text),
-            Step::Key(key) => {
-                out.push('/');
-                for c in key.chars() {
-                    match c {
-                        '~' => out.push_str("~0"),
-                        '/' => out.push_str("~1"),
-                        c => out.push(c),
-                    }
-                }
-            }
-            // Writing into a `String` does not fail.
-            Step::Index(index) => {
-                let _ = write!(out, "/{index}");
-            }
-        }
-    }
-
-    /// The refusal of what stands here, for `reason`.
-    #[inline(never)]
-    pub fn refuse(&self, reason: impl Into<String>) -> DocError {
-        DocError::Invalid {
-            path: self.render(),
-            reason: reason.into(),
-        }
-    }
-
-    /// The object this points at.
-    #[inline(never)]
-    pub fn object<'v>(&self, value: &'v Json5Value) -> Result<&'v Entries, DocError> {
-        match value {
-            Json5Value::Object(entries) => Ok(entries),
-            other => Err(self.refuse(format!("expected an object, found {}", describe(other)))),
-        }
-    }
-
-    /// The array this points at.
-    #[inline(never)]
-    pub fn array<'v>(&self, value: &'v Json5Value) -> Result<&'v [Json5Value], DocError> {
-        match value {
-            Json5Value::Array(items) => Ok(items),
-            other => Err(self.refuse(format!("expected an array, found {}", describe(other)))),
-        }
-    }
-
-    /// Refuse a key outside `allowed` and a key that appears twice. The reader
-    /// keeps every member, and resolving a repeat silently (last one wins) would
-    /// make a typo in a profile read as a choice.
-    #[inline(never)]
-    pub fn check_keys(&self, entries: &Entries, allowed: &[&str]) -> Result<(), DocError> {
-        for (key, _) in entries {
-            if !allowed.contains(&key.as_str()) {
-                return Err(self.key(key).refuse(format!(
-                    "unknown key `{key}` (allowed here: {})",
-                    allowed.join(", ")
-                )));
-            }
-        }
-        self.check_distinct(entries)
-    }
-
-    /// Refuse a key that appears twice, for an object whose keys are the
-    /// caller's own names rather than a fixed list.
-    #[inline(never)]
-    pub fn check_distinct(&self, entries: &Entries) -> Result<(), DocError> {
-        for (i, (key, _)) in entries.iter().enumerate() {
-            if entries[..i].iter().any(|(earlier, _)| earlier == key) {
-                return Err(self
-                    .key(key)
-                    .refuse(format!("the key `{key}` appears twice")));
-            }
-        }
-        Ok(())
-    }
-
-    /// The member `key` of `entries`, which this points at, refused here when
-    /// it is missing.
-    #[inline(never)]
-    pub fn required<'v>(
-        &self,
-        entries: &'v Entries,
-        key: &str,
-    ) -> Result<&'v Json5Value, DocError> {
-        optional(entries, key).ok_or_else(|| self.refuse(format!("the key `{key}` is required")))
-    }
-
-    /// An unsigned integer as a profile or a values document writes one: a
-    /// plain decimal JSON number, or a string of decimal or `0x` hex digits.
-    #[inline(never)]
-    pub fn read_uint(&self, value: &Json5Value) -> Result<u64, DocError> {
-        let result = match value {
-            Json5Value::Number(text) => {
-                if is_plain_decimal(text) {
-                    uint_from_text(text)
-                } else {
-                    Err(format!(
-                        "`{text}` is not a plain unsigned decimal number: write hexadecimal \
-                         as a string such as \"0x1f\""
-                    ))
-                }
-            }
-            Json5Value::String(text) => uint_from_text(text),
-            other => Err(format!(
-                "expected an unsigned integer (a number, or a string of decimal or 0x hex \
-                 digits), found {}",
-                describe(other)
-            )),
-        };
-        result.map_err(|reason| self.refuse(reason))
-    }
-
-    /// The boolean this points at.
-    #[inline(never)]
-    pub fn read_bool(&self, value: &Json5Value) -> Result<bool, DocError> {
-        match value {
-            Json5Value::Bool(b) => Ok(*b),
-            other => Err(self.refuse(format!("expected true or false, found {}", describe(other)))),
-        }
-    }
-
-    /// The string this points at.
-    #[inline(never)]
-    pub fn read_string<'v>(&self, value: &'v Json5Value) -> Result<&'v str, DocError> {
-        match value {
-            Json5Value::String(s) => Ok(s),
-            other => Err(self.refuse(format!("expected a string, found {}", describe(other)))),
-        }
-    }
-
-    /// The name this points at: a profile's, a field's or a part's.
-    #[inline(never)]
-    pub(crate) fn read_name(&self, value: &Json5Value) -> Result<String, DocError> {
-        let name = self.read_string(value)?;
-        check_name(name, self)?;
-        Ok(String::from(name))
-    }
-}
-
-/// `path` with the member `key` below it, written out. A reader holds a
-/// [`Pointer`] instead, which is written out only for a refusal.
-pub fn child(path: &str, key: &str) -> String {
-    Pointer::text(path).key(key).render()
-}
-
-/// `path` with the item `index` below it, written out.
-pub fn at(path: &str, index: usize) -> String {
-    Pointer::text(path).index(index).render()
-}
-
-#[inline(never)]
-pub(crate) fn describe(value: &Json5Value) -> &'static str {
-    match value {
-        Json5Value::Null => "null",
-        Json5Value::Bool(_) => "a boolean",
-        Json5Value::Number(_) => "a number",
-        Json5Value::String(_) => "a string",
-        Json5Value::Array(_) => "an array",
-        Json5Value::Object(_) => "an object",
-    }
-}
-
-pub type Entries = [(String, Json5Value)];
-
-pub fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entries, DocError> {
-    Pointer::text(path).object(value)
-}
-
-pub fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
-    Pointer::text(path).array(value)
-}
-
-/// [`Pointer::check_keys`] at a pointer already written out.
-pub fn check_keys(entries: &Entries, allowed: &[&str], path: &str) -> Result<(), DocError> {
-    Pointer::text(path).check_keys(entries, allowed)
-}
-
-/// [`Pointer::check_distinct`] at a pointer already written out.
-pub fn check_distinct(entries: &Entries, path: &str) -> Result<(), DocError> {
-    Pointer::text(path).check_distinct(entries)
-}
-
-/// The member `key` of `entries`, when there is one. Out of line, as the
-/// readers of [`Pointer`] are.
-#[inline(never)]
-pub fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5Value> {
-    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-pub fn required<'a>(
-    entries: &'a Entries,
-    key: &str,
-    path: &str,
-) -> Result<&'a Json5Value, DocError> {
-    Pointer::text(path).required(entries, key)
-}
-
-/// Whether `text` is `0` or digits with no leading zero.
-fn is_plain_decimal(text: &str) -> bool {
-    !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text.len() == 1 || !text.starts_with('0'))
-}
-
-fn uint_from_text(text: &str) -> Result<u64, String> {
-    let does_not_fit = || format!("`{text}` does not fit in 64 bits");
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!("`{text}` is not hexadecimal digits after `0x`"));
-        }
-        return u64::from_str_radix(hex, 16).map_err(|_| does_not_fit());
-    }
-    if !is_plain_decimal(text) {
-        return Err(format!(
-            "`{text}` is not an unsigned integer: write decimal digits with no sign or \
-             leading zero, or `0x` and hex digits"
-        ));
-    }
-    text.parse().map_err(|_| does_not_fit())
-}
-
-/// [`Pointer::read_uint`] at a pointer already written out.
-pub fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError> {
-    Pointer::text(path).read_uint(value)
-}
-
-pub fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
-    Pointer::text(path).read_bool(value)
-}
-
-pub fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
-    Pointer::text(path).read_string(value)
+pub(crate) fn read_name(path: &Pointer<'_>, value: &Json5Value) -> Result<String, DocError> {
+    let name = path.read_string(value)?;
+    check_name(name, path)?;
+    Ok(String::from(name))
 }
 
 fn check_name(name: &str, path: &Pointer<'_>) -> Result<(), DocError> {
@@ -943,6 +613,28 @@ fn check_name(name: &str, path: &Pointer<'_>) -> Result<(), DocError> {
     Ok(())
 }
 
+/// The name and the width of the field `entries` describes at `here`, read
+/// one way for every kind of profile: a name no earlier field has (`named`
+/// answers whether one has it), and 1 to 8 bytes.
+#[inline(never)]
+pub(crate) fn read_field_head(
+    here: &Pointer<'_>,
+    entries: &Entries,
+    named: &dyn Fn(&str) -> bool,
+) -> Result<(String, usize), DocError> {
+    let name_at = here.key("name");
+    let name = read_name(&name_at, here.required(entries, "name")?)?;
+    if named(&name) {
+        return Err(name_at.refuse(format!("two fields are called `{name}`")));
+    }
+    let bytes_at = here.key("bytes");
+    let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
+    if !(1..=8).contains(&bytes) {
+        return Err(bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}")));
+    }
+    Ok((name, bytes as usize))
+}
+
 fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
     let path = Pointer::text("/fields");
     let items = path.array(value)?;
@@ -959,19 +651,8 @@ fn read_fields(value: &Json5Value) -> Result<Vec<Field>, DocError> {
         let entries = here.object(item)?;
         here.check_keys(entries, &["name", "bytes", "xor", "split", "derive"])?;
 
-        let name_at = here.key("name");
-        let name = name_at.read_name(here.required(entries, "name")?)?;
-        if fields.iter().any(|f| f.name == name) {
-            return Err(name_at.refuse(format!("two fields are called `{name}`")));
-        }
-        let bytes_at = here.key("bytes");
-        let bytes = bytes_at.read_uint(here.required(entries, "bytes")?)?;
-        if !(1..=8).contains(&bytes) {
-            return Err(
-                bytes_at.refuse(format!("a field is 1 to 8 bytes wide, this one is {bytes}"))
-            );
-        }
-        let bytes = bytes as usize;
+        let named = |name: &str| fields.iter().any(|f| f.name == name);
+        let (name, bytes) = read_field_head(&here, entries, &named)?;
         let bits = (bytes * 8) as u8;
 
         let xor = match optional(entries, "xor") {
@@ -1031,7 +712,7 @@ fn read_split(value: &Json5Value, path: &Pointer<'_>, bits: u8) -> Result<Vec<Pa
         here.check_keys(entries, &["name", "lsb", "width", "derive"])?;
 
         let name_at = here.key("name");
-        let name = name_at.read_name(here.required(entries, "name")?)?;
+        let name = read_name(&name_at, here.required(entries, "name")?)?;
         if parts.iter().any(|p| p.name == name) {
             return Err(name_at.refuse(format!("two parts of one field are called `{name}`")));
         }
@@ -1105,14 +786,6 @@ fn read_derive(value: &Json5Value, path: &Pointer<'_>, bits: u8) -> Result<Deriv
     Ok(Derive { mask, xor })
 }
 
-#[inline(never)]
-fn field_named(fields: &[Field], name: &str, path: &Pointer<'_>) -> Result<usize, DocError> {
-    fields
-        .iter()
-        .position(|f| f.name == name)
-        .ok_or_else(|| path.refuse(format!("no field is called `{name}`")))
-}
-
 /// A field the mechanism gives a meaning to (CRC, length, counter) carries no
 /// transformation of its own.
 fn plain(field: &Field, role: &str, path: &Pointer<'_>) -> Result<(), DocError> {
@@ -1165,7 +838,7 @@ fn read_crc_engine(entries: &Entries, path: &Pointer<'_>) -> Result<Crc, DocErro
     })
 }
 
-/// A profile kind's header fields as its CRC object reads them.
+/// A profile kind's header fields, as its CRC object and its roles read them.
 pub(crate) trait CrcFields {
     /// The index of the field called `name`.
     fn index_of(&self, name: &str) -> Option<usize>;
@@ -1204,8 +877,10 @@ pub(crate) struct CrcObject {
     pub(crate) cover: Vec<Option<usize>>,
 }
 
-/// The index of the field `name` names, for a CRC object.
-fn crc_field_named(
+/// The index of the field `name` names, refused at `path` when no field has
+/// it: one body for every kind of profile and every place that names a field.
+#[inline(never)]
+pub(crate) fn field_called(
     fields: &dyn CrcFields,
     name: &str,
     path: &Pointer<'_>,
@@ -1234,7 +909,7 @@ pub(crate) fn read_crc_object(
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = crc_field_named(fields, field_name, &field_at)?;
+    let field = field_called(fields, field_name, &field_at)?;
     fields.may_hold_crc(field, &field_at)?;
 
     let engine = read_crc_engine(entries, path)?;
@@ -1259,7 +934,7 @@ pub(crate) fn read_crc_object(
         let entry = if name == body {
             None
         } else {
-            Some(crc_field_named(fields, name, &here)?)
+            Some(field_called(fields, name, &here)?)
         };
         if entry == Some(field) {
             return Err(here.refuse(format!(
@@ -1298,7 +973,7 @@ fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocEr
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     plain(&fields[field], "length", &field_at)?;
 
     let counts_at = path.key("counts");
@@ -1324,7 +999,7 @@ fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocEr
             for (i, item) in items.iter().enumerate() {
                 let here = list_at.index(i);
                 let name = here.read_string(item)?;
-                let index = field_named(fields, name, &here)?;
+                let index = field_called(&fields, name, &here)?;
                 if skipped.contains(&index) {
                     return Err(here.refuse(format!("`{name}` is listed twice")));
                 }
@@ -1360,7 +1035,7 @@ fn read_slot(
         for (i, item) in list_at.array(v)?.iter().enumerate() {
             let here = list_at.index(i);
             let name = here.read_string(item)?;
-            let index = field_named(fields, name, &here)?;
+            let index = field_called(&fields, name, &here)?;
             if judged.contains(&index) {
                 return Err(here.refuse(format!(
                     "`{name}` is the crc, length or counter field: it changes from \
@@ -1387,7 +1062,7 @@ fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, Doc
 
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     plain(&fields[field], "counter", &field_at)?;
 
     let gap_at = path.key("max_gap");
@@ -1454,7 +1129,7 @@ fn read_rules(
     if let Some(v) = optional(entries, "ident") {
         let here = path.key("ident");
         let name = here.read_string(v)?;
-        let index = field_named(fields, name, &here)?;
+        let index = field_called(&fields, name, &here)?;
         if judged.contains(&index) {
             return Err(here.refuse(format!(
                 "`{name}` is the crc, length or counter field, each judged by a rule of \
@@ -1502,7 +1177,7 @@ fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError>
     path.check_keys(entries, &["field", "kind", "result", "sender"])?;
     let field_at = path.key("field");
     let field_name = field_at.read_string(path.required(entries, "field")?)?;
-    let field = field_named(fields, field_name, &field_at)?;
+    let field = field_called(&fields, field_name, &field_at)?;
     let parts = &fields[field].parts;
     if parts.is_empty() {
         return Err(field_at.refuse(format!(
@@ -1539,42 +1214,4 @@ fn read_cell(value: &Json5Value, fields: &[Field]) -> Result<CellSpec, DocError>
         result,
         sender,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use alloc::string::String;
-
-    use super::{at, child, Pointer};
-
-    #[test]
-    fn a_pointer_is_written_out_as_the_eager_path_was() {
-        let fields = Pointer::text("/fields");
-        let here = fields.index(2);
-        let split = here.key("split");
-        let part = split.index(0);
-        assert_eq!(part.key("lsb").render(), "/fields/2/split/0/lsb");
-        assert_eq!(
-            part.key("lsb").render(),
-            child(&at(&child(&at("/fields", 2), "split"), 0), "lsb")
-        );
-
-        let doc = Pointer::text("");
-        assert_eq!(doc.render(), "");
-        assert_eq!(doc.key("name").render(), "/name");
-        // RFC 6901: `~` is written `~0` and `/` is written `~1`, in that order.
-        assert_eq!(doc.key("a~/b").render(), "/a~0~1b");
-        assert_eq!(doc.key("a~/b").render(), child("", "a~/b"));
-        assert_eq!(doc.key("").render(), "/");
-        assert_eq!(doc.index(10).render(), "/10");
-
-        let refused = doc.key("x").index(1).refuse("why");
-        assert_eq!(
-            refused,
-            super::DocError::Invalid {
-                path: String::from("/x/1"),
-                reason: String::from("why"),
-            }
-        );
-    }
 }
