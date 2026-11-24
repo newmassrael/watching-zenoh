@@ -5489,9 +5489,12 @@ impl SharedSession {
                 (Some(fan), Ok(interest_id)) => {
                     let undo = session.clone();
                     let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo.cancel_pending_liveliness_get(interest_id);
-                    })
+                    !crate::fan_undo::record(
+                        fan,
+                        Box::new(move || {
+                            undo.cancel_pending_liveliness_get(interest_id);
+                        }),
+                    )
                 }
                 _ => false,
             };
@@ -6036,7 +6039,7 @@ impl SharedSession {
         // `false` when the token cancelled while the fan was running.
         let mut issue_recorded = |leg: QueryLeg<'_>| -> bool {
             match (issue(leg), fan) {
-                (Some(rid), Some(fan)) => fan.record(leg.canceller(rid)),
+                (Some(rid), Some(fan)) => crate::fan_undo::record(fan, leg.canceller(rid)),
                 _ => true,
             }
         };

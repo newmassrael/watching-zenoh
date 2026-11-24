@@ -115,6 +115,10 @@ pub(crate) struct Counts {
     pub(crate) matching_listeners: usize,
     /// Declaration watches of each session.
     pub(crate) decl_watches: usize,
+    /// Advanced publishers of each session.
+    pub(crate) advanced_publishers: usize,
+    /// Advanced subscribers of each session, owned and background.
+    pub(crate) advanced_subscribers: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -188,6 +192,8 @@ pub(crate) struct Bounds {
     liveliness_gets: Option<usize>,
     matching_listeners: Option<usize>,
     decl_watches: Option<usize>,
+    advanced_publishers: Option<usize>,
+    advanced_subscribers: Option<usize>,
 }
 
 impl Bounds {
@@ -205,6 +211,8 @@ impl Bounds {
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
             matching_listeners: limits.max_matching_listeners().most(),
             decl_watches: limits.max_decl_watches().most(),
+            advanced_publishers: limits.max_advanced_publishers().most(),
+            advanced_subscribers: limits.max_advanced_subscribers().most(),
         }
     }
 }
@@ -332,12 +340,24 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.decl_watches,
             bounds.decl_watches,
         )),
+        advanced_publishers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_publishers,
+            bounds.advanced_publishers,
+        )),
+        advanced_subscribers: planned!(bounded(
+            cfg!(feature = "advanced"),
+            sessions,
+            stated.advanced_subscribers,
+            bounds.advanced_subscribers,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 19;
+const KINDS: usize = 22;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,6 +454,13 @@ impl Plan {
         {
             plan =
                 plan.with::<crate::decl_watch::WatchPlace>(Kind::DeclWatch, objects.decl_watches);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        {
+            plan = plan.with::<crate::advanced::AdvPubState>(
+                Kind::AdvancedPublisher,
+                objects.advanced_publishers,
+            );
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -955,6 +982,12 @@ const fn built_counts() -> Result<Counts, Unplanned> {
             limits.max_matching_listeners(),
         ),
         decl_watches: each::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches()),
+        advanced_publishers: each::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            limits.max_advanced_publishers(),
+        ),
+        advanced_subscribers: each::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            limits.max_advanced_subscribers(),
+        ),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -982,6 +1015,8 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_gets: 0,
         matching_listeners: 0,
         decl_watches: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1227,6 +1262,8 @@ mod tests {
         liveliness_gets: Some(9),
         matching_listeners: Some(10),
         decl_watches: Some(11),
+        advanced_publishers: Some(10),
+        advanced_subscribers: Some(11),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1240,6 +1277,8 @@ mod tests {
         liveliness_gets: None,
         matching_listeners: None,
         decl_watches: None,
+        advanced_publishers: None,
+        advanced_subscribers: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1340,6 +1379,8 @@ mod tests {
             liveliness_gets: 1,
             matching_listeners: 1,
             decl_watches: 1,
+            advanced_publishers: 1,
+            advanced_subscribers: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1767,6 +1808,12 @@ mod tests {
             Kind::DeclWatch,
             core::mem::size_of::<crate::decl_watch::WatchPlace>(),
         );
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        row(
+            "advanced_publisher",
+            Kind::AdvancedPublisher,
+            core::mem::size_of::<crate::advanced::AdvPubState>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1960,6 +2007,8 @@ mod tests {
             )
         ))]
         check(Kind::DeclWatch);
+        #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
+        check(Kind::AdvancedPublisher);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1987,6 +2036,14 @@ mod tests {
             limits.max_matching_listeners().most()
         );
         assert_eq!(bounds.decl_watches, limits.max_decl_watches().most());
+        assert_eq!(
+            bounds.advanced_publishers,
+            limits.max_advanced_publishers().most()
+        );
+        assert_eq!(
+            bounds.advanced_subscribers,
+            limits.max_advanced_subscribers().most()
+        );
     }
 
     /// The free blocks of `order`, by their offsets, first to last.

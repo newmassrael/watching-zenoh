@@ -180,6 +180,10 @@ impl wz_ext_object_pool_counts_t {
             liveliness_gets: self.liveliness_gets,
             matching_listeners: self.matching_listeners,
             decl_watches: self.decl_watches,
+            // At the bound of the session's `MAX_ADVANCED_PUBLISHERS` and
+            // `MAX_ADVANCED_SUBSCRIBERS`, which the program states no count of.
+            advanced_publishers: 0,
+            advanced_subscribers: 0,
         }
     }
 }
@@ -455,6 +459,8 @@ mod tests {
                 liveliness_gets: 18,
                 matching_listeners: 19,
                 decl_watches: 20,
+                advanced_publishers: 0,
+                advanced_subscribers: 0,
             }
         );
     }

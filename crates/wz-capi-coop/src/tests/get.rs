@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken};
 use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
@@ -53,14 +53,14 @@ pub(super) fn remote_get() -> QueryOptions {
 }
 
 /// Ask a get on `keyexpr` with `opts`, its legs recorded in what is returned, each holding
-/// `registration` when there is one, as a C get's callbacks hold theirs. `step`, when given, is
-/// stepped from inside each reply callback.
+/// `registration` (the get's fan, which is its registration on its token) when there is one, as a
+/// C get's callbacks hold theirs. `step`, when given, is stepped from inside each reply callback.
 pub(super) fn ask(
     engine: &Engine,
     keyexpr: &str,
     opts: &QueryOptions,
     fan: Option<&CancellableFan>,
-    registration: Option<Arc<Registration>>,
+    registration: Option<Arc<CancellableFan>>,
     step: Option<Arc<Engine>>,
 ) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
@@ -203,17 +203,16 @@ fn a_cancelled_get_ends_without_a_step() {
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let token = CancellationToken::new();
-    let (fan, registration) = register_fan(&token).expect("a fresh token registers");
-    let registration = Arc::new(registration);
+    let fan = register_fan(&token).expect("a fresh token registers");
     let (issued, leg) = ask(
         &engine,
         "demo/g/a",
         &remote_get(),
         Some(&fan),
-        Some(registration.clone()),
+        Some(fan.clone()),
         None,
     );
-    drop(registration);
+    drop(fan);
     assert_eq!(issued, Ok(1));
     assert!(
         !leg.lock().unwrap().ended,
