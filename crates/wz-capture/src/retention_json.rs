@@ -558,7 +558,7 @@ mod tests {
             doc.contains("\"oldest_ts_ns\":\"1700000000000000000\"}"),
             "a real-clock instant is the digits in a string: {doc}"
         );
-        assert!(doc.contains("\"revision\":5"), "{doc}");
+        assert!(doc.contains("\"revision\":6"), "{doc}");
 
         // The last millisecond that stays a number: 9_007_199_254 ms is 9.007e15 ns
         // and under the line; one more is over it.

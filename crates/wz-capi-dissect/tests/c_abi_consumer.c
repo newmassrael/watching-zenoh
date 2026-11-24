@@ -4521,8 +4521,10 @@ int main(void) {
      * declared after; the exchange plane gains `maybe_other_link`; a reply
      * pairs with its request across a named session's links.
      * 28: `dropped_by_limits.caps` gains `chain_bytes`, the bytes one fragment
-     * chain may join. A key arrives; nothing retires. */
-    revisioned[0].revision = 28;
+     * chain may join. A key arrives; nothing retires.
+     * 29: `dropped_by_limits.caps` gains `stream_bytes_total`, the bytes every
+     * TCP flow keeps together. A key arrives; nothing retires. */
+    revisioned[0].revision = 29;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -4552,8 +4554,10 @@ int main(void) {
      * counted and its section comments carried. Eight keys arrive; nothing
      * retires.
      * 10: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
-     * retires. */
-    revisioned[1].revision = 10;
+     * retires.
+     * 11: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
+    revisioned[1].revision = 11;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -4855,8 +4859,10 @@ int main(void) {
      * chose it. Two keys and one family arrive; a json or cbor decoding is
      * now typed.
      * 83: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives;
+     * nothing retires.
+     * 84: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
      * nothing retires. */
-    revisioned[2].revision = 83;
+    revisioned[2].revision = 84;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4884,8 +4890,10 @@ int main(void) {
      * 4: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
      * 5: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
-     * retires. */
-    revisioned[4].revision = 5;
+     * retires.
+     * 6: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
+    revisioned[4].revision = 6;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;
@@ -4902,8 +4910,9 @@ int main(void) {
      * same `health` object; 4 on the summary's move to 7, `caps` gaining
      * `frames_total`; 5 on the summary's move to 8, `skips` gaining
      * `link_type_interfaces`; 6 on the summary's move to 10, `caps` gaining
-     * `chain_bytes`. */
-    revisioned[5].revision = 6;
+     * `chain_bytes`; 7 on the summary's move to 11, `caps` gaining
+     * `stream_bytes_total`. */
+    revisioned[5].revision = 7;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;
@@ -5032,9 +5041,11 @@ int main(void) {
      * 14: model 7, as the field document's 68. No key moves.
      * 15: each flow gains `direction_basis`, what named its directions.
      * 16: `dropped_by_limits.caps` gains `chain_bytes`. Keys arrive; nothing
-     * retires. */
+     * retires.
+     * 17: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 16;
+    revisioned[12].revision = 17;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -5127,9 +5138,11 @@ int main(void) {
      * 5: a query reply carrying a put is read as a published sample is (its
      * CRC judged, its counter and timeout not). Values move; no key arrives.
      * 6: `dropped_by_limits.caps` gains `chain_bytes`. A key arrives; nothing
-     * retires. */
+     * retires.
+     * 7: `dropped_by_limits.caps` gains `stream_bytes_total`. A key arrives;
+     * nothing retires. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 6;
+    revisioned[18].revision = 7;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;
