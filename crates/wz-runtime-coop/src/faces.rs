@@ -742,16 +742,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         let mut signals = Signals::default();
         let mut answer = None;
         match self.face_mut(at).map(|face| face.link_mut()) {
-            Some(Link::Up(wire)) => signals.ended = wire.finished(),
-            Some(Link::Opening { wire, .. }) => {
-                signals.ended = wire.finished();
-                signals.established = wire.established();
-            }
             Some(Link::Dialing { dial, .. }) => {
                 answer = dial.answer();
                 signals.dial = answer.as_ref().map(Result::is_ok);
             }
-            _ => {}
+            // An established link and one in its handshake read their wire's end by one look; only
+            // the handshake's has an establishment to report.
+            Some(link) => {
+                if let Some(wire) = link.wire() {
+                    signals.ended = wire.finished();
+                    signals.established =
+                        matches!(link, Link::Opening { .. }) && wire.established();
+                }
+            }
+            None => {}
         }
         if let Phase::Held { node } = &phase {
             signals.node_held = self.node_is_held(node.as_slice(), id);
@@ -1298,6 +1302,16 @@ mod tests {
         assert!(read.signals.established);
         assert!(!read.signals.ended);
         assert!(read.answer.is_none());
+        // An established link reads its wire's end and reports no establishment: only a
+        // handshake's link has one to report.
+        faces.put_link(
+            1,
+            Link::Up(wire(&local, session(true, Some(&node)), false, false)),
+        );
+        let up = faces.read_face(1, 1);
+        assert_eq!(up.phase, Phase::Up);
+        assert!(!up.signals.established);
+        assert!(!up.signals.ended);
 
         faces.put_link(0, Link::Held { zid: held_node() });
         assert!(faces.read_face(0, 100).signals.node_held);
