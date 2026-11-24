@@ -1248,6 +1248,16 @@ mod tests {
         >());
     }
 
+    /// A build that asks no query holds its faces' pending gets over a sink of no value: no row of
+    /// them can be made, so none is delivered to or dropped. Turned red by a sink that can be made
+    /// chosen for such a build.
+    #[cfg(not(feature = "query"))]
+    #[test]
+    fn without_query_a_pending_get_has_a_sink_of_no_value() {
+        assert_eq!(core::mem::size_of::<LegSink>(), 0);
+        assert_eq!(core::mem::size_of::<Option<LegSink>>(), 0);
+    }
+
     /// A flip reported for a listener waits in the session's queue under the listener's id, to be
     /// handed after the lock; a change back before it is handed takes it away.
     #[test]
