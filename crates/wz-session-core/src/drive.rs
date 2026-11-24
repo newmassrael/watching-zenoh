@@ -2178,14 +2178,16 @@ where
     // one message is read on where it lies, as [`dispatch_datagram`] reads it.
     let mut hand = through_hand_off(reasm, actions, now_ms, on_event);
     let mut path = None;
-    let mut at = 0usize;
-    while let Some(rest) = unit.get(at..) {
+    let mut rest = unit;
+    loop {
         let (read_by, used, _) =
             dispatch_datagram_reassembling_unit(rest, None, false, engine, record, &mut hand);
         path.get_or_insert(read_by);
-        at = at.saturating_add(used);
-        if used == 0 || at >= unit.len() {
-            break;
+        // Walked on the slice left rather than an offset into it: the end is where no unit is
+        // left, with no sum to bound.
+        match rest.get(used..) {
+            Some(next) if used != 0 && !next.is_empty() => rest = next,
+            _ => break,
         }
     }
     path.unwrap_or(DatagramPath::InPlace)
@@ -3075,10 +3077,11 @@ where
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
     let peer_len = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-        for (to, from) in peer.iter_mut().zip(zid) {
-            *to = *from;
+        let kept = zid.get(..peer.len()).unwrap_or(zid);
+        if let Some(to) = peer.get_mut(..kept.len()) {
+            to.copy_from_slice(kept);
         }
-        zid.len().min(peer.len())
+        kept.len()
     });
     let mut dropped_by_decode = None;
     let ingest_outcome = reasm.ingest_keeping(

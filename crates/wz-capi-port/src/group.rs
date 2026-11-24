@@ -146,7 +146,7 @@ impl GroupDeclarations {
         if self.declares_keyexprs() && wire.mapping_id != 0 {
             GroupKey {
                 mapping_id: wire.mapping_id,
-                suffix: wire.suffix.as_deref(),
+                suffix: wire.suffix(),
             }
         } else {
             GroupKey::literal(keyexpr)

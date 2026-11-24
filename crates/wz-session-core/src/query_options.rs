@@ -1127,7 +1127,9 @@ impl<'a> QueryOptionsOf<'a> {
     /// Only the body is built ([`crate::request_build::QueryBuilder`]): the loopback's request id
     /// and key ride the dispatch's arguments. Its caller-error asserts are the wire's too, so a
     /// selector longer than the wire's bound panics here as it would on the link: a selector that
-    /// no wire queryable could receive is not one a local queryable should.
+    /// no wire queryable could receive is not one a local queryable should. A part the codec
+    /// refuses (a source info that names no zid) is the builder's `CodecError`, answered as the
+    /// wire's is, so each engine refuses that leg as it refuses a link's.
     ///
     /// [`PublishOptions::loopback_sample`]: crate::publish_options::PublishOptions::loopback_sample
     #[cfg(all(
@@ -1136,7 +1138,9 @@ impl<'a> QueryOptionsOf<'a> {
         feature = "codec-request",
         feature = "alloc"
     ))]
-    pub fn loopback_query(&self) -> crate::wire::parts::QueryOwned {
+    pub fn loopback_query(
+        &self,
+    ) -> Result<crate::wire::parts::QueryOwned, sce_forge_runtime::codec::CodecError> {
         let full = self.query_metadata();
         let meta = QueryMetadata {
             parameters: full.parameters,
@@ -1145,9 +1149,7 @@ impl<'a> QueryOptionsOf<'a> {
             value: full.value,
             ..Default::default()
         };
-        crate::request_build::QueryBuilder::from_meta(&meta)
-            .build()
-            .expect("a loopback Query body builds on the heap profile")
+        crate::request_build::QueryBuilder::from_meta(&meta).build()
     }
 }
 
@@ -1173,6 +1175,35 @@ mod tests {
         let mut opts = QueryOptions::get();
         opts.allowed_destination = Locality::Remote;
         assert_eq!(opts.remote_finals(0), 0, "a group with no member owes none");
+    }
+
+    /// The loopback body answers a part the codec refuses as a value: a source info that names no
+    /// zid is refused with the codec's length error, one that names a zid is carried in the body's
+    /// extension chain, and options that set nothing make the bare header. Turned red by a body
+    /// that panics on the refused part or carries it.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "codec-request",
+        feature = "query-source-info"
+    ))]
+    #[test]
+    fn a_loopback_body_the_codec_refuses_is_answered_as_a_value() {
+        let refused = QueryOptions::get()
+            .with_source_info(SourceInfo::default())
+            .loopback_query();
+        assert!(matches!(
+            refused,
+            Err(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
+        ));
+        let carried = QueryOptions::get()
+            .with_source_info(SourceInfo::new(&[0x5a], 1, 2))
+            .loopback_query()
+            .expect("a source info that names a zid is carried");
+        assert_ne!(carried.header & 0x80, 0, "the body has its extension chain");
+        let plain = QueryOptions::get()
+            .loopback_query()
+            .expect("a query with nothing set has a body");
+        assert_eq!(plain.header, 0x03, "the bare Query header");
     }
 
     /// Lent parameters with the reply-keyexpr-any flag appended are one state: the parts a link's

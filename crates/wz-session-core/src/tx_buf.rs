@@ -375,15 +375,16 @@ pub const SESSION_SLOT: bool = cfg!(feature = "session-slot");
 /// compiled the per-session slot profile (`session-slot`), one `compile_error!`
 /// that names the crate refused and the cause, and no item.
 ///
-/// For a crate written for the heap profile only, around every item of its
-/// root (`"crate-name"; items`). Features unify across the build graph, and a
+/// For a crate written for the heap profile only, at its root and given no
+/// items (`"crate-name";`). Features unify across the build graph, and a
 /// workspace-wide `--all-features` turns this selector on from every crate that
-/// has it; without the wrapper such a build reports each heap item of the crate
+/// has it; without the refusal such a build reports each heap item of the crate
 /// that the slot profile lacks, and no line of it names the selector. The
-/// refusal is raised while the crate's macros expand, before its items are
-/// resolved or type-checked, and the items it drops add no error of their own.
-/// A crate whose root is more than a list of modules may give no items: its
-/// refusal is then the first error of the build and not the only one.
+/// refusal is raised while the crate's macros expand, before the crate's items
+/// are resolved or type-checked, so it is the first error of the build. Items
+/// given to it are dropped with it and add no error of their own, but a root's
+/// `mod` declarations are not given: rustfmt does not read a macro's body, and
+/// the modules declared in one would be formatted by no `cargo fmt`.
 #[cfg(not(feature = "session-slot"))]
 #[macro_export]
 macro_rules! heap_session_profile {

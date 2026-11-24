@@ -157,8 +157,8 @@ fn matches_filters(filters: Option<&[RegionFilter]>, remote: &RemoteFacts<'_>) -
         let value = filter
             .zids
             .as_ref()
-            .map_or(true, |zids| zids.iter().any(zid_matches))
-            && filter.interfaces.as_ref().map_or(true, |ifaces| {
+            .is_none_or(|zids| zids.iter().any(zid_matches))
+            && filter.interfaces.as_ref().is_none_or(|ifaces| {
                 remote
                     .interfaces
                     .iter()
@@ -167,8 +167,8 @@ fn matches_filters(filters: Option<&[RegionFilter]>, remote: &RemoteFacts<'_>) -
             && filter
                 .modes
                 .as_ref()
-                .map_or(true, |modes| modes.matches(remote.whatami))
-            && filter.region_names.as_ref().map_or(true, |names| {
+                .is_none_or(|modes| modes.matches(remote.whatami))
+            && filter.region_names.as_ref().is_none_or(|names| {
                 remote
                     .region_name
                     .is_some_and(|rn| names.iter().any(|n| n == rn))

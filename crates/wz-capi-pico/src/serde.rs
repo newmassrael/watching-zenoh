@@ -473,7 +473,8 @@ impl z_bytes_reader_t {
     /// `data` must be valid for `len` bytes.
     unsafe fn remaining(&self) -> &[u8] {
         match self.len.checked_sub(self.pos) {
-            Some(left) if left != 0 && !self.data.is_null() => {
+            // An empty tail is a slice of no bytes at the end, so it needs no branch of its own.
+            Some(left) if !self.data.is_null() => {
                 core::slice::from_raw_parts(self.data.add(self.pos), left)
             }
             _ => &[],

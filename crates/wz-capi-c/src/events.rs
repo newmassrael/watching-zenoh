@@ -1980,13 +1980,7 @@ fn kind_of(kind: FaceEventKind) -> z_sample_kind_t {
 /// Whether a snapshot passes a transport filter.
 #[inline]
 fn passes(filter: TransportFilter, snapshot: &FaceSnapshot) -> bool {
-    // `Option::is_none_or` would read better and is stable since 1.82; this
-    // workspace's MSRV is 1.81, and clippy's `incompatible_msrv` is right to
-    // refuse it.
-    #[allow(clippy::unnecessary_map_or)]
-    filter.map_or(true, |(zid, multicast)| {
-        zid == snapshot.zid && multicast == snapshot.is_multicast
-    })
+    filter.is_none_or(|(zid, multicast)| zid == snapshot.zid && multicast == snapshot.is_multicast)
 }
 
 /// Default link-events listener options (zenoh-c

@@ -4,7 +4,7 @@
 // SCE-MAP: keyexpr_shape.scxml:12 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
-// Runtime: none
+// Runtime: sce_forge_runtime
 // Do not edit — regenerate from the source SCXML file.
 //
 // RFC §synth-5-A: pure synchronous function with bounded loops. Free
@@ -33,7 +33,7 @@ pub fn keyexpr_shape(k: &[u8]) -> keyexpr_shape_schema::KeyexprShapeSchemaPayloa
                 double_star = true;
             }
             if chunks < n {
-                chunks = chunks + 1;
+                chunks = sce_forge_runtime::algorithm::proven::add::<u32>(chunks, 1);
             }
             run = 0;
             stars = 0;
@@ -44,11 +44,11 @@ pub fn keyexpr_shape(k: &[u8]) -> keyexpr_shape_schema::KeyexprShapeSchemaPayloa
             if byte == 42 {
                 star = true;
                 if stars < 3 {
-                    stars = stars + 1;
+                    stars = sce_forge_runtime::algorithm::proven::add::<u8>(stars, 1);
                 }
             }
             if run < 3 {
-                run = run + 1;
+                run = sce_forge_runtime::algorithm::proven::add::<u8>(run, 1);
             }
         }
     }

@@ -1446,7 +1446,7 @@ impl PlainPublisher {
         // How a put that brings nothing of its own is sent plain, worked out once from the QoS it
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         filter.keep_plain(
-            (wire.mapping_id != 0 && wire.suffix.is_none())
+            (wire.mapping_id != 0 && wire.suffix().is_none())
                 .then(|| declared.apply(put_options()).plain_put_params())
                 .flatten()
                 .map(|params| (params, wire.mapping_id)),
@@ -3874,8 +3874,11 @@ mod tests {
         };
         let mut found = Found::default();
         let context = (&mut found as *mut Found).cast::<c_void>();
-        let mut callback =
-            make_subscriber_callback(Arc::new(CClosure::new(context, Some(note_where), None)));
+        let mut callback = make_subscriber_callback(Arc::new(CClosure::uncounted(
+            context,
+            Some(note_where),
+            None,
+        )));
         callback(&view);
         drop(callback);
         assert_eq!(found.key, view.key.as_ptr() as usize);

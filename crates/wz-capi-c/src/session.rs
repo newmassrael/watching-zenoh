@@ -992,7 +992,7 @@ pub unsafe extern "C" fn zc_get_last_error(out: *mut crate::abi::z_view_string_t
 pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t) -> bool {
     guard_val(true, || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { session_handle(session) }.map_or(true, SessionHandle::is_closed)
+        unsafe { session_handle(session) }.is_none_or(SessionHandle::is_closed)
     })
 }
 

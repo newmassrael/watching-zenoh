@@ -228,6 +228,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_MAX_ADVANCED_SUBSCRIBERS",
         8,
     ),
+    (
+        "MAX_SAMPLE_MISS_LISTENERS",
+        "WZ_LIMIT_MAX_SAMPLE_MISS_LISTENERS",
+        4,
+    ),
     ("MAX_LOCATOR_LEN", "WZ_LIMIT_MAX_LOCATOR_LEN", 64),
     (
         "MAX_GROUP_ENDPOINT_LEN",

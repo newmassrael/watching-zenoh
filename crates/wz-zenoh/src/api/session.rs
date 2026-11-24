@@ -1218,7 +1218,8 @@ impl Engine {
                     #[cfg(feature = "unstable")]
                     timestamps,
                 } = subscription;
-                let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                let wire = tokio_engine::wire_key_of(scope, suffix)
+                    .keeping(wz_capi_port::lodge::Kept::shared(keeps));
                 // The registry's own door, not the port's: the port has no operation that takes
                 // a set of links, and for no restriction the two declare the same.
                 state
@@ -1408,7 +1409,8 @@ impl Engine {
                     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
                     shm_promoter,
                 } = queryable;
-                let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                let wire = tokio_engine::wire_key_of(scope, suffix)
+                    .keeping(wz_capi_port::lodge::Kept::shared(keeps));
                 // The registry is held weakly: the queryable lives in it.
                 #[cfg(all(feature = "unstable", feature = "shared-memory"))]
                 let promotion = shm_promoter.map(|promoter| {
@@ -1695,7 +1697,8 @@ impl Engine {
                     notifier,
                     keeps,
                 } = subscription;
-                let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                let wire = tokio_engine::wire_key_of(scope, suffix)
+                    .keeping(wz_capi_port::lodge::Kept::shared(keeps));
                 // The registry's own door, not the port's, for the reason the token's is.
                 // `#[non_exhaustive]`: built from its default and narrowed.
                 let mut options =
@@ -4807,7 +4810,7 @@ impl SessionInner {
             self.engine
                 .faces()
                 .into_iter()
-                .filter(move |face| transport.as_ref().map_or(true, |t| face.is_the_face_of(t)))
+                .filter(move |face| transport.as_ref().is_none_or(|t| face.is_the_face_of(t)))
                 .flat_map(|face| face.links),
         )
     }
@@ -10210,7 +10213,7 @@ mod tests {
         let wire = tokio_engine::wire_key(&publication);
         assert!(!wire.is_literal());
         assert_eq!(wire.mapping_id, 3);
-        assert_eq!(wire.suffix.as_deref(), Some("/leaf"));
+        assert_eq!(wire.suffix(), Some("/leaf"));
     }
 
     #[test]

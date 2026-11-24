@@ -10,8 +10,13 @@
 //! the subscriber.
 
 use alloc::sync::Arc;
+use core::ptr::NonNull;
 #[cfg(feature = "advanced-recovery")]
 use core::time::Duration;
+
+/// What keeps an entity's name declared ([`EntityForm::keeping`]).
+pub use wz_capi_port::lodge::Kept;
+use wz_capi_port::lodge::Strong;
 
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::locality::Locality;
@@ -325,15 +330,34 @@ impl SubscriberDetection {
 pub struct EntityForm {
     /// The declaration the wire names, `0` for the literal key.
     mapping_id: wz_session_core::wire_id::ExprId,
-    /// What follows the declared prefix; `None` when it covers the whole key.
-    suffix: Option<String>,
+    /// What follows the declared prefix ([`Self::suffix`]).
+    suffix: FormSuffix,
     /// The key a subscriber's retraction names beside its id, when it names one.
     retraction: Option<RetractionKey>,
     /// Whether a TOKEN's retraction names its key beside its id.
     names_key_on_retraction: bool,
     /// What keeps the declaration alive; let go of AFTER the entity is.
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Option<Kept>,
 }
+
+/// The rest of an entity's key past its declared prefix: none, a copy of its own, or text that
+/// lies in what the form keeps ([`EntityForm::aliased_in`]), which every copy of the form keeps.
+#[derive(Clone, Default)]
+enum FormSuffix {
+    #[default]
+    None,
+    Owned(String),
+    Lent {
+        at: NonNull<u8>,
+        len: usize,
+    },
+}
+
+// SAFETY: lent text is read only, through shared borrows, and lies in what the form keeps, which
+// is `Send + Sync`.
+unsafe impl Send for FormSuffix {}
+// SAFETY: as `Send`.
+unsafe impl Sync for FormSuffix {}
 
 impl EntityForm {
     /// The key itself, announced literally, retracted by id alone.
@@ -345,9 +369,42 @@ impl EntityForm {
     pub fn aliased(mapping_id: wz_session_core::wire_id::ExprId, suffix: Option<String>) -> Self {
         Self {
             mapping_id,
-            suffix,
+            suffix: suffix.map_or(FormSuffix::None, FormSuffix::Owned),
             ..Self::default()
         }
+    }
+
+    /// Declaration `mapping_id` followed by `rest` (none when it is empty), which lies in what
+    /// `kept` keeps: the form copies nothing of it, and keeps `kept` for as long as the entity
+    /// declared in it stands.
+    ///
+    /// # Safety
+    /// `rest` lies in the value `kept` counts and stays there, unchanged, while any count of it
+    /// is held.
+    pub unsafe fn aliased_in(
+        mapping_id: wz_session_core::wire_id::ExprId,
+        rest: &str,
+        kept: Kept,
+    ) -> Self {
+        let suffix = match NonNull::new(rest.as_ptr().cast_mut()) {
+            Some(at) if !rest.is_empty() => FormSuffix::Lent {
+                at,
+                len: rest.len(),
+            },
+            _ => FormSuffix::None,
+        };
+        Self {
+            mapping_id,
+            suffix,
+            keeps: Some(kept),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the suffix lies in what the form keeps ([`Self::aliased_in`]), so a key made from
+    /// the form may lend it from there rather than copy it.
+    pub fn suffix_is_kept(&self) -> bool {
+        matches!(self.suffix, FormSuffix::Lent { .. })
     }
 
     /// Make a subscriber's retraction name `key` beside its id.
@@ -362,8 +419,14 @@ impl EntityForm {
         self
     }
 
-    /// Hold `anchor` for as long as the entity declared in this form stands.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+    /// Hold `anchor` for as long as the entity declared in this form stands. A suffix that lay in
+    /// what the form kept before is copied into the form first.
+    pub fn keeping(mut self, anchor: Kept) -> Self {
+        if let FormSuffix::Lent { .. } = self.suffix {
+            self.suffix = self
+                .suffix()
+                .map_or(FormSuffix::None, |rest| FormSuffix::Owned(rest.into()));
+        }
         self.keeps = Some(anchor);
         self
     }
@@ -380,7 +443,15 @@ impl EntityForm {
 
     /// What follows the declared prefix; `None` when it covers the whole key.
     pub fn suffix(&self) -> Option<&str> {
-        self.suffix.as_deref()
+        match &self.suffix {
+            FormSuffix::None => None,
+            FormSuffix::Owned(rest) => Some(rest),
+            // SAFETY: lent text lies, unchanged, in what this form keeps (`Self::aliased_in`), and
+            // was a `str` there.
+            FormSuffix::Lent { at, len } => Some(unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(at.as_ptr(), *len))
+            }),
+        }
     }
 
     /// The key a subscriber's retraction names beside its id, when it names one.
@@ -394,7 +465,7 @@ impl EntityForm {
     }
 
     /// What keeps the declaration alive, to be let go of AFTER the entity.
-    pub fn kept(&self) -> Option<&Arc<dyn Send + Sync>> {
+    pub fn kept(&self) -> Option<&Kept> {
         self.keeps.as_ref()
     }
 }
@@ -403,7 +474,7 @@ impl core::fmt::Debug for EntityForm {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EntityForm")
             .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix)
+            .field("suffix", &self.suffix())
             .field("retraction", &self.retraction)
             .field("names_key_on_retraction", &self.names_key_on_retraction)
             .field("keeps", &self.keeps.is_some())
@@ -453,23 +524,55 @@ pub trait DeclarationForms: Send + Sync {
     /// Take over an entity's declaration when the subscriber runs in the
     /// background: its handle is gone and nothing is left to let go of the
     /// declaration after the entity, so the host keeps it until its own end.
-    fn retain(&self, _anchor: Arc<dyn Send + Sync>) {}
+    fn retain(&self, _anchor: Kept) {}
 }
 
 /// A host's [`DeclarationForms`], shareable and printable, for
-/// [`AdvancedSubscriberOptions::forms`].
+/// [`AdvancedSubscriberOptions::forms`]: in a box of its own ([`Self::new`]) or lodged where the
+/// host put it ([`Self::lodged`]), so a host that keeps its forms in a place of its own takes no
+/// memory for them.
 #[derive(Clone)]
-pub struct FormsHandle(Arc<dyn DeclarationForms>);
+pub struct FormsHandle(FormsForm);
+
+#[derive(Clone)]
+enum FormsForm {
+    Shared(Arc<dyn DeclarationForms>),
+    /// The forms where they are lodged, and the count that holds them there.
+    Lodged {
+        forms: NonNull<dyn DeclarationForms>,
+        _count: Kept,
+    },
+}
+
+// SAFETY: the lodged forms are read only through a shared borrow, which `DeclarationForms`'s own
+// `Sync` admits from any thread, and their count is `Send + Sync`.
+unsafe impl Send for FormsForm {}
+// SAFETY: as `Send`.
+unsafe impl Sync for FormsForm {}
 
 impl FormsHandle {
     /// Wrap `forms`.
     pub fn new(forms: Arc<dyn DeclarationForms>) -> Self {
-        Self(forms)
+        Self(FormsForm::Shared(forms))
+    }
+
+    /// The forms `forms` counts, lodged where the host put them.
+    pub fn lodged<T: DeclarationForms + 'static>(forms: Strong<T>) -> Self {
+        let at: &dyn DeclarationForms = &*forms;
+        let at = NonNull::from(at);
+        Self(FormsForm::Lodged {
+            forms: at,
+            _count: Kept::lodged(forms),
+        })
     }
 
     /// The host's answers.
     pub fn forms(&self) -> &dyn DeclarationForms {
-        &*self.0
+        match &self.0 {
+            FormsForm::Shared(forms) => &**forms,
+            // SAFETY: the count kept beside the pointer holds the forms where they are lodged.
+            FormsForm::Lodged { forms, .. } => unsafe { forms.as_ref() },
+        }
     }
 }
 
@@ -514,8 +617,8 @@ impl AdvancedSubscriberOptions {
     }
 
     /// Name each entity the way `forms` says — see [`DeclarationForms`].
-    pub fn with_declaration_forms(mut self, forms: Arc<dyn DeclarationForms>) -> Self {
-        self.forms = Some(FormsHandle::new(forms));
+    pub fn with_declaration_forms(mut self, forms: FormsHandle) -> Self {
+        self.forms = Some(forms);
         self
     }
 

@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: bdf62ae47b10e3b3fd3fe8e001de33856afaa90612364e46d7d519260e9da8f0
+// source-hash: a9b2837121a33a1431165e7139e80152a2ef77fbcce44c179cb8b961fef38b75
 // source: session_fsm_unicast.scxml
 
 
@@ -1547,6 +1547,8 @@ compile_error!("feature `session-extshm` requires `transport-shm`, which this bu
 compile_error!("feature `session-matching` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-matching", not(feature = "keyexpr-includes")))]
 compile_error!("feature `session-matching` requires `keyexpr-includes`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-multicast", not(feature = "interest-answer")))]
+compile_error!("feature `session-multicast` requires `interest-answer`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-multicast", not(feature = "rx-control")))]
 compile_error!("feature `session-multicast` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-multicast", not(feature = "rx-push")))]
@@ -1565,6 +1567,8 @@ compile_error!("feature `session-slot` requires `session-fixed-storage`, which t
 compile_error!("feature `session-slot` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "tx-lend-only")))]
 compile_error!("feature `session-slot` requires `tx-lend-only`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-unicast-accept", not(feature = "interest-answer")))]
+compile_error!("feature `session-unicast-accept` requires `interest-answer`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-control")))]
 compile_error!("feature `session-unicast-accept` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-push")))]

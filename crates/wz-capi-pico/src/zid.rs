@@ -76,8 +76,9 @@ impl z_id_t {
     /// dropping the peer from the enumeration would hide a real face.
     pub(crate) fn from_wire(bytes: &[u8]) -> Self {
         let mut id = [0u8; Z_ID_SIZE];
-        for (to, from) in id.iter_mut().zip(bytes) {
-            *to = *from;
+        let kept = bytes.get(..Z_ID_SIZE).unwrap_or(bytes);
+        if let Some(to) = id.get_mut(..kept.len()) {
+            to.copy_from_slice(kept);
         }
         Self { id }
     }

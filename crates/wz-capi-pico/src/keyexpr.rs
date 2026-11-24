@@ -352,13 +352,7 @@ impl DeclaredKeyexpr {
     /// entry replayed onto later faces — holds the id declared for as long as
     /// it names it.
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
-        // Every constructor keeps the declared prefix at the front of the
-        // literal (see `extended`), so the remainder always exists; the `get`
-        // turns a broken invariant into the literal rather than a panic.
-        match self
-            .declared_on(shared)
-            .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
-        {
+        match self.declared_rest(shared) {
             Some((d, rest)) => WireKey::aliased(
                 d.hold.mapping_id(),
                 (!rest.is_empty()).then(|| rest.to_owned()),
@@ -366,6 +360,27 @@ impl DeclaredKeyexpr {
             .holding(d.hold.clone()),
             None => WireKey::literal(),
         }
+    }
+
+    /// The declaration's id and the remainder of the key, borrowed from this key, when the
+    /// declaration is `shared`'s: what [`Self::wire`] names, for a holder that keeps this key
+    /// and lends the remainder from it.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn aliased_parts(
+        &self,
+        shared: &Engine,
+    ) -> Option<(wz_session_core::wire_id::ExprId, &str)> {
+        self.declared_rest(shared)
+            .map(|(d, rest)| (d.hold.mapping_id(), rest))
+    }
+
+    /// The declaration that is `shared`'s and the remainder of the key past it.
+    fn declared_rest(&self, shared: &Engine) -> Option<(&WireDeclaration, &str)> {
+        // Every constructor keeps the declared prefix at the front of the
+        // literal (see `extended`), so the remainder always exists; the `get`
+        // turns a broken invariant into the literal rather than a panic.
+        self.declared_on(shared)
+            .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
     }
 
     /// What an entity held on this key names when it retracts itself, or `None`
@@ -402,7 +417,7 @@ impl DeclaredKeyexpr {
         } else {
             RetractionKey {
                 mapping_id: wire.mapping_id,
-                suffix: wire.suffix.unwrap_or_default(),
+                suffix: wire.into_suffix().unwrap_or_default(),
             }
         }
     }
@@ -1714,7 +1729,7 @@ mod tests {
         assert_eq!(declarations[0].1, "demo/kd/qbl");
         let wire = key.wire(Arc::as_ref(&engine));
         assert_eq!(wire.mapping_id, declarations[0].0);
-        assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
+        assert_eq!(wire.suffix(), Some("/*/x"));
 
         let other = session().as_engine();
         assert_eq!(

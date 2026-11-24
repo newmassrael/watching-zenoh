@@ -2372,7 +2372,7 @@ fn unit_reads_whole(unit: &[u8]) -> bool {
                 if consumed > 0
                     && frame
                         .announced_version()
-                        .map_or(true, |v| v == wz_codecs::wire_const::PROTOCOL_VERSION) =>
+                        .is_none_or(|v| v == wz_codecs::wire_const::PROTOCOL_VERSION) =>
             {
                 match frame_reach(&frame, consumed) {
                     // A reach past the unit ends the walk, as the end of it does.

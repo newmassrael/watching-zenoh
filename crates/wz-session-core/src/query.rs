@@ -5635,7 +5635,9 @@ mod tests {
             &mut replies,
         );
         // Of the session's own, given the stack of its loopback leg.
-        let query = crate::query_options::QueryOptions::get().loopback_query();
+        let query = crate::query_options::QueryOptions::get()
+            .loopback_query()
+            .expect("a query with nothing set has a body");
         reg.local_query_with_stack(
             QueryEnvelope {
                 rid: 44,
