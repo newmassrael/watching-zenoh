@@ -241,7 +241,7 @@ pub mod session_runtime;
 // network stack is not lwIP (Zephyr's own sockets) drives the same loop.
 #[cfg(feature = "session-unicast")]
 // Totality debt TD-203 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(clippy::indexing_slicing)]
 pub mod session_drive;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
