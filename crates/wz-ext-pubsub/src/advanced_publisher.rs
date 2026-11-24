@@ -209,11 +209,12 @@ pub struct AdvancedPublisherOptions {
 struct WireQos {
     allowed_destination: Locality,
     reliability: Reliability,
-    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    // The QoS trio is folded only by a build with `pubsub-qos`, which alone has its setters.
+    #[cfg(feature = "pubsub-qos")]
     priority: Priority,
-    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    #[cfg(feature = "pubsub-qos")]
     congestion_control: CongestionControl,
-    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    #[cfg(feature = "pubsub-qos")]
     express: bool,
 }
 
@@ -222,8 +223,11 @@ impl WireQos {
         Self {
             allowed_destination: options.allowed_destination,
             reliability: options.reliability,
+            #[cfg(feature = "pubsub-qos")]
             priority: options.priority,
+            #[cfg(feature = "pubsub-qos")]
             congestion_control: options.congestion_control,
+            #[cfg(feature = "pubsub-qos")]
             express: options.express,
         }
     }
