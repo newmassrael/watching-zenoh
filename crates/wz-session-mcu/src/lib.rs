@@ -77,8 +77,6 @@ extern crate alloc;
 extern crate std;
 
 // R2827 — the application layer attached to the session drive.
-// Totality debt TD-224 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod app_layer;
 // Decision D7's contract: a node is asked to hold a peer by its zid. The transports (the admin
 // query, the control port, the declared peers) differ only in what feeds it.
@@ -126,8 +124,6 @@ pub mod run_arena;
 pub mod slot_admin;
 // A client of a router that answers queries, on the slot profile: the dialler over a fixed list of
 // endpoints, and the declarations sent on every session as it establishes.
-// Totality debt TD-225 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_client;
 // The latest sample of a subscription, in storage the image declared: what a node that
@@ -213,7 +209,5 @@ pub mod admin_fixed;
 pub mod admin_node;
 // An in-memory network for the shell's tests, and for a sibling crate's that
 // wants a peer no stack owns.
-// Totality debt TD-223 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(any(test, feature = "test-support"), not(feature = "session-slot")))]
 pub mod memory;
