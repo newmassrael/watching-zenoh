@@ -626,7 +626,9 @@ mod tests {
 
     #[test]
     fn the_received_ranges_merge_as_a_sorted_union_would() {
-        let cases: [(&[(u64, u64)], &[(u64, u64)], &[(u64, u64)]); 7] = [
+        // The ranges held, the ranges taken, and the union the merge must give.
+        type Case<'a> = (&'a [(u64, u64)], &'a [(u64, u64)], &'a [(u64, u64)]);
+        let cases: [Case<'_>; 7] = [
             (&[], &[(0, 8)], &[(0, 8)]),
             (&[(0, 8)], &[], &[(0, 8)]),
             (&[(0, 8)], &[(8, 16)], &[(0, 16)]),
