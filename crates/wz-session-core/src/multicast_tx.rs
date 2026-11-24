@@ -1248,7 +1248,7 @@ where
         MulticastTxItem::DeclareReply { declare } => push_frame(
             meta,
             worst_case,
-            declare_body(declare),
+            declare_body(&declare),
             tx_sn,
             params,
             conf,
@@ -1259,7 +1259,7 @@ where
         MulticastTxItem::Declare { declare } => push_frame(
             meta,
             worst_case,
-            declare_body(declare),
+            declare_body(&declare),
             tx_sn,
             params,
             conf,
