@@ -589,15 +589,31 @@ impl ByteBuf {
         if self.bounds.is_empty() && self.len != 0 {
             self.bounds.push(self.len);
         }
-        for segment in (0..).map_while(|idx| other.segment(idx)) {
+        // The other payload's segment ends, walked in one loop: a payload that keeps none is one
+        // segment of its whole length, or none when it is empty, as `Self::segment` reads it. Read
+        // through `Self::segment` by index, the first segment was read apart from the rest.
+        let data = other.as_slice();
+        let whole = [other.len];
+        let ends: &[usize] = if !other.bounds.is_empty() {
+            &other.bounds
+        } else if data.is_empty() {
+            &[]
+        } else {
+            &whole
+        };
+        let mut start = 0;
+        for &end in ends {
+            let Some(segment) = data.get(start..end) else {
+                break;
+            };
             self.put_segment(segment);
+            start = end;
         }
         Ok(())
     }
 
-    /// Write `segment` after the payload's bytes and end a segment there. Out of line: the loop
-    /// that reads the other payload's segments is unrolled into a first one read apart, and each
-    /// copy of the loop held the write and the end of its own.
+    /// Write `segment` after the payload's bytes and end a segment there. Out of line: it is
+    /// written once per segment of an appended payload.
     #[inline(never)]
     fn put_segment(&mut self, segment: &[u8]) {
         self.put_after(segment);
@@ -2382,6 +2398,19 @@ mod block_tests {
         assert_eq!(writer.segment(2), Some(&b"q"[..]));
         assert_eq!(writer.segment(3), None);
         assert_eq!(writer.segment(usize::MAX), None);
+    }
+
+    /// An empty payload appended brings no segment, not an empty one, while it still closes the
+    /// writer's own bytes into a segment of their own. Turned red by an append that walks one end
+    /// for every payload that keeps none, whatever its length.
+    #[test]
+    fn an_empty_payload_appended_brings_no_segment() {
+        let mut writer = ByteBuf::copy_of(b"x").expect("room");
+        writer.append_segments(&ByteBuf::new()).expect("room");
+        assert_eq!(writer.as_slice(), b"x");
+        assert_eq!(*writer.bounds, [1]);
+        assert_eq!(writer.segment(0), Some(&b"x"[..]));
+        assert_eq!(writer.segment(1), None);
     }
 
     /// A block whose holders are past half the address space is not shared again: the share is
