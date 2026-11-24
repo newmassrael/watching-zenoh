@@ -1084,15 +1084,44 @@ impl<T> LentSeq<T> {
         let tail = self.len().wrapping_sub(len);
         // Below the length, which is a `u32`.
         self.len = len as u32;
-        // SAFETY: the `tail` rows from `len` held values, which the length no longer covers, so
-        // each is dropped here once.
+        if !core::mem::needs_drop::<T>() {
+            return;
+        }
+        // SAFETY: the `tail` rows from `len` held values of `T`, `size_of::<T>()` bytes apart,
+        // which the length no longer covers, so each is dropped here once, by `drop_row::<T>`.
         unsafe {
-            core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(
-                self.base.as_ptr().add(len),
+            drop_rows(
+                self.base.as_ptr().add(len).cast::<u8>(),
                 tail,
-            ));
+                core::mem::size_of::<T>(),
+                drop_row::<T>,
+            );
         }
     }
+}
+
+/// Drop `len` rows `stride` bytes apart from `first`, each by `drop_one`: the walk over the rows of
+/// a lent table, one body for every row type, which hands each row to the drop of its own type.
+///
+/// # Safety
+/// The `len` rows from `first` each hold a value `drop_one` drops, which nothing reads after.
+#[inline(never)]
+unsafe fn drop_rows(first: *mut u8, len: usize, stride: usize, drop_one: unsafe fn(*mut u8)) {
+    let mut row = first;
+    for _ in 0..len {
+        // SAFETY: the caller's contract: `row` is one of the `len` rows, each a value to drop.
+        unsafe { drop_one(row) };
+        row = row.wrapping_add(stride);
+    }
+}
+
+/// Drop the `T` at `row`.
+///
+/// # Safety
+/// `row` holds a value of `T`, aligned for it, which nothing reads after.
+unsafe fn drop_row<T>(row: *mut u8) {
+    // SAFETY: the caller's contract.
+    unsafe { core::ptr::drop_in_place(row.cast::<T>()) }
 }
 
 impl<T> Drop for LentSeq<T> {
@@ -2545,6 +2574,41 @@ mod tests {
         held.push(Counted(7, &drops)).expect("within the rows");
         drop(held);
         assert_eq!(drops.get(), 7, "a dropped table drops what it held");
+    }
+
+    /// A row at least a word wide, whose drop marks its own bit: dropped at the wrong place, it
+    /// marks a bit of what lies there instead.
+    struct Wide<'a> {
+        _pad: [u64; 3],
+        bit: u32,
+        seen: &'a core::cell::Cell<u32>,
+    }
+
+    impl Drop for Wide<'_> {
+        fn drop(&mut self) {
+            self.seen.set(self.seen.get() | (1 << self.bit));
+        }
+    }
+
+    /// A lent table of rows wider than a byte drops each row once at its own place, the rows cut
+    /// off the end first and the rest with the table.
+    #[test]
+    fn a_lent_table_drops_each_wide_row_at_its_place() {
+        let seen = core::cell::Cell::new(0);
+        let mut arena = arena_of(Arena::table_bytes::<Wide<'_>>(4).expect("fits"));
+        let mut v: BoundedVec<Wide<'_>, 4, Lent> = arena.lend(4).expect("four rows fit");
+        for bit in 0..4 {
+            v.push(Wide {
+                _pad: [0; 3],
+                bit,
+                seen: &seen,
+            })
+            .expect("within the rows");
+        }
+        v.truncate(2);
+        assert_eq!(seen.get(), 0b1100, "the rows cut off the end are dropped");
+        drop(v);
+        assert_eq!(seen.get(), 0b1111, "and the rest with the table");
     }
 
     /// Both policies in ONE build, side by side: what the feature selector could
