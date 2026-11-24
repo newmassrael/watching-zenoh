@@ -1273,6 +1273,7 @@ impl EntryBytes {
 
 /// Keep `row` in `table`, whose room its declaration found free under the lock it still holds,
 /// before it took an id or sent anything.
+#[inline(never)]
 fn keep<T, const N: usize>(table: &mut Rows<T, N>, row: T) {
     let kept = table.push(row).is_ok();
     debug_assert!(kept, "the table had the row its declaration found free");
@@ -1971,6 +1972,7 @@ impl Watched {
     /// The criterion a listener on `plane` over `keyexpr` counts with, the session's own
     /// entities among it with `count_local` as its write filter's are (`counted`); `None` for a
     /// plane this build does not hold.
+    #[inline(never)]
     fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Option<Self> {
         let locality = counted(plane, count_local);
         match plane {
@@ -2246,6 +2248,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The session's next entity id, taken: what a declaration and an Interest of the session are
     /// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed
     /// out, which refuses the declaration rather than wrap onto a live id.
+    #[inline(never)]
     fn take_entity_id(&self) -> Option<EntityId> {
         tables_mut(&self.registry).take_entity_id()
     }
@@ -2257,6 +2260,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// (a row of the session's record, a table of the registry, an object of the program), is that
     /// block shared ([`KeySpace::kept`]), so a key the session's declarations and the program's
     /// objects name alike takes one block, whichever of them came first.
+    #[inline(never)]
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
         if !self.keys.holds_key(keyexpr.len()) {
             return None;
@@ -2286,6 +2290,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Why [`Self::row_key`] refused `keyexpr`: longer than a row holds, or no room for it left in
     /// the key arena.
+    #[inline(never)]
     fn key_refusal(&self, keyexpr: &str) -> Declined {
         if self.keys.holds_key(keyexpr.len()) {
             Declined::TableFull
@@ -5550,6 +5555,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
     /// own that a local put reaches (`local-subscriber`). The session answers nothing else
     /// locally, as zenoh-pico's default build does not.
+    #[inline(never)]
     fn local_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
         #[cfg(feature = "local-subscriber")]
         if matches!(plane, FilterPlane::Subscribers) {

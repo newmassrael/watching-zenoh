@@ -1237,6 +1237,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// the session holds, otherwise the declaration of it the session made already, held once more,
     /// when there is one. Refused with [`RegisterError::IdsExhausted`] when no id is left that is
     /// neither declared nor refused by `usable` (an id a dictionary of shared key ids names).
+    #[inline(never)]
     pub fn declare_keyexpr_where(
         &mut self,
         key: &str,
@@ -1338,6 +1339,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     /// The next entity id, for an entity the session numbers and keeps no row of here (a
     /// publisher, a querier, a get's Interest); `None` once every one has been handed out.
+    #[inline(never)]
     pub fn take_entity_id(&mut self) -> Option<EntityId> {
         let id = self.next_entity?;
         self.next_entity = id.checked_add(1);
