@@ -2088,6 +2088,32 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
     }
 
+    /// Declare a matching listener of what the write filter `filter` counts, on its key and with
+    /// its count of the session's own, as one declared on that key is
+    /// ([`Self::declare_matching_listener_on`]): it holds an Interest of its own, shared with the
+    /// filter's when the filter holds one, and does not go with the filter. The filter's facts are
+    /// read off its row, so whoever holds the filter keeps no copy of them. Refused with
+    /// [`RegisterError::OwnerGone`] when `filter` names no filter, the callback handed back.
+    pub fn declare_matching_listener_of(
+        &mut self,
+        filter: WriteFilterHandle,
+        callback: F::Matching,
+    ) -> Result<Watching<kind::MatchingListener>, Refused<F::Matching>> {
+        // The key is another holder of the row's, as the declaration below takes the tables the
+        // row lies in.
+        let owner = self
+            .kept_write_filters()
+            .and_then(|filters| filters.get(filter))
+            .map(|row| (row.plane, row.key.clone(), row.count_local));
+        let Some((plane, key, count_local)) = owner else {
+            return Err(Refused {
+                why: RegisterError::OwnerGone,
+                callback,
+            });
+        };
+        self.declare_matching_listener_on(plane, text(&key), count_local, callback)
+    }
+
     /// Put `row` in the matching listeners' table.
     fn insert_matching_listener(
         &mut self,

@@ -476,6 +476,16 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         None
     }
 
+    /// [`Self::declare_matching_listener`] of what write filter `filter` counts, on its key and with
+    /// its count of the session's own, as the engine keeps them for the filter, so the filter's
+    /// holder keeps no copy of them. The listener does not go with the filter: its holder stops it.
+    /// [`Refusal::Closed`] when `filter` names no filter, as for anything of a closed session.
+    fn declare_filter_matching_listener(
+        &self,
+        filter: FilterId,
+        sink: MatchingSink,
+    ) -> Result<MatchId, Refusal>;
+
     /// Stop the matching listener `id`.
     fn undeclare_matching_listener(&self, id: MatchId);
 

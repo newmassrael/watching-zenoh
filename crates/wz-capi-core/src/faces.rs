@@ -6743,6 +6743,14 @@ impl SharedSession {
         Some(id)
     }
 
+    /// What write filter `id` counts, the literal it is matched on and whether the session's own
+    /// entities count, as it was declared; `None` when no filter is `id`.
+    pub fn write_filter_facts(&self, id: FilterId) -> Option<(FilterPlane, String, bool)> {
+        let guard = self.lock();
+        let entry = guard.filters.iter().find(|e| e.id == id)?;
+        Some((entry.plane, entry.keyexpr.clone(), entry.count_local))
+    }
+
     /// Retract a write filter: drop the SSOT entry so no future face asks, and
     /// release every face's Interest (each emitting its `Interest(Final)` once
     /// no other holder of that key remains).

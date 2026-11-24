@@ -2353,6 +2353,61 @@ fn a_listener_on_a_key_holds_an_interest_of_its_own() {
     assert_eq!(tables.interests().len(), 0);
 }
 
+/// A listener declared from a write filter reads the filter's kind, key and count of the session's
+/// own off its row and is the listener declared on that key: it shares the filter's Interest, opens
+/// one of its own for a filter that asks nothing, and stays when the filter goes; one from a filter
+/// that is gone is refused, its callback handed back. Turned red by a listener that takes another
+/// key or count, or goes with its filter.
+#[test]
+fn a_listener_from_a_filter_is_the_listener_on_its_key() {
+    let mut tables = Tables::new();
+    let asking = tables
+        .declare_write_filter(Plane::Subscribers, "m", true)
+        .unwrap();
+    let shared = tables
+        .declare_matching_listener_of(asking.handle, 1)
+        .unwrap();
+    assert_eq!(shared.interest, None, "the filter's Interest is shared");
+    let row = tables.matching_listeners().get(shared.handle).unwrap();
+    assert_eq!(
+        (row.filter(), row.plane(), row.count_local(), row.interest()),
+        (
+            None,
+            Plane::Subscribers,
+            true,
+            asking.interest.map(|opened| opened.handle)
+        )
+    );
+    let quiet = tables
+        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
+        .unwrap();
+    let own = tables
+        .declare_matching_listener_of(quiet.handle, 2)
+        .unwrap();
+    let opened = own
+        .interest
+        .expect("a filter that asks nothing leaves the listener an Interest of its own");
+    assert_eq!(
+        tables.interests().get(opened.handle).unwrap().suffix(),
+        Some("q")
+    );
+    assert!(!tables
+        .matching_listeners()
+        .get(own.handle)
+        .unwrap()
+        .count_local());
+    let _ = tables.undeclare_write_filter(quiet.handle, |_, _| {});
+    assert!(
+        tables.matching_listeners().get(own.handle).is_some(),
+        "it stays with its filter gone"
+    );
+    let refused = tables
+        .declare_matching_listener_of(quiet.handle, 3)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::OwnerGone);
+    assert_eq!(refused.callback, 3);
+}
+
 /// An Interest keeps the rest of the key it names as a range of its own key: the tail where the
 /// rest ends the key, the place inside the key where it lies elsewhere, and the key whole by no
 /// declaration where it lies nowhere in the key, which names the same key. Turned red by a rest

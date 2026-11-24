@@ -405,6 +405,22 @@ impl SessionEngine for SharedSession {
         ))
     }
 
+    fn declare_filter_matching_listener(
+        &self,
+        filter: FilterId,
+        sink: MatchingSink,
+    ) -> Result<MatchId, Refusal> {
+        let (plane, keyexpr, count_local) =
+            SharedSession::write_filter_facts(self, filter).ok_or(Refusal::Closed)?;
+        Ok(SharedSession::declare_plane_matching_listener(
+            self,
+            plane,
+            keyexpr,
+            sink,
+            count_local,
+        ))
+    }
+
     fn undeclare_matching_listener(&self, id: MatchId) {
         SharedSession::undeclare_matching_listener(self, id)
     }

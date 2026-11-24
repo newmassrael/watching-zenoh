@@ -65,8 +65,9 @@ use wz_session_core::row_callback::{CallLatch, RowCallback};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, MatchingListenerHandle,
-    Plane, RowCallbacks, SessionTables, SubscriberHandle, WriteFilterHandle,
+    kind, InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle,
+    MatchingListenerHandle, Plane, Refused, RowCallbacks, SessionTables, SubscriberHandle,
+    Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 use wz_session_core::slot_observer::ObserverRows;
@@ -5615,6 +5616,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// The end of a matching listener's declaration the tables answered under `guard`: its new
+    /// Interest asked of each link and its first verdict delivered once the lock is let go, or the
+    /// refusal, its callback let go of with no lock held.
+    fn matching_declared(
+        &self,
+        mut guard: LiveCore<'_, L, C>,
+        declared: Result<Watching<kind::MatchingListener>, Refused<MatchingCall>>,
+    ) -> Result<MatchId, Declined> {
+        let core = &mut guard.0;
+        let watching = match declared {
+            Ok(watching) => watching,
+            Err(refused) => {
+                drop(guard);
+                let why = Declined::from(refused.why);
+                drop(refused.callback);
+                return Err(why);
+            }
+        };
+        // A new Interest is asked of each link from its row; one held already was asked.
+        if let Some(opened) = watching.interest {
+            core.announce_interest(opened.handle);
+        }
+        // A listener that matches already is told so as it is declared, as zenoh-pico tells it
+        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
+        self.read_matching(core);
+        drop(guard);
+        self.deliver();
+        Ok(row_id(watching.handle))
+    }
+
     /// Read the verdict of every matching listener off what the peers and the session itself
     /// declare now, each one that changed owed to its callback in its row, which the delivery
     /// after the lock hands it: after a step that wrote the faces' tables, and after each
@@ -6448,36 +6479,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !counts(plane) {
             return Err(Declined::NotBuilt);
         }
-        let mut guard = self.live().ok_or(Declined::Closed)?;
-        let core = &mut guard.0;
+        let guard = self.live().ok_or(Declined::Closed)?;
         // The listener is a row of the session's tables holding an Interest of its own: a full
         // table, a key the session cannot hold or an Interest it cannot hold or number refuses it
         // before anything is asked, as a listener that could ask no peer would never hear one.
-        let declared = tables_mut(&core.session.registry).declare_matching_listener_on(
+        let declared = tables_mut(&guard.0.session.registry).declare_matching_listener_on(
             plane_of(plane),
             keyexpr,
             counts_own(plane, count_local),
             MatchingCall { sink: Some(sink) },
         );
-        let watching = match declared {
-            Ok(watching) => watching,
-            Err(refused) => {
-                drop(guard);
-                let why = Declined::from(refused.why);
-                drop(refused.callback);
-                return Err(why);
-            }
-        };
-        // A new Interest is asked of each link from its row; one held already was asked.
-        if let Some(opened) = watching.interest {
-            core.announce_interest(opened.handle);
-        }
-        // A listener that matches already is told so as it is declared, as zenoh-pico tells it
-        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
-        self.read_matching(core);
-        drop(guard);
-        self.deliver();
-        Ok(row_id(watching.handle))
+        self.matching_declared(guard, declared)
+    }
+
+    fn declare_filter_matching_listener(
+        &self,
+        filter: FilterId,
+        sink: MatchingSink,
+    ) -> Result<MatchId, Declined> {
+        let handle = row_of(filter).ok_or(Declined::Closed)?;
+        let guard = self.live().ok_or(Declined::Closed)?;
+        // The filter's row holds the plane and the count of the session's own it was declared
+        // with, as `declare_matching_listener` would make them, so the listener is that one's.
+        let declared = tables_mut(&guard.0.session.registry)
+            .declare_matching_listener_of(handle, MatchingCall { sink: Some(sink) });
+        self.matching_declared(guard, declared)
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {

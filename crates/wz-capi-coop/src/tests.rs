@@ -1509,6 +1509,55 @@ fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
     )
 }
 
+/// A matching listener declared from a write filter counts what the filter was declared to count,
+/// on its key: it matches once a peer declares a subscriber on that key and not on another, and one
+/// from an id that names no filter is refused as of a closed session, its sink let go. The CONTROL
+/// is the filter itself, which opens on the same declaration.
+#[test]
+fn a_listener_from_a_filter_counts_what_the_filter_counts() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let filter = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/f",
+            &WireKey::literal(),
+            Some(InterestAsk {
+                mapping_id: 0,
+                suffix: Some("demo/f"),
+                aggregate: false,
+            }),
+            false,
+        )
+        .expect("a session with ids left declares");
+    let (sink, told) = heard();
+    engine
+        .declare_filter_matching_listener(filter, sink)
+        .expect("the filter is declared");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    router.send(Command::DeclareSubscriber(1, "demo/other"));
+    router.send(Command::DeclareSubscriber(2, "demo/f"));
+    until(&engine, "the listener to match", || {
+        *told.lock().unwrap() == [true]
+    });
+    assert!(
+        !engine.write_filter_active(filter),
+        "CONTROL: the filter opened on the same subscriber"
+    );
+    let (sink, refused) = heard();
+    assert_eq!(
+        engine.declare_filter_matching_listener(0, sink),
+        Err(wz_capi_port::Refusal::Closed)
+    );
+    assert_eq!(
+        Arc::strong_count(&refused),
+        1,
+        "the refused sink is not kept: the log is held by nothing else"
+    );
+}
+
 /// A build without a querier or a queryable holds no table of the queryables a peer declares, so a
 /// matching listener and a write filter on that plane are refused (a listener with
 /// `Refusal::NotBuilt`, a filter with none) and the listener's sink goes with the refusal. The CONTROL is a listener on the

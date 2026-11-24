@@ -407,6 +407,16 @@ impl SessionEngine for RouterState {
         ))
     }
 
+    fn declare_filter_matching_listener(
+        &self,
+        _filter: FilterId,
+        _sink: MatchingSink,
+    ) -> Result<MatchId, Refusal> {
+        // A node keeps no write filter (`declare_write_filter`), so there is none to read; its
+        // listeners are declared on their key.
+        Err(Refusal::NotBuilt)
+    }
+
     fn undeclare_matching_listener(&self, id: MatchId) {
         self.unwatch_matching(id);
     }

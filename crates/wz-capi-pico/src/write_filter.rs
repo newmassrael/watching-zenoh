@@ -53,7 +53,7 @@ use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
-use crate::keyexpr::{DeclaredKeyexpr, KeyText};
+use crate::keyexpr::DeclaredKeyexpr;
 use crate::matching::FilterListeners;
 // A build of one engine calls the engine through its own type, so the port's trait is in scope.
 #[cfg(not(feature = "engine-tokio"))]
@@ -127,12 +127,9 @@ impl PicoSession {
 /// (`_z_undeclare_publisher` clears the filter, then the key).
 pub(crate) struct WriteFilter {
     shared: Arc<Engine>,
+    /// What the filter counts, on which key and whether the session's own entities count are the
+    /// engine's, kept with this id, and its listeners count the same.
     id: FilterId,
-    /// What the filter counts, and on which key: what each of its listeners counts. The key is
-    /// the entity's own, shared: a block of the session's key arena where it keeps one.
-    plane: FilterPlane,
-    keyexpr: KeyText,
-    count_local: bool,
     /// The listeners declared on it and not undeclared yet, each linked through its own place,
     /// which the list holds: a listener goes with its entity, and zenoh-pico's entity is gone only
     /// once no callback of its listeners is running and their closures' drops have run.
@@ -162,16 +159,12 @@ impl WriteFilter {
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
         let ask = interest_ask(&shared, session.mode, key, wire);
-        let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
+            .declare_write_filter(plane, key.literal(), wire, ask, count_local)
             .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok(Self {
             shared,
             id,
-            plane,
-            keyexpr,
-            count_local,
             listeners: FilterListeners::default(),
         })
     }
@@ -183,12 +176,7 @@ impl WriteFilter {
     ///
     /// A listener the engine refuses is answered by its cause, with `sink` let go of.
     pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> Result<MatchId, Refusal> {
-        self.shared.declare_matching_listener(
-            self.plane,
-            self.keyexpr.as_str(),
-            sink,
-            self.count_local,
-        )
+        self.shared.declare_filter_matching_listener(self.id, sink)
     }
 
     /// The session the filter is declared in, where its listeners are declared too.
