@@ -179,11 +179,11 @@ impl LwipUdpDriver {
     /// address lwIP routes to that peer from, with this socket's port.
     ///
     /// The text of each end is the cooperative engine's one rule for it
-    /// ([`link_endpoints`](wz_runtime_coop::udp_link::link_endpoints)): an end
-    /// whose text the build's locator bound cannot hold is refused and reads
-    /// blank, never a locator cut short, and that bound is held at compile time
-    /// to at least the widest IPv4 end
-    /// ([`LONGEST_IPV4_LOCATOR_LEN`](wz_runtime_coop::session_drive::LONGEST_IPV4_LOCATOR_LEN)).
+    /// ([`link_endpoints`](wz_runtime_coop::udp_link::link_endpoints)). Every
+    /// end of this link is an IPv4 one, and the build's locator bound is held at
+    /// compile time to at least the widest IPv4 end
+    /// ([`LONGEST_IPV4_LOCATOR_LEN`](wz_runtime_coop::session_drive::LONGEST_IPV4_LOCATOR_LEN)),
+    /// so both ends are always held whole.
     fn note_endpoints(&self) {
         let Some((addr, port)) = self.binding.peer() else {
             return;
@@ -195,13 +195,15 @@ impl LwipUdpDriver {
             return;
         };
         let local_port = self.socket.borrow().local_port();
-        let _ = self
-            .endpoints
-            .set(wz_runtime_coop::udp_link::link_endpoints(
-                LinkProto::Udp,
-                socket_addr(src, local_port),
-                socket_addr(addr, port),
-            ));
+        let ends = wz_runtime_coop::udp_link::link_endpoints(
+            LinkProto::Udp,
+            socket_addr(src, local_port),
+            socket_addr(addr, port),
+        );
+        debug_assert!(ends.is_ok(), "an IPv4 end is held by every bound");
+        if let Ok(ends) = ends {
+            let _ = self.endpoints.set(ends);
+        }
     }
 
     /// The peer every send targets `(addr, port)`, once one is known.
@@ -721,7 +723,8 @@ mod tests {
             LinkProto::Udp,
             SocketAddr::from(([127, 0, 0, 1], 7486)),
             SocketAddr::from(([127, 0, 0, 1], 7486)),
-        );
+        )
+        .expect("an IPv4 pair is held");
         std::assert_eq!(ends, &expected);
         std::assert_eq!(ends.dst, "udp/127.0.0.1:7486");
     }

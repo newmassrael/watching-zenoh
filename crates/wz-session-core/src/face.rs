@@ -222,18 +222,55 @@ impl FaceSnapshot {
 }
 
 /// Which way a face moved: the input to the kind an event of a transport or a link carries.
-/// A locator's or an endpoint's text as a [`FaceLinkRow`] holds it, in the row itself.
-pub type RowText = heapless::String<{ crate::caps::MAX_LOCATOR_LEN }>;
-
-/// `text` in a row, or a blank row with `clipped` set when it is longer than a row holds.
-fn row_text(text: &str, clipped: &mut bool) -> RowText {
-    let mut row = RowText::new();
-    if row.push_str(text).is_err() {
-        *clipped = true;
-        row.clear();
-    }
-    row
+/// A text as a [`FaceLinkRow`] holds it, always whole: in the row itself when it is at most `N`
+/// bytes, on the heap when it is longer. Only a heap engine reaches the heap form, for a locator
+/// of upstream's length that no row bound sizes (a unix socket path); an engine that reserves
+/// its memory refuses a link or a group whose text would not fit where it admits it, so its rows
+/// are read with nothing allocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowTextOf<const N: usize> {
+    /// A text of at most `N` bytes, held in the row.
+    Inline(heapless::String<N>),
+    /// A longer text, on the heap.
+    Spilled(String),
 }
+
+impl<const N: usize> RowTextOf<N> {
+    /// `text`, whole: in the row when it fits.
+    pub fn of(text: &str) -> Self {
+        heapless::String::try_from(text)
+            .map_or_else(|_| Self::Spilled(String::from(text)), Self::Inline)
+    }
+
+    /// The text.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Inline(text) => text.as_str(),
+            Self::Spilled(text) => text.as_str(),
+        }
+    }
+
+    /// Whether the text is held in the row, with nothing allocated.
+    pub fn is_inline(&self) -> bool {
+        matches!(self, Self::Inline(_))
+    }
+}
+
+impl<const N: usize> core::ops::Deref for RowTextOf<N> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// A locator as a [`FaceLinkRow`] holds it: in the row up to [`crate::caps::MAX_LOCATOR_LEN`]
+/// bytes.
+pub type RowText = RowTextOf<{ crate::caps::MAX_LOCATOR_LEN }>;
+
+/// A group's endpoint as a [`FaceLinkRow`] holds it, its socket keys included: in the row up to
+/// [`crate::caps::MAX_GROUP_ENDPOINT_LEN`] bytes.
+pub type GroupRowText = RowTextOf<{ crate::caps::MAX_GROUP_ENDPOINT_LEN }>;
 
 /// One link of an established face, with the face it is under, as a reader takes it out of the
 /// session's lock to hand on: every field is held in the row, so reading the faces one row at a
@@ -263,22 +300,19 @@ pub struct FaceLinkRow {
     /// The negotiated outbound frame budget, clamped into a `u16`.
     pub mtu: u16,
     /// The endpoint the session joined the group by, for a member of a joined group.
-    pub group_endpoint: Option<RowText>,
-    /// Whether a text was longer than [`crate::caps::MAX_LOCATOR_LEN`] and reads blank here.
-    pub clipped: bool,
+    pub group_endpoint: Option<GroupRowText>,
 }
 
 impl FaceLinkRow {
     /// The `at`-th link of `face`, copied into a row; `None` past its last link.
     pub fn of_snapshot(face: &FaceSnapshot, at: usize) -> Option<Self> {
         let link = face.links.get(at)?;
-        let mut clipped = false;
-        let src = row_text(&link.src, &mut clipped);
-        let dst = row_text(&link.dst, &mut clipped);
+        let src = RowText::of(&link.src);
+        let dst = RowText::of(&link.dst);
         let group_endpoint = link
             .group
             .as_ref()
-            .map(|group| row_text(&group.endpoint, &mut clipped));
+            .map(|group| GroupRowText::of(&group.endpoint));
         Some(Self {
             zid: face.zid,
             whatami: face.whatami,
@@ -291,7 +325,6 @@ impl FaceLinkRow {
             kind: link.kind,
             mtu: link.mtu,
             group_endpoint,
-            clipped,
         })
     }
 }
@@ -343,13 +376,13 @@ impl FaceLinkRow {
                 index += 1;
                 return true;
             }
-            let mut clipped = false;
-            let src = row_text(link.src.as_str(), &mut clipped);
-            let dst = row_text(link.dst.as_str(), &mut clipped);
-            ends = Some((src, dst, clipped));
+            ends = Some((
+                RowText::of(link.src.as_str()),
+                RowText::of(link.dst.as_str()),
+            ));
             false
         });
-        let (src, dst, clipped) = ends?;
+        let (src, dst) = ends?;
         Some(Self {
             zid,
             whatami,
@@ -362,8 +395,53 @@ impl FaceLinkRow {
             kind,
             mtu,
             group_endpoint: None,
-            clipped,
         })
+    }
+}
+
+#[cfg(feature = "session-multicast")]
+impl FaceLinkRow {
+    /// `member` of a group as its row, the transport [`FaceSnapshot::of_group_member`] reports
+    /// and its one link: from the group's locator `src` to the address the member's datagrams come
+    /// from, labelled by the `endpoint` the group was joined by. Every text that fits its row is
+    /// held there, so an engine that admits only those reads its members with nothing allocated.
+    /// `None` for a member whose JOIN named a role this node does not know.
+    pub fn of_group_member(
+        member: &crate::multicast_dispatch::MulticastMember,
+        src: &str,
+        endpoint: &str,
+        is_shm: bool,
+    ) -> Option<Self> {
+        let whatami = member.whatami?.to_wire();
+        let mut zid = [0u8; 16];
+        for (into, byte) in zid.iter_mut().zip(member.peer.as_slice()) {
+            *into = *byte;
+        }
+        Some(Self {
+            zid,
+            whatami,
+            is_qos: false,
+            is_multicast: true,
+            is_shm,
+            link: 0,
+            src: RowText::of(src),
+            dst: udp_row(member.locator),
+            kind: Some(LinkKind::Udp),
+            mtu: 0,
+            group_endpoint: Some(GroupRowText::of(endpoint)),
+        })
+    }
+}
+
+/// `udp/<at>`, the locator a group member's end is reported by, written into its row.
+#[cfg(feature = "session-multicast")]
+fn udp_row(at: core::net::SocketAddr) -> RowText {
+    use core::fmt::Write;
+    let mut inline = heapless::String::<{ crate::caps::MAX_LOCATOR_LEN }>::new();
+    if write!(inline, "udp/{at}").is_ok() {
+        RowText::Inline(inline)
+    } else {
+        RowText::Spilled(alloc::format!("udp/{at}"))
     }
 }
 
@@ -507,7 +585,8 @@ mod tests {
         assert_eq!(first.src.as_str(), "tcp/127.0.0.1:1");
         assert_eq!(first.dst.as_str(), "tcp/127.0.0.1:2");
         assert_eq!((first.kind, first.mtu), (Some(LinkKind::Tcp), 2048));
-        assert!(first.group_endpoint.is_none() && !first.clipped);
+        assert!(first.group_endpoint.is_none());
+        assert!(first.src.is_inline() && first.dst.is_inline());
         let second = FaceLinkRow::of_snapshot(&face, 1).expect("the second link");
         assert_eq!(second.link, 1);
         assert_eq!(
@@ -520,21 +599,36 @@ mod tests {
         );
     }
 
-    /// A locator longer than a row holds reads blank and says so, and one that fits whole is kept.
-    /// Turned red by a row that cuts a locator short, which would name another peer.
+    /// A locator of the bound and the longest group endpoint within its own bound read whole from
+    /// rows that hold them in place; a locator past the bound still reads whole, from the heap,
+    /// which only a heap engine's link reaches. Turned red by a row that cuts a text short or
+    /// blanks it, which would name another peer, or by one that spills a text that fits.
     #[test]
-    fn a_locator_past_the_row_reads_blank_and_clipped() {
-        let long = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
-        let face = face_of(&long, "tcp/127.0.0.1:2");
-        let row = FaceLinkRow::of_snapshot(&face, 0).expect("the link");
-        assert!(row.src.is_empty() && row.clipped);
-        assert_eq!(row.dst.as_str(), "tcp/127.0.0.1:2");
+    fn every_text_reads_whole_from_a_row_and_one_that_fits_is_held_in_place() {
         let fits = "t".repeat(crate::caps::MAX_LOCATOR_LEN);
-        let row = FaceLinkRow::of_snapshot(&face_of(&fits, "d"), 0).expect("the link");
-        assert_eq!(
-            (row.src.len(), row.clipped),
-            (crate::caps::MAX_LOCATOR_LEN, false)
+        let mut face = face_of(&fits, "tcp/127.0.0.1:2");
+        let endpoint = "e".repeat(crate::caps::MAX_GROUP_ENDPOINT_LEN);
+        if let Some(group) = face.links[1].group.as_mut() {
+            group.endpoint = endpoint.clone();
+        }
+        let row = FaceLinkRow::of_snapshot(&face, 0).expect("the link");
+        assert_eq!(row.src.as_str(), fits);
+        assert!(
+            row.src.is_inline(),
+            "a locator of the bound is held in the row"
         );
+        let member = FaceLinkRow::of_snapshot(&face, 1).expect("the member's link");
+        let held = member.group_endpoint.expect("the group's endpoint");
+        assert_eq!(held.as_str(), endpoint);
+        assert!(
+            held.is_inline(),
+            "an endpoint of its bound is held in the row"
+        );
+
+        let long = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        let row = FaceLinkRow::of_snapshot(&face_of(&long, "d"), 0).expect("the link");
+        assert_eq!(row.src.as_str(), long, "a longer locator reads whole");
+        assert!(!row.src.is_inline());
     }
 
     fn named_subject(kind: Option<LinkKind>) -> LinkSubject {
@@ -613,6 +707,53 @@ mod tests {
     /// A member of a UDP group is a multicast transport of its own, of its zid and role, with one
     /// UDP link to the address its datagrams come from, over the group; a member whose role this
     /// node does not know is no transport it can report.
+    /// A group member's row read in place is the row of its snapshot, every text held in the row,
+    /// the longest endpoint of its bound too. Turned red by a row that reports another end, kind or
+    /// label than the snapshot, or that spills a text that fits.
+    #[cfg(feature = "session-multicast")]
+    #[test]
+    fn a_group_members_row_is_the_row_of_its_snapshot_held_in_place() {
+        use crate::multicast_dispatch::MulticastMember;
+        use crate::multicast_peer_lost::MulticastPeerId;
+        let member = MulticastMember {
+            peer: MulticastPeerId::from_wire(&[0x0a, 0x0b]),
+            whatami: Some(crate::WhatAmI::Peer),
+            locator: core::net::SocketAddr::from(([192, 0, 2, 9], 7447)),
+        };
+        let group = "udp/239.1.2.3:7447";
+        let endpoint = "e".repeat(crate::caps::MAX_GROUP_ENDPOINT_LEN);
+        let face = FaceSnapshot::of_group_member(
+            &member,
+            GroupMemberLink::udp(group, &member, group, &endpoint),
+            true,
+        )
+        .expect("a member of a known role");
+        let snapshot = FaceLinkRow::of_snapshot(&face, 0).expect("its link");
+        let row = FaceLinkRow::of_group_member(&member, group, &endpoint, true).expect("its row");
+        assert_eq!(
+            (row.zid, row.whatami, row.is_multicast, row.is_shm, row.link),
+            (
+                snapshot.zid,
+                snapshot.whatami,
+                snapshot.is_multicast,
+                snapshot.is_shm,
+                0
+            )
+        );
+        assert_eq!((row.kind, row.mtu), (snapshot.kind, snapshot.mtu));
+        assert_eq!(row.src.as_str(), snapshot.src.as_str());
+        assert_eq!(row.dst.as_str(), "udp/192.0.2.9:7447");
+        assert_eq!(row.dst.as_str(), snapshot.dst.as_str());
+        let held = row.group_endpoint.expect("the group's endpoint");
+        assert_eq!(held.as_str(), endpoint);
+        assert!(row.src.is_inline() && row.dst.is_inline() && held.is_inline());
+        let unknown = MulticastMember {
+            whatami: None,
+            ..member
+        };
+        assert!(FaceLinkRow::of_group_member(&unknown, group, &endpoint, true).is_none());
+    }
+
     #[cfg(feature = "session-multicast")]
     #[test]
     fn a_group_member_is_a_multicast_transport_with_one_link_over_the_group() {

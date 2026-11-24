@@ -586,6 +586,39 @@ config WZ_LIMIT_MAX_LOCATOR_LEN
 	  is skipped, never cut short. The default fits an IPv6 locator with its
 	  scheme and port.
 
+config WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN
+	int "MAX_GROUP_ENDPOINT_LEN"
+	default 96
+	help
+	  The longest endpoint, in bytes, a session joins a multicast group by, its
+	  socket keys included (for example udp/224.0.0.224:7447#iface=eth0): the
+	  text a connectivity row reports a group member's link by. A longer one is
+	  refused when the group is joined, never cut short. Apart from
+	  MAX_LOCATOR_LEN, so the keys of a group endpoint do not lengthen every
+	  locator row of a node. The default holds a raweth group endpoint with an
+	  interface name of fifteen bytes and two whitelisted addresses (90 bytes).
+
+config WZ_LIMIT_MAX_GROUP_MEMBERS
+	int "MAX_GROUP_MEMBERS"
+	default 32
+	help
+	  The members a session holds of each multicast group it joined, each the
+	  row of a peer whose JOIN it heard: the row a connectivity reader reads the
+	  member's transport and link from, and the member table of the group's
+	  session. A JOIN from one more member is not admitted while every row is
+	  held, and is heard again once a member is lost.
+
+config WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS
+	int "MAX_CONNECTIVITY_REPLAY_EVENTS"
+	default 8
+	help
+	  The transport or link events a connectivity listener declared with history
+	  holds while its history is replayed, each told after it in order. A put
+	  followed by a delete of the same transport cancel out, and a delete then a
+	  put of it (a reconnect) are both told. When every row is held, the rest of
+	  the replay's window is told by comparing the transports that stand with
+	  those the listener was told, which may lose one reconnect.
+
 config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"
 	default 8

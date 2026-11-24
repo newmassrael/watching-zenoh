@@ -3643,6 +3643,78 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the length of a locator; wz bounds it to size the locator rows of a node."
 
 [[limit]]
+id = "MAX_GROUP_ENDPOINT_LEN"
+kconfig = "WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN"
+kind = "bound"
+driven = "local"
+default = 96
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The longest endpoint, in bytes, a session joins a multicast group by, its
+socket keys included (for example udp/224.0.0.224:7447#iface=eth0): the
+text a connectivity row reports a group member's link by. A longer one is
+refused when the group is joined, never cut short. Apart from
+MAX_LOCATOR_LEN, so the keys of a group endpoint do not lengthen every
+locator row of a node. The default holds a raweth group endpoint with an
+interface name of fifteen bytes and two whitelisted addresses (90 bytes).
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the length of an endpoint, and zenoh-pico keeps an endpoint's text on the heap with no constant; wz bounds it to size the row a group member's link is reported in."
+
+[[limit]]
+id = "MAX_GROUP_MEMBERS"
+kconfig = "WZ_LIMIT_MAX_GROUP_MEMBERS"
+kind = "bound"
+driven = "remote"
+default = 32
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The members a session holds of each multicast group it joined, each the
+row of a peer whose JOIN it heard: the row a connectivity reader reads the
+member's transport and link from, and the member table of the group's
+session. A JOIN from one more member is not admitted while every row is
+held, and is heard again once a member is lost.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the rows of a group's members: its multicast transport keeps each peer on the heap, and the count a profile states for a group's sessions is a quota within these rows, not their capacity; the default is the member table the cooperative engine's group session already held."
+
+[[limit]]
+id = "MAX_CONNECTIVITY_REPLAY_EVENTS"
+kconfig = "WZ_LIMIT_MAX_CONNECTIVITY_REPLAY_EVENTS"
+kind = "bound"
+driven = "remote"
+default = 8
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The transport or link events a connectivity listener declared with history
+holds while its history is replayed, each told after it in order. A put
+followed by a delete of the same transport cancel out, and a delete then a
+put of it (a reconnect) are both told. When every row is held, the rest of
+the replay's window is told by comparing the transports that stand with
+those the listener was told, which may lose one reconnect.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the events a listener holds during its history: zenoh-pico queues them on the heap with no constant, and zenoh tells the history and the events under one lock, holding none."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"

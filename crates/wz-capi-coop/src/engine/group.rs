@@ -34,6 +34,7 @@ use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
+use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::InterestKinds;
@@ -46,6 +47,7 @@ use wz_session_core::metadata::PushMetadata;
 use wz_session_core::multicast_dispatch::MulticastConfig;
 use wz_session_core::multicast_dispatch::MulticastMember;
 use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
+use wz_session_core::multicast_peer_lost::MulticastPeerId;
 use wz_session_core::multicast_reply_sink::{
     asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
 };
@@ -65,7 +67,7 @@ use wz_session_mcu::group_drive::{
 #[cfg(feature = "connectivity")]
 use {
     super::faces::FacePlane,
-    wz_session_core::face::{FaceEventKind, FaceSnapshot, GroupMemberLink},
+    wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceSnapshot, GroupMemberLink},
 };
 #[cfg(feature = "query")]
 use {
@@ -81,11 +83,63 @@ use crate::prelude::*;
 use super::registry::{FaceId, Registry};
 use crate::round::Round;
 
-/// The rows of each group's member table: a member whose JOIN finds them all held is turned
-/// away, as a group whose `max_sessions` is reached turns one away. A table that does not grow,
-/// so that what a group holds is what it was given when it was joined; the tokio engine's group
-/// face starts from the same count of rows and grows past it, and zenoh-pico states no cap.
-pub(super) const GROUP_MEMBERS: usize = 32;
+/// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
+/// held is turned away, as a group whose `max_sessions` is reached turns one away. A table that
+/// does not grow, so that what a group holds is what it was given when it was joined; the tokio
+/// engine's group face starts from the same count of rows and grows past it, and zenoh-pico states
+/// no cap.
+pub(super) const GROUP_MEMBERS: usize = caps::MAX_GROUP_MEMBERS;
+
+/// The members a group holds, in the order they came, in as many rows as its session's member
+/// table: reserved when the group is joined, so a member that comes or goes allocates nothing and
+/// a reader of the session's faces reads each member in place.
+struct MemberRows {
+    rows: [Option<MulticastMember>; GROUP_MEMBERS],
+    len: usize,
+}
+
+impl MemberRows {
+    const fn new() -> Self {
+        Self {
+            rows: [None; GROUP_MEMBERS],
+            len: 0,
+        }
+    }
+
+    /// Note `member`; `false` when every row is held.
+    fn push(&mut self, member: MulticastMember) -> bool {
+        let Some(row) = self.rows.get_mut(self.len) else {
+            return false;
+        };
+        *row = Some(member);
+        self.len += 1;
+        true
+    }
+
+    /// Let go of the member `peer`, the ones after it moving up a row, and hand it back.
+    fn remove(&mut self, peer: &MulticastPeerId) -> Option<MulticastMember> {
+        let at = self.iter().position(|member| member.peer == *peer)?;
+        let gone = self.rows.get_mut(at)?.take();
+        self.rows.get_mut(at..self.len)?.rotate_left(1);
+        self.len -= 1;
+        gone
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &MulticastMember> {
+        self.rows.iter().take(self.len).flatten()
+    }
+
+    #[cfg(feature = "query")]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Default for MemberRows {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The tick of a group's lease sweep, in milliseconds, which its task is due on while it holds a
 /// member (and while its socket holds back a datagram), and the longest a read waits for a group
@@ -326,7 +380,7 @@ pub(super) struct GroupFace<W> {
     input: Option<WaitOn>,
     /// When the group's session is next due with nothing arriving on it, as its last step said.
     due: GroupDue,
-    members: Rc<RefCell<Vec<MulticastMember>>>,
+    members: Rc<RefCell<MemberRows>>,
     took: Rc<Cell<bool>>,
     stop: Rc<Cell<bool>>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
@@ -401,7 +455,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let room = transport.room_wait();
         let input = transport.input_wait();
         let due = GroupDue::default();
-        let members: Rc<RefCell<Vec<MulticastMember>>> = Rc::new(RefCell::new(Vec::new()));
+        let members = Rc::new(RefCell::new(MemberRows::new()));
         let took = Rc::new(Cell::new(false));
         let stop = Rc::new(Cell::new(false));
         let join_ask = JoinAsk::default();
@@ -681,11 +735,11 @@ impl<W: LinkWaits> GroupFace<W> {
         // The members go with the group's link, and a watcher of the faces is told each went.
         let gone = core::mem::take(&mut *self.members.borrow_mut());
         #[cfg(feature = "connectivity")]
-        for member in &gone {
+        for member in gone.iter() {
             self.events.tell(FaceEventKind::Down, member);
         }
         #[cfg(not(feature = "connectivity"))]
-        drop(gone);
+        let _ = gone;
         // A finished task's output is taken without stepping anything.
         local.block_on_local(task).ok()
     }
@@ -783,6 +837,37 @@ impl<W: LinkWaits> GroupFace<W> {
             .iter()
             .filter_map(|member| self.events.label.snapshot(member))
             .collect()
+    }
+
+    /// How many rows the group's members are read in (`connectivity`): one for each member of a
+    /// known role, as [`Self::member_snapshots`] lists them; a group whose session ended holds
+    /// none.
+    #[cfg(feature = "connectivity")]
+    pub(super) fn member_rows(&self) -> usize {
+        if self.has_ended() {
+            return 0;
+        }
+        self.members
+            .borrow()
+            .iter()
+            .filter(|member| member.whatami.is_some())
+            .count()
+    }
+
+    /// The `at`-th of the rows [`Self::member_rows`] counts, read in place: the member's transport
+    /// and its one link, every text in the row, so nothing is allocated (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    pub(super) fn member_row(&self, at: usize) -> Option<FaceLinkRow> {
+        if self.has_ended() {
+            return None;
+        }
+        let members = self.members.borrow();
+        let member = members
+            .iter()
+            .filter(|member| member.whatami.is_some())
+            .nth(at)?;
+        let label = &self.events.label;
+        FaceLinkRow::of_group_member(member, &label.group, &label.endpoint, label.is_shm)
     }
 
     /// Tell the group of `entity`, which the session declared, as the group's declarations say
@@ -1073,7 +1158,7 @@ where
 /// noted, each told to the session's watchers of its faces (`connectivity`), and then the event
 /// goes through `dispatch` with the sink the group's replies are queued on.
 fn noting_members<D>(
-    members: Rc<RefCell<Vec<MulticastMember>>>,
+    members: Rc<RefCell<MemberRows>>,
     replies: GroupReplies,
     mut dispatch: D,
     #[cfg(feature = "connectivity")] events: Rc<MemberEvents>,
@@ -1089,16 +1174,16 @@ where
                     whatami: arrived.whatami,
                     locator: arrived.locator,
                 };
-                members.borrow_mut().push(member);
+                // The session's member table has as many rows, so it admits no member past them.
+                let noted = members.borrow_mut().push(member);
+                debug_assert!(noted, "a member past the group's rows was admitted");
                 #[cfg(feature = "connectivity")]
-                events.tell(FaceEventKind::Up, &member);
+                if noted {
+                    events.tell(FaceEventKind::Up, &member);
+                }
             }
             IterationEvent::MulticastPeerLost(lost) => {
-                let gone = {
-                    let mut held = members.borrow_mut();
-                    let at = held.iter().position(|member| member.peer == lost.peer);
-                    at.map(|at| held.remove(at))
-                };
+                let gone = members.borrow_mut().remove(&lost.peer);
                 #[cfg(feature = "connectivity")]
                 if let Some(member) = gone {
                     events.tell(FaceEventKind::Down, &member);
