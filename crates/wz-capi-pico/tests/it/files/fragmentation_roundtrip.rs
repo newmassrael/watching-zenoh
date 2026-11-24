@@ -139,6 +139,44 @@ unsafe fn put(session: &z_owned_session_t, key: &std::ffi::CStr, payload: &[u8])
     );
 }
 
+/// `size` letters kept for as long as the program runs, for a payload that lends their bytes
+/// rather than copies them: one past the receiving ceiling, which no payload block of the release
+/// form holds, as its largest holds the largest message a session delivers.
+fn lent_letters(size: usize) -> &'static std::ffi::CStr {
+    let text: Vec<u8> = (0..size).map(|i| b'a' + (i % 26) as u8).collect();
+    Box::leak(
+        std::ffi::CString::new(text)
+            .expect("letters hold no terminator")
+            .into_boxed_c_str(),
+    )
+}
+
+/// One `z_put` on `key` of a payload lending the bytes of `text`, asserting it returns `Z_OK`.
+unsafe fn put_lent(
+    session: &z_owned_session_t,
+    key: &std::ffi::CStr,
+    text: &'static std::ffi::CStr,
+) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut bytes = std::mem::zeroed();
+    assert_eq!(
+        wz_capi_pico::z_bytes_from_static_str(&mut bytes, text.as_ptr()),
+        Z_OK
+    );
+    assert_eq!(
+        z_put(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            wz_capi_pico::z_bytes_move(&mut bytes),
+            std::ptr::null(),
+        ),
+        Z_OK,
+        "z_put returned an error for {} lent bytes",
+        text.to_bytes().len()
+    );
+}
+
 #[test]
 fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
     let port = free_port();
@@ -270,11 +308,11 @@ fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
         }
     }
 
-    // Past the ceiling: published, accepted by `z_put` (asserted in `put`), and
+    // Past the ceiling: published, accepted by `z_put` (asserted in `put_lent`), and
     // dropped by the acceptor. The put after it rides the same reliable conduit,
     // so once it has arrived the acceptor has read every fragment of the dropped
     // chain before it, and the absence below is a verdict and not an impatience.
-    unsafe { put(&session, c"frag/past", &payload_of(PAST)) };
+    unsafe { put_lent(&session, c"frag/past", lent_letters(PAST)) };
     let after = payload_of(AFTER);
     let mut recovered = false;
     for _ in 0..150 {
@@ -449,12 +487,12 @@ fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver
     );
 
     // Twice this door's receiving ceiling (pico's FRAG_MAX_SIZE): a chain only the receiver's
-    // drop can answer for, and a payload every build of this door holds. The release form keeps
-    // payloads in the process pools' bounded area, which refuses a copy of megabytes with pico's
-    // _Z_ERR_SYSTEM_OUT_OF_MEMORY, as zenoh-pico on a small heap does: the size of the put is not
-    // what this test asks about, the sender's answer past the ceiling is.
+    // drop can answer for. Its bytes are lent, not copied: the release form keeps a copied payload
+    // in a block of its process pools, the largest of which holds the largest message a session
+    // delivers and so no payload past the ceiling. The size of the put is not what this test asks
+    // about, the sender's answer past the ceiling is.
     const TOO_BIG: usize = 2 * CEILING;
-    let payload = payload_of(TOO_BIG);
+    let lent = lent_letters(TOO_BIG);
     let rc = unsafe {
         let mut ke: z_view_keyexpr_t = std::mem::zeroed();
         assert_eq!(
@@ -463,7 +501,7 @@ fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver
         );
         let mut bytes = std::mem::zeroed();
         assert_eq!(
-            z_bytes_copy_from_buf(&mut bytes, payload.as_ptr(), payload.len()),
+            wz_capi_pico::z_bytes_from_static_str(&mut bytes, lent.as_ptr()),
             Z_OK
         );
         z_put(

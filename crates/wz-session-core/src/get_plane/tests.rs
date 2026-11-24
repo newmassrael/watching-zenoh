@@ -7,6 +7,7 @@
 use super::*;
 use crate::bounded::{Arena, ARENA_ALIGN};
 use crate::caps;
+use crate::placed::Placed;
 use crate::plane_lock::StdLocks;
 use crate::reply_sink::ReplyKind;
 use crate::round::{RoundCalls, RoundRowCounts, RoundRows};
@@ -139,8 +140,8 @@ fn plane<C: GetCalls>(rows: usize, held: usize) -> Arc<GetPlane<C>> {
     ))
 }
 
-/// A round of a few records, its tables lent from an arena over leaked memory.
-fn round<C: RoundCalls>() -> Arc<Round<C>> {
+/// A round of a few records, placed with its tables in an arena over leaked memory.
+fn round<C: RoundCalls>() -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(4),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
@@ -150,8 +151,11 @@ fn round<C: RoundCalls>() -> Arc<Round<C>> {
     let bytes = counts.records * RoundRows::<C>::RECORD_BYTES
         + counts.callbacks * RoundRows::<C>::CALLBACK_BYTES
         + counts.key_bytes()
-        + 3 * ARENA_ALIGN;
-    Round::shared_over(RoundRows::lent(&mut arena(bytes), counts).expect("the arena has the rows"))
+        + core::mem::size_of::<Round<C>>()
+        + 4 * ARENA_ALIGN;
+    let mut arena = arena(bytes);
+    let rows = RoundRows::lent(&mut arena, counts).expect("the arena has the rows");
+    Round::placed_over(&mut arena, rows).expect("the arena has the round")
 }
 
 /// A reply of key `key` and payload `payload`.
@@ -350,15 +354,14 @@ fn a_plane_let_go_drops_the_callbacks_its_rows_and_ends_still_hold() {
 fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
     let plane = plane::<Asking>(2, 1);
     let mut round = round::<Asking>();
-    Arc::get_mut(&mut round)
-        .expect("not shared yet")
-        .calls_legs_of(plane.clone());
+    round.get_mut().calls_legs_of(plane.clone());
     let seen = Arc::new(Seen::default());
     let row = plane
         .open_leg(&mut || Counted(seen.clone()), true)
         .expect("a row");
-    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
-    let mut sink = unsafe { LegSink::new(3, row, &plane, &round) };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
+    // sink, made after the round, is dropped before it.
+    let mut sink = unsafe { LegSink::new(3, row, &plane, round.share()) };
     lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
@@ -385,15 +388,14 @@ fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
 fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
     let plane = plane::<Remote>(2, 1);
     let mut round = round::<Remote>();
-    Arc::get_mut(&mut round)
-        .expect("not shared yet")
-        .calls_legs_of(plane.clone());
+    round.get_mut().calls_legs_of(plane.clone());
     let seen = Arc::new(Seen::default());
     let row = plane
         .open_leg(&mut || Counted(seen.clone()), true)
         .expect("a row");
-    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
-    let mut sink = unsafe { LegSink::new(3, row, &plane, &round) };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
+    // sink, made after the round, is dropped before it.
+    let mut sink = unsafe { LegSink::new(3, row, &plane, round.share()) };
     lend_reply(&round);
     plane.capture();
     sink.on_reply(&REPLY);
@@ -419,8 +421,9 @@ fn a_sinks_drop_is_its_legs_end_with_the_timeout_it_was_told() {
     let row = plane
         .open_leg(&mut || Counted(seen.clone()), true)
         .expect("a row");
-    // SAFETY: the test hands the sink nothing; it is the round's one writer.
-    let mut sink = unsafe { LegSink::new(7, row, &plane, &round) };
+    // SAFETY: the test hands the sink nothing; it is the round's one writer, and the sink, made
+    // after the round, is dropped before it.
+    let mut sink = unsafe { LegSink::new(7, row, &plane, round.share()) };
     sink.on_final(5);
     sink.on_timeout(9);
     assert!(!plane.ends_pending(), "no end while the sink lives");

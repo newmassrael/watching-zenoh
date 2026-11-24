@@ -4,7 +4,7 @@
 //! What the session's application layer holds, in the two parts a session that listens needs
 //! apart (`docs/capi-pico-on-coop-engine.md`, section 7).
 //!
-//! - [`Registry::app`], what the application registered (its subscribers, queryables, local
+//! - [`RegistryOf::app`], what the application registered (its subscribers, queryables, local
 //!   tokens, the listeners on what a peer declares), once for the session however many peers it
 //!   comes to hold;
 //! - one [`FaceTables`] for each face, what ONE peer wrote (its key aliases, its subscribers,
@@ -48,8 +48,6 @@ use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-#[cfg(not(any(feature = "listen", feature = "group", test)))]
-use wz_session_core::slot_observer::NoOtherPeers;
 #[cfg(not(feature = "query"))]
 use wz_session_core::slot_observer::NoRequesters;
 #[cfg(not(any(
@@ -200,7 +198,9 @@ impl FaceTables {
 /// (`crate::arena::ArenaPlan`).
 pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 
-/// The bytes of one entry of the index of held sets, a row of the arena's table of them.
+/// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a
+/// build that adds faces beside its dial role's alone (`held::ManyHolders`).
+#[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<FaceId>();
 
 /// What the index of held sets reads for a free set: the session numbers its faces up from 1
@@ -223,6 +223,8 @@ fn names_face(holder: FaceId) -> bool {
 
 #[cfg(any(feature = "listen", feature = "group", test))]
 mod adding;
+mod held;
+use held::Holders;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.
@@ -234,7 +236,7 @@ fn place_of(holders: &[FaceId], id: FaceId) -> Option<usize> {
 }
 
 /// A face as the dispatch of its link or group names it: the place of its set and its id, read
-/// once as the dispatch is made ([`Registry::held`]). The set is the face's while its row of the
+/// once as the dispatch is made ([`RegistryOf::held`]). The set is the face's while its row of the
 /// index of held sets names the id, so the key of a face that went finds nothing, whichever face
 /// holds the set since.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,7 +265,7 @@ impl HeldFace {
     }
 }
 
-/// Where a liveliness subscriber's history stands ([`Registry::next_history_token`]): the face
+/// Where a liveliness subscriber's history stands ([`RegistryOf::next_history_token`]): the face
 /// whose peer's tokens it reads now, by id, and the last token handed from them.
 #[cfg(feature = "liveliness")]
 #[derive(Clone, Copy, Default)]
@@ -276,7 +278,7 @@ pub(super) struct HistoryCursor {
 /// the sets before the call's own and after it, and the rows of the index of held sets that
 /// name their faces.
 #[cfg(any(feature = "listen", feature = "group", test))]
-struct Others<'a> {
+pub(super) struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
     held_before: &'a [FaceId],
@@ -380,8 +382,8 @@ impl MatchingSink for NoWatch {
 pub(super) type App = SlotObserverOf<CoopSinks, Lent, NoWatch>;
 
 /// What a write filter's verdict and a matching listener's are read off: every face's peer's
-/// declarations, each search of them counted for the tests ([`Registry::peers_declare`]).
-impl PeerDeclarations for Registry {
+/// declarations, each search of them counted for the tests ([`RegistryOf::peers_declare`]).
+impl<H: Holders> PeerDeclarations for RegistryOf<H> {
     fn declares(&self, plane: Plane, key: &str) -> bool {
         self.peers_declare(plane, key)
     }
@@ -413,8 +415,20 @@ fn faces_declare<'a>(
     }
 }
 
-/// The application layer of one session. See the module documentation.
-pub(super) struct Registry {
+/// The index of held sets the build keeps: a build that adds faces beside its dial role's
+/// (`listen`, `group`) lends one from its arena, and one of that face alone knows it.
+#[cfg(any(feature = "listen", feature = "group"))]
+type BuildHolders = held::ManyHolders;
+/// See the form of a build that adds faces.
+#[cfg(not(any(feature = "listen", feature = "group")))]
+type BuildHolders = held::OneHolder;
+
+/// The application layer of one session, as the build holds its faces.
+pub(super) type Registry = RegistryOf<BuildHolders>;
+
+/// The application layer of one session, its faces held as `H` holds them. See the module
+/// documentation.
+pub(super) struct RegistryOf<H: Holders> {
     pub(super) app: App,
     /// Where a sample the application's subscribers match goes: the session's round of
     /// deliveries, handed to each dispatch of the application's tables.
@@ -433,10 +447,8 @@ pub(super) struct Registry {
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
     /// the first. The place is the face's in every table of the session (its link's, its room's).
     /// Every walk over the faces and every lookup of one reads this and the held sets alone; the
-    /// open lends a set for each face the config admits, most of them free at any time. Lent at
-    /// the open with a row for each set lent, so a face coming or going writes its set's row and
-    /// moves none.
-    holders: BoundedVec<FaceId, MAX_FACE_SETS, Lent>,
+    /// open lends a set for each face the config admits, most of them free at any time.
+    holders: H,
     /// The tokens of faces that went before each was retracted, in the order the faces went: each
     /// the token table the face's set held, its rows still in the session's pool, the set given
     /// back as the face went. Lent at the open, a row for each row of the session's token pool,
@@ -477,7 +489,7 @@ pub(super) struct Registry {
 /// The faces as the session's state reaches them (`SessionState`): a
 /// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
 /// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
-impl SessionFaces for Registry {
+impl<H: Holders> SessionFaces for RegistryOf<H> {
     fn end_leg(&mut self, face: FaceId, kind: GetKind) {
         #[cfg(feature = "query")]
         if let Some(gets) = self.gets_mut(face) {
@@ -509,28 +521,20 @@ impl SessionFaces for Registry {
 
     #[cfg(feature = "liveliness")]
     fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
-        Registry::retract_owed(self, room)
+        RegistryOf::retract_owed(self, room)
     }
 }
 
-/// The faces other than the one a call acts on, as the build holds them. A build that adds no face
-/// beside its dial role's (`listen`, `group`) holds that one alone, so its calls count no other.
-#[cfg(any(feature = "listen", feature = "group", test))]
-type OtherFaces<'a> = Others<'a>;
-/// See the form of a build that adds faces.
-#[cfg(not(any(feature = "listen", feature = "group", test)))]
-type OtherFaces<'a> = NoOtherPeers;
-
 /// The application's part, one face's tables and the other faces', apart so each can be used as
-/// its call needs.
-struct Split<'a> {
+/// its call needs. A session of its dial role's face alone counts no other.
+struct Split<'a, H: Holders + 'a> {
     app: &'a mut App,
     delivery: &'a mut RoundDelivery,
     face: &'a mut FaceTables,
-    others: OtherFaces<'a>,
+    others: H::Others<'a>,
 }
 
-impl Registry {
+impl<H: Holders> RegistryOf<H> {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
     /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
     /// of each, the pools of what the peers write `peers` counts lent from it next, and the tables
@@ -561,7 +565,7 @@ impl Registry {
         // dial face's. Either way every set the plan counts is lent by the one call below, so the
         // open builds and lends a set in one place.
         let mut sets = arena.lend(peers.sets())?;
-        let mut holders: BoundedVec<FaceId, MAX_FACE_SETS, Lent> = arena.lend(peers.sets())?;
+        let holders = H::lent(arena, peers.sets())?;
         if !peers.dial {
             push_unpeered(&mut sets, keys, limits).ok_or(LendRefused::OverCeiling {
                 rows: 1,
@@ -572,14 +576,6 @@ impl Registry {
             lend_set(
                 &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
             )?;
-        }
-        // The dial role's face holds the first set, and every set after it is free.
-        let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
-        for holder in faces.take(sets.len()) {
-            holders.push(holder).map_err(|_| LendRefused::OverCeiling {
-                rows: 1,
-                ceiling: 0,
-            })?;
         }
         // Every span an arena lends starts on one alignment, so lending the session's own gets
         // after the faces' takes the bytes the plan counts for them wherever it lends them.
@@ -678,6 +674,7 @@ impl Registry {
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         self.holders
+            .rows()
             .iter()
             .enumerate()
             .filter(|(_, holder)| names_face(**holder))
@@ -686,13 +683,14 @@ impl Registry {
 
     /// Where the set face `id` holds lies among the sets, while the session holds the face.
     fn held_at(&self, id: FaceId) -> Option<usize> {
-        place_of(&self.holders, id)
+        place_of(self.holders.rows(), id)
     }
 
     /// The faces the session holds, in the order of their sets.
     #[cfg(any(feature = "liveliness", test))]
     fn held_ids(&self) -> impl Iterator<Item = FaceId> + '_ {
         self.holders
+            .rows()
             .iter()
             .copied()
             .filter(|holder| names_face(*holder))
@@ -718,7 +716,7 @@ impl Registry {
 
     /// Where the set `face` names lies, while its face holds it: read at its place, with no walk.
     fn place(&self, face: HeldFace) -> Option<usize> {
-        (self.holders.get(face.at) == Some(&face.id)).then_some(face.at)
+        (self.holders.rows().get(face.at) == Some(&face.id)).then_some(face.at)
     }
 
     /// The tables of face `id`, while the session holds it, to write.
@@ -742,7 +740,7 @@ impl Registry {
         let gets = self
             .sets
             .iter_mut()
-            .zip(self.holders.iter())
+            .zip(self.holders.rows().iter())
             .filter(|(_, holder)| names_face(**holder))
             .map(|(face, _)| &mut face.gets);
         #[cfg(feature = "local-queryable")]
@@ -785,8 +783,12 @@ impl Registry {
     /// `None` when every place is held or kept.
     #[cfg(feature = "connectivity")]
     pub(super) fn keep_place(&mut self) -> Option<usize> {
-        let at = self.holders.iter().position(|holder| *holder == NO_FACE)?;
-        let row = self.holders.get_mut(at)?;
+        let at = self
+            .holders
+            .rows()
+            .iter()
+            .position(|holder| *holder == NO_FACE)?;
+        let row = self.holders.rows_mut().get_mut(at)?;
         *row = KEPT;
         Some(at)
     }
@@ -794,7 +796,12 @@ impl Registry {
     /// The place at `at` a tomb kept is free again; a place a face holds is left as it is.
     #[cfg(feature = "connectivity")]
     pub(super) fn free_kept(&mut self, at: usize) {
-        if let Some(row) = self.holders.get_mut(at).filter(|row| **row == KEPT) {
+        if let Some(row) = self
+            .holders
+            .rows_mut()
+            .get_mut(at)
+            .filter(|row| **row == KEPT)
+        {
             *row = NO_FACE;
         }
     }
@@ -808,7 +815,7 @@ impl Registry {
             return;
         };
         self.writing();
-        if let Some(holder) = self.holders.get_mut(at) {
+        if let Some(holder) = self.holders.rows_mut().get_mut(at) {
             *holder = row;
         }
         // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
@@ -824,7 +831,8 @@ impl Registry {
     pub(super) fn remove_accepted_faces(&mut self) {
         self.writing();
         let Self { sets, holders, .. } = self;
-        for (set, holder) in sets.iter_mut().zip(holders.iter_mut()) {
+        // A session of its dial role's face alone has no row to write, and so no set to give back.
+        for (set, holder) in sets.iter_mut().zip(holders.rows_mut().iter_mut()) {
             if *holder == DIAL_FACE {
                 continue;
             }
@@ -874,35 +882,17 @@ impl Registry {
 
     /// The application's part, the tables of face `id` and those of the others, apart so each can
     /// be used as its call needs: what every dispatch and drain takes.
-    fn split(&mut self, at: Option<usize>) -> Option<Split<'_>> {
+    fn split(&mut self, at: Option<usize>) -> Option<Split<'_, H>> {
         self.writing();
         let at = at?;
         let Self {
             app,
             delivery,
             sets,
-            // Only the others of a face read who holds each set; a build that holds one face has
-            // none.
-            #[cfg(any(feature = "listen", feature = "group", test))]
             holders,
             ..
         } = self;
-        #[cfg(any(feature = "listen", feature = "group", test))]
-        let (face, others) = {
-            let (before, rest) = sets.split_at_mut_checked(at)?;
-            let (face, after) = rest.split_first_mut()?;
-            let holders: &[FaceId] = &holders[..];
-            let (held_before, rest) = holders.split_at_checked(at)?;
-            let others = Others {
-                before: &*before,
-                after: &*after,
-                held_before,
-                held_after: rest.get(1..)?,
-            };
-            (face, others)
-        };
-        #[cfg(not(any(feature = "listen", feature = "group", test)))]
-        let (face, others) = (sets.get_mut(at)?, NoOtherPeers);
+        let (face, others) = holders.split(sets, at)?;
         Some(Split {
             app,
             delivery,
@@ -1253,7 +1243,7 @@ impl Registry {
 }
 
 /// Stage for `face`'s peer what the application did to its subscriptions since the peer last looked
-/// ([`Registry::reconcile_subscribers`]): one body for every caller, not one for each that inlines
+/// ([`RegistryOf::reconcile_subscribers`]): one body for every caller, not one for each that inlines
 /// it. Only a build that answers its peers' Interests keeps any to reconcile.
 #[cfg(feature = "interest-answer")]
 #[inline(never)]
@@ -1325,6 +1315,7 @@ mod tests {
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
     //! what is asked of them: the session takes no memory but its arena.
     use super::adding::FacesFull;
+    use super::held::{Holders, ManyHolders, OneHolder};
     use super::*;
     use crate::arena::{AllocatorMemory, SessionArena};
     use wz_session_core::peer_tables::PeerPoolRows;
@@ -1357,10 +1348,14 @@ mod tests {
         assert!(!core::mem::needs_drop::<Gets>());
     }
 
+    /// The registry of a session that adds faces beside its dial role's, which most of these tests
+    /// hold several of, whatever the build.
+    type Registry = RegistryOf<ManyHolders>;
+
     /// A registry and the arena its tables were lent from, the registry first so its tables go
     /// before the memory they lie in, and how many sets the open lent rows to.
-    struct Held {
-        registry: Registry,
+    struct Held<H: Holders = ManyHolders> {
+        registry: RegistryOf<H>,
         arena: SessionArena,
         lent: usize,
         /// The key arena the registry's tables keep their keys in, lent from `arena`.
@@ -1390,6 +1385,11 @@ mod tests {
     /// [`held_with`], the first of the faces' tables the dial face's when `dial`, and with no
     /// dial every one of them kept for the faces to come.
     fn held_as(faces: usize, pools: PeerPoolRows, dial: bool) -> Held {
+        held_of::<ManyHolders>(faces, pools, dial)
+    }
+
+    /// [`held_as`], its faces held as `H` holds them.
+    fn held_of<H: Holders>(faces: usize, pools: PeerPoolRows, dial: bool) -> Held<H> {
         let mut arena =
             SessionArena::of_bytes(1 << 20, &AllocatorMemory).expect("the host has the memory");
         let gets = GetTables {
@@ -1422,7 +1422,7 @@ mod tests {
             round,
             alloc::sync::Arc::new(super::super::query::leaked_plane(1)),
         );
-        let registry = Registry::new(
+        let registry = RegistryOf::<H>::new(
             &SessionLimits::defaults(),
             arena.arena_mut(),
             keys,
@@ -1454,7 +1454,7 @@ mod tests {
     /// How many sets the open lent that no face holds: the lent sets lie first.
     fn free_lent(held: &Held) -> usize {
         (0..held.lent)
-            .filter(|at| held.registry.holders[*at] == NO_FACE)
+            .filter(|at| held.registry.holders.rows()[*at] == NO_FACE)
             .count()
     }
 
@@ -2050,7 +2050,7 @@ mod tests {
         held.registry
             .add_face(5)
             .expect("the open lent a set for the face");
-        assert_eq!(&held.registry.holders[..], &[DIAL_FACE, 5, NO_FACE]);
+        assert_eq!(held.registry.holders.rows(), &[DIAL_FACE, 5, NO_FACE]);
         assert_eq!(held.registry.held_at(NO_FACE), None);
         assert_eq!(
             held.registry.place(held.registry.held(NO_FACE)),
@@ -2059,7 +2059,7 @@ mod tests {
         );
         remove(&mut held.registry, NO_FACE);
         assert_eq!(
-            &held.registry.holders[..],
+            held.registry.holders.rows(),
             &[DIAL_FACE, 5, NO_FACE],
             "nothing was removed"
         );
@@ -2084,7 +2084,7 @@ mod tests {
         assert_eq!(five.at(), 1);
         held.registry.depart(five);
         assert_eq!(
-            &held.registry.holders[..],
+            held.registry.holders.rows(),
             &[DIAL_FACE, KEPT, NO_FACE, NO_FACE]
         );
         assert_eq!(
@@ -2104,7 +2104,8 @@ mod tests {
         held.registry.free_kept(1);
         held.registry.free_kept(3);
         assert_eq!(
-            held.registry.holders[3], 6,
+            held.registry.holders.rows()[3],
+            6,
             "a face's place is not freed as a kept one"
         );
         assert_eq!(
@@ -2114,7 +2115,7 @@ mod tests {
         );
         held.registry.remove_accepted_faces();
         assert_eq!(
-            &held.registry.holders[..],
+            held.registry.holders.rows(),
             &[DIAL_FACE, NO_FACE, NO_FACE, NO_FACE],
             "a tomb's place goes with the faces'"
         );
@@ -2504,5 +2505,79 @@ mod tests {
             assert_eq!(held.registry.all_gets().count(), walked);
             assert_eq!(held.registry.all_gets_mut().count(), walked);
         }
+    }
+    /// A session of its dial role's face alone holds that face in the first set and no other, and
+    /// keeps no index of held sets: a face that is not the dial role's finds no set, no call counts
+    /// another face, and neither removing the dial role's face nor every accepted face empties its
+    /// set. Turned red by a one-face index that names a second face or lets the dial role's set go.
+    #[test]
+    fn a_session_of_one_face_holds_its_dial_role_s_face_alone() {
+        assert_eq!(core::mem::size_of::<OneHolder>(), 0, "no index is kept");
+        let pools = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
+            shared: false,
+        };
+        let mut held = held_of::<OneHolder>(1, pools, true);
+        let registry = &mut held.registry;
+        assert_eq!(registry.held_ids().collect::<Vec<_>>(), [DIAL_FACE]);
+        assert_eq!(registry.held_at(DIAL_FACE), Some(0));
+        assert_eq!(
+            registry.held_at(5),
+            None,
+            "no face but the dial role's is held"
+        );
+        assert_eq!(registry.held_at(NO_FACE), None);
+        assert_eq!(registry.place(registry.held(5)), None);
+        assert_eq!(registry.place(HeldFace::new(1, DIAL_FACE)), None);
+        assert_eq!(registry.faces().count(), 1);
+        assert!(registry.split(Some(0)).is_some());
+        assert!(
+            registry.split(Some(1)).is_none(),
+            "one set lies at the first place"
+        );
+        #[cfg(feature = "connectivity")]
+        assert_eq!(registry.keep_place(), None, "no place is free to keep");
+        registry
+            .held_mut(DIAL_FACE)
+            .expect("the dial role's face holds the first set")
+            .peer
+            .finals
+            .owe(1, QosLevel::DEFAULT);
+        let dial = registry.held(DIAL_FACE);
+        registry.remove_face(dial);
+        registry.remove_accepted_faces();
+        assert_eq!(
+            registry.held_at(DIAL_FACE),
+            Some(0),
+            "the dial role's face stays"
+        );
+        assert_eq!(
+            registry.sets[0].peer.finals.owed(),
+            1,
+            "and its set was not given back"
+        );
+    }
+
+    /// The index of a session that adds faces is lent a row for each set, the dial role's face's
+    /// first and every other free, while a session of one face reads its one row off its form.
+    /// Turned red by an index that names a face in a set no face took.
+    #[test]
+    fn each_form_names_the_dial_role_s_face_in_the_first_set() {
+        let many = held(3);
+        assert_eq!(many.registry.holders.rows(), &[DIAL_FACE, NO_FACE, NO_FACE]);
+        let one = held_of::<OneHolder>(
+            1,
+            PeerPoolRows {
+                aliases: 16,
+                remote_decls: 16,
+                interests: 16,
+                shared: false,
+            },
+            true,
+        );
+        assert_eq!(one.registry.holders.rows(), &[DIAL_FACE]);
+        assert_eq!(one.registry.sets.len(), 1);
     }
 }

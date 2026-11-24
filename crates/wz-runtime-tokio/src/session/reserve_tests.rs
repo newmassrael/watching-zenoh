@@ -131,6 +131,7 @@ fn session_over(driver: &Arc<ReservingDriver>) -> TokioSession {
         fixture_session_init_params(),
         TokioTime::new(),
     );
+    actions.enter_established();
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     TokioSession::new(actions, observer, Arc::new(TokioTime::new()))
 }

@@ -44,6 +44,7 @@ fn live_keyexpr_alias_definition_ships_namespaced() {
         fixture_params_with_zid(0x01),
         TokioTime::new(),
     );
+    actions.enter_established();
 
     actions.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
 

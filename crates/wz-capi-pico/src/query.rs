@@ -29,7 +29,7 @@
 //! the `ResponseFinal` until the copy is let go, as pico's `_z_query_clear`
 //! does. Either engine keeps the query under an id
 //! (`QueryHolder::keep_query`), and the copy owns its key and parameters (in
-//! the payloads' area of the process pools, or on the heap in a library without
+//! the process pools' payload blocks, or on the heap in a library without
 //! them) and holds its session weakly, as pico's `_z_query_t` owns its key and
 //! parameters and holds a weak session, so a copy kept past its session holds
 //! none of the session's memory. The family
@@ -281,7 +281,7 @@ enum QueryText<T: ?Sized> {
     /// The marshal's own, on the heap, in a library without the process pools.
     #[cfg(not(wz_process_pools))]
     Owned(Box<T>),
-    /// The marshal's own, in the block of the payloads' area `copy` holds and gives back when it
+    /// The marshal's own, in the payload block `copy` holds and gives back when it
     /// drops, the text read from it in the form it was copied from.
     #[cfg(wz_process_pools)]
     Pooled { copy: crate::bytes::ByteBuf },
@@ -330,7 +330,7 @@ impl<T: ?Sized + TextForm> QueryText<T> {
 
 #[cfg(wz_process_pools)]
 impl QueryText<str> {
-    /// A copy of `text` of the marshal's own, in the payloads' area of the process pools.
+    /// A copy of `text` of the marshal's own, in the process pools' payload blocks.
     fn pooled_text(text: &str) -> Result<Self, crate::bytes::NoRoom> {
         Ok(Self::Pooled {
             copy: crate::bytes::ByteBuf::copy_of(text.as_bytes())?,
@@ -340,7 +340,7 @@ impl QueryText<str> {
 
 #[cfg(wz_process_pools)]
 impl QueryText<[u8]> {
-    /// A copy of `bytes` of the marshal's own, in the payloads' area of the process pools.
+    /// A copy of `bytes` of the marshal's own, in the process pools' payload blocks.
     fn pooled_bytes(bytes: &[u8]) -> Result<Self, crate::bytes::NoRoom> {
         Ok(Self::Pooled {
             copy: crate::bytes::ByteBuf::copy_of(bytes)?,
@@ -576,7 +576,7 @@ impl QueryMarshal {
     }
 
     /// The key and the parameters of a copy kept past the dispatch, the copy's own: in the
-    /// payloads' area of the process pools, reserved before the first session opened, whose having
+    /// process pools' payload blocks, reserved before the first session opened, whose having
     /// no room for them refuses the copy as zenoh-pico refuses a copy it cannot allocate; on the
     /// heap in a library without the pools, as its other objects are.
     fn kept_texts(&self) -> Result<(QueryText<str>, QueryText<[u8]>), crate::bytes::NoRoom> {
@@ -3004,14 +3004,15 @@ mod tests {
     }
 }
 
-/// The key and the parameters a kept copy owns lie in the payloads' area of the process pools, in a
-/// library that has them.
+/// The key and the parameters a kept copy owns lie in the pools of payload blocks of the process
+/// pools, in a library that has them.
 #[cfg(all(test, wz_process_pools))]
 mod pooled_text_tests {
     use super::*;
 
     /// A text copied for a kept query reads what it copied from a place of its own, and one longer
-    /// than the payloads' area holds is refused, as zenoh-pico refuses a copy it cannot allocate.
+    /// than the largest payload block holds is refused, as zenoh-pico refuses a copy it cannot
+    /// allocate.
     /// The CONTROL is the short text, copied. Turned red by a copy that lends the source's bytes,
     /// or that falls back to the heap.
     #[test]
@@ -3025,10 +3026,10 @@ mod pooled_text_tests {
         let empty = QueryText::pooled_bytes(b"").expect("no parameters take no block");
         assert!(empty.get().is_empty());
 
-        let long = "k".repeat(wz_session_core::caps::HELD_PAYLOAD_BYTES + 1);
+        let long = "k".repeat(crate::process_pool::LARGEST_BLOCK + 1);
         assert!(
             QueryText::pooled_text(&long).is_err(),
-            "a text past the payloads' area is refused"
+            "a text past the largest payload block is refused"
         );
     }
 }

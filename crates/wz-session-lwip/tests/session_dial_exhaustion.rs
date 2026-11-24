@@ -354,8 +354,8 @@ fn a_dial_with_no_socket_left_is_refused_typed_and_counted_and_sends_nothing() {
     dial_then_refuse(rig, N, Why::Socket);
 }
 
-/// The session table is the full one, with a socket to spare: the refused dial's
-/// socket goes back to its pool.
+/// The session table is the full one, with a socket to spare: the refused dial
+/// binds no socket, so the pool holds what it held.
 #[test]
 fn a_dial_with_no_session_slot_left_is_refused_typed_and_counted_and_gives_its_socket_back() {
     static RUNTIME: RuntimeCell<Frozen, { N + 2 }, 256, 4> = RuntimeCell::new();
@@ -364,6 +364,20 @@ fn a_dial_with_no_session_slot_left_is_refused_typed_and_counted_and_gives_its_s
     static SOCKETS: SessionRxPool<{ N + 1 }> = SessionRxPool::new();
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let rig = Rig::new(Rc::new(link), 7812, &RUNTIME, &SESSIONS, &PUMPS, &SOCKETS);
+    dial_then_refuse(rig, N, Why::SessionSlot);
+}
+
+/// The session table and the socket pool are both full: the free slot is asked for
+/// first, so the refusal is the session table's, counted there, and the pool is not
+/// asked for a socket (its refusals stay at zero).
+#[test]
+fn a_dial_with_neither_a_session_slot_nor_a_socket_left_is_refused_by_the_session_table() {
+    static RUNTIME: RuntimeCell<Frozen, { N + 2 }, 256, 4> = RuntimeCell::new();
+    static SESSIONS: Slots<N> = SessionSlots::new();
+    static PUMPS: Pumps<{ N + 1 }> = PumpSlots::new();
+    static SOCKETS: SessionRxPool<N> = SessionRxPool::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let rig = Rig::new(Rc::new(link), 7815, &RUNTIME, &SESSIONS, &PUMPS, &SOCKETS);
     dial_then_refuse(rig, N, Why::SessionSlot);
 }
 

@@ -1375,14 +1375,13 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
 }
 
-/// The send limits a send reads without a lock are, after every write of the peer's
-/// capabilities, what the accessors that read the slot under its mutex say: the first
-/// call after a write recomputes, the second is the kept value, and a write in between
-/// is seen by the very next call. The writes include a reset to `None` (a reconnect) and
-/// the same capabilities twice.
+/// The send limits a send reads without a lock are, at every establishment, what the
+/// accessors that read the peer's capabilities under their mutex say, and a write of the
+/// capabilities after establishment reaches them only at the next one. The writes include a
+/// reset to `None` (a reconnect) and the same capabilities twice.
 #[cfg(feature = "codec-push")]
 #[test]
-fn the_send_limits_follow_every_write_of_the_peers_capabilities() {
+fn the_send_limits_are_the_capabilities_of_each_establishment() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.seq_num_res = 3;
@@ -1405,16 +1404,22 @@ fn the_send_limits_follow_every_write_of_the_peers_capabilities() {
         Some(caps(1, 1400)),
     ];
     let mut seen = std::collections::BTreeSet::new();
+    let mut settled = actions.negotiated_tx_limits();
     for write in writes {
         actions.set_peer_init_caps(write);
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            settled,
+            "writing {write:?} after establishment moves nothing yet"
+        );
+        actions.enter_established();
         let want = (actions.negotiated_batch_mtu(), actions.negotiated_sn_mask());
-        for call in ["recomputed", "kept"] {
-            assert_eq!(
-                actions.negotiated_tx_limits(),
-                want,
-                "after writing {write:?}, the {call} limits"
-            );
-        }
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            want,
+            "established with {write:?}"
+        );
+        settled = want;
         seen.insert(want);
     }
     assert!(

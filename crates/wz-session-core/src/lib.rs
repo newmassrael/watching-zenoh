@@ -210,6 +210,17 @@ pub mod session_tables;
 /// the engine's. Unconditional, like [`session_tables`]: it is a value and needs no feature.
 pub mod session_state;
 
+/// One value placed in a span of a session's arena, owned by one owner and reached by handles that
+/// count nothing: what a session keeps in its arena that its tasks and its engine reach alike.
+/// Unconditional, like [`bounded`].
+pub mod placed;
+
+/// A place a value the session owns is lent in for the length of a step, to the tasks an executor
+/// polls with nothing but their context: the reassembly Router of a unicast receive and an
+/// engine's tables. Gated on `alloc`: the place is shared by the tasks that look in it.
+#[cfg(feature = "alloc")]
+pub mod step_lend;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.
@@ -1191,8 +1202,13 @@ pub mod inbound;
 
 /// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
 /// session's [`send_gate::Latch`] for a close ordered for congestion. Unconditional, no_std and
-/// no_alloc: two `AtomicBool`s, which every target the crate builds for loads and stores.
+/// no_alloc: a gate is an `AtomicBool`, which every target the crate builds for loads and
+/// stores, and a latch is the runtime's flag ([`runtime_cell::FlagCell`]).
 pub mod send_gate;
+
+/// The flags and words a session's holders write without a lock, as an atomic or as a cell,
+/// whichever the runtime's concurrency asks for. Unconditional, no_std and no_alloc.
+pub mod runtime_cell;
 
 /// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
 /// is what an outbound encoder writes to, `Vec<u8>` is its heap form, and
