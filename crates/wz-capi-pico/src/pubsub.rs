@@ -35,7 +35,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::{encoding_carried, timestamp_carried, SampleView};
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -305,18 +305,10 @@ impl SampleMarshal {
     /// # Safety
     /// As [`Self::lent`]: the marshal is dropped before the borrow of `view` ends.
     unsafe fn with_metadata(mut self, view: &dyn SampleView) -> Self {
-        // Read where the view holds them first: a view of the session's delivery lane carries no
-        // hint, only the parts.
-        self.timestamp = view
-            .timestamp_parts()
-            .map(|(time, zid)| timestamp_from(time, zid))
-            .or_else(|| view.timestamp().map(timestamp_of));
-        self.encoding = view
-            .encoding_parts()
-            .or_else(|| {
-                view.encoding()
-                    .map(|hint| (hint.packed_id, hint.schema.as_deref()))
-            })
+        // Read where the view holds them, or off its hints for a view that holds them only so: one
+        // reading of each, the session's own.
+        self.timestamp = timestamp_carried(view).map(|(time, zid)| timestamp_from(time, zid));
+        self.encoding = encoding_carried(view)
             .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema));
         // R311y559 — the three fields the census found unreachable from C. All
         // three were already on the seam; nothing decoded them into the ABI.
@@ -521,13 +513,8 @@ crate::abi::impl_boxed_element!(
     z_sample_take_from_loaned
 );
 
-/// The pico timestamp for a wz [`TimestampHint`]. Shared by the sample and
-/// reply metadata paths so the two cannot render one differently.
-fn timestamp_of(hint: &wz_session_core::sample::TimestampHint) -> z_timestamp_t {
-    timestamp_from(hint.time, &hint.zid)
-}
-
-/// A timestamp of time word `time` and id prefix `zid`, as they lie on the wire.
+/// A timestamp of time word `time` and id prefix `zid`, as they lie on the wire: the one the sample
+/// and the reply metadata paths both make, so the two cannot render one differently.
 fn timestamp_from(time: u64, zid: &[u8]) -> z_timestamp_t {
     z_timestamp_t {
         valid: true,

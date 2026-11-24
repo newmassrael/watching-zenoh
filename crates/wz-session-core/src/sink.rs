@@ -649,9 +649,98 @@ impl SampleSink for BoxedSink {
     }
 }
 
+/// The timestamp `view` carries, read where it lies ([`SampleView::timestamp_parts`]) or, for a
+/// view that holds it only as a hint, off the hint: the one reading of a sample's timestamp for
+/// every reader that takes either form.
+#[cfg(feature = "alloc")]
+pub fn timestamp_carried(view: &dyn SampleView) -> Option<(u64, &[u8])> {
+    view.timestamp_parts().or_else(|| {
+        view.timestamp()
+            .map(|hint| (hint.time, hint.zid.as_slice()))
+    })
+}
+
+/// The encoding `view` carries, read where it lies ([`SampleView::encoding_parts`]) or, for a
+/// view that holds it only as a hint, off the hint, as [`timestamp_carried`] reads the timestamp.
+#[cfg(feature = "alloc")]
+pub fn encoding_carried(view: &dyn SampleView) -> Option<(u32, Option<&[u8]>)> {
+    view.encoding_parts().or_else(|| {
+        view.encoding()
+            .map(|hint| (hint.packed_id, hint.schema.as_deref()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view that holds its timestamp and its encoding as hints, as parts where they lie, as both
+    /// or as neither. Its parts differ from its hints, which no real view's do, so a test sees
+    /// which form was read.
+    #[cfg(feature = "alloc")]
+    struct Carried {
+        hint: bool,
+        parts: bool,
+        timestamp: crate::sample::TimestampHint,
+        encoding: crate::sample::EncodingHint,
+    }
+
+    #[cfg(feature = "alloc")]
+    impl SampleView for Carried {
+        fn keyexpr(&self) -> &str {
+            "k"
+        }
+        fn payload(&self) -> &[u8] {
+            b""
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+            self.hint.then_some(&self.timestamp)
+        }
+        fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+            self.hint.then_some(&self.encoding)
+        }
+        fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+            self.parts.then_some((7, &[0x22][..]))
+        }
+        fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+            self.parts.then_some((3, Some(&b"p"[..])))
+        }
+    }
+
+    /// A view's timestamp and encoding are read where they lie when it holds them there, and off
+    /// its hints when it holds them only so; a view with neither carries none. Turned red by a
+    /// reading that drops either form or prefers the hint.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_views_timestamp_and_encoding_are_read_where_they_lie_or_off_its_hints() {
+        let view = |hint, parts| Carried {
+            hint,
+            parts,
+            timestamp: crate::sample::TimestampHint::new(5, &[0x11]).expect("a short id"),
+            encoding: crate::sample::EncodingHint {
+                packed_id: 1,
+                schema: Some(b"h".to_vec()),
+            },
+        };
+        let hinted = view(true, false);
+        assert_eq!(timestamp_carried(&hinted), Some((5, &[0x11][..])));
+        assert_eq!(encoding_carried(&hinted), Some((1, Some(&b"h"[..]))));
+        let laid = view(false, true);
+        assert_eq!(timestamp_carried(&laid), Some((7, &[0x22][..])));
+        assert_eq!(encoding_carried(&laid), Some((3, Some(&b"p"[..]))));
+        let both = view(true, true);
+        assert_eq!(timestamp_carried(&both), Some((7, &[0x22][..])));
+        assert_eq!(encoding_carried(&both), Some((3, Some(&b"p"[..]))));
+        let neither = view(false, false);
+        assert_eq!(timestamp_carried(&neither), None);
+        assert_eq!(encoding_carried(&neither), None);
+    }
 
     // A no-heap-style concrete sink: the shape an MCU consumer `enum`
     // variant takes. Impls `SampleSink` without `Box`, so it compiles +

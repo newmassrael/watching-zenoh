@@ -415,8 +415,8 @@ impl<'s> Parts<'s> {
     fn of(sample: &'s dyn SampleView) -> Self {
         Self {
             attachment: sample.attachment(),
-            encoding: encoding_of(sample),
-            timestamp: timestamp_of(sample),
+            encoding: crate::sink::encoding_carried(sample),
+            timestamp: crate::sink::timestamp_carried(sample),
             source_info: sample.source_info(),
         }
     }
@@ -428,24 +428,6 @@ impl<'s> Parts<'s> {
             || self.timestamp.is_some()
             || self.source_info.is_some()
     }
-}
-
-/// The encoding `sample` carries, read where it lies or from its hint.
-fn encoding_of(sample: &dyn SampleView) -> Option<(u32, Option<&[u8]>)> {
-    sample.encoding_parts().or_else(|| {
-        sample
-            .encoding()
-            .map(|hint| (hint.packed_id, hint.schema.as_deref()))
-    })
-}
-
-/// The timestamp `sample` carries, read where it lies or from its hint.
-fn timestamp_of(sample: &dyn SampleView) -> Option<(u64, &[u8])> {
-    sample.timestamp_parts().or_else(|| {
-        sample
-            .timestamp()
-            .map(|hint| (hint.time, hint.zid.as_slice()))
-    })
 }
 
 /// A reply as a record of the round holds it: what it is besides its bytes, and where its parts
