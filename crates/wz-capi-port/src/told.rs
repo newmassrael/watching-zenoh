@@ -248,6 +248,7 @@ mod tests {
             kind: None,
             mtu: 0,
             group_endpoint: None,
+            lost_after: 0,
         }
     }
 

@@ -1095,6 +1095,11 @@ impl Connectivity {
     /// link, then the transport, at the face's last row. A face with no link is told by one row,
     /// which is its transport alone.
     pub(crate) fn on_face_row(&self, kind: FaceEventKind, row: &FaceLinkRow) {
+        // Rows the session's queue lost after this one (`row.lost_after`) are told to no listener:
+        // pico calls its listeners from the task that saw the peer come or go and queues nothing
+        // (`_z_connectivity_peer_disconnected`, cited in the module doc), so its listeners have no
+        // event that says one was missed. Nor is a live listener brought to the faces as they
+        // stand, as a replaying one is: what it was told is noted only while it replays.
         let has_link = row.links > 0;
         match kind {
             FaceEventKind::Up => {

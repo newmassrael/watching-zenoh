@@ -230,13 +230,15 @@ use {
 #[cfg(feature = "connectivity")]
 type FacePlane = wz_session_core::face_plane::FacePlane<CoopLocks>;
 
-/// The rows a session's queue of face events holds without growing: one for each face the config
-/// admits beside the dial role's and for each member each of its groups holds, every face of the
-/// session coming or going once between two deliveries. A coop face has one link, so one row.
+/// The rows a session's queue of face events holds between two deliveries, reserved at its open:
+/// the build's [`caps::MAX_FACE_WATCH_ROWS`], or fewer for a session whose faces turn over in
+/// fewer, each face the config admits beside the dial role's and each member each of its groups
+/// holds going and coming back once. A coop face has one link, so one row each way.
 #[cfg(feature = "connectivity")]
-fn face_event_rows(max_faces: usize, groups: usize) -> usize {
-    let members = groups.saturating_mul(wz_session_core::caps::MAX_GROUP_MEMBERS);
-    max_faces.saturating_add(1).saturating_add(members)
+pub(crate) fn face_event_rows(max_faces: usize, groups: usize) -> usize {
+    let members = groups.saturating_mul(caps::MAX_GROUP_MEMBERS);
+    let faces = max_faces.saturating_add(1).saturating_add(members);
+    faces.saturating_mul(2).min(caps::MAX_FACE_WATCH_ROWS)
 }
 #[cfg(feature = "connectivity")]
 mod told;
@@ -3874,7 +3876,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             session: SessionState {
                 registry: Rc::new(RefCell::new(lent.registry)),
-                // No watcher yet: the queue's rows are reserved with the first watch.
+                // No watcher yet: the queue's rows are reserved now, so a program that watches
+                // after the open is told its faces with nothing allocated.
                 #[cfg(feature = "connectivity")]
                 watchers: Arc::new(FacePlane::with_room(face_rows)),
                 #[cfg(not(feature = "connectivity"))]
@@ -4063,6 +4066,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .halves_cells
             .as_ref()
             .map(LentByteCells::in_use)
+    }
+
+    /// The plane the session's faces are told through, for a test that tells it rows itself.
+    #[cfg(all(test, feature = "connectivity"))]
+    pub(crate) fn face_plane(&self) -> &FacePlane {
+        &self.faces
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
