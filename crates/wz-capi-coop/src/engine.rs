@@ -113,8 +113,8 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
-use wz_runtime_coop::transport::TransportRefusal;
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
+use wz_runtime_coop::transport::{TransportRefusal, TransportSession};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -1722,6 +1722,17 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
 
     fn close_reason(&self) -> Option<CloseReason> {
         self.actions.close_reason()
+    }
+}
+
+impl<C: ClockSource + 'static> TransportSession<C> for LinkSession<C> {
+    fn actions(&self) -> &SessionHandle<C> {
+        &self.actions
+    }
+
+    #[cfg(feature = "queryable")]
+    fn answers_as(&self, generation: u64) -> bool {
+        self.generation == generation
     }
 }
 
