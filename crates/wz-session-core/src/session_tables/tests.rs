@@ -1630,6 +1630,7 @@ impl crate::sink::SampleDelivery<Counted, SubscriberHandle> for Handed {
         id: SubscriberHandle,
         row: RowAccess<'_, Counted>,
         _sample: &dyn crate::sink::SampleView,
+        _turn: crate::sink::FanOut,
     ) {
         row.row().hear();
         self.0.push(id);

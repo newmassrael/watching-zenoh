@@ -214,7 +214,7 @@ use crate::sample::Reliability;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::sample::{Sample, SampleKind, TimestampHint};
-use crate::sink::{RowAccess, SampleDelivery, SampleSink, SampleView};
+use crate::sink::{FanOut, RowAccess, SampleDelivery, SampleSink, SampleView};
 #[cfg(all(
     feature = "alloc",
     feature = "declare-subscriber",
@@ -1804,16 +1804,22 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
         }
 
+        // The rows this sample reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
         if is_remote {
             subs.deliver_from_peer(
                 sample.keyexpr(),
                 self.class,
                 PeerDelivery::default(),
-                |id, row| cx.deliver(id, row, &sample),
+                |id, row| {
+                    cx.deliver(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
             );
         } else {
             subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
-                cx.deliver(id, row, &sample)
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
             });
         }
     }
@@ -4258,8 +4264,10 @@ pub trait LocalSubscribers {
     where
         Self: Sized,
     {
+        let mut turn = FanOut::begin();
         self.fire_matching(sample.keyexpr(), true, false, |id, row| {
-            cx.deliver(id, row, sample)
+            cx.deliver(id, row, sample, turn);
+            turn = FanOut::later();
         })
     }
 }

@@ -283,6 +283,7 @@ impl Span {
 }
 
 /// Whether `a` and `b` are the same bytes: the same place, or equal.
+#[cfg(feature = "liveliness")]
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && (ptr::eq(a.as_ptr(), b.as_ptr()) || a == b)
 }
@@ -324,8 +325,7 @@ impl Word {
     }
 }
 
-/// A sample as its view hands it, read once: what an offer compares with the record the table
-/// holds last and, when it does not join that record, places.
+/// A sample as its view hands it, read once: what an offer that writes a record of its own places.
 struct Offered<'s> {
     kind: SampleKind,
     reliability: Reliability,
@@ -373,27 +373,6 @@ impl<'s> Parts<'s> {
             || self.encoding.is_some()
             || self.timestamp.is_some()
             || self.source_info.is_some()
-    }
-
-    /// Whether `other` is the same parts, read where each lies.
-    fn same(&self, other: &Self) -> bool {
-        let bytes = |a: Option<&[u8]>, b: Option<&[u8]>| match (a, b) {
-            (Some(a), Some(b)) => same(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        bytes(self.attachment, other.attachment)
-            && match (self.encoding, other.encoding) {
-                (Some((a, x)), Some((b, y))) => a == b && bytes(x, y),
-                (None, None) => true,
-                _ => false,
-            }
-            && match (self.timestamp, other.timestamp) {
-                (Some((a, x)), Some((b, y))) => a == b && same(x, y),
-                (None, None) => true,
-                _ => false,
-            }
-            && self.source_info == other.source_info
     }
 }
 
@@ -612,6 +591,9 @@ struct Table {
     longest_key: usize,
     /// The key written last, which the records on it that follow share.
     key: Option<Span>,
+    /// Whether the record written last is the one of the sample whose fan-out runs now: what a
+    /// later row of that fan-out joins. A record of no fan-out, or of one before, is joined by none.
+    fan: bool,
     /// The area the parts that lie nowhere the callbacks can read them are written into, and how
     /// much of it is written.
     area: NonNull<u8>,
@@ -723,28 +705,6 @@ impl Table {
         Some(span)
     }
 
-    /// The parts `rest` holds, read where each lies.
-    fn parts<'t>(&'t self, rest: Option<&'t Rest>) -> Parts<'t> {
-        let Some(rest) = rest else {
-            return Parts {
-                attachment: None,
-                encoding: None,
-                timestamp: None,
-                source_info: None,
-            };
-        };
-        Parts {
-            attachment: rest.attachment.map(|span| self.bytes(span)),
-            encoding: rest
-                .encoding
-                .map(|(id, schema)| (id, schema.map(|span| self.bytes(span)))),
-            timestamp: rest
-                .timestamp
-                .map(|(time, zid)| (time.get(), self.bytes(zid))),
-            source_info: rest.source_info.as_ref(),
-        }
-    }
-
     /// `parts` placed for the table.
     fn place_parts(
         &mut self,
@@ -789,6 +749,7 @@ impl Table {
         self.entries.clear();
         self.keys.clear();
         self.key = None;
+        self.fan = false;
         self.datagram = (ptr::null(), 0);
         self.lends = false;
         self.written = 0;
@@ -1019,6 +980,7 @@ impl Round {
             ptr::write(addr_of_mut!((*table).keys), rows.keys);
             ptr::write(addr_of_mut!((*table).longest_key), rows.longest_key);
             ptr::write(addr_of_mut!((*table).key), None);
+            ptr::write(addr_of_mut!((*table).fan), false);
             ptr::write(addr_of_mut!((*table).area), area);
             ptr::write(addr_of_mut!((*table).area_bytes), area_bytes);
             ptr::write(addr_of_mut!((*table).written), 0);
@@ -1077,6 +1039,7 @@ impl Round {
             keys: _,
             longest_key: _,
             key: _,
+            fan: _,
             area: _,
             area_bytes: _,
             written: _,
@@ -1166,12 +1129,19 @@ impl Round {
     }
 
     /// Hold `sample` for `call`, a call of a subscriber's callback begun on its row, read where it
-    /// lies when it lies in the datagram a link lends the step. A sample offered again for one more
-    /// subscriber is written once; what finds no room is counted, and its call ended.
+    /// lies when it lies in the datagram a link lends the step; `first` when `call` is the first
+    /// row of the sample's fan-out. A later row of the same fan-out joins the record the sample
+    /// was written in, so a sample offered to many subscribers is written once; what finds no
+    /// room is counted, and its call ended.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub(crate) unsafe fn offer_sample(&self, call: SubscriberCall, sample: &dyn SampleView) {
+    pub(crate) unsafe fn offer_sample(
+        &self,
+        call: SubscriberCall,
+        sample: &dyn SampleView,
+        first: bool,
+    ) {
         // The session's own put is handed the calls and holds nothing.
         #[cfg(feature = "local-subscriber")]
         // SAFETY: the caller's contract: written under the session's lock, which is held.
@@ -1196,12 +1166,19 @@ impl Round {
             self.released.end(call);
             return;
         };
-        let call = match self.join_sample(table, call, &sample) {
-            Ok(()) => {
-                self.filled(table);
-                return;
+        // A record is joined by the later rows of its own fan-out alone: a sample of the same
+        // bytes in another fan-out is a record of its own.
+        let call = if first {
+            table.fan = false;
+            call
+        } else {
+            match self.join_sample(table, call) {
+                Ok(()) => {
+                    self.filled(table);
+                    return;
+                }
+                Err(call) => call,
             }
-            Err(call) => call,
         };
         if !Self::takes(table, 1) {
             self.refuse(holds_sender);
@@ -1228,7 +1205,10 @@ impl Round {
             first,
         ));
         let kept = match entry {
-            Ok(()) => self.owe_call(table, call),
+            Ok(()) => {
+                table.fan = true;
+                self.owe_call(table, call)
+            }
             Err(_) => {
                 self.released.end(call);
                 false
@@ -1263,29 +1243,20 @@ impl Round {
         Some((key, payload, rest))
     }
 
-    /// Join `call` to the record `table` holds last when that is `sample` and no call of the same
-    /// row is owed it yet; the call back when it does not join.
-    fn join_sample(
-        &self,
-        table: &mut Table,
-        call: SubscriberCall,
-        sample: &Offered<'_>,
-    ) -> Result<(), SubscriberCall> {
+    /// Join `call` to the record `table` holds last when that is the record of the fan-out `call`
+    /// is a later row of and no call of the same row is owed it yet; the call back when it does not
+    /// join.
+    fn join_sample(&self, table: &mut Table, call: SubscriberCall) -> Result<(), SubscriberCall> {
         let Some(
             entry @ Entry {
-                what: Held::Sample { head, rest },
+                what: Held::Sample { .. },
                 ..
             },
         ) = table.entries.last()
         else {
             return Err(call);
         };
-        let joins = head.kind == sample.kind
-            && head.reliability == sample.reliability
-            && head.qos == sample.qos
-            && same(table.bytes(head.key), sample.key)
-            && same(table.bytes(head.payload), sample.payload)
-            && table.parts(rest.as_ref()).same(&sample.rest)
+        let joins = table.fan
             && !table
                 .owed(entry)
                 .iter()

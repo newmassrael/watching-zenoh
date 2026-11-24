@@ -2092,6 +2092,7 @@ mod tests {
             id: crate::session_tables::SubscriberHandle,
             _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
         ) {
             self.0.push(id);
         }
@@ -2257,6 +2258,7 @@ mod tests {
             _id: crate::session_tables::SubscriberHandle,
             _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
         ) {
         }
     }
@@ -2435,6 +2437,7 @@ mod tests {
             _id: crate::session_tables::SubscriberHandle,
             _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
+            _turn: crate::sink::FanOut,
         ) {
         }
     }

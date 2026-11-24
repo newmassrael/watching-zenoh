@@ -135,7 +135,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{RowAccess, SampleDelivery, SampleView};
+use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -1681,6 +1681,7 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         id: SubscriberHandle,
         row: RowAccess<'_, SubscriberRow>,
         sample: &dyn SampleView,
+        turn: FanOut,
     ) {
         // The row is read where it lies, shared with the calls of it a delivery makes on another
         // thread. One past the most calls one latch counts is handed nothing; an undeclared one is
@@ -1692,7 +1693,7 @@ impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
         // holds, as the round's writer must.
         unsafe {
             self.round
-                .offer_sample(SubscriberCall::new(call, id), sample)
+                .offer_sample(SubscriberCall::new(call, id), sample, turn.is_first())
         };
     }
 }
