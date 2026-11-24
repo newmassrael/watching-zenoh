@@ -10,24 +10,23 @@
 //! records where the link then stands ([`FaceLife::set`]). The decisions are here once, testable
 //! without a network, and the executor holds the I/O once.
 //!
-//! Each answer of [`LinkSupervisor::advance`](crate::faces::LinkSupervisor::advance) is one
-//! [`Turn`], and the engine's poll of a face is [`FaceLife::effect`] over it:
+//! What each step of a face comes to, by where its link stands and what the executor read of it:
 //!
-//! | `Moved` | phase | signal | [`Turn`] | [`FaceEffect`] |
-//! |---|---|---|---|---|
-//! | `Stays` | any | none of the below | `Stays` | `Stay` |
-//! | `Lost` | `Up` | `ended` | `Lost` | `Lose`: `Remove`, `EndSession` or `DialFrom(0)` |
-//! | `Established` | `Opening` | `established` | `Established` | `BringUp` |
-//! | `HandshakeOver` | `Opening` | `ended`, or the deadline | `HandshakeOver` | `Fail`: `Remove`, `StandBy` or `DialFrom(next)` |
-//! | `DialOver` | `Dialing` | `dial` answered, or the deadline | `DialOver` | `Handshake`, or `DialFailed`: `Remove` or `DialFrom(next)` |
-//! | `Due` | `Waiting` past its time, `Held` with `!node_held` | | `Due` | `Dial(0)` |
+//! | phase | signal | [`Turn`] | [`FaceEffect`] |
+//! |---|---|---|---|
+//! | any | none of the below | `Stays` | `Stay` |
+//! | `Up` | `ended` | `Lost` | `Lose`: `Remove`, `EndSession` or `DialFrom(0)` |
+//! | `Opening` | `established` | `Established` | `BringUp` |
+//! | `Opening` | `ended`, or the deadline | `HandshakeOver` | `Fail`: `Remove`, `StandBy` or `DialFrom(next)` |
+//! | `Dialing` | `dial` answered, or the deadline | `DialOver` | `Handshake`, or `DialFailed`: `Remove` or `DialFrom(next)` |
+//! | `Waiting` past its time, `Held` with `!node_held` | | `Due` | `Dial(0)` |
 //!
 //! A face of the dial role ([`FaceRole::Dial`]) is kept through every loss and dialled again; any
 //! other face goes with its link ([`Next::Remove`]).
 
 use wz_session_core::session_zid::SessionZid;
 
-use crate::faces::{DialEndpoint, FaceId};
+use crate::faces::{DialEndpoint, FaceId, DIAL_LOOK_MS};
 
 /// Which face of the session it is: the one that dials the session's endpoints, kept for as long
 /// as the session is, or one taken besides (attached, or accepted on a port), which goes with its
@@ -88,7 +87,7 @@ pub struct Signals {
     pub node_held: bool,
 }
 
-/// What became of a face's link at a step: [`Moved`](crate::faces::Moved) without the link.
+/// What became of a face's link at a step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Turn {
     /// Nothing for the session to do.
@@ -213,9 +212,8 @@ impl FaceLife {
         self.phase = phase;
     }
 
-    /// What became of the face's link at `now_us`, given what the executor read of it: the answer
-    /// [`LinkSupervisor::advance`](crate::faces::LinkSupervisor::advance) gives, in its order (a
-    /// handshake that completed is established even when its task ended after).
+    /// What became of the face's link at `now_us`, given what the executor read of it. A handshake
+    /// that completed is established even when its task ended after.
     pub fn turn(&self, now_us: u64, signals: Signals) -> Turn {
         match &self.phase {
             Phase::Up if signals.ended => Turn::Lost,
@@ -275,6 +273,24 @@ impl FaceLife {
                 then: self.after_failure(next),
             },
             Turn::Due => FaceEffect::Dial { from: 0 },
+        }
+    }
+
+    /// When the face is next to be looked at though its link brings no input: a face waiting to
+    /// dial again at its time, a dial under way at the next look (`DIAL_LOOK_MS` from `now_us`)
+    /// or at its deadline when that is sooner, and a handshake at its deadline, which ends it.
+    /// `None` for a link that is up and a face standing by, which only input or another face moves
+    /// on.
+    pub fn wake_at(&self, now_us: u64) -> Option<u64> {
+        match &self.phase {
+            Phase::Waiting { at_us } => Some(*at_us),
+            Phase::Dialing { deadline_us, .. } => Some(
+                now_us
+                    .saturating_add(DIAL_LOOK_MS.saturating_mul(1000))
+                    .min(*deadline_us),
+            ),
+            Phase::Opening { deadline_us, .. } => Some(*deadline_us),
+            Phase::Up | Phase::Held { .. } => None,
         }
     }
 
@@ -504,6 +520,27 @@ mod tests {
             dial(opening()).effect(Turn::Established, true, None),
             FaceEffect::BringUp
         );
+    }
+
+    /// A face is looked at again at its wait's end, a dial at the next look or its deadline, a
+    /// handshake at its deadline; a link that is up, or a face standing by, only on input.
+    #[test]
+    fn a_face_wakes_at_its_wait_its_dial_look_or_its_handshake_deadline() {
+        let look = DIAL_LOOK_MS * 1000;
+        assert_eq!(dial(Phase::Waiting { at_us: NOW }).wake_at(0), Some(NOW));
+        assert_eq!(
+            dial(dialing()).wake_at(0),
+            Some(look.min(NOW + 10)),
+            "the next look"
+        );
+        assert_eq!(
+            dial(dialing()).wake_at(NOW),
+            Some(NOW + 10),
+            "the deadline when it comes before the next look"
+        );
+        assert_eq!(dial(opening()).wake_at(0), Some(NOW + 10));
+        assert_eq!(dial(Phase::Up).wake_at(0), None);
+        assert_eq!(dial(Phase::Held { node: node() }).wake_at(0), None);
     }
 
     /// The executor records where the link stands after it acted.

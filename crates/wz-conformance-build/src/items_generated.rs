@@ -334,6 +334,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         0,
     ),
     ("HANDED_LEG_BYTES", "WZ_LIMIT_HANDED_LEG_BYTES", 4096),
+    ("UDP_PORT_SLOTS", "WZ_LIMIT_UDP_PORT_SLOTS", 64),
     (
         "PICO_UNICAST_BATCH_BYTES",
         "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES",

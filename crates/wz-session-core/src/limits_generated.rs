@@ -1434,6 +1434,28 @@ const _: LimitDomain = HandedLegBytes::DOMAIN;
 /// How `HANDED_LEG_BYTES` is held: in no byte when its domain is one value.
 pub type HandedLegBytesHeld = Limited<HandedLegBytes, { HandedLegBytes::HELD }>;
 
+/// `UDP_PORT_SLOTS`: How many datagrams the udp ports a session listens on hold at once,
+/// read off their sockets and waiting for the links of their peers to take them, in slots
+/// of the batch the session advertises that it reserves when it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdpPortSlots;
+
+impl LimitSpec for UdpPortSlots {
+    type Value = usize;
+    const LIMIT: &'static str = "UDP_PORT_SLOTS";
+    const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = lent_capacity(caps::UDP_PORT_SLOTS);
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::UDP_PORT_SLOTS;
+}
+
+const _: LimitDomain = UdpPortSlots::DOMAIN;
+
+/// How `UDP_PORT_SLOTS` is held: in no byte when its domain is one value.
+pub type UdpPortSlotsHeld = Limited<UdpPortSlots, { UdpPortSlots::HELD }>;
+
 /// `PICO_UNICAST_BATCH_BYTES`: The batch size, in bytes, a session of the zenoh-pico
 /// interface advertises when it opens a unicast session, as zenoh-pico's
 /// BATCH_UNICAST_SIZE.
@@ -1729,6 +1751,8 @@ pub struct SessionLimits {
     declaration_sync_tx_no_progress_ms: DeclarationSyncTxNoProgressMsHeld,
     /// `HANDED_LEG_BYTES`.
     handed_leg_bytes: HandedLegBytesHeld,
+    /// `UDP_PORT_SLOTS`.
+    udp_port_slots: UdpPortSlotsHeld,
     /// `PICO_UNICAST_BATCH_BYTES`.
     pico_unicast_batch_bytes: PicoUnicastBatchBytesHeld,
     /// `PICO_MULTICAST_BATCH_BYTES`.
@@ -1805,6 +1829,7 @@ impl SessionLimits {
             declaration_sync_retry_interval_ms: Limited::build_default(),
             declaration_sync_tx_no_progress_ms: Limited::build_default(),
             handed_leg_bytes: Limited::build_default(),
+            udp_port_slots: Limited::build_default(),
             pico_unicast_batch_bytes: Limited::build_default(),
             pico_multicast_batch_bytes: Limited::build_default(),
             pico_lease_ms: Limited::build_default(),
@@ -1909,6 +1934,7 @@ impl SessionLimits {
         declaration_sync_retry_interval_ms: Limited::build_default(),
         declaration_sync_tx_no_progress_ms: Limited::build_default(),
         handed_leg_bytes: Limited::build_default(),
+        udp_port_slots: Limited::preset_or_build(10, LimitValue::Integer(10)),
         pico_unicast_batch_bytes: Limited::build_default(),
         pico_multicast_batch_bytes: Limited::build_default(),
         pico_lease_ms: Limited::build_default(),
@@ -2913,6 +2939,23 @@ impl SessionLimits {
         Ok(())
     }
 
+    /// `UDP_PORT_SLOTS` as this snapshot holds it.
+    pub const fn udp_port_slots(&self) -> usize {
+        self.udp_port_slots.get()
+    }
+
+    /// `UDP_PORT_SLOTS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn udp_port_slots_held(&self) -> UdpPortSlotsHeld {
+        self.udp_port_slots
+    }
+
+    /// Selects `UDP_PORT_SLOTS`, when the build's domain holds `value`.
+    pub fn select_udp_port_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.udp_port_slots = Limited::select(value)?;
+        Ok(())
+    }
+
     /// `PICO_UNICAST_BATCH_BYTES` as this snapshot holds it.
     pub const fn pico_unicast_batch_bytes(&self) -> usize {
         self.pico_unicast_batch_bytes.get()
@@ -3614,6 +3657,16 @@ impl LimitField<SessionLimits> for HandedLegBytes {
     }
 }
 
+impl LimitField<SessionLimits> for UdpPortSlots {
+    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_udp_port_slots(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> usize {
+        snapshot.udp_port_slots()
+    }
+}
+
 impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
     fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
         snapshot.select_pico_unicast_batch_bytes(value)
@@ -3695,7 +3748,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 62;
+pub const SESSION_LIMIT_COUNT: usize = 63;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -3754,6 +3807,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<DeclarationSyncRetryIntervalMs>(),
     LimitEntry::of::<DeclarationSyncTxNoProgressMs>(),
     LimitEntry::of::<HandedLegBytes>(),
+    LimitEntry::of::<UdpPortSlots>(),
     LimitEntry::of::<PicoUnicastBatchBytes>(),
     LimitEntry::of::<PicoMulticastBatchBytes>(),
     LimitEntry::of::<PicoLeaseMs>(),

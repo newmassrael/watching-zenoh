@@ -980,6 +980,20 @@ config WZ_LIMIT_HANDED_LEG_BYTES
 	  when the held-publish-drop policy keeps such publishes for the other faces. At
 	  least 1; a session may lower it and never raise it.
 
+config WZ_LIMIT_UDP_PORT_SLOTS
+	int "UDP_PORT_SLOTS"
+	range 1 4294967295
+	default 10 if WZ_LIMITS_ZENOH_PICO
+	default 64
+	help
+	  How many datagrams the udp ports a session listens on hold at once, read off
+	  their sockets and waiting for the links of their peers to take them, in slots of
+	  the batch the session advertises that it reserves when it opens. The ports of a
+	  session share the slots, and a port reads each datagram into one. A datagram
+	  that finds every slot held is dropped and counted, as one a full socket receive
+	  buffer drops, and so is one past the most one peer may have waiting. At least 1;
+	  a session may lower it and never raise it.
+
 config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	int "PICO_UNICAST_BATCH_BYTES"
 	range 1 65535
