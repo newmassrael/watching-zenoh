@@ -64,9 +64,10 @@ pub(super) fn time_literal(text: &str) -> Option<TimeLiteral> {
     if !text.is_ascii() {
         return None;
     }
-    // A date opens with four digits and a hyphen; a clock time never has a
-    // hyphen before its first colon.
-    if text.len() >= 10 && text.as_bytes()[4] == b'-' {
+    // A date opens with four digits and a hyphen; a clock time opens with one
+    // or two digits and a colon, and its offset may hold a hyphen anywhere.
+    let bytes = text.as_bytes();
+    if bytes.len() >= 10 && bytes[..4].iter().all(u8::is_ascii_digit) && bytes[4] == b'-' {
         let days = date(&text[..10])?;
         let rest = &text[10..];
         let (of_day, offset) = match rest.as_bytes().first() {
@@ -338,6 +339,13 @@ mod tests {
             Some(TimeLiteral::Instant {
                 ms: utc + 250,
                 zoned: false
+            })
+        );
+        assert_eq!(
+            time_literal("2026-11-23-05:30"),
+            Some(TimeLiteral::Instant {
+                ms: DAY_2026_11_23 + 5 * HOUR + 30 * 60_000,
+                zoned: true
             })
         );
         assert_eq!(
