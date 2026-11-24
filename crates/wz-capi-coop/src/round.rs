@@ -2345,6 +2345,7 @@ impl Round {
 
     /// A round holding `events` records at once, its tables lent from an arena the test leaks, given
     /// no area: what a build that keeps none (`rx-lent-only`) makes.
+    #[cfg(any(feature = "rx-lent-only", all(feature = "std", feature = "queryable")))]
     pub(crate) fn leaked(events: usize) -> Arc<Self> {
         Self::shared_over(Self::leaked_rows(events))
     }
