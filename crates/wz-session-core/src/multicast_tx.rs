@@ -2015,8 +2015,14 @@ where
 ))]
 #[derive(Debug, Default)]
 pub struct MulticastBatch {
-    /// The open frame's bytes, in storage the batch keeps from one frame to the next.
+    /// Storage the batch keeps from one frame to the next; the open frame is its first `len`
+    /// bytes. A build whose encoders write through `dyn TxBuf` (`transport-tx-lend`) keeps it a
+    /// batch long and writes a frame into it as into a fixed buffer held to the batch, so a
+    /// message that would carry the frame past the batch is refused before its payload is copied
+    /// in. The bytes past `len` are no frame's.
     buf: alloc::vec::Vec<u8>,
+    /// The open frame's length in `buf`.
+    len: usize,
     open: Option<OpenFrame>,
 }
 
@@ -2050,6 +2056,7 @@ impl MulticastBatch {
     pub const fn new() -> Self {
         Self {
             buf: alloc::vec::Vec::new(),
+            len: 0,
             open: None,
         }
     }
@@ -2059,6 +2066,7 @@ impl MulticastBatch {
     pub fn with_budget(budget: usize) -> Self {
         Self {
             buf: alloc::vec::Vec::with_capacity(budget),
+            len: 0,
             open: None,
         }
     }
@@ -2072,7 +2080,8 @@ impl MulticastBatch {
     /// of the group goes onto it (compressed when the group compresses), and hold none after.
     /// No room is asked: the frame was given its room when it was opened. A queue that lends a
     /// slot takes a copy of the frame and the batch keeps its storage; otherwise the frame is
-    /// handed over as it is.
+    /// handed over: as a copy of exactly the frame when the storage is the batch the window
+    /// writes into, which the batch keeps, and as the storage itself when that is the frame.
     pub fn flush<Q: MulticastTxQueue + ?Sized>(
         &mut self,
         priority: Priority,
@@ -2085,15 +2094,16 @@ impl MulticastBatch {
         // A compressing group's frame is compressed on its way to the queue, which only the
         // datagram handed over is.
         if !params.compression {
-            let bytes = &self.buf;
+            let bytes = self.frame();
             let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
                 crate::tx_buf::TxBuf::append(slot, bytes).is_ok()
             };
             if queue.enqueue_lent(priority, open.reliable, open.sn, bytes.len(), &mut fill) {
-                self.buf.clear();
+                self.len = 0;
                 return;
             }
         }
+        let bytes = self.take_frame();
         enqueue_wire(
             queue,
             params,
@@ -2101,9 +2111,26 @@ impl MulticastBatch {
                 priority,
                 reliable: open.reliable,
                 sn: open.sn,
-                bytes: core::mem::take(&mut self.buf),
+                bytes,
             },
         );
+    }
+
+    /// The open frame's bytes.
+    fn frame(&self) -> &[u8] {
+        self.buf.get(..self.len).unwrap_or_default()
+    }
+
+    /// The open frame's bytes, taken out of the batch. Storage longer than the frame is the
+    /// batch a window writes into: it stays the batch's and a copy of exactly the frame is
+    /// taken, so a queued datagram holds no batch of its own. Storage that is the frame (a
+    /// vector's, or a frame held whole) is taken as it is.
+    fn take_frame(&mut self) -> alloc::vec::Vec<u8> {
+        let len = core::mem::take(&mut self.len);
+        if len < self.buf.len() {
+            return self.buf.get(..len).unwrap_or_default().to_vec();
+        }
+        core::mem::take(&mut self.buf)
     }
 
     /// Append the message `body` encodes to the open frame, when one is open on the `reliable`
@@ -2119,15 +2146,9 @@ impl MulticastBatch {
         if open.reliable != reliable {
             return false;
         }
-        let before = self.buf.len();
-        let encoded = held_to(&mut self.buf, mtu, |buf| {
+        self.write_held(mtu, |buf| {
             body(&mut crate::tx_buf::TxSink::new(buf)).is_ok()
-        });
-        if encoded && self.buf.len() <= mtu {
-            return true;
-        }
-        self.buf.truncate(before);
-        false
+        })
     }
 
     /// Open a frame on the `reliable` channel that took `sn`, `write` writing it into the
@@ -2141,13 +2162,57 @@ impl MulticastBatch {
         write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
     ) -> bool {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
-        self.buf.clear();
-        let written = held_to(&mut self.buf, mtu, write);
-        if written && self.buf.len() <= mtu {
+        self.len = 0;
+        let opened = self.write_held(mtu, write);
+        if opened {
             self.open = Some(OpenFrame { reliable, sn });
+        }
+        opened
+    }
+
+    /// Write what `write` writes after the open frame, the frame held to `mtu`: whether it was
+    /// written whole within `mtu`, the frame grown by it. A write that was not leaves the frame
+    /// as it was.
+    ///
+    /// The storage is made a batch long once and stays so, and is written as a fixed buffer
+    /// held to the batch: a write past it is refused as it is made.
+    #[cfg(feature = "transport-tx-lend")]
+    fn write_held(
+        &mut self,
+        mtu: usize,
+        write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
+    ) -> bool {
+        use crate::tx_buf::TxBuf;
+        if self.buf.len() < mtu {
+            self.buf.resize(mtu, 0);
+        }
+        // A frame already past `mtu` (one held whole) has no room after it.
+        let Some(room) = self.buf.get_mut(self.len..mtu) else {
+            return false;
+        };
+        let mut room = crate::tx_buf::SliceTxBuf::new(room);
+        if !write(&mut room) {
+            return false;
+        }
+        let written = room.len();
+        self.len = self.len.saturating_add(written);
+        true
+    }
+
+    /// See the lending form above. A vector refuses no write, so the frame is measured against
+    /// `mtu` once it is written.
+    #[cfg(not(feature = "transport-tx-lend"))]
+    fn write_held(
+        &mut self,
+        mtu: usize,
+        write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> bool,
+    ) -> bool {
+        self.buf.truncate(self.len);
+        if write(&mut self.buf) && self.buf.len() <= mtu {
+            self.len = self.buf.len();
             return true;
         }
-        self.buf.clear();
+        self.buf.truncate(self.len);
         false
     }
 
@@ -2155,37 +2220,9 @@ impl MulticastBatch {
     /// batch, which a build that cuts no chain holds as it is.
     fn hold(&mut self, reliable: bool, sn: u64, bytes: alloc::vec::Vec<u8>) {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
+        self.len = bytes.len();
         self.buf = bytes;
         self.open = Some(OpenFrame { reliable, sn });
-    }
-}
-
-/// Run `write` over `buf`, a batch's storage, held to `mtu`: a build whose encoders write through
-/// `dyn TxBuf` (`transport-tx-lend`) refuses a write past it as it is made
-/// ([`CappedTxBuf`](crate::tx_buf::CappedTxBuf)), and one whose encoders write a vector writes the
-/// storage itself, which its caller checks against `mtu` after.
-#[cfg(all(
-    feature = "alloc",
-    any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
-    )
-))]
-fn held_to<T>(
-    buf: &mut Vec<u8>,
-    mtu: usize,
-    write: impl FnOnce(&mut crate::tx_buf::EncodeBuf<'_>) -> T,
-) -> T {
-    #[cfg(feature = "transport-tx-lend")]
-    {
-        write(&mut crate::tx_buf::CappedTxBuf::new(buf, mtu))
-    }
-    #[cfg(not(feature = "transport-tx-lend"))]
-    {
-        let _ = mtu;
-        write(buf)
     }
 }
 
@@ -3717,6 +3754,75 @@ mod lend_tests {
             Some(&0),
             "the whole frame was refused at the batch: nothing written past it"
         );
+    }
+
+    /// A window's frame is held to the batch in the window's own storage: a message that would
+    /// carry it past the batch is refused before it is written, the storage does not grow, and a
+    /// frame handed to a queue that lends nothing is a copy of exactly the frame, the storage
+    /// staying the window's.
+    #[test]
+    fn a_window_holds_its_frame_to_the_batch_in_storage_of_its_own() {
+        use sce_forge_runtime::codec::SceSink;
+        let budget = 64;
+        let params = params(64, false);
+        let mut window = MulticastBatch::with_budget(budget);
+        let storage = window.buf.capacity();
+        assert!(window.open_with(true, 3, budget, |buf| {
+            crate::tx_buf::TxSink::new(buf)
+                .write_bytes(&[9u8; 10])
+                .is_ok()
+        }));
+        let twenty = |sink: &mut crate::tx_buf::TxSink<'_>| sink.write_bytes(&[1u8; 20]);
+        assert!(window.append(true, budget, &twenty));
+        assert!(window.append(true, budget, &twenty));
+        assert!(
+            !window.append(true, budget, &twenty),
+            "seventy bytes are past the batch"
+        );
+        assert_eq!(
+            window.frame().len(),
+            50,
+            "the refused message left the frame as it was"
+        );
+        assert_eq!(
+            window.buf.capacity(),
+            storage,
+            "the refused message was not written into a grown vector"
+        );
+        assert!(
+            window
+                .buf
+                .get(50..)
+                .unwrap_or_default()
+                .iter()
+                .all(|b| *b == 0),
+            "nothing of the refused message was written"
+        );
+        assert!(
+            !window.append(false, budget, &twenty),
+            "another channel does not join the frame"
+        );
+
+        // A queue that lends no slot (a zero-length one is refused) is handed the frame.
+        let mut queue = Lending::new(0, 0);
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert!(window.is_empty());
+        let mut frame = alloc::vec![9u8; 10];
+        frame.extend_from_slice(&[1u8; 40]);
+        assert_eq!(queue.heap, alloc::vec![(frame, 3)], "exactly the frame");
+        assert_eq!(
+            window.buf.capacity(),
+            storage,
+            "the storage stayed the window's"
+        );
+
+        // A frame held whole is past the batch: nothing is appended to it, and it is handed over
+        // as it is.
+        let whole = alloc::vec![5u8; budget * 2];
+        window.hold(true, 4, whole.clone());
+        assert!(!window.append(true, budget, &twenty));
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(queue.heap.last(), Some(&(whole, 4)));
     }
 
     /// A batch window's frame is written into the window's own storage and leaves through a lent
