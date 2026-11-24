@@ -195,7 +195,7 @@ use registry::{FaceId, Registry, DIAL_FACE};
 pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
-use replay::{Kind, Replay, TurnEnd};
+use replay::{Replay, TurnEnd};
 
 #[cfg(feature = "listen")]
 mod faces_added;
@@ -6573,13 +6573,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let unwatched =
                 tables_mut(&core.session.registry).undeclare_matching_listener(handle)?;
             // The row went before the links are told: a send never finds the tables borrowed.
-            if let (Some(interest), Some(at)) = (unwatched.interest_final, place) {
-                core.retract(
-                    Kind::Interest,
-                    at,
-                    &interest_final::<C>(u64::from(interest)),
-                );
-            }
+            core.end_interest(unwatched.interest_final, place);
             unwatched.row
         });
         // Nothing it was owed is handed, its row being gone; its callback is let go of here, with
@@ -6710,13 +6704,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
-        if let (Some(interest), Some(at)) = (last_held, place) {
-            core.retract(
-                Kind::Interest,
-                at,
-                &interest_final::<C>(u64::from(interest)),
-            );
-        }
+        core.end_interest(last_held, place);
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {

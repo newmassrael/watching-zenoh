@@ -39,6 +39,7 @@ use wz_session_core::session_tables::QueryableHandle;
 use wz_session_core::session_tables::{InterestHandle, KeyexprHandle, SubscriberHandle};
 #[cfg(feature = "liveliness")]
 use wz_session_core::session_tables::{LivelinessSubscriberHandle, TokenHandle};
+use wz_session_core::wire_id::EntityId;
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -633,6 +634,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn retract(&mut self, kind: Kind, index: usize, send: &dyn TellTo<C>) {
         let place = self.place(kind, index);
         self.retract_at(place, send);
+    }
+
+    /// The Interest `interest`, which a write filter or a matching listener held last, ended:
+    /// tell each face whose peer was asked it, `rank` its place among the Interests read while
+    /// it stood ([`Self::retract`]). Nothing when either is `None`.
+    // Out of line: the filter's and the listener's undeclarations end their Interest alike.
+    #[inline(never)]
+    pub(super) fn end_interest(&mut self, interest: Option<EntityId>, rank: Option<usize>) {
+        if let (Some(interest), Some(at)) = (interest, rank) {
+            self.retract(
+                Kind::Interest,
+                at,
+                &super::interest_final::<C>(u64::from(interest)),
+            );
+        }
     }
 
     /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
