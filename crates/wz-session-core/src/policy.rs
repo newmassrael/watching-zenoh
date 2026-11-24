@@ -50,13 +50,10 @@ impl SnResolution {
     /// `Resolution` for a frame's sequence number, and zenoh-pico's `Z_SN_RESOLUTION`, which it
     /// puts in its InitSyn and its Join (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
     /// `msg._body._init._seq_num_res = Z_SN_RESOLUTION;`) and has fixed at `0x02`.
+    /// The declaration states each width's code (`wire_codes`), which is the width's
+    /// discriminant.
     pub const fn wire_code(self) -> u8 {
-        match self {
-            Self::Bits8 => 0x00,
-            Self::Bits16 => 0x01,
-            Self::Bits32 => 0x02,
-            Self::Bits64 => 0x03,
-        }
+        self as u8
     }
 
     /// The width a two-bit `seq_num_res` code names, the inverse of [`Self::wire_code`]. Only

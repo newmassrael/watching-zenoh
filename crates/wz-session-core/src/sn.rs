@@ -28,7 +28,7 @@ use crate::policy_binding::PolicyValue;
 /// not fit 32 bits. A build that leaves it out never advertises it (it advertises at most
 /// [`SN_RES_WIDEST`]), and a unicast session runs the smaller of the two advertised widths.
 pub const SN_RESOLUTION_HAS_64: bool =
-    <SnResolution as PolicyValue>::DOMAIN.contains_index(SnResolution::Bits64 as usize);
+    <SnResolution as PolicyValue>::DOMAIN.contains_index(SnResolution::Bits64.position());
 
 /// The word a sequence number is held in: wide enough for the widest ring the build can
 /// negotiate, so a build without `bits-64` steps its rings in 32-bit arithmetic.
