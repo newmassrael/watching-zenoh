@@ -2211,7 +2211,7 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
 }
 
 /// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
-/// for every caller that sends it, so its body and its call through `&dyn Fn` are made once.
+/// for every caller that sends it, so its body and its call through `&dyn TellTo` are made once.
 fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&McuActions<C>) {
     move |actions| actions.send_undeclare_kexpr(mapping_id)
 }
@@ -6431,7 +6431,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&core.session.registry).undeclare_subscriber(handle)?;
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions| {
+            core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 SubscriberRow::retract(id, names, actions);
             });
@@ -6489,7 +6489,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let place = core.keyexpr_place(declared.handle);
         let taken = core.announce_or_undo_at(
             place,
-            &|actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
+            &|actions: &McuActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             &undeclare_kexpr::<C>(id),
         );
         if !taken {
@@ -7421,7 +7421,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let undeclared = tables_mut(&core.session.registry).undeclare_queryable(handle)?;
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions| {
+            core.retract_at(place, &|actions: &McuActions<C>| {
                 let names = retraction.as_ref().map(|(names, key)| names.names(key));
                 QueryableRow::retract(id, names, actions);
             });
@@ -7514,7 +7514,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.transport.retract_from_groups(id);
         // The rows went before the links are told: a send never finds the tables borrowed.
         let key = undeclared.row.as_ref().map(|row| row.key().as_str());
-        core.retract_at(token_place, &|actions| {
+        core.retract_at(token_place, &|actions: &McuActions<C>| {
             if let Some(key) = key {
                 retract_token(actions, id, names.map(|names| names.names(key)));
             }
