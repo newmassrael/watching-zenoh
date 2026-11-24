@@ -2210,7 +2210,7 @@ mod coop_open_refusal_tests {
             .expect_err("nine is over eight");
         assert_eq!(
             coop_open_refusal(&OpenError::Arena(ArenaRefused::Limit {
-                limit: "MAX_SUBSCRIPTIONS",
+                limit: wz_capi_coop::arena::ArenaLimit::MaxSubscriptions,
                 why,
             })),
             Z_ERR_CONFIG_INVALID_VALUE
