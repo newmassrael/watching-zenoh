@@ -1991,6 +1991,16 @@ where
         mut on_members,
         mut on_group_subs,
     } = seams;
+    // The one place every group face starts, whoever spawns it: a width the build's domain leaves
+    // out has no word to run its ring in, so the face never comes up, as one whose bind failed.
+    if let Err(refused) = wz_session_core::sn::sn_resolution_admitted(
+        wz_session_core::policy::SnResolution::from_wire_code(params.seq_num_res),
+    ) {
+        let refused = std::io::Error::new(std::io::ErrorKind::InvalidInput, refused);
+        log::error!("{label}: {refused}; face absent");
+        on_open(Err(&refused));
+        return None;
+    }
     let clock = TokioTime::new();
     let new_dispatcher = || group_face_dispatcher(params, scope_members);
     let mut rejoin = GroupRejoin::new();
@@ -3258,6 +3268,66 @@ mod tests {
             None,
             "the bounded test guard ended the loop; re-joining would unbound it"
         );
+    }
+
+    /// A group face whose width of sequence numbers the build's `sn-resolution` domain leaves out
+    /// never comes up: nothing is bound, its host hears the refusal as an invalid input, and no
+    /// loop runs. A width the domain holds goes on to the bind.
+    #[tokio::test]
+    async fn a_group_face_of_a_width_outside_the_domain_is_never_bound() {
+        use wz_session_core::policy::SnResolution;
+        use wz_session_core::policy_binding::PolicyValue;
+
+        for width in SnResolution::WIDTHS {
+            let mut group = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            group.seq_num_res = width.wire_code();
+            let mut binds = 0u32;
+            let mut opened = None;
+            let (_signal, mut shutdown) = tokio::sync::watch::channel(false);
+            let outcome = serve_group_face(
+                GroupFaceSpec {
+                    label: "width",
+                    params: &group,
+                    tick_ms: 5,
+                    node_stats: None,
+                    membership: None,
+                    scope_members: false,
+                    messages: None,
+                },
+                || {
+                    binds += 1;
+                    async { Err::<FakeDriver, _>(std::io::Error::other("no link in this test")) }
+                },
+                GroupFaceSeams {
+                    on_event: |_: IterationEvent<'_, '_>| {},
+                    on_members: |_: &[Vec<u8>]| {},
+                    on_group_subs: |_: &[String]| {},
+                },
+                &MulticastTxProducer::new(),
+                &mut shutdown,
+                |result: Result<(), &std::io::Error>| {
+                    opened = Some(result.map_err(std::io::Error::kind));
+                },
+            )
+            .await;
+            assert!(outcome.is_none(), "{}: no loop ran", width.id());
+            if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+                assert!(binds > 0, "{}: a held width is bound", width.id());
+                assert!(
+                    matches!(opened, Some(Err(kind)) if kind != std::io::ErrorKind::InvalidInput),
+                    "{}: the host hears the bind's failure",
+                    width.id()
+                );
+            } else {
+                assert_eq!(binds, 0, "{}: nothing is bound", width.id());
+                assert_eq!(
+                    opened,
+                    Some(Err(std::io::ErrorKind::InvalidInput)),
+                    "{}: the host hears the refusal",
+                    width.id()
+                );
+            }
+        }
     }
 
     /// The drive loop admits a peer from an inbound JOIN (keyed by its source

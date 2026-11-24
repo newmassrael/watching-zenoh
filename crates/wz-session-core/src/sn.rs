@@ -27,14 +27,17 @@ use crate::policy_binding::{OutsideDomain, PolicyValue};
 /// Whether the build's `sn-resolution` domain holds `bits-64`, the one width whose ring does
 /// not fit 32 bits. A build that leaves it out never advertises it (it advertises at most
 /// [`SN_RES_WIDEST`]), and a unicast session runs the smaller of the two advertised widths.
-pub const SN_RESOLUTION_HAS_64: bool =
-    <SnResolution as PolicyValue>::DOMAIN.contains_index(SnResolution::Bits64.position());
+pub const SN_RESOLUTION_HAS_64: bool = sn_resolution_admitted(SnResolution::Bits64).is_ok();
 
 /// Whether a session or a group may run `width`: the build's `sn-resolution` domain holds it.
 /// Each engine's open asks it of every width it is handed, so a width the build holds no word for
 /// ([`Sn`]) is refused to the opener before anything is wired, rather than run on another ring.
-pub fn sn_resolution_admitted(width: SnResolution) -> Result<(), OutsideDomain<SnResolution>> {
-    if <SnResolution as PolicyValue>::DOMAIN.contains(width) {
+/// A `const fn`, so a width an image fixes as a constant is held to the domain by this same test
+/// when the image is compiled.
+pub const fn sn_resolution_admitted(
+    width: SnResolution,
+) -> Result<(), OutsideDomain<SnResolution>> {
+    if <SnResolution as PolicyValue>::DOMAIN.contains_index(width.position()) {
         Ok(())
     } else {
         Err(OutsideDomain { value: width })
@@ -1299,6 +1302,7 @@ mod tests {
             );
         }
         assert_eq!(sn_resolution_admitted(SnResolution::DEFAULT), Ok(()));
+        const _: () = assert!(sn_resolution_admitted(SnResolution::DEFAULT).is_ok());
     }
 
     /// A gap count saturates at `u32::MAX` and is exact below it.
