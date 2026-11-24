@@ -2131,19 +2131,6 @@ impl<C: RoundCalls> Round<C> {
     }
 }
 
-/// The round as the session's state asks it (`SessionState::retract_owed`). Named by its path
-/// alone: in scope, its methods would be found first on an `Arc<Round>`, before the round's own.
-impl<C: RoundCalls> crate::session_state::DeliveryRound for Round<C> {
-    unsafe fn has_room(&self, callbacks: usize) -> bool {
-        // SAFETY: the caller's contract, which is the round's own.
-        unsafe { Self::has_room(self, ReadRoom { callbacks }) }
-    }
-
-    fn owe(&self, owed: bool) {
-        Self::owe(self, owed);
-    }
-}
-
 /// A query of the round, read where its parts lie: what each queryable it reached is handed.
 struct RoundQuery<'t, C: RoundCalls> {
     query: &'t HeldQuery,
@@ -2332,4 +2319,4 @@ impl<C: RoundCalls> ReplyView for RoundReply<'_, C> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

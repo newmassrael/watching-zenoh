@@ -186,8 +186,6 @@ use {
 
 mod deliveries;
 use deliveries::Deliveries;
-#[cfg(feature = "query")]
-mod queued;
 
 mod registry;
 #[cfg(feature = "local-queryable")]
@@ -2264,11 +2262,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
 }
 
-/// The port's mutex, as the lock the session core's planes keep their state under.
-#[cfg(feature = "connectivity")]
-enum CoopLocks {}
+/// The port's mutex, as the lock the session core's planes keep their state under and the queues
+/// the deliveries drain sit behind: the faces' watchers (`connectivity`) and the gets' queues
+/// (`query`).
+#[cfg(any(feature = "connectivity", feature = "query"))]
+pub(crate) enum CoopLocks {}
 
-#[cfg(feature = "connectivity")]
+#[cfg(any(feature = "connectivity", feature = "query"))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
@@ -3401,7 +3401,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         )
         .max(1);
         // SAFETY: `Core` is reached under the session's lock alone, the round writer's lock.
-        unsafe { self.session.retract_owed(callbacks) };
+        unsafe {
+            self.session
+                .retract_owed(crate::round::ReadRoom { callbacks })
+        };
     }
 
     /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
@@ -4467,16 +4470,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // closure's `drop(context)`). A round another delivery still hands out may hold a reply
         // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        while self.gets.ended.is_pending() && self.samples.is_idle() {
-            let next = self.gets.ended.lock().take();
-            let Some(ended) = next else {
+        while self.gets.ends_pending() && self.samples.is_idle() {
+            let Some(ended) = self.gets.take_end() else {
                 break;
             };
             if let Some(mut core) = self.live() {
                 core.0
                     .session
                     .pending_gets
-                    .retain(|pending| pending.leg != ended.leg);
+                    .retain(|pending| pending.leg != ended.leg());
             }
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
@@ -4489,19 +4491,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// querier hands them.
     #[cfg(feature = "query")]
     fn hand_held(&self, ended: Ended) {
-        let leg = ended.leg;
+        let (leg, row) = (ended.leg(), ended.row());
         while let Some(reply) = self.gets.take_due(leg) {
-            self.gets.call(ended.row, &reply);
+            self.gets.call(row, &reply);
         }
         while let Some(reply) = self.gets.take_held(leg) {
-            self.gets.call(ended.row, &reply);
+            self.gets.call(row, &reply);
         }
-        if let Some(rid) = ended.timed_out {
-            self.gets.call(ended.row, &timeout_reply(rid));
+        if let Some(rid) = ended.timed_out() {
+            self.gets.call(row, &timeout_reply(rid));
         }
         // The end's count of the row, given back last: the callback goes with it unless a record
         // of a round another delivery hands out holds it still, whose end lets it go.
-        drop(self.gets.release(ended.row));
+        drop(self.gets.release(row));
     }
 
     /// One pass over what the session queued for the program's callbacks, under the delivery
@@ -5311,11 +5313,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// sent), and leave no end of it waiting for a delivery.
     #[cfg(feature = "query")]
     fn end_leg_now(&self, leg: u64) {
-        let ended = self.gets.ended.lock().forget(leg);
+        let ended = self.gets.forget_end(leg);
         self.gets.forget_due(leg);
         while self.gets.take_held(leg).is_some() {}
         if let Some(ended) = ended {
-            drop(self.gets.release(ended.row));
+            drop(self.gets.release(ended.row()));
         }
     }
 
@@ -6819,9 +6821,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld = unheld.saturating_add(1);
                 continue;
             };
+            // SAFETY: the sink goes into a table of pending gets, which the session
+            // reaches under its lock alone, and is handed its replies there.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
             let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
-                get::LegSink::new(leg_id, row, &self.gets, &self.samples),
+                leg_sink,
                 get::LegHold::new(leg_id, &self.gets),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
@@ -6949,9 +6954,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 unheld = unheld.saturating_add(1);
                 continue;
             };
+            // SAFETY: the sink goes into a table of pending gets, which the session
+            // reaches under its lock alone, and is handed its replies there.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
             let sink = ConsolidatingSink::with_hold(
                 opts.resolved_consolidation(),
-                get::LegSink::new(leg_id, row, &self.gets, &self.samples),
+                leg_sink,
                 get::LegHold::new(leg_id, &self.gets),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
@@ -7020,9 +7028,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 None
             };
             if let Some(row) = row {
+                // SAFETY: the sink goes into a table of pending gets, which the session
+                // reaches under its lock alone, and is handed its replies there.
+                let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
                 let sink = ConsolidatingSink::with_hold(
                     opts.resolved_consolidation(),
-                    get::LegSink::new(leg_id, row, &self.gets, &self.samples),
+                    leg_sink,
                     get::LegHold::new(leg_id, &self.gets),
                 );
                 let registered = core
@@ -7130,6 +7141,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let Some(row) = self.gets.open_leg(leg, true) else {
                 continue;
             };
+            // SAFETY: the sink goes into a table of pending gets, which the session
+            // reaches under its lock alone, and is handed its replies there.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, &self.gets, &self.samples) };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core
@@ -7138,11 +7152,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .borrow_mut()
                 .face_mut(face)
                 .map(|tables| {
-                    tables.gets.liveliness_gets.register(
-                        interest_id,
-                        deadline_ms,
-                        get::LegSink::new(leg_id, row, &self.gets, &self.samples),
-                    )
+                    tables
+                        .gets
+                        .liveliness_gets
+                        .register(interest_id, deadline_ms, leg_sink)
                 })
                 .is_some_and(|registered| matches!(registered, Ok(true)));
             if !registered {
@@ -7587,13 +7600,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         {
             // Each end gives back its count of its leg's row, and the callback goes there when no
             // record of the round still holds it, with no lock held.
-            loop {
-                let next = self.gets.ended.lock().take();
-                let Some(ended) = next else {
-                    break;
-                };
-                self.gets.forget_due(ended.leg);
-                drop(self.gets.release(ended.row));
+            while let Some(ended) = self.gets.take_end() {
+                self.gets.forget_due(ended.leg());
+                drop(self.gets.release(ended.row()));
             }
             drop(self.gets.take_all_held());
         }

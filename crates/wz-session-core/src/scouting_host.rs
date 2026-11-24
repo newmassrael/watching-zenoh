@@ -826,11 +826,9 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
         let body = ScoutParts {
             version: wz_codecs::wire_const::PROTOCOL_VERSION,
             cbyte: flags.cbyte,
-            // The id is at most the codec's own bound (`zid_len_m1` is four bits).
-            zid: zid.as_ref().map(|zid| {
-                sce_forge_runtime::codec::Bounded::new(zid.as_slice())
-                    .expect("a SessionZid is 1..=16 bytes, the codec's bounds")
-            }),
+            // A zid holds its bytes within the codec's own bounds (`zid_len_m1`
+            // is four bits).
+            zid: zid.as_ref().map(SessionZid::as_field),
         };
         // The whole message, header and chain included, by its document
         // (`sources/codecs/scouting_scout.scxml`).

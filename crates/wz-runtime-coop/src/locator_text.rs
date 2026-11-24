@@ -264,6 +264,10 @@ impl Text<'_> {
     /// Take the run of digits of `radix` (10 or 16) at the front: how many there were, and their
     /// value, held at `u64::MAX` once it passes it, which every reader refuses. `str::parse`
     /// would also take a leading `+`, and is a copy of the integer reader for each width.
+    ///
+    /// Out of line: every octet, group, scope and port is read by it, and the loop inlined at each
+    /// was a copy of it in every reader above, the four octets of an IPv4 address unrolled.
+    #[inline(never)]
     fn number(&mut self, radix: u8) -> (usize, u64) {
         let (mut digits, mut value) = (0usize, 0u64);
         while let [first, rest @ ..] = self.0 {

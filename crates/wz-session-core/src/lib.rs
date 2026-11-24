@@ -785,6 +785,12 @@ pub mod pending_get;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub mod round;
 
+/// The requesting end of the session's gets: the rows of their legs' callbacks, held by count, the
+/// replies they hold to their ends and the ends the deliveries hand out, with the sink and the
+/// hold a leg's pending entry owns. Gated as [`round`] is, whose records hold counts of its rows.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod get_plane;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
@@ -947,8 +953,6 @@ pub mod scout_initiator;
     feature = "codec-hello",
     target_has_atomic = "ptr"
 ))]
-// Totality debt TD-032 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod scouting_host;
 
 // R311ky — deferred callback firing (the F-6 structural fix): the
@@ -1306,8 +1310,6 @@ pub mod encoded_push;
 /// [`push_build::build_push_literal`]'s owned message. One composition for the unicast
 /// lend-only send and the multicast no-allocator TX. `codec-push` gated.
 #[cfg(feature = "codec-push")]
-// Totality debt TD-031 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod lent_push;
 
 /// A strict, allocation-free reader of the one record a data stream is made of (a `Push`

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::bounded::ARENA_ALIGN;
+use crate::plane_lock::StdLocks;
 use crate::session_tables::{Absent, Present};
 use crate::wire_id::RequestId;
 use core::ptr::NonNull;
@@ -13,7 +14,7 @@ use std::vec::Vec;
 
 /// What a test's calls were handed, and how many calls and counts of legs were ended.
 #[derive(Default)]
-struct Log {
+pub(crate) struct Log {
     handed: Mutex<Vec<String>>,
     ended: std::sync::atomic::AtomicUsize,
 }
@@ -23,7 +24,7 @@ impl Log {
         self.handed.lock().unwrap().push(what);
     }
 
-    fn handed(&self) -> Vec<String> {
+    pub(crate) fn handed(&self) -> Vec<String> {
         self.handed.lock().unwrap().clone()
     }
 
@@ -37,9 +38,9 @@ impl Log {
 }
 
 /// A call of the test's row `row`, which notes what it is handed and its end in `log`.
-struct Call {
-    row: u32,
-    log: Arc<Log>,
+pub(crate) struct Call {
+    pub(crate) row: u32,
+    pub(crate) log: Arc<Log>,
 }
 
 impl RoundCall for Call {
@@ -71,21 +72,6 @@ impl TokenCall for Call {
     }
 }
 
-/// The host's mutex, as the lock the round keeps what answers its queries under.
-enum StdLocks {}
-
-impl LockFamily for StdLocks {
-    type Lock<T> = Mutex<T>;
-
-    fn new<T>(value: T) -> Mutex<T> {
-        Mutex::new(value)
-    }
-
-    fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        f(&mut lock.lock().unwrap())
-    }
-}
-
 /// A tally that keeps the rounds handed out and the samples they held.
 #[derive(Default)]
 struct Counted {
@@ -102,7 +88,7 @@ impl RoundTally for Counted {
 }
 
 /// A round that keeps every kind of record.
-enum Kept {}
+pub(crate) enum Kept {}
 
 impl RoundCalls for Kept {
     type Subscriber = Call;
@@ -144,7 +130,7 @@ struct Block([u8; ARENA_ALIGN]);
 
 /// A round of a few records, its tables lent from an arena over memory the test process leaks,
 /// so it outlives the round.
-fn round<C: RoundCalls>() -> Arc<Round<C>> {
+pub(crate) fn round<C: RoundCalls>() -> Arc<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(4),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
