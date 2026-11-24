@@ -23,6 +23,7 @@ use crate::face::{FaceEventKind, FaceSnapshot};
 use crate::face_plane::FaceReports;
 use crate::key_arena::KeySpace;
 use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
+use crate::replay_pacing::ReplayPacing;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::round::{ReadRoom, Round, RoundCalls};
 use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
@@ -124,6 +125,10 @@ pub struct SessionState<P: SessionParts> {
     pub local_requests: P::LocalRequests,
     /// Where the matching listeners were last read.
     pub matching: MatchingRead,
+    /// How a link that comes up is told the declarations the session holds: a burst at a time at
+    /// this pace, or all in one turn (`None`). One for the session, which every face's replay
+    /// reads, as the policies the session opened under state it or a caller set it since.
+    pub replay_pacing: Option<ReplayPacing>,
     /// The plane the session's queryables answer through.
     pub plane: P::Queryables,
     /// The legs of the session's gets still pending on its links.
@@ -446,6 +451,7 @@ mod tests {
             key_ids: (),
             local_requests: LocalRequests::default(),
             matching: MatchingRead::default(),
+            replay_pacing: None,
             plane: (),
             pending_gets: Default::default(),
             gets: (),

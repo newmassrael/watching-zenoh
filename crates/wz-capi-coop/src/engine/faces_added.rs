@@ -70,15 +70,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Add a face whose link is `link`: a dial under way or a handshake. It is told the session's
-    /// declarations at the pace the dial role's face is. Every face the open admits has its place
-    /// in the table; one past them, which the callers refuse before they make it, is let go of
-    /// with its tables.
+    /// declarations at the session's pace, as every face is. Every face the open admits has its
+    /// place in the table; one past them, which the callers refuse before they make it, is let go
+    /// of with its tables.
     fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Dial>) {
-        let pacing = self.transport.dial().and_then(|dial| dial.replay.pacing());
         let face = Face {
             id,
             link,
-            replay: Replay::with_pacing(pacing),
+            replay: Replay::idle(),
             #[cfg(feature = "connectivity")]
             told: FaceTold::default(),
         };
