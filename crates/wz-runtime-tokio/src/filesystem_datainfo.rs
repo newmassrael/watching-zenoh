@@ -342,7 +342,7 @@ mod tests {
     fn info(zid: &[u8], encoding: Option<EncodingHint>) -> DataInfo {
         DataInfo {
             encoding,
-            timestamp: TimestampHint::new(0x0102_0304_0506_0708, &zid).unwrap(),
+            timestamp: TimestampHint::new(0x0102_0304_0506_0708, zid).unwrap(),
         }
     }
 

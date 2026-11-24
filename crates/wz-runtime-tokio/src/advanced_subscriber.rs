@@ -2455,7 +2455,7 @@ mod tests {
                 PublishOptions::put()
                     .with_locality(Locality::SessionLocal)
                     .with_timestamp(
-                        wz_session_core::sample::TimestampHint::new(time, &zid).unwrap(),
+                        wz_session_core::sample::TimestampHint::new(time, zid).unwrap(),
                     ),
             )
             .expect("loopback timestamped publish")
