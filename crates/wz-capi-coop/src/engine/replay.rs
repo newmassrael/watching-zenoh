@@ -243,7 +243,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_ms: u64,
     ) -> TurnEnd {
         let owed = self.sequence_len();
-        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+        if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.begin(owed, now_ms);
         }
         self.replay_turn(at, actions, now_ms)
@@ -260,7 +260,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_ms: u64,
     ) -> TurnEnd {
         // A place with no face has no replay to send.
-        let Some(Face { replay, .. }) = self.transport.links.faces().get(at) else {
+        let Some(Face { replay, .. }) = self.transport.links.face(at) else {
             return TurnEnd::Kept;
         };
         if replay.cursor.finished() || now_ms < replay.next_turn_ms {
@@ -281,8 +281,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         self.transport
             .links
-            .faces_mut()
-            .get_mut(at)
+            .face_mut(at)
             .map_or(TurnEnd::Kept, |face| {
                 face.replay.settle(cursor, told, refused, now_ms, pacing)
             })
@@ -304,7 +303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         undo: &dyn TellTo<C>,
     ) -> bool {
         announce_on(
-            self.transport.links.faces_mut(),
+            self.transport.links.places_mut(),
             place,
             on_refusal,
             send,
@@ -321,7 +320,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let place = self.place_of(declared);
         let registry = &self.session.registry;
         announce_on(
-            self.transport.links.faces_mut(),
+            self.transport.links.places_mut(),
             place,
             OnRefusal::Forget,
             &|actions: &McuActions<C>| tell(&super::tables(registry), actions, declared),
@@ -478,7 +477,7 @@ fn told<C: ClockSource + 'static>(
 /// kept to put back.
 #[inline(never)]
 fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
-    faces: &mut [Face<C, L>],
+    faces: &mut [Option<Face<C, L>>],
     place: usize,
     on_refusal: OnRefusal,
     send: &dyn SendTo<C>,
@@ -491,6 +490,9 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
     };
     let mut refused_at = None;
     for (at, face) in faces.iter().enumerate() {
+        let Some(face) = face else {
+            continue;
+        };
         let Link::Up(wire) = &face.link else {
             continue;
         };
@@ -500,7 +502,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         }
     }
     if let Some(refused) = refused_at {
-        for face in faces.iter().take(refused) {
+        for face in faces.iter().take(refused).flatten() {
             if let Link::Up(wire) = &face.link {
                 if emits_now(face) {
                     undo.tell_to(&wire.actions);
@@ -509,7 +511,7 @@ fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
         }
         return false;
     }
-    for face in faces.iter_mut() {
+    for face in faces.iter_mut().flatten() {
         if matches!(face.link, Link::Up(_)) {
             // The face was told it above, or its replay tells it in its turn.
             let _ = face.replay.cursor.inserted(place);

@@ -348,19 +348,22 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
             ArenaLimit::MaxPublishers,
             caps::MAX_PUBLISHERS,
             SessionLimits::select_max_publishers,
-            |plan| plan.entities().publishers,
+            |plan| plan.entities().of_kind(crate::arena::EntityKind::Publisher),
         ),
         (
             ArenaLimit::MaxQueriers,
             caps::MAX_QUERIERS,
             SessionLimits::select_max_queriers,
-            |plan| plan.entities().queriers,
+            |plan| plan.entities().of_kind(crate::arena::EntityKind::Querier),
         ),
         (
             ArenaLimit::MaxMatchingListeners,
             caps::MAX_MATCHING_LISTENERS,
             SessionLimits::select_max_matching_listeners,
-            |plan| plan.entities().matching_listeners,
+            |plan| {
+                plan.entities()
+                    .of_kind(crate::arena::EntityKind::MatchingListener)
+            },
         ),
         (
             ArenaLimit::MaxDeclaredKeyexprs,
@@ -2318,14 +2321,14 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
         .expect("the build's limits lay an arena out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
-    let rows = plan.entities().matching_listeners;
+    let rows = plan.entities().of_kind(EntityKind::MatchingListener);
     assert!(rows > 0, "the build's limits admit matching listeners");
     let laid = plan
         .rows()
         .find(|row| row.part() == "matching listener places")
         .map(|row| (row.basis(), row.count));
     assert_eq!(laid, Some(("MAX_MATCHING_LISTENERS", rows)));
-    assert_eq!(plan.entities().of_kind(EntityKind::MatchingListener), rows);
+    assert_eq!(plan.tables().matching_listeners, rows);
 }
 
 /// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
@@ -2340,7 +2343,7 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
         .expect("the build's limits lay an arena out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
-    let rows = plan.entities().decl_watches;
+    let rows = plan.entities().of_kind(EntityKind::DeclWatch);
     let laid = plan
         .rows()
         .find(|row| row.part() == "declaration watch places")
@@ -2355,7 +2358,6 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
         assert_eq!(rows, 0, "a build without the watch holds none");
         assert_eq!(laid, None, "and lays no place out for one");
     }
-    assert_eq!(plan.entities().of_kind(EntityKind::DeclWatch), rows);
 }
 
 /// The ABI's places of transport events listeners are as many as
@@ -2370,7 +2372,7 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
         .expect("the build's limits lay an arena out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
-    let rows = plan.entities().transport_events_listeners;
+    let rows = plan.entities().of_kind(EntityKind::TransportEventsListener);
     let laid = plan
         .rows()
         .find(|row| row.part() == "transport events listener places")
@@ -2385,10 +2387,6 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
         assert_eq!(rows, 0, "a build without connectivity holds none");
         assert_eq!(laid, None, "and lays no place out for one");
     }
-    assert_eq!(
-        plan.entities().of_kind(EntityKind::TransportEventsListener),
-        rows
-    );
 }
 
 /// The ABI's places of link events listeners are as many as `MAX_LINK_EVENTS_LISTENERS` admits in
@@ -2403,7 +2401,7 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
         .expect("the build's limits lay an arena out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
-    let rows = plan.entities().link_events_listeners;
+    let rows = plan.entities().of_kind(EntityKind::LinkEventsListener);
     let laid = plan
         .rows()
         .find(|row| row.part() == "link events listener places")
@@ -2415,10 +2413,6 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
         assert_eq!(rows, 0, "a build without connectivity holds none");
         assert_eq!(laid, None, "and lays no place out for one");
     }
-    assert_eq!(
-        plan.entities().of_kind(EntityKind::LinkEventsListener),
-        rows
-    );
 }
 
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's

@@ -19,7 +19,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
 use super::{client_config, config, open_with, until, CatchAll, Engine, Router};
-use crate::arena::ArenaPlan;
+use crate::arena::{ArenaPlan, EntityKind};
 use crate::CoopConfig;
 
 /// The build's limits with `select` applied. Every build these tests run in lets a test lower a
@@ -169,10 +169,18 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     });
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
     let rows = plan.entities();
-    assert_eq!(rows.subscribers, 2);
-    assert_eq!(rows.publishers, 3);
-    assert_eq!(rows.queriers, 4);
-    assert_eq!(rows.matching_listeners, 5);
+    assert_eq!(rows.of_kind(EntityKind::Subscriber), 2);
+    assert_eq!(rows.of_kind(EntityKind::Publisher), 3);
+    assert_eq!(rows.of_kind(EntityKind::Querier), 4);
+    assert_eq!(rows.of_kind(EntityKind::MatchingListener), 5);
+    assert_eq!(
+        rows.of_kind(EntityKind::Queryable),
+        if cfg!(feature = "queryable") { 7 } else { 0 }
+    );
+    assert_eq!(
+        rows.of_kind(EntityKind::LivelinessSubscriber),
+        if cfg!(feature = "liveliness") { 3 } else { 0 }
+    );
     assert_eq!(rows.keyexprs, 6);
     assert_eq!(rows.filters(), Some(7));
     assert_eq!(rows.interests(), Some(12));

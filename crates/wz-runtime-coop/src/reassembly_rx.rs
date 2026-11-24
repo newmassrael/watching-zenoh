@@ -36,9 +36,9 @@
 //! this seam composes on the no-alloc MCU profile (default features, no
 //! `alloc`) — the same profile Layer G.9 proves the seam cross-compiles
 //! under. The no_std `ReassemblyDispatcher<4, 4096>` is ~22 KiB
-//! (vendor/sce 4ec1aa642 elided the inline W3C event metadata, and
-//! `fragment_chunk_schema.scxml` dropped its vestigial 1472-byte payload
-//! field), so a `static` instance fits the MCU's 128 KiB SRAM region.
+//! (vendor/sce 4ec1aa642 elided the inline W3C event metadata, and the
+//! slot machine's events carry no payload), so a `static` instance fits the
+//! MCU's 128 KiB SRAM region.
 //!
 //! `now_ms` is a caller parameter (not read from a
 //! [`crate::time::ClockSource`]) so the seam needs no executor / timer:

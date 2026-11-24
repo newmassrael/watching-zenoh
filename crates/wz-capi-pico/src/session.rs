@@ -607,13 +607,19 @@ pub(crate) struct PicoSessionHandle {
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
+    /// What an entity declared on the session needs of it, made once by the open and lent to each
+    /// declaring door (`crate::write_filter::PicoSession::of`), so no door makes its own copy and
+    /// lets it go on each of its ways out.
+    pub(crate) pico: crate::write_filter::PicoSession,
 }
 
 impl PicoSessionHandle {
     pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
+        let pico = crate::write_filter::PicoSession::over(drive.engine(), &ext);
         Self {
             drive,
             ext,
+            pico,
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -702,7 +708,7 @@ impl SessionTail {
         Self {
             open: crate::ffi::OpenClosures::default(),
             #[cfg(not(feature = "engine-tokio"))]
-            arena: core::mem::ManuallyDrop::new(engine_of(handle)),
+            arena: core::mem::ManuallyDrop::new(engine_held(handle).clone()),
         }
     }
 }
@@ -764,8 +770,8 @@ unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
     let place = place.cast::<SessionPlace>();
     // SAFETY: the caller's: nothing reads what lies beside the handle again, and it is read out
     // once, here, while the hold it carries keeps the place standing.
-    let SessionTail { open, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
-    drop(open);
+    // The count of open closures owns nothing; the hold on the engine is what is let go of.
+    let SessionTail { open: _, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
     drop(core::mem::ManuallyDrop::into_inner(arena));
 }
 
@@ -848,11 +854,11 @@ pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) type Engine = wz_capi_coop::CoopEngine<PicoLinks, SessionClockOf>;
 
-/// The engine behind a session handle, to keep: what an entity declared on the session holds for
-/// its own life. The engine hands itself out, so this crate never turns an engine's own type into
-/// the port's, which would instantiate the engine's drop glue a second time here.
-pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> {
-    handle.drive.engine()
+/// The engine behind a session handle as the session holds it, for the length of one call: a door
+/// that only passes it on, or keeps it in an object that clones it, takes no count of its own, and
+/// so has none to let go of on each of its ways out.
+pub(crate) fn engine_held(handle: &PicoSessionHandle) -> &alloc::sync::Arc<Engine> {
+    handle.drive.engine_hold()
 }
 
 /// The engine behind a session handle, for the length of one call: a put or a delete reaches the
@@ -1618,7 +1624,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 &zid,
                 policy,
                 limits,
-                &drive.engine(),
+                drive.engine_hold(),
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
@@ -1842,12 +1848,13 @@ fn write_unicast_endpoints(
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
     // What the config names, read where it lies; the texts themselves are written into the
-    // engine's rows by the open (`write_endpoints` below), the config going with them.
-    let Ok(open) = open_config(&request.config) else {
-        // `open_request` read the same config and took its mode.
-        return crate::result::Z_ERR_CONFIG_INVALID_MODE;
-    };
-    let (stated, listen) = (open.connect, open.listen);
+    // engine's rows by the open (`write_unicast_endpoints` below), the config going with them.
+    // The keys `open_config` reads them by: `open_request` read the config so and took its mode,
+    // which is not judged again.
+    let (stated, listen) = (
+        request.config.get(Z_CONFIG_CONNECT_KEY),
+        request.config.get(Z_CONFIG_LISTEN_KEY),
+    );
     // A build without `peer` is a client build: `z_open` refused a listener and the peer role
     // before this.
     #[cfg(not(feature = "peer"))]
@@ -2073,7 +2080,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         &zid,
         policy,
         limits,
-        &drive.engine(),
+        drive.engine_hold(),
     );
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
@@ -3711,9 +3718,10 @@ mod session_place_tests {
         // while the engine the test holds keeps the session's arena standing.
         unsafe {
             let mut session = listening_on_loopback();
-            let engine = engine_of(
+            let engine = engine_held(
                 session_handle(z_session_loan(&session)).expect("an open session has its handle"),
-            );
+            )
+            .clone();
             let mut copy = z_owned_session_t {
                 _val: session._val,
                 _cnt: session._cnt,
@@ -3735,6 +3743,30 @@ mod session_place_tests {
         }
     }
 
+    /// The engine a door reaches for one call is the session's own: the engine one kept is, the
+    /// same each time it is asked. Turned red by a hold that hands out an engine other than the one
+    /// the session's entities keep.
+    #[test]
+    fn the_engine_held_for_a_call_is_the_one_its_entities_keep() {
+        // SAFETY: the session is live and owned by this frame, and let go of once at the end.
+        unsafe {
+            let mut session = listening_on_loopback();
+            let handle =
+                session_handle(z_session_loan(&session)).expect("an open session has its handle");
+            let kept = engine_held(handle).clone();
+            assert!(
+                alloc::sync::Arc::ptr_eq(&kept, engine_held(handle)),
+                "the engine kept is the one held"
+            );
+            assert!(
+                core::ptr::eq(engine_held(handle), engine_held(handle)),
+                "the session's own hold, the same each time"
+            );
+            drop(kept);
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+
     /// A closure counted in a session outlives the session's drop: the place of its handle, and the
     /// engine whose arena it lies in, stand until the closure is let go of, whose drop then gives
     /// them back. Turned red by a count kept in the handle, which goes with the drop.
@@ -3752,9 +3784,13 @@ mod session_place_tests {
         // SAFETY: every pointer is to a live owned value of this frame.
         unsafe {
             let mut session = listening_on_loopback();
-            let engine = alloc::sync::Arc::downgrade(&engine_of(
-                session_handle(z_session_loan(&session)).expect("an open session has its handle"),
-            ));
+            let engine = alloc::sync::Arc::downgrade(
+                &engine_held(
+                    session_handle(z_session_loan(&session))
+                        .expect("an open session has its handle"),
+                )
+                .clone(),
+            );
             let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
                 core::ptr::from_ref(&dropped).cast_mut().cast(),
                 None,

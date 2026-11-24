@@ -938,14 +938,14 @@ mod tests {
     fn a_listeners_place_stands_while_its_filter_holds_it() {
         use crate::prelude::Vec;
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many listener places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =

@@ -1385,11 +1385,11 @@ pub(crate) unsafe fn get_inner(
     let params_in = parameters_in(parameters, parameters_len);
     // The query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
-    let engine = crate::session::engine_of(handle);
-    let wire = wire_key_of(keyexpr, Arc::as_ref(&engine));
+    let engine = crate::session::engine_held(handle);
+    let wire = wire_key_of(keyexpr, Arc::as_ref(engine));
     let token = held.token.take().map(TokenRef::shared);
     let ask = held.ask(params_in, shape, None);
-    issue_get(&engine, ke, wire, &ask, cclosure, token, target_peer)
+    issue_get(engine, ke, wire, &ask, cclosure, token, target_peer)
 }
 
 /// Adopt a moved reply closure and null the source, exactly as pico does
@@ -2587,7 +2587,7 @@ mod tests {
     fn a_gets_place_goes_back_with_its_last_leg() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -2605,7 +2605,7 @@ mod tests {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many get places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =

@@ -492,7 +492,7 @@ mod tests {
     ) -> std::sync::Arc<crate::session::Engine> {
         let handle = crate::session::session_handle(crate::session::z_session_loan(session))
             .expect("an open session");
-        crate::session::engine_of(handle)
+        crate::session::engine_held(handle).clone()
     }
 
     #[cfg(feature = "peer")]

@@ -60,7 +60,7 @@ use crate::matching::FilterListeners;
 use crate::prelude::*;
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_GENERIC};
-use crate::session::{engine_of, Engine, PicoSessionHandle};
+use crate::session::{Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
 /// ([`crate::session_ext::PicoSessionExt`]) because nothing downstream of the
@@ -99,15 +99,21 @@ pub(crate) struct PicoSession {
 }
 
 impl PicoSession {
-    /// The session behind a borrowed handle.
-    pub(crate) fn of(handle: &PicoSessionHandle) -> Self {
+    /// The session behind a borrowed handle, as its open made it once: a door that declares on it
+    /// borrows it, and one that keeps it clones it where it keeps it.
+    pub(crate) fn of(handle: &PicoSessionHandle) -> &Self {
+        &handle.pico
+    }
+
+    /// The session running on `engine` whose pico-side state is `ext`: made once, by the open.
+    pub(crate) fn over(engine: Arc<Engine>, ext: &crate::session_ext::PicoSessionExt) -> Self {
         Self {
-            engine: engine_of(handle),
-            mode: session_mode(handle),
+            engine,
+            mode: ext.mode,
             #[cfg(feature = "advanced")]
-            hlc: handle.ext.hlc.clone(),
+            hlc: ext.hlc.clone(),
             #[cfg(feature = "advanced")]
-            time: handle.ext.time.clone(),
+            time: ext.time.clone(),
         }
     }
 }
@@ -314,8 +320,33 @@ fn interest_ask<'a>(
 mod tests {
     use super::*;
     use crate::session::{
-        listening_on_loopback, session_handle, z_session_drop, z_session_loan, z_session_move,
+        engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+        z_session_move,
     };
+
+    /// A door that declares on a session borrows the one view its open made: the same each time,
+    /// over the engine the session's entities keep and in the session's role. Turned red by a view
+    /// made per call, or over another engine.
+    #[test]
+    fn a_door_borrows_the_view_its_session_was_opened_with() {
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) }
+            .expect("an open session has its handle");
+        assert!(
+            core::ptr::eq(PicoSession::of(handle), PicoSession::of(handle)),
+            "one view, lent each time"
+        );
+        let kept = engine_held(handle).clone();
+        assert!(
+            Arc::ptr_eq(&PicoSession::of(handle).engine, &kept),
+            "over the session's engine"
+        );
+        assert!(PicoSession::of(handle).mode == session_mode(handle));
+        drop(kept);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
 
     /// An entity's key is declared and named on the wire by its own declaration, its id comes off
     /// the session's counter, and the filter it gets holds back what it sends while nothing on a
@@ -327,14 +358,9 @@ mod tests {
         let handle = unsafe { session_handle(z_session_loan(&session)) }
             .expect("an open session has its handle");
         let pico = PicoSession::of(handle);
-        let filtered = FilteredKey::declare(
-            &pico,
-            FilterPlane::Subscribers,
-            "demo/filtered",
-            None,
-            false,
-        )
-        .unwrap_or_else(|code| panic!("a session with room declares the key, not {code}"));
+        let filtered =
+            FilteredKey::declare(pico, FilterPlane::Subscribers, "demo/filtered", None, false)
+                .unwrap_or_else(|code| panic!("a session with room declares the key, not {code}"));
         assert_eq!(filtered.key.literal(), "demo/filtered");
         let (id, rest) = filtered.wire.names_in(filtered.key.literal());
         assert_ne!(id, 0, "the wire names the key's own declaration");
@@ -350,7 +376,6 @@ mod tests {
             assert!(next > filtered.eid, "the entity's id was taken first");
         }
         drop(filtered);
-        drop(pico);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }

@@ -56,7 +56,8 @@ pub struct TxLease<'a, D: BoxedLinkDriver + ?Sized = dyn BoxedLinkDriver> {
     slot: TxSlot,
     /// First byte of the slot (the headroom's first byte).
     base: *mut u8,
-    /// The slot's whole length, headroom included.
+    /// Where writes stop: the slot's whole length, headroom included, or less once the frame is
+    /// held to a budget ([`TxLease::hold_to`]).
     total: usize,
     /// Bytes at the front that belong to the link's framing.
     headroom: usize,
@@ -271,6 +272,19 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
     pub fn capacity(&self) -> usize {
         // The headroom is never past the slot: `acquire` and `resume` refuse one that is.
         self.total.wrapping_sub(self.headroom)
+    }
+
+    /// Hold the frame to `end` bytes: a write that would carry it past `end` is refused as one
+    /// past the slot is, before a byte of it is copied. The budget is the lease's own room, so a
+    /// sender needs no second buffer over the slot to check it. A slot shorter than `end` keeps
+    /// its own end, and the bytes already written are never cut. A frame kept open
+    /// ([`Self::keep_open`]) keeps the hold; a held one ([`Self::hold`]) asks the driver for the
+    /// slot again when it resumes, and with it for the slot's whole length.
+    pub fn hold_to(&mut self, end: usize) {
+        let end = self.headroom.saturating_add(core::cmp::max(end, self.len));
+        if end < self.total {
+            self.total = end;
+        }
     }
 
     /// The bytes of the slot not written yet: `len` never passes the capacity.
@@ -562,6 +576,54 @@ mod tests {
         lease.append_byte(3).unwrap();
         assert_eq!(lease.len(), SLOT_LEN - HEADROOM);
         assert_eq!(*lease.as_slice().last().unwrap(), 3);
+    }
+
+    /// A lease held to a budget refuses a write past it and keeps what was written; a budget past
+    /// the slot leaves the slot's own end, one below the written bytes cuts none of them, and a
+    /// frame kept open is picked up with its hold.
+    #[test]
+    fn a_lease_held_to_a_budget_refuses_a_write_past_it() {
+        let link = LendingLink::new();
+        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
+        lease.hold_to(5);
+        assert_eq!(lease.capacity(), 5);
+        lease.append(&[1, 2, 3]).unwrap();
+        assert_eq!(lease.append(&[4, 4, 4]), Err(CodecError::BufferOverflow));
+        assert_eq!(
+            lease.as_slice(),
+            &[1, 2, 3],
+            "the refused write wrote nothing"
+        );
+        lease.append_byte(4).unwrap();
+        let open = lease.keep_open();
+        // SAFETY: `link` lent the slot and nothing has sent or aborted it.
+        let mut lease = unsafe { TxLease::pick_up(&link, open) };
+        lease.append_byte(5).unwrap();
+        assert_eq!(
+            lease.append_byte(6),
+            Err(CodecError::BufferOverflow),
+            "the hold came back with the open frame"
+        );
+        assert!(matches!(lease.reserve(1), Err(CodecError::BufferOverflow)));
+        assert_eq!(lease.as_slice(), &[1, 2, 3, 4, 5]);
+        lease.hold_to(2);
+        assert_eq!(
+            lease.as_slice(),
+            &[1, 2, 3, 4, 5],
+            "a hold cuts no written byte"
+        );
+        assert_eq!(lease.capacity(), 5);
+        drop(lease);
+
+        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
+        lease.hold_to(SLOT_LEN * 2);
+        assert_eq!(
+            lease.capacity(),
+            SLOT_LEN - HEADROOM,
+            "a budget past the slot leaves the slot's end"
+        );
+        lease.append(&[7; SLOT_LEN - HEADROOM]).unwrap();
+        assert_eq!(lease.append_byte(8), Err(CodecError::BufferOverflow));
     }
 
     #[test]

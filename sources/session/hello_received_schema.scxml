@@ -25,12 +25,12 @@
   construction: the drive loop reads it from `ScoutParams::exit_on_first`,
   which is captured by value when the cycle's action bundle is built.
 
-  WHY THIS IS NOT THE FRAGMENT `more` BIT'S SHAPE. `fragment.chunk`'s
-  `more` is a WIRE fact decoded from the message that triggered the event;
-  `exit_on_first` is a CALLER fact about the scouting cycle. Both reach
-  the guard the same way because the engine-free surface offers one
-  channel, but the field is host configuration, not peer input — nothing a
-  Hello sender can influence.
+  WHY THIS IS NOT THE FRAGMENT `more` BIT'S SHAPE. The reassembly slot's
+  `more` is a WIRE fact decoded from the message that triggered the event,
+  and the dispatcher raises it as the event itself (`fragment.more` or
+  `fragment.last`); `exit_on_first` is a CALLER fact about the scouting
+  cycle, host configuration and not peer input — nothing a Hello sender
+  can influence.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"

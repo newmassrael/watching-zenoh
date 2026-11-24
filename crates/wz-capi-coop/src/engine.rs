@@ -89,7 +89,7 @@ use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::face_life::{FaceEffect, Next};
-use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
+use wz_runtime_coop::face_send::{self, Behind, FaceSend, Pass, PublishRun, Then, FIRST_FACE};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(any(feature = "listen", feature = "group"))]
@@ -936,10 +936,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms<L::Waits>>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
-    /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
-    /// ([`SendingOn`]): the face pico's profile drops a droppable publish on, as against the
-    /// session's other faces, which it is still sent to, and a session held by a read step, a
-    /// timer or the drive, which it waits for.
+    /// The place of the face a publish holding the session sends on now, [`NOT_SENDING`] while
+    /// none does ([`SendingOn`]): the face pico's profile drops a droppable publish on, as
+    /// against the session's other faces, which it is still sent to, and a session held by a read
+    /// step, a timer or the drive, which it waits for.
     sending_on: AtomicU64,
     /// The droppable publishes that found the session held and were dropped on the faces its
     /// holder waits on, owed to the session's other faces ([`HandedTable`]), in the order they
@@ -1145,40 +1145,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_,
 /// up names for a wait for its room, kept outside [`Core`] so that a publish that finds the
 /// session held asks them with nothing of it held, and a read waits with them with nothing of it
 /// held. A face's handle is a value, held from the face's coming up until its link is lost or the
-/// face goes; one asked after its link went is a hint, as every answer is. Each face keeps its
-/// place in the table for as long as it holds one, so a publish dropped on a face names it by its
-/// place ([`DroppedOn`]).
+/// face goes; one asked after its link went is a hint, as every answer is. A face's handle lies at
+/// the face's place, the one its tables and its link keep, so a publish dropped on a face names it
+/// by that place ([`DroppedOn`]) and nothing looks a face up by its id.
 pub(crate) struct LinkRooms<W> {
     waits: W,
     rooms: Mutex<RoomTable>,
 }
 
-/// The faces that are up and what each names for a wait for its room, each at a place it keeps
-/// until it goes, and the mark of the last face that took a place: a set of places read at one
-/// mark names no face that took its place after it.
+/// What the faces that are up name for a wait for their room, each at its face's place, and the
+/// mark of the last face that took a place: a set of places read at one mark names no face that
+/// took its place after it.
 struct RoomTable {
     places: Vec<Option<RoomPlace>>,
     mark: u64,
 }
 
-/// A face's place in the table of rooms.
+/// What the face at a place of the table of rooms names.
 #[derive(Clone, Copy)]
 struct RoomPlace {
-    face: FaceId,
     on: WaitOn,
     /// The table's mark when the face took the place.
     #[cfg(any(feature = "listen", feature = "group"))]
     since: u64,
-}
-
-impl RoomTable {
-    /// The place `face` holds, if it holds one.
-    fn place_of(&self, face: FaceId) -> Option<(usize, RoomPlace)> {
-        self.places
-            .iter()
-            .enumerate()
-            .find_map(|(at, place)| place.filter(|place| place.face == face).map(|p| (at, p)))
-    }
 }
 
 /// What a droppable publish that found the session held is told of the faces it would be sent
@@ -1186,18 +1175,30 @@ impl RoomTable {
 /// send value reads into what the publish does ([`face_send::Room::behind`]).
 pub(crate) type Room = face_send::Room<DroppedOn>;
 
-/// What [`CoopEngine`]'s `sending_on` holds while no publish sends: no face has the id 0, since
-/// the session numbers its faces from 1 (`LinkSupervisor::next_face_id`).
-const NOT_SENDING: FaceId = 0;
+/// What [`CoopEngine`]'s `sending_on` holds while no publish sends. A send marks the place of
+/// the face it sends on, and no session has a place this far up.
+const NOT_SENDING: u64 = u64::MAX - 2;
+
+/// The place `at` as a send marks it ([`SendingOn`]) and as a fan-out orders its faces
+/// ([`Pass::face_send`]).
+fn mark_of_place(at: usize) -> u64 {
+    u64::try_from(at).unwrap_or(NOT_SENDING)
+}
+
+/// The place a send's mark names ([`mark_of_place`]): one past every place for a mark that names
+/// none.
+#[cfg(any(feature = "listen", feature = "group"))]
+fn place_of_mark(mark: u64) -> usize {
+    usize::try_from(mark).unwrap_or(usize::MAX)
+}
 
 /// What [`CoopEngine`]'s `sending_on` holds while a publish holds the session and sends on no
-/// face: before its first send and between two. No face has the id, the session numbering its
-/// faces up from 1 one at a time.
-const PUBLISHING: FaceId = FaceId::MAX;
+/// face: before its first send and between two. No face has the place.
+const PUBLISHING: u64 = u64::MAX;
 
 /// What [`CoopEngine`]'s `sending_on` holds while a read holds the session to work out its wait
-/// (and lend its one link's buffer to it): no face has the id either.
-const WAITING: FaceId = FaceId::MAX - 1;
+/// (and lend its one link's buffer to it): no face has the place either.
+const WAITING: u64 = u64::MAX - 1;
 
 /// Who holds the session, as a droppable publish that finds it held reads it ([`SendingOn`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1208,8 +1209,9 @@ pub(crate) enum Holder {
     Publish,
     /// A read working out its wait: it holds no send, and lets go within its take.
     Waiting,
-    /// A send on this face, a publish's or what a read step sends of the legs handed to it.
-    Sending(FaceId),
+    /// A send on the face at this place, a publish's or what a read step sends of the legs
+    /// handed to it.
+    Sending(u64),
 }
 
 /// A send on a face, or a publish holding the session ([`PUBLISHING`]), marked for as long as this
@@ -1221,12 +1223,12 @@ pub(crate) enum Holder {
 /// as one between its sends.
 struct SendingOn<'a> {
     mark: &'a AtomicU64,
-    was: FaceId,
+    was: u64,
 }
 
 impl<'a> SendingOn<'a> {
-    fn enter(mark: &'a AtomicU64, face: FaceId) -> Self {
-        let was = mark.swap(face, Ordering::SeqCst);
+    fn enter(mark: &'a AtomicU64, place: u64) -> Self {
+        let was = mark.swap(place, Ordering::SeqCst);
         Self { mark, was }
     }
 }
@@ -1238,13 +1240,15 @@ impl Drop for SendingOn<'_> {
 }
 
 impl<W: LinkWaits> LinkRooms<W> {
-    /// The rooms of a session over a stack whose waits are `waits`, with room for `faces` faces'
-    /// handles reserved, the most that are up at once: none grows after.
-    pub(crate) fn new(waits: W, faces: usize) -> Self {
+    /// The rooms of a session over a stack whose waits are `waits`, a place for each of the
+    /// `places` places a face of the session may hold, made now: none grows after.
+    pub(crate) fn new(waits: W, places: usize) -> Self {
+        let mut table = Vec::with_capacity(places);
+        table.resize(places, None);
         Self {
             waits,
             rooms: Mutex::new(RoomTable {
-                places: Vec::with_capacity(faces),
+                places: table,
                 mark: 0,
             }),
         }
@@ -1255,71 +1259,71 @@ impl<W: LinkWaits> LinkRooms<W> {
         &self.waits
     }
 
-    /// Hold `on`, what a wait for room on `face` waits on, in place of what the face named
-    /// before (the dial role's face, whose link is made again), at the place the face holds, or
-    /// at the first free one.
-    pub(crate) fn hold(&self, face: FaceId, on: WaitOn) {
+    /// Hold `on`, what a wait for room on the face at place `at` waits on, in place of what the
+    /// face named before (a group joined again keeps the mark it took the place at), or as the
+    /// face that takes the place now.
+    pub(crate) fn hold(&self, at: usize, on: WaitOn) {
         let mut guard = lock(&self.rooms);
         let rooms = &mut *guard;
-        if let Some((at, held)) = rooms.place_of(face) {
-            if let Some(place) = rooms.places.get_mut(at) {
-                *place = Some(RoomPlace { on, ..held });
-            }
+        let mark = rooms.mark.wrapping_add(1);
+        let Some(place) = rooms.places.get_mut(at) else {
+            return;
+        };
+        if let Some(held) = place.as_mut() {
+            held.on = on;
             return;
         }
-        rooms.mark = rooms.mark.wrapping_add(1);
-        let place = Some(RoomPlace {
-            face,
+        rooms.mark = mark;
+        *place = Some(RoomPlace {
             on,
             #[cfg(any(feature = "listen", feature = "group"))]
-            since: rooms.mark,
+            since: mark,
         });
-        if let Some(free) = rooms.places.iter_mut().find(|free| free.is_none()) {
-            *free = place;
-        } else {
-            rooms.places.push(place);
-        }
     }
 
-    /// Let go of what `face` named: its link is lost, or the face has gone. Its place is free.
-    pub(crate) fn forget(&self, face: FaceId) {
-        let mut rooms = lock(&self.rooms);
-        if let Some((at, _)) = rooms.place_of(face) {
-            if let Some(place) = rooms.places.get_mut(at) {
-                *place = None;
-            }
+    /// Let go of what the face at place `at` named: its link is lost, or the face has gone. Its
+    /// place is free.
+    pub(crate) fn forget(&self, at: usize) {
+        if let Some(place) = lock(&self.rooms).places.get_mut(at) {
+            *place = None;
         }
     }
 
     /// Let go of what every face named: the faces' links are ended.
     pub(crate) fn forget_all(&self) {
-        lock(&self.rooms).places.clear();
+        for place in &mut lock(&self.rooms).places {
+            *place = None;
+        }
     }
 
-    /// The set of `face`'s place alone, as the table stands now: every face when it holds none,
-    /// since a publish dropped on a face no place names is dropped on all.
+    /// The set of place `at` alone, as the table stands now: every face when no face holds the
+    /// place, since a publish dropped on a face no place names is dropped on all.
     #[cfg(any(feature = "listen", feature = "group"))]
-    pub(crate) fn dropped_on(&self, face: FaceId) -> DroppedOn {
+    pub(crate) fn dropped_on(&self, at: usize) -> DroppedOn {
         let rooms = lock(&self.rooms);
         let mut set = DroppedOn::none(rooms.mark);
-        match rooms.place_of(face) {
-            Some((at, _)) => set.insert(at),
-            None => set.insert(usize::MAX),
+        if rooms.places.get(at).is_some_and(Option::is_some) {
+            set.insert(at);
+        } else {
+            set.insert(usize::MAX);
         }
         set
     }
 
-    /// Whether a publish dropped on `set` passes over `face`: one of the set, or one that took
-    /// its place after the set was read, as a transport that opened after a publish is not sent
-    /// it ([`DroppedOn::owes`]). A face with no place, which names no wait for its room, is sent
-    /// it: when it came is not known, and a droppable publish sent to a face that came after it
+    /// Whether a publish dropped on `set` passes over the face at place `at`: one of the set, or
+    /// one that took its place after the set was read, as a transport that opened after a publish
+    /// is not sent it ([`DroppedOn::owes`]). A place that names no wait for its room is sent it:
+    /// when its face came is not known, and a droppable publish sent to a face that came after it
     /// costs that face one message it could have missed, where passing it over could lose one the
     /// face was owed.
     #[cfg(any(feature = "listen", feature = "group"))]
-    pub(crate) fn skips(&self, set: &DroppedOn, face: FaceId) -> bool {
+    pub(crate) fn skips(&self, set: &DroppedOn, at: usize) -> bool {
         lock(&self.rooms)
-            .place_of(face)
-            .is_some_and(|(at, place)| !set.owes(at, place.since))
+            .places
+            .get(at)
+            .copied()
+            .flatten()
+            .is_some_and(|place| !set.owes(at, place.since))
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
@@ -2921,7 +2925,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.poll_groups(redial_ms);
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
-        for at in (0..self.transport.links.faces().len()).rev() {
+        for at in (0..self.transport.links.places()).rev() {
             self.poll_face(at, redial_ms, now_us)?;
         }
         Ok(())
@@ -2946,7 +2950,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_us: u64,
     ) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
-        let Some(face) = self.transport.links.faces().get(at) else {
+        let Some(face) = self.transport.links.face(at) else {
             return Ok(());
         };
         let id = face.id;
@@ -3103,8 +3107,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let lost = self
             .transport
             .links
-            .faces()
-            .get(at)
+            .face(at)
             .and_then(|face| face.link.wire());
         if let Some(wire) = lost.filter(|_| self.session.faces_watched()) {
             FaceLinkRow::each_of_actions(&*wire.actions, |row| {
@@ -3119,10 +3122,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .links
             .put_link(at, Link::Waiting { at_us: now_us });
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
-        if let Some(face) = self.transport.links.faces_mut().get_mut(at) {
+        if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.discard();
         }
-        self.rooms.forget(id);
+        self.rooms.forget(at);
         self.lose_link(id);
     }
 
@@ -3133,8 +3136,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// next pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
-        let faces = self.transport.links.faces().len();
-        (0..faces)
+        let places = self.transport.links.places();
+        (0..places)
             .filter(|&at| self.redeclare_on(at, now_ms))
             .count()
     }
@@ -3142,16 +3145,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
     /// whether it was told, which a place with no face, or a face whose link is not up, is not.
     fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
-        let actions = match self.transport.links.faces().get(at).map(|face| &face.link) {
+        let actions = match self.transport.links.face(at).map(|face| &face.link) {
             Some(Link::Up(wire)) => wire.actions.clone(),
             _ => return false,
         };
         match self.begin_replay(at, &actions, now_ms) {
             TurnEnd::Kept => true,
             TurnEnd::EndsLink => {
-                if let Some(Link::Up(wire)) =
-                    self.transport.links.faces().get(at).map(|face| &face.link)
-                {
+                if let Some(Link::Up(wire)) = self.transport.links.face(at).map(|face| &face.link) {
                     wire.abort();
                 }
                 false
@@ -3166,7 +3167,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// turn the replay is given up on ends the link at once, and the next pass over the faces
     /// takes it as lost (`poll_face`).
     fn bring_up(&mut self, at: usize, now_us: u64) {
-        let Some(face) = self.transport.links.faces().get(at) else {
+        let Some(face) = self.transport.links.face(at) else {
             return;
         };
         let Some(wire) = face.link.wire() else {
@@ -3176,7 +3177,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         wire.gate.pump().grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(on) = wire.room_wait() {
-            self.rooms.hold(face.id, on);
+            self.rooms.hold(at, on);
         }
         let actions = wire.actions.clone();
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
@@ -3203,9 +3204,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // a query whose key they cannot resolve by the session's policy. The open lent a set
             // for each group the task cells hold, so a group past them is refused as its spawn
             // would be: no task cell is left for it.
-            if self.session.registry.borrow_mut().add_face(id).is_err() {
+            let Ok(held) = self.session.registry.borrow_mut().add_face(id) else {
                 return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
-            }
+            };
             self.session
                 .registry
                 .borrow_mut()
@@ -3218,10 +3219,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .borrow_mut()
                     .install_shared_key_ids(id, ids.clone());
             }
-            match self.join_group(id, join) {
+            match self.join_group(held, join) {
                 Ok(face) => self.transport.add_group(face),
                 Err(refused) => {
-                    self.session.registry.borrow_mut().remove_face(id);
+                    self.session.registry.borrow_mut().remove_face(held);
                     return Err(refused);
                 }
             }
@@ -3236,14 +3237,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Ok(())
     }
 
-    /// Join the group `join` names as face `id`, whose tables the registry holds: the stack joins
-    /// the group, and its session, with a fresh dispatcher, is spawned on the session's local set
-    /// and stepped once. [`OpenError::Group`] when the stack joins no such group or the session
-    /// ended at its first step (its link did not open).
+    /// Join the group `join` names as the face `face` names, whose tables the registry holds at
+    /// its place: the stack joins the group, and its session, with a fresh dispatcher, is spawned
+    /// on the session's local set and stepped once. [`OpenError::Group`] when the stack joins no
+    /// such group or the session ended at its first step (its link did not open).
     #[cfg(feature = "group")]
     fn join_group(
         &mut self,
-        id: FaceId,
+        face: HeldFace,
         join: GroupJoin,
     ) -> Result<GroupFace<L::Waits>, OpenError> {
         let transport = self.transport.open_group(&join.endpoint)?;
@@ -3263,12 +3264,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "queryable")]
         let dispatch = group::dispatch(
             self.session.registry.clone(),
-            id,
+            face,
             self.session.plane.clone(),
             generation,
         );
         #[cfg(not(feature = "queryable"))]
-        let dispatch = group::dispatch(self.session.registry.clone(), id);
+        let dispatch = group::dispatch(self.session.registry.clone(), face);
         // The group is handed a record of its datagrams only while the round of deliveries has the
         // room one record of the group's batch can take (decision Q4), as a link is.
         let record_room = crate::round::read_room::<
@@ -3279,10 +3280,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(unsafe {
             crate::round::takes_a_group_read(self.session.lane.clone(), record_room)
         });
-        let face = GroupFace::join(
+        let group = GroupFace::join(
             &self.local,
             GroupJoining {
-                id,
+                face,
                 join,
                 transport,
                 input_gate,
@@ -3306,18 +3307,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         )
         .map_err(OpenError::NoTask)?;
         self.run_tasks();
-        if face.has_ended() {
+        if group.has_ended() {
             return Err(OpenError::Group(EndpointRefusal::new(
                 &endpoint,
                 Refusal::GroupLinkDidNotOpen,
             )));
         }
         // A droppable publish that finds the session held asks the group's socket for room as it
-        // asks a link's, and its wait goes with the face.
-        if let Some(on) = face.room() {
-            self.rooms.hold(id, on);
+        // asks a link's, and its wait goes with the face, at the face's place.
+        if let Some(on) = group.room() {
+            self.rooms.hold(face.at(), on);
         }
-        Ok(face)
+        Ok(group)
     }
 
     /// The place in the replay's order of the declaration `prefix` names, when the entity going is
@@ -3366,6 +3367,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 continue;
             };
             let id = group.id();
+            let face = HeldFace::new(group.at(), id);
             if let Some(outcome) = group.take_outcome(&self.local) {
                 self.lose_link(id);
                 if let (true, Some(ms)) = (outcome.warrants_rejoin(), redial_ms) {
@@ -3380,7 +3382,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .filter(|group| group.rejoin_due(now_us))
                 .map(|group| group.group_join().clone());
             if let Some(join) = due {
-                match self.join_group(id, join) {
+                match self.join_group(face, join) {
                     Ok(face) => {
                         // The liveliness subscribers ask the group again, as they would have
                         // had it been there when they were declared, as the tokio engine's
@@ -3445,8 +3447,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if self.keep_departed(at) {
             return;
         }
-        if let Some(face) = self.transport.links.remove_face(at) {
-            self.session.registry.borrow_mut().remove_face(face.id);
+        if let Some(face) = self.transport.links.take_face(at) {
+            self.session
+                .registry
+                .borrow_mut()
+                .remove_face(HeldFace::new(at, face.id));
         }
     }
 
@@ -3490,7 +3495,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let tables = &*registry;
         let links = &self.transport.links;
         let faces = move || {
-            links.faces().iter().filter_map(move |face| {
+            links.faces().filter_map(move |face| {
                 let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
                     return None;
                 };
@@ -3554,7 +3559,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport
                 .links
                 .faces()
-                .iter()
                 .filter_map(|face| face.replay.next_turn_ms())
                 .min(),
             #[cfg(feature = "ticker")]
@@ -3640,14 +3644,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // first, so no connection is taken while the faces are ended.
         self.transport.links.end_dials_and_ports();
         // Each group's session is asked to stop, and its next step, taken here, tells the group it
-        // leaves and lets the group's link go; its tables go with it.
+        // leaves and lets the group's link go; its tables go with the other faces' below.
         #[cfg(feature = "group")]
         if self.transport.stop_groups() {
             self.run_tasks();
-            let mut registry = self.session.registry.borrow_mut();
-            for group in self.transport.groups.drain(..) {
-                registry.remove_face(group.id());
-            }
+            self.transport.groups.clear();
         }
         self.transport.links.end_faces(|face| face.replay.discard());
         self.rooms.forget_all();
@@ -3835,24 +3836,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         #[cfg(feature = "connectivity")]
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
+        // The faces' links keep the places the registry lends their tables at: one table of them.
+        let places = lent.registry.places();
         // Each field is made in the order its makers need: the rooms ask the links' waits before the
         // supervisor takes the links, and the config and policy are read before they are moved.
         let core = Core {
             local,
             clock,
-            // A handle for each face that may be up at once, the dial role's and each group's
-            // among them.
-            rooms: Arc::new(LinkRooms::new(
-                links.waits(),
-                config
-                    .max_faces
-                    .saturating_add(1)
-                    .saturating_add(config.groups.len()),
-            )),
+            // A handle at each place a face may hold, the dial role's and each group's among them.
+            rooms: Arc::new(LinkRooms::new(links.waits(), places)),
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,
-                // A face for each the config admits beside the dial role's, each with its dial, and
+                // A place for each face the registry lent a set for, each face with its dial, and
                 // the waits a read makes at once, reserved here: none grows after.
                 links: LinkSupervisor::new(
                     links,
@@ -3863,7 +3859,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                         #[cfg(feature = "connectivity")]
                         told: FaceTold::default(),
                     },
-                    config.max_faces.saturating_add(1),
+                    places,
                     wait_room,
                 ),
                 endpoints: lent.transport.endpoints,
@@ -4214,7 +4210,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .transport
                 .links
                 .faces()
-                .iter()
                 .filter(|face| match &face.link {
                     Link::Up(wire) | Link::Opening { wire, .. } => wire.owes_write(),
                     _ => false,
@@ -4352,7 +4347,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .transport
                 .links
                 .faces()
-                .iter()
                 .all(|face| face.replay.finished())
         })
     }
@@ -4435,7 +4429,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Behind::Dropped { on, told } => ToPublish::DroppedOn {
                     faces: match on {
                         DropSet::Faces(faces) => faces,
-                        DropSet::Face(face) => self.rooms.dropped_on(face),
+                        DropSet::Face(place) => self.rooms.dropped_on(place_of_mark(place)),
                     },
                     told,
                 },
@@ -4456,7 +4450,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             NOT_SENDING => Holder::Step,
             PUBLISHING => Holder::Publish,
             WAITING => Holder::Waiting,
-            face => Holder::Sending(face),
+            place => Holder::Sending(place),
         }
     }
 
@@ -4781,7 +4775,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             cfg!(any(feature = "listen", feature = "group")),
             probe,
             core.0.config.tx_queue.wait_before_close_us,
-            DIAL_FACE,
+            // The faces are sent in the order of their places, the dial role's the first.
+            FIRST_FACE,
         );
         let begin = run.begin();
         // What was handed to the session before this publish leaves before it, and what was
@@ -4892,8 +4887,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.fan_out_in(core, put, skip, Pass::EVERY_FACE).0
     }
 
-    /// [`Self::fan_out`] by `pass`: with `listen`, to the faces from the one whose order is
-    /// `pass.from` on ([`order_key`]), with a send that does not wait for a slot when
+    /// [`Self::fan_out`] by `pass`: with `listen`, to the faces from the one whose place is
+    /// `pass.from` on ([`mark_of_place`]), with a send that does not wait for a slot when
     /// `pass.probe`. The faces are sent the put in order until one's link finds no outbound slot
     /// for it, which is answered beside the outcome and is sent nothing, nor are the faces after
     /// it, nor the groups.
@@ -4903,7 +4898,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         put: &Publication<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
-    ) -> (Result<usize, FanoutError>, Option<FaceId>) {
+    ) -> (Result<usize, FanoutError>, Option<u64>) {
         let Publication {
             keyexpr,
             wire,
@@ -4922,17 +4917,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut outcome = Ok(0);
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let _ = skip;
-        for (face, actions) in core.transport.ups_by_id() {
+        for (at, _, actions) in core.transport.ups_at() {
             #[cfg(any(feature = "listen", feature = "group"))]
-            let dropped_on = skip.is_some_and(|dropped| self.rooms.skips(dropped, face));
+            let dropped_on = skip.is_some_and(|dropped| self.rooms.skips(dropped, at));
             #[cfg(not(any(feature = "listen", feature = "group")))]
             let dropped_on = false;
-            // How the face is sent the publish is the face send value's (`Pass::face_send`).
-            let how = pass.face_send(order_key(face, DIAL_FACE), dropped_on);
+            // How the face is sent the publish is the face send value's (`Pass::face_send`): the
+            // faces go in the order of their places, so a pass that stopped at one goes on from it.
+            let place = mark_of_place(at);
+            let how = pass.face_send(place, dropped_on);
             if how == FaceSend::Skip {
                 continue;
             }
-            let _sending = SendingOn::enter(&self.sending_on, face);
+            let _sending = SendingOn::enter(&self.sending_on, place);
             // Each link names the key as its own key-wire form says. A publication is written from
             // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
             // own shorter writer, unless the session or the build leaves it to the owned send below.
@@ -4980,7 +4977,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     Some(Ok(Probed::Chain)) | None => ProbeAnswer::Chain,
                 };
                 match after_probe(answer) {
-                    AfterProbe::StopHere => return (outcome, Some(face)),
+                    AfterProbe::StopHere => return (outcome, Some(place)),
                     AfterProbe::Next => continue,
                     AfterProbe::SendAsOwn => {}
                 }
@@ -5047,10 +5044,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // And each group the session joined, which its task frames and sends.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
-            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.id())) {
+            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
                 continue;
             }
-            let _sending = SendingOn::enter(&self.sending_on, group.id());
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
             let sent = group.publish(GroupPut {
                 keyexpr,
                 wire,
@@ -6058,9 +6055,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // `next_group_member` answers them, whatever role they announced.
         core.0
             .transport
-            .ups_by_id()
-            .filter(|(id, actions)| *id >= from && actions.is_established())
-            .filter_map(|(id, actions)| {
+            .ups_at()
+            .filter(|(_, id, actions)| *id >= from && actions.is_established())
+            .filter_map(|(_, id, actions)| {
                 Some((
                     id,
                     PeerIdentity {
@@ -7979,6 +7976,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C
 
     /// The engine, borrowed for the length of one call.
     pub fn engine_ref(&self) -> &CoopEngine<L, C> {
+        &self.engine
+    }
+
+    /// The session's own hold of the engine, borrowed for the length of one call: a caller that
+    /// keeps the engine clones it where it keeps it, and one that only reaches it counts nothing.
+    pub fn engine_hold(&self) -> &Arc<CoopEngine<L, C>> {
         &self.engine
     }
 

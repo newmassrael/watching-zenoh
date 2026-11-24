@@ -146,6 +146,16 @@ impl<'a> SliceTxBuf<'a> {
     pub fn remaining(&self) -> usize {
         self.storage.len().saturating_sub(self.len)
     }
+
+    /// Hold the buffer to `end` bytes: a write that would carry it past `end` is refused as one
+    /// past the storage is, before a byte of it is copied, so a frame budget smaller than the
+    /// storage is the buffer's own end. Storage shorter than `end` keeps its end, and the bytes
+    /// already written are never cut.
+    pub fn hold_to(&mut self, end: usize) {
+        let storage = core::mem::take(&mut self.storage);
+        let end = core::cmp::min(core::cmp::max(end, self.len), storage.len());
+        self.storage = storage.split_at_mut(end).0;
+    }
 }
 
 impl TxBuf for SliceTxBuf<'_> {
@@ -251,70 +261,6 @@ pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -
         count.len
     } else {
         0
-    }
-}
-
-/// A [`TxBuf`] that refuses to hold more than `cap` bytes, over another one.
-///
-/// What a sender encodes a frame through when the frame must not pass the batch
-/// budget: a write that would carry it past the cap is refused whole, so a frame
-/// that turns out to be too long is found out as soon as it is, and the payload
-/// write that would have crossed the cap is never copied at all. Over a lent
-/// slot at least `cap` long, a refusal therefore says the frame is past the
-/// budget and must be cut into fragments, which is how the send path tells that
-/// case from the others.
-///
-/// Like [`SliceTxBuf`] it needs no allocation and no runtime, so it is
-/// unconditional; its caller in the session is the lending send path.
-pub struct CappedTxBuf<'a, 'b> {
-    inner: &'a mut (dyn TxBuf<Error = CodecError> + 'b),
-    cap: usize,
-}
-
-impl<'a, 'b> CappedTxBuf<'a, 'b> {
-    /// `inner`, held to `cap` bytes in all (what it already holds included).
-    pub fn new(inner: &'a mut (dyn TxBuf<Error = CodecError> + 'b), cap: usize) -> Self {
-        Self { inner, cap }
-    }
-}
-
-impl TxBuf for CappedTxBuf<'_, '_> {
-    type Error = CodecError;
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        self.inner.as_slice()
-    }
-
-    fn truncate(&mut self, len: usize) {
-        self.inner.truncate(len);
-    }
-
-    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        if self.inner.len().saturating_add(bytes.len()) > self.cap {
-            return Err(CodecError::BufferOverflow);
-        }
-        self.inner.append(bytes)
-    }
-
-    /// Forwarded as a byte, so the buffer underneath can store it without the
-    /// one-byte slice the default would build and pass through two calls.
-    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
-        if self.inner.len() >= self.cap {
-            return Err(CodecError::BufferOverflow);
-        }
-        self.inner.append_byte(byte)
-    }
-
-    /// The cap is checked as an append checks it, then the window is the buffer's own.
-    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
-        if self.inner.len().saturating_add(n) > self.cap {
-            return Err(CodecError::BufferOverflow);
-        }
-        self.inner.reserve(n)
     }
 }
 
@@ -480,6 +426,39 @@ mod tests {
         buf.append_byte(7).unwrap();
         assert_eq!(buf.as_slice(), &[9, 9, 9, 7]);
         assert_eq!(buf.append_byte(8), Err(CodecError::BufferOverflow));
+    }
+
+    #[test]
+    fn a_slice_buffer_held_to_a_budget_refuses_a_write_past_it() {
+        let mut storage = [0u8; 8];
+        {
+            let mut buf = SliceTxBuf::new(&mut storage);
+            buf.append(&[1, 2]).unwrap();
+            buf.hold_to(4);
+            assert_eq!((buf.capacity(), buf.remaining()), (4, 2));
+            assert_eq!(buf.append(&[3, 3, 3]), Err(CodecError::BufferOverflow));
+            assert!(matches!(buf.reserve(3), Err(CodecError::BufferOverflow)));
+            buf.append(&[3, 4]).unwrap();
+            assert_eq!(buf.append_byte(5), Err(CodecError::BufferOverflow));
+            buf.hold_to(1);
+            assert_eq!(buf.as_slice(), &[1, 2, 3, 4], "a hold cuts no written byte");
+            buf.hold_to(64);
+            assert_eq!(buf.capacity(), 4, "a hold never moves the end out again");
+        }
+        assert_eq!(
+            &storage[4..],
+            &[0u8; 4],
+            "nothing was written past the budget"
+        );
+
+        let mut storage = [0u8; 3];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.hold_to(16);
+        assert_eq!(
+            buf.capacity(),
+            3,
+            "storage shorter than the budget keeps its end"
+        );
     }
 
     #[test]

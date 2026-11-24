@@ -77,7 +77,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
     Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
-use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
+use crate::session::{engine_held, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
 
@@ -599,7 +599,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session, declared)),
+            Arc::new(PicoPlane::new(session.clone(), declared)),
             ke,
             advanced_publisher_options(options),
             engine.session_zid(),
@@ -1438,9 +1438,9 @@ unsafe fn declare_subscriber_state(
     // A closed session takes no declaration; the closure consumed above runs its drop.
     let handle = crate::session::open_session_handle(zs)?;
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
-    let engine = engine_of(handle);
+    let engine = engine_held(handle);
     let slot = crate::object_slot::Slot::<AdvSubPlace>::take_entity(
-        &engine,
+        engine,
         crate::object_slot::Kind::AdvancedSubscriber,
     )
     .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
@@ -1451,13 +1451,13 @@ unsafe fn declare_subscriber_state(
     // session keeps its key, so the subscriber's entities share its block and copy no text.
     let base = match declared_of(keyexpr) {
         Some(declared) => declared.share(),
-        None => DeclaredKeyexpr::literal_of_session(&engine, ke)?,
+        None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             AdvSubState {
-                engine: Arc::clone(&engine),
+                engine: Arc::clone(engine),
                 subscriber: None,
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
@@ -1504,7 +1504,7 @@ unsafe fn declare_subscriber_state(
     };
     // SAFETY: as above; the forms are asked only while the subscriber's entities are declared,
     // below, while the owner holds the place.
-    let forms = unsafe { lodge_forms(state, &PicoSession::of(handle), base) };
+    let forms = unsafe { lodge_forms(state, PicoSession::of(handle), base) };
     let opts =
         advanced_subscriber_options(options).with_declaration_forms(FormsHandle::lodged(forms));
     // SAFETY: as above.
@@ -1515,7 +1515,7 @@ unsafe fn declare_subscriber_state(
     // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
     // set is read through a shared borrow, which it admits from any thread.
     let misses = unsafe { MissHandlers::lent(fire_adv_miss, lent_miss, Some(let_go_miss_set)) };
-    let declared = EngineSubscriber::declare_in(&engine, ke, opts, on_sample, misses, core);
+    let declared = EngineSubscriber::declare_in(engine, ke, opts, on_sample, misses, core);
     match declared {
         Ok(subscriber) => {
             (*state).subscriber = Some(subscriber);
@@ -2954,7 +2954,7 @@ mod tests {
     fn an_advanced_publisher_lies_in_a_place_of_its_session() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
 
@@ -2963,7 +2963,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many advanced publisher places `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =
@@ -3045,7 +3045,7 @@ mod tests {
     fn an_advanced_subscriber_lies_in_a_place_of_its_session() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
             z_session_loan, z_session_loan_mut, z_session_move,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3055,7 +3055,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many places of `kind` `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>, kind: Kind| {
             let claimed: Vec<Slot<u64>> =
@@ -3182,7 +3182,7 @@ mod tests {
     fn a_recovering_advanced_subscribers_place_goes_back_with_its_job() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
             z_session_loan, z_session_loan_mut, z_session_move,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3192,7 +3192,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many advanced subscribers' places `engine` has free: each claimed, then all given
         // back.
         let free = |engine: &Arc<Engine>| {
@@ -3268,7 +3268,7 @@ mod tests {
     fn a_background_subscribers_lodged_names_go_back_with_the_close() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
             z_session_loan, z_session_loan_mut, z_session_move,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3278,7 +3278,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
@@ -3341,7 +3341,7 @@ mod tests {
     fn a_miss_listener_keeps_its_subscribers_place_until_it_goes() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
         use std::sync::atomic::AtomicUsize;
@@ -3353,7 +3353,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         let free = |engine: &Arc<Engine>| {
             let claimed: Vec<Slot<u64>> =
                 core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::AdvancedSubscriber))
@@ -3434,7 +3434,7 @@ mod tests {
     fn a_background_publisher_detection_lies_in_a_place_of_its_session() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_of, listening_on_loopback, session_handle, z_close, z_session_drop,
+            engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
             z_session_loan, z_session_loan_mut, z_session_move,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3444,7 +3444,7 @@ mod tests {
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.
         let handle = unsafe { session_handle(loaned) };
-        let engine = engine_of(handle.expect("an open session has its handle"));
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
         // How many places of `kind` `engine` has free: each claimed, then all given back.
         let free = |engine: &Arc<Engine>, kind: Kind| {
             let claimed: Vec<Slot<u64>> =
