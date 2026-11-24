@@ -698,7 +698,7 @@ pub(crate) mod tests {
     }
 
     /// Read an owned string out and free it, the way a C caller must.
-    unsafe fn take_text(out: &mut z_owned_string_t) -> String {
+    pub(crate) unsafe fn take_text(out: &mut z_owned_string_t) -> String {
         let text = if out.ptr.is_null() {
             String::new()
         } else {

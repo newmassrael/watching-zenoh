@@ -108,6 +108,11 @@ pub mod config_verdict;
 // the config field it is about. Gated as `config_verdict` is.
 #[cfg(feature = "config-verdict")]
 pub mod config_verdict_rows;
+// What a config's access control decides for a list of messages, with the rule that decided each.
+// It reads the config as the verdict doors do and answers refusals in their rows, so it needs both
+// `config-verdict` and the access control's compile (`interceptors`).
+#[cfg(all(feature = "config-verdict", feature = "interceptors"))]
+pub mod acl_verdict;
 // The four sets of doors of the observation plane, under wz's own `wz_capi_c_` prefix: wz has
 // them and zenoh-c has not, so they carry no upstream gate (`zenoh-c-no-unstable-api` is a
 // question about zenoh-c), and each has a feature of its own that is off, as the reference build
