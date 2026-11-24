@@ -691,6 +691,10 @@ transport-link-unixpipe,transport-link-ws|"
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
     # in this form too.
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # The default build less `key-matching-listener`, as the pico C ABI builds the engine: a matching
+    # listener declared on a key is refused as not built, its sink let go of, while one on an
+    # entity's filter is taken. No other row builds without it, so this one runs the refusal.
+    "wz-capi-coop|hook|-default,std,threads|tests::entity_tables::a_build_without_key_listeners_refuses_one_as_not_built"
     # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
     # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
     # tests run as the row above runs them).
