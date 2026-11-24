@@ -136,7 +136,8 @@ use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::KeyWireForm;
-use wz_session_core::policy::{SessionPolicy, SnResolution};
+use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy, SnResolution};
+use wz_session_core::policy_binding::OutsideDomain;
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::push_build;
 use wz_session_core::sample::{QosLevel, SampleKind};
@@ -4351,13 +4352,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// the session's policies (a test, or a program whose image is built for another policy); the
     /// snapshots the session opened under state it otherwise (`ReplayPacing::of_snapshot`). `Some`
     /// sends a burst of declarations a step and waits at least the interval before the next burst;
-    /// `None` sends them all in one. A build whose domain of `declaration-sync-pacing` leaves
-    /// `on` out (`ReplayPacing::REACHABLE`) holds no code of the turns and sends them all in one
-    /// whatever is stated here.
-    pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
+    /// `None` sends them all in one. A pace is refused, and the session keeps what it had, in a
+    /// build whose domain of `declaration-sync-pacing` leaves `on` out
+    /// (`ReplayPacing::REACHABLE`): that build holds no code of the turns, so it answers as a
+    /// snapshot that selects the policy's `on` is answered there.
+    pub fn set_replay_pacing(
+        &self,
+        pacing: Option<ReplayPacing>,
+    ) -> Result<(), OutsideDomain<DeclarationSyncPacing>> {
+        if pacing.is_some() && !ReplayPacing::REACHABLE {
+            return Err(OutsideDomain {
+                value: DeclarationSyncPacing::On,
+            });
+        }
         if let Some(mut core) = self.live() {
             core.0.session.replay_pacing = pacing;
         }
+        Ok(())
     }
 
     /// How the dial role's face replays its declarations now, and the snapshot the session opened

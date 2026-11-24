@@ -69,7 +69,9 @@ fn reconnected_after(
     until(&engine, "the link to be lost", || {
         engine.peer_identities().is_empty()
     });
-    engine.set_replay_pacing(pacing);
+    engine
+        .set_replay_pacing(pacing)
+        .expect("a test states a pace only where the build reaches one");
     let second = Router::start_on(port, CatchAll::None);
     until(&engine, "the first turn of the replay", || {
         told(&second) >= 1
@@ -338,4 +340,42 @@ fn every_form_of_the_replay_tells_the_new_peer_the_same_declarations_in_the_same
         assert_eq!(live, held, "{pacing:?}: the order the session made them in");
         SessionDrive::close(&*engine);
     }
+}
+
+/// A pace the build cannot reach is refused as a snapshot that selects the policy's `on` is
+/// refused there, and the session keeps the pace it had; a build that reaches one takes it, and
+/// no pace is taken by every build. The CONTROL is the build's own selection of the policy: the
+/// refusal holds exactly where that selection is refused.
+#[test]
+fn a_pace_the_build_cannot_reach_is_refused_and_changes_nothing() {
+    use wz_session_core::policy::{DeclarationSyncPacing, SessionPolicy};
+    use wz_session_core::policy_binding::OutsideDomain;
+    let mut policy = SessionPolicy::defaults();
+    let selectable = policy
+        .select_declaration_sync_pacing(DeclarationSyncPacing::On)
+        .is_ok();
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(config(&router));
+    let (before, _) = engine.policy_in_force().expect("the session is open");
+    let pace = ReplayPacing::new(2, 50);
+    let stated = engine.set_replay_pacing(pace);
+    let (after, _) = engine.policy_in_force().expect("the session is open");
+    if selectable {
+        assert_eq!(stated, Ok(()));
+        assert_eq!(after, pace, "the stated pace is the session's");
+    } else {
+        assert_eq!(
+            stated,
+            Err(OutsideDomain {
+                value: DeclarationSyncPacing::On
+            })
+        );
+        assert_eq!(after, before, "a refused pace changes nothing");
+    }
+    assert_eq!(
+        engine.set_replay_pacing(None),
+        Ok(()),
+        "every build sends the declarations in one turn"
+    );
+    SessionDrive::close(&*engine);
 }
