@@ -152,7 +152,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
-use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
+use wz_session_core::timestamp_visibility::exposed_by;
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::WhatAmI;
@@ -1924,11 +1924,14 @@ impl SubscriberRow {
         if self.latch.retired() {
             return;
         }
-        if self.expose {
-            self.sink.call(sample);
+        let hidden;
+        let sample = if self.expose {
+            sample
         } else {
-            self.sink.call(&HiddenTimestamp(sample));
-        }
+            hidden = sample.without_timestamp();
+            &hidden
+        };
+        self.sink.call(sample);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:

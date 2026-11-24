@@ -347,6 +347,28 @@ impl<'a> SampleRef<'a> {
             hints: Some(Hints::default()),
         }
     }
+
+    /// The same sample with its timestamp hidden: none as parts or as a hint, and every other part
+    /// as it is. What a subscriber that does not see timestamps is handed
+    /// (`crate::timestamp_visibility`), made in place of a view over the sample.
+    pub fn without_timestamp(&self) -> SampleRef<'a> {
+        SampleRef {
+            keyexpr: self.keyexpr,
+            held: self.held,
+            payload: self.payload,
+            kind: self.kind,
+            reliability: self.reliability,
+            qos: self.qos,
+            attachment: self.attachment,
+            encoding: self.encoding,
+            timestamp: None,
+            source_info: self.source_info,
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: self.routed,
+            #[cfg(feature = "alloc")]
+            hints: self.hints.as_ref().map(|_| Hints::default()),
+        }
+    }
 }
 
 #[cfg(feature = "storage-profile")]
@@ -1065,6 +1087,35 @@ mod tests {
                 (std::string::String::from("demo/ref"), false)
             ]
         );
+    }
+
+    /// The sample with its timestamp hidden answers no timestamp, as parts or as a hint, and every
+    /// other part as the sample does, its encoding hint included. Turned red by a hidden sample that
+    /// keeps the timestamp or drops another part with it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_sample_without_its_timestamp_keeps_every_other_part() {
+        let view = Every {
+            source: crate::sample::SourceInfo::new(&[0x51, 0x52], 9, 41),
+            timestamp: crate::sample::TimestampHint::new(7, &[0x22, 0x23]).expect("a short id"),
+        };
+        let sample = SampleRef::of(&view);
+        let hidden = sample.without_timestamp();
+        assert!(hidden.timestamp_parts().is_none() && hidden.timestamp().is_none());
+        assert!(sample.timestamp_parts().is_some() && sample.timestamp().is_some());
+        assert_eq!(
+            (hidden.keyexpr(), hidden.payload()),
+            (sample.keyexpr(), sample.payload())
+        );
+        assert_eq!(
+            (hidden.kind(), hidden.reliability(), hidden.qos()),
+            (sample.kind(), sample.reliability(), sample.qos())
+        );
+        assert_eq!(hidden.attachment(), sample.attachment());
+        assert_eq!(hidden.encoding_parts(), sample.encoding_parts());
+        assert_eq!(hidden.encoding(), sample.encoding());
+        assert!(hidden.encoding().is_some());
+        assert_eq!(hidden.source_info(), sample.source_info());
     }
 
     // A no-heap-style concrete sink: the shape an MCU consumer `enum`

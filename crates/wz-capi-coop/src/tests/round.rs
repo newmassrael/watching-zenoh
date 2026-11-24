@@ -47,11 +47,16 @@ struct Row {
 impl Row {
     /// A row handing what it hears to `sink`, the timestamp shown.
     fn new(sink: SubscriberSink) -> Self {
+        Self::exposing(sink, true)
+    }
+
+    /// A row handing what it hears to `sink`, the timestamp shown when `expose`.
+    fn exposing(sink: SubscriberSink, expose: bool) -> Self {
         Self {
             row: Box::new(SubscriberRow::new(
                 WireKey::literal().into_holds(),
                 sink,
-                true,
+                expose,
             )),
         }
     }
@@ -263,6 +268,55 @@ fn a_lent_sample_is_handed_with_every_part_where_it_lies() {
     assert!(!round.deliver(), "nothing is left");
     assert_eq!(round.counts(), RoundCounts::default());
     assert_eq!(round.tally().lent(), 1, "read where it lies");
+}
+
+/// A subscriber that does not see timestamps is handed the round's sample with no timestamp, as
+/// parts or as a hint, and every other part as it was offered; one that sees them, offered the same
+/// record, is handed the timestamp. Turned red by a row that shows a timestamp it was declared not
+/// to see, or hides another part with it.
+#[test]
+fn a_row_that_sees_no_timestamp_is_handed_every_other_part() {
+    type Seen = (bool, Option<Vec<u8>>, Option<(u32, Option<Vec<u8>>)>, bool);
+    let round = round(4);
+    let source = SourceInfo::new(&[9, 9], 3, 4);
+    let datagram = *b"payloadatttext\x01\x02\x03";
+    let sample = Whole {
+        datagram: &datagram,
+        source: &source,
+    };
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+    let row = |expose| {
+        let seen = seen.clone();
+        Row::exposing(
+            SubscriberSink::shared(move |view: &dyn SampleView| {
+                seen.lock().unwrap().push((
+                    view.timestamp_parts().is_some() || view.timestamp().is_some(),
+                    view.attachment().map(<[u8]>::to_vec),
+                    view.encoding_parts()
+                        .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
+                    view.source_info().is_some(),
+                ));
+            }),
+            expose,
+        )
+    };
+    let (shown, hidden) = (row(true), row(false));
+    // SAFETY (each call): this thread is the round's one writer, as a session's step is, and the
+    // datagram outlives the round's record of it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.offer_sample(shown.call(), &sample, true) };
+    unsafe { round.offer_sample(hidden.call(), &sample, false) };
+    unsafe { round.set_lending(None) };
+    unsafe { round.seal() };
+    assert!(round.deliver(), "the sealed round is handed out");
+    let (attachment, encoding) = (Some(b"att".to_vec()), Some((7u32, Some(b"text".to_vec()))));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            (true, attachment.clone(), encoding.clone(), true),
+            (false, attachment, encoding, true)
+        ]
+    );
 }
 
 /// The samples of a datagram a link lends are read where they lie: one record for a sample
