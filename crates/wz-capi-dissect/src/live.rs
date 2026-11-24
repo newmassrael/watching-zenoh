@@ -1192,14 +1192,20 @@ impl LiveDissection {
     /// messages that arrived, whether or not a ceiling trimmed a list since. They
     /// begin again, over what is held, only where a fold cannot go on at all (a
     /// flow that appeared among the stream flows or left the table, a handshake
-    /// that changes who owns an earlier message, a message that sorts before one
+    /// that changes who owns a message already folded (one that arrives after
+    /// traffic of its flow, or on a list before lists already given a session;
+    /// the handshake of a session that opens after the others changes nothing
+    /// folded and the planes go on), a message that sorts before one
     /// already folded, a stopped call, a selector whose memory was given up to
     /// make room for another, which with the default of one memory
     /// ([`Self::set_selector_memories`]) is every change of selector) and where
     /// the exchanges still open alone outgrow four times the messages held; then
-    /// `trimmed` is 0 again. The node census is kept the same way, begins again
-    /// when a message that arrived names a node, and begins again with the other
-    /// planes and they with it, so one document covers one set of messages. Each
+    /// `trimmed` is 0 again. The node census is kept the same way, goes on
+    /// across a message that names a node (each list is kept apart and the lists
+    /// are joined at every call, so the bytes a direction carried before its
+    /// handshake are credited anew and a late list's nodes are numbered before
+    /// later ones, without folding a message again), and begins again with the
+    /// other planes, so one document covers one set of messages. Each
     /// scouting list is read once as it grows, and each exchange still open is
     /// judged once and keeps its verdict until a response to it arrives.
     ///

@@ -38,7 +38,11 @@
 //! took: which session owns a list, which zids a direction announced, and which
 //! zids a selector's prefix is read against. A handshake that arrives after the
 //! messages it names changes all of them for messages already folded, and a fold
-//! that kept going would hold the old reading.
+//! that kept going would hold the old reading. A handshake that arrives before
+//! any message it would change does not: the census planes go on when a later
+//! grouping only gives a session to lists whose folded messages carry no network
+//! message, and their selector reads no zid (`OrderedFold::regroups`), which is
+//! every session after the first opening as the capture grows.
 //!
 //! # What proves it
 //!
@@ -109,6 +113,20 @@ pub(crate) trait OrderedFold: Clone {
         message: Option<&[u8]>,
         grouping: &SessionGrouping,
     );
+
+    /// Whether this fold may go on under a later session grouping that only
+    /// attributes lists whose messages it took carry no network message
+    /// ([`SessionGrouping::regroups_as`]): a fold whose readings of a list's
+    /// messages depend on the list's owners and zids only through the records,
+    /// declarations and requests it carries, and whose selector reads no zid
+    /// the capture names. Such a fold goes on across the handshake of every
+    /// session after the first.
+    ///
+    /// `false` unless a fold says so: then it begins again whenever the
+    /// grouping moves, which is never a wrong answer.
+    fn regroups(&self) -> bool {
+        false
+    }
 
     /// Called once a walk has fed every message it took, before the fold is
     /// kept and read: where a fold settles what a reading would otherwise work
@@ -322,8 +340,14 @@ impl<F: OrderedFold> Resumable<F> {
         let origin_ms = dissection.capture_origin_ms();
         let resumed = match &self.saved {
             Some(s)
-                if s.grouping.continues_as(grouping, s.fold.reads_flow_word())
-                    && s.origin_ms == origin_ms =>
+                if s.origin_ms == origin_ms
+                    && (s.grouping.continues_as(grouping, s.fold.reads_flow_word())
+                        || (s.fold.regroups()
+                            && s.grouping.regroups_as(
+                                grouping,
+                                s.fold.reads_flow_word(),
+                                |list| dissection.walked_only_transport(list, &s.marks),
+                            ))) =>
             {
                 match trims {
                     TrimPolicy::Restart => dissection.capture_order_since(Some(&s.marks)),
@@ -343,6 +367,11 @@ impl<F: OrderedFold> Resumable<F> {
                     p.expect(frames.iter().len() as u64 * F::PLANES);
                 }
                 let saved = self.saved.as_mut().expect("a resumed fold has a saved one");
+                // What the fold goes on under: equal to the grouping it was made
+                // under, or one that only gave quiet lists their sessions.
+                if saved.grouping != *grouping {
+                    saved.grouping = grouping.clone();
+                }
                 // The walk takes the messages after `saved.marks`: the reader that
                 // wants the messages after the same marks reads them here.
                 let mut tap =
@@ -476,6 +505,11 @@ fn steps(progress: Option<&Progress<'_>>, n: u64) -> bool {
 /// listener. Each plane's fold is the one it always was.
 #[derive(Debug, Clone)]
 pub(crate) struct CensusFold {
+    /// The selector reads no zid the capture names, so the planes may go on
+    /// when a later session's handshake adds a session to the grouping
+    /// ([`OrderedFold::regroups`]). Each plane reads a list's owners and zids
+    /// for the records, declarations and requests of that list alone.
+    regroups: bool,
     pub(crate) keyexprs: crate::agg::AggFold,
     #[cfg(feature = "network-codecs")]
     pub(crate) exchanges: crate::exchange::ExchangeFold,
@@ -493,6 +527,7 @@ impl CensusFold {
         grouping: &SessionGrouping,
     ) -> Self {
         Self {
+            regroups: !filter.reads_zid(),
             keyexprs: crate::agg::AggFold::begin(dissection, filter, grouping),
             #[cfg(feature = "network-codecs")]
             exchanges: crate::exchange::ExchangeFold::begin(dissection, filter, grouping),
@@ -513,6 +548,10 @@ impl OrderedFold for CensusFold {
 
     fn reads_flow_word(&self) -> bool {
         self.keyexprs.reads_flow_word()
+    }
+
+    fn regroups(&self) -> bool {
+        self.regroups
     }
 
     fn reads_tree(&self) -> bool {
@@ -690,7 +729,8 @@ impl CensusMemory {
     ///
     /// The planes begin again where a fold of the capture cannot go on at all
     /// (a list that moved or was replaced, a message that sorts before one
-    /// already folded, a grouping that changed, a stopped call), and where what
+    /// already folded, a grouping that changed the owner of a message already
+    /// folded, a stopped call), and where what
     /// they keep that is not a row's outgrows four times the messages held;
     /// then the census is of what is held, and `observed` says so. The node
     /// census begins again with them, and they with it, so every plane of one
@@ -837,8 +877,7 @@ impl CensusMemory {
 /// the planes go on across front trims, and cover ONE scope between them.
 ///
 /// The planes are begun again whenever the node census began again since they
-/// began (its own restart, a message that names a node, or another selector's
-/// call that began it), and the node census is begun again whenever the planes
+/// began (its own restart, or another selector's call that began it), and the node census is begun again whenever the planes
 /// began over what is held (a fold that cannot go on, their open exchanges
 /// outgrowing the holding, another selector) while it holds messages the lists
 /// no longer do. A node census begun again can group the held messages

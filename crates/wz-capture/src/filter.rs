@@ -2140,6 +2140,19 @@ impl Filter {
             .any_term(&|term| matches!(term, Term::Zenoh { .. }))
     }
 
+    /// `true` when some term reads the zids the capture names (`zid`, `zids`,
+    /// `session`): a fold kept between calls must then begin again when the
+    /// nodes the capture names move, since a prefix is read against them
+    /// ([`Self::resolved_against`]).
+    pub fn reads_zid(&self) -> bool {
+        self.root.any_term(&|term| {
+            matches!(
+                term,
+                Term::Zid { .. } | Term::Zids { .. } | Term::Session { .. }
+            )
+        })
+    }
+
     /// `true` when some term reads the end-to-end judge's verdict (`e2e`,
     /// `e2e.crc`, `e2e.counter`, `e2e.timeout`): for a plane handed
     /// declarations to judge the samples it walks only when a selector asks.

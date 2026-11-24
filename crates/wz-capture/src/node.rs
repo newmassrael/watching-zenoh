@@ -102,6 +102,15 @@ impl NodeEvidence {
     pub fn admissible(&self) -> usize {
         self.init + self.join + self.hello + self.scout
     }
+
+    /// Add `other`'s counts to these, each count on its own.
+    fn add(&mut self, other: &Self) {
+        self.init += other.init;
+        self.join += other.join;
+        self.hello += other.hello;
+        self.scout += other.scout;
+        self.inadmissible += other.inadmissible;
+    }
 }
 
 /// One zenoh node, as the wire named itself.
@@ -598,26 +607,29 @@ impl NodeCensus {
         // one number.
         list: usize,
     ) {
-        self.observe_flow_from(flow, frames, list, 0, &mut [None, None]);
+        let (mut ends, mut bytes) = ([None, None], [0, 0]);
+        self.fold_list_from(flow, frames, list, 0, &mut ends, &mut bytes);
+        self.settle_list(flow, ends, bytes);
     }
 
-    /// [`Self::observe_flow`] from message `start` of the list, with the two ends
-    /// the earlier messages settled handed in and handed back.
+    /// The first pass of [`Self::observe_flow`] over the list's messages from
+    /// `start` on: each node a message names interned and its evidence counted,
+    /// a JOIN's sender seated, and in `ends` the node each direction's latest
+    /// admissible INIT named. Each direction's unit bytes from `start` on are
+    /// added to `bytes`, which [`Self::settle_list`] credits once the list's
+    /// ends are known.
     ///
-    /// With `start` 0 and no ends this IS `observe_flow`. With the ends a first
-    /// call left and a `start` past the messages it took, it folds only what
-    /// arrived since, and is the same fold as one call over the whole list WHEN
-    /// the new messages name no node: the first pass then settles nothing new, so
-    /// the ends the second pass attributes bytes by are the ones the earlier bytes
-    /// were attributed by. A caller that cannot promise that (a new message that
-    /// names a zid) calls from 0.
-    pub(crate) fn observe_flow_from(
+    /// Taken from `start` with the ends and bytes an earlier call left, it is the
+    /// pass over the whole list: nothing it does to a message depends on a
+    /// message after it, which is why the crediting waits for the settle.
+    fn fold_list_from(
         &mut self,
         flow: &FlowKey,
         frames: crate::messages::Messages<'_>,
         list: usize,
         start: usize,
         ends: &mut [Option<usize>; 2],
+        bytes: &mut [u64; 2],
     ) {
         // R2206 (open-debt item 561) — the space is read off the frames rather
         // than handed in. It arrived as an argument decided one layer up by a
@@ -677,27 +689,92 @@ impl NodeCensus {
                 self.record_end(idx, end_sending(frame.direction), flow);
             }
         }
+        // Read off the heads: the unit's length and direction are all it needs,
+        // and once per unit (see `ObservedNode::wire_bytes`).
+        for frame in frames.heads_from(start) {
+            if frame.batch_index == 0 {
+                bytes[dir_index(frame.direction)] += frame.unit_len as u64;
+            }
+        }
+    }
+
+    /// The end of [`Self::observe_flow`] for the list it last folded: the link
+    /// between the two ends `ends` settled, and each direction's `bytes`
+    /// credited to the node at its end or said to be nobody's.
+    ///
+    /// R311y714 (§1.1f) — after the whole list, and it has to be: which node
+    /// owns a direction is settled by the handshake, and a fold that attributed
+    /// bytes as it walked would credit everything before the INIT to nobody
+    /// even on a flow whose INIT arrives one message later.
+    fn settle_list(&mut self, flow: &FlowKey, ends: [Option<usize>; 2], bytes: [u64; 2]) {
         if let (Some(a), Some(b)) = (ends[0], ends[1]) {
             if a != b {
                 self.record_link(a, b, flow);
             }
         }
-        // R311y714 (§1.1f) — SECOND pass, and it has to be second: which node
-        // owns a direction is settled by the handshake, and a fold that
-        // attributed bytes as it walked would credit everything before the
-        // INIT to nobody even on a flow whose INIT arrives one message later.
-        // Read off the heads: the unit's length and direction are all it needs.
-        for frame in frames.heads_from(start) {
-            // Once per unit. See `ObservedNode::wire_bytes`.
-            if frame.batch_index != 0 {
-                continue;
-            }
-            let bytes = frame.unit_len as u64;
-            match ends[dir_index(frame.direction)] {
+        for (end, bytes) in ends.into_iter().zip(bytes) {
+            match end {
                 Some(idx) => self.nodes[idx].wire_bytes += bytes,
                 None => self.unattributed_bytes += bytes,
             }
         }
+    }
+
+    /// Take the census one list's [`ListPart`] holds into this one, as folding
+    /// that list after the lists before it would have: its nodes interned by
+    /// zid in the order the list named them, their evidence, anchors and flows
+    /// joined to what earlier lists said of the same zid, its JOIN seats, its
+    /// link and its bytes credited by the ends the whole list settled.
+    fn absorb_list(&mut self, part: &ListPart) {
+        if part.headed {
+            self.anchors = part.census.anchors;
+        }
+        self.list = part.list;
+        let here: Vec<usize> = part
+            .census
+            .nodes
+            .iter()
+            .map(|node| self.absorb_node(node))
+            .collect();
+        for end in &part.census.ends {
+            self.record_end(here[end.node], end.end, &end.flow);
+        }
+        let ends = part.ends.map(|end| end.map(|at| here[at]));
+        self.settle_list(&part.flow, ends, part.bytes);
+    }
+
+    /// Take `node`, as a census of one later list numbered it, into this
+    /// census, and return its index here: what interning each message of that
+    /// list that named it would have done.
+    ///
+    /// Its anchors join this census's only where they are in the space this
+    /// census opened the node in. A list's spaces are its own (a stream
+    /// direction's) or the packet space every packet-anchored list shares, so
+    /// a node's anchors in a later list extend its interval only through the
+    /// packet space, and otherwise make it partial, as each message would.
+    fn absorb_node(&mut self, node: &ObservedNode) -> usize {
+        let Some(idx) = self.nodes.iter().position(|n| n.zid == node.zid) else {
+            self.nodes.push(node.clone());
+            return self.nodes.len() - 1;
+        };
+        let held = &mut self.nodes[idx];
+        if held.space == node.space {
+            held.last_anchor = held.last_anchor.max(node.last_anchor);
+            held.anchors_exact &= node.anchors_exact;
+        } else {
+            held.anchors_exact = false;
+        }
+        if held.whatami.is_none() {
+            held.whatami = node.whatami;
+        }
+        held.evidence.add(&node.evidence);
+        for flow in &node.flows {
+            if !held.flows.contains(flow) {
+                held.flows.push(*flow);
+            }
+        }
+        held.wire_bytes += node.wire_bytes;
+        idx
     }
 
     /// R311y714 — fold one datagram flow's SCOUTING list in.
@@ -1133,18 +1210,8 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     census
 }
 
-/// Does this message NAME a node? An INIT or a JOIN: the two messages
-/// [`named_zid`] reads a zid from, asked without building the zid.
-fn names_a_zid(frame: &PassiveFrame) -> bool {
-    frame.unit_read_whole
-        && matches!(
-            &frame.frame,
-            Ok(InboundFrame::Init { .. } | InboundFrame::Join { .. })
-        )
-}
-
 /// Whether a message of `kind` (a row head's [`InboundFrame::kind_code`]) can
-/// name a node: what [`names_a_zid`] and [`named_zid`] ask first, answered
+/// name a node: what [`named_zid`] asks first, answered
 /// without decoding the message.
 fn may_name_a_zid(kind: u8) -> bool {
     kind == InboundFrame::KIND_INIT || kind == InboundFrame::KIND_JOIN
@@ -1165,14 +1232,72 @@ pub struct NodeStats {
     pub scouting_folded: u64,
 }
 
-/// The lists a node census stopped at, and the two ends each had settled.
+/// What a node census kept of ONE message list, folded on its own: the nodes
+/// the list named, numbered in the order it named them, with their evidence,
+/// anchors and JOIN seats, the two ends its INITs settled so far, and each
+/// direction's unit bytes not yet credited to anyone.
+///
+/// # Why per list
+///
+/// The census of a capture numbers its nodes in the order the lists named them,
+/// credits a direction's bytes to the node its LAST handshake named, and links
+/// the two ends a list settled by its end. A census kept whole could take a
+/// message that names a node only by folding again: the bytes it credited
+/// before the handshake, a node a later handshake on an earlier list must come
+/// before, and the link of a list that re-handshook all move. Kept per list,
+/// each of those is settled when the lists are joined
+/// ([`NodeCensus::absorb_list`]), in list order and by each list's ends as
+/// they stand, which costs the nodes and not the messages, so a handshake costs
+/// what arrived with it.
+#[derive(Debug, Clone)]
+struct ListPart {
+    flow: FlowKey,
+    /// The list's index among `Dissection::message_lists`, which its stream
+    /// anchors' space and its link are named by.
+    list: usize,
+    /// The list's nodes and JOIN seats, as a census of it alone holds them.
+    census: NodeCensus,
+    ends: [Option<usize>; 2],
+    bytes: [u64; 2],
+    /// The list held a message at its last fold, so its anchors' space is the
+    /// census's when the lists are joined.
+    headed: bool,
+}
+
+impl ListPart {
+    /// A part of the list `list` of `flow` that has folded nothing.
+    fn new(flow: FlowKey, list: usize) -> Self {
+        Self {
+            flow,
+            list,
+            census: NodeCensus::new(),
+            ends: [None, None],
+            bytes: [0, 0],
+            headed: false,
+        }
+    }
+
+    /// Fold the list's messages from `start` on.
+    fn take(&mut self, frames: crate::messages::Messages<'_>, start: usize) {
+        self.headed = frames.heads_from(0).next().is_some();
+        self.census.fold_list_from(
+            &self.flow,
+            frames,
+            self.list,
+            start,
+            &mut self.ends,
+            &mut self.bytes,
+        );
+    }
+}
+
+/// The lists a node census stopped at, and what it kept of each.
 #[derive(Debug)]
 struct NodeSaved {
-    /// The census of the message lists alone: scouting is folded over a COPY, so
-    /// it never has to be undone.
-    census: NodeCensus,
+    /// One part per message list, in the dissection's order. Scouting is folded
+    /// over a COPY of their joined census, so it never has to be undone.
+    parts: Vec<ListPart>,
     lists: Vec<crate::ListMark>,
-    ends: Vec<[Option<usize>; 2]>,
     /// Messages folded since the census began: more than the lists hold says
     /// it went on across a front trim and holds history.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -1186,13 +1311,13 @@ struct NodeSaved {
 ///
 /// When the capture it stopped in is still a PREFIX of the capture now (the same
 /// lists, nothing trimmed from a list's front: see
-/// `Dissection::capture_order_since`) AND no message that arrived names a
-/// zid. The second half is this plane's own condition. Which node owns a
-/// direction is settled by the handshake, and bytes are credited to it after the
-/// list's messages have all been read, so a handshake that arrives after the
-/// bytes it would own changes who they were credited to. A message that names a
-/// node therefore starts the census again; a capture after its handshake, which is
-/// nearly all of one, does not.
+/// `Dissection::capture_order_since`). A message that names a node is folded
+/// like any other: each list is kept apart ([`ListPart`]) and the lists are
+/// joined at every call, so the bytes a direction carried before its handshake
+/// are credited to the node it names, and a node a late handshake names on an
+/// earlier list is numbered before the nodes later lists named, without folding
+/// a message again. A list whose place among the lists moved is folded again on
+/// its own.
 ///
 /// Each datagram flow's scouting list is folded once, as it grows, into what it
 /// named, and that is applied to a copy of the census at every call: a node first
@@ -1275,12 +1400,10 @@ impl NodeMemory {
         if !self.resume(&current, trims) {
             self.restart(&current);
         }
-        let mut census = self
-            .saved
-            .as_ref()
-            .expect("a census was kept above")
-            .census
-            .clone();
+        let mut census = NodeCensus::new();
+        for part in &self.saved.as_ref().expect("a census was kept above").parts {
+            census.absorb_list(part);
+        }
         self.fold_scouting(dissection);
         for fold in &self.scouting {
             fold.apply_to(&mut census);
@@ -1325,12 +1448,11 @@ impl NodeMemory {
             wz_session_core::passive_messages::Messages<'_>,
         )],
     ) {
-        let mut census = NodeCensus::new();
+        let mut parts = Vec::with_capacity(current.len());
         let mut lists = Vec::with_capacity(current.len());
-        let mut all_ends = Vec::with_capacity(current.len());
         for (list, (flow, origin, frames)) in current.iter().enumerate() {
-            let mut ends = [None, None];
-            census.observe_flow_from(flow, *frames, list, 0, &mut ends);
+            let mut part = ListPart::new(*flow, list);
+            part.take(*frames, 0);
             self.stats.messages_folded += frames.len() as u64;
             lists.push(crate::ListMark {
                 flow: *flow,
@@ -1339,12 +1461,11 @@ impl NodeMemory {
                 produced: frames.produced(),
                 last_packet: 0,
             });
-            all_ends.push(ends);
+            parts.push(part);
         }
         self.saved = Some(NodeSaved {
-            census,
+            parts,
             lists,
-            ends: all_ends,
             #[cfg(all(feature = "dissect", feature = "network-codecs"))]
             folded: current
                 .iter()
@@ -1388,32 +1509,24 @@ impl NodeMemory {
             {
                 return false;
             }
-            let start = (mark.produced.max(first) - first) as usize;
-            if frames
-                .heads_from(start)
-                .enumerate()
-                .any(|(at, head)| may_name_a_zid(head.kind) && names_a_zid(&frames.row(start + at)))
-            {
-                return false;
-            }
         }
+        let mut parts = Vec::with_capacity(current.len());
         let mut lists = Vec::with_capacity(current.len());
-        let mut all_ends = Vec::with_capacity(current.len());
         for (list, (flow, origin, frames)) in current.iter().enumerate() {
-            let (start, mut ends) = match continues[list] {
-                Some(at) => {
+            // A part goes on only at the place it was folded at: its anchors'
+            // space and its link are named by that place.
+            let (start, mut part) = match continues[list] {
+                Some(at) if at == list => {
                     let first = frames.produced() - frames.len() as u64;
                     (
                         (saved.lists[at].produced.max(first) - first) as usize,
-                        saved.ends[at],
+                        core::mem::replace(&mut saved.parts[at], ListPart::new(*flow, list)),
                     )
                 }
-                None => (0, [None, None]),
+                _ => (0, ListPart::new(*flow, list)),
             };
             if start < frames.len() {
-                saved
-                    .census
-                    .observe_flow_from(flow, *frames, list, start, &mut ends);
+                part.take(*frames, start);
                 self.stats.messages_folded += (frames.len() - start) as u64;
                 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
                 {
@@ -1427,10 +1540,10 @@ impl NodeMemory {
                 produced: frames.produced(),
                 last_packet: 0,
             });
-            all_ends.push(ends);
+            parts.push(part);
         }
         saved.lists = lists;
-        saved.ends = all_ends;
+        saved.parts = parts;
         self.stats.resumes += 1;
         true
     }
@@ -1616,6 +1729,48 @@ impl SessionGrouping {
             && zids_by_list == &later.zids_by_list
             && named == &later.named
             && sessions == &later.sessions
+            && (!words_matter || later.words.starts_with(words))
+    }
+
+    /// Whether a fold made under `self` may go on under `later` though the two
+    /// differ, because nothing a message already folded was judged by has moved:
+    /// every list `self` attributed has the same owners and zids under
+    /// `later`, and every list `later` attributes and `self` did not is one
+    /// whose messages the fold took carry no network message (`quiet` says so
+    /// of a list), so no record, declaration or request of it was read under the
+    /// fallback owner. That is a session's handshake read before its link was
+    /// complete, which is how every session after the first begins.
+    ///
+    /// The named zids are not compared: only a selector's `zid` terms read
+    /// them, and a fold whose selector has one does not ask
+    /// (`OrderedFold::regroups`). Nor is the session count, which no
+    /// fold reads. The words count as for [`Self::continues_as`]. A list whose
+    /// owners moved (a link named before the links of earlier lists renumbers
+    /// theirs) is a change, and the fold begins again.
+    pub(crate) fn regroups_as(
+        &self,
+        later: &Self,
+        words_matter: bool,
+        quiet: impl Fn(usize) -> bool,
+    ) -> bool {
+        let Self {
+            by_list,
+            zids_by_list,
+            named: _,
+            words,
+            sessions: _,
+        } = self;
+        by_list
+            .iter()
+            .all(|(list, owners)| later.by_list.get(list) == Some(owners))
+            && zids_by_list
+                .iter()
+                .all(|(list, zids)| later.zids_by_list.get(list) == Some(zids))
+            && later
+                .by_list
+                .keys()
+                .filter(|list| !by_list.contains_key(list))
+                .all(|list| quiet(*list))
             && (!words_matter || later.words.starts_with(words))
     }
 
@@ -2991,6 +3146,68 @@ pub(crate) mod tests {
             "{high:?}"
         );
         assert_eq!(census.ends().len(), 4, "{:?}", census.ends());
+    }
+
+    /// A NODE MEMORY GOES ON ACROSS EVERY HANDSHAKE AND STILL EQUALS A FRESH
+    /// CENSUS: traffic credited to nobody until its flow's INITs arrive and then
+    /// to the nodes they name, a flow that says who it is after a later flow did
+    /// (its nodes numbered first), and a direction handshaken again by another
+    /// node (its bytes and its link move to that node). At every step the memory's
+    /// census is the fresh one, and it began once and folded each message once.
+    #[test]
+    fn a_node_memory_goes_on_across_every_handshake_and_equals_a_fresh_census() {
+        use crate::datagram_tests::{frame_carrying, push, sender_space};
+        let (low, high) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        let data = frame_carrying(&push(sender_space(0, Some("demo/a")), &[7u8; 16]));
+        let wires: [(u16, bool, Vec<u8>); 9] = [
+            (40000, true, data.clone()),
+            (40000, false, data.clone()),
+            (41000, true, init_wire(&[0xD4; 4])),
+            (41000, false, init_wire(&[0xE5; 4])),
+            (40000, true, init_wire(&[0xA1; 4])),
+            (40000, false, init_wire(&[0xB2; 4])),
+            (40000, true, data.clone()),
+            (40000, true, init_wire(&[0xC3; 4])),
+            (41000, false, data),
+        ];
+        let mut d = Dissection::new();
+        let mut memory = NodeMemory::new();
+        for (i, (sport, from_low, wire)) in wires.iter().enumerate() {
+            let packet = if *from_low {
+                udp_packet(low, *sport, high, 7447, wire)
+            } else {
+                udp_packet(high, 7447, low, *sport, wire)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            assert_eq!(memory.nodes(&d), nodes(&d), "the census after packet {i}");
+        }
+        let held: u64 = d.message_lists().map(|(_, f)| f.len() as u64).sum();
+        let stats = memory.stats();
+        assert_eq!(
+            (stats.restarts, stats.messages_folded),
+            (1, held),
+            "began once and folded each message once: {stats:?}"
+        );
+        let census = nodes(&d);
+        assert_eq!(
+            census.nodes()[0].zid,
+            [0xA1; 4],
+            "the earlier list's nodes come first"
+        );
+        assert_eq!(
+            (
+                census.unattributed_bytes() == 0,
+                census.attributed_bytes() > 0
+            ),
+            (true, true),
+            "every byte is credited by the ends its flow settled: {census:?}"
+        );
+        let (c, b) = (index_of(&census, &[0xC3; 4]), index_of(&census, &[0xB2; 4]));
+        assert!(
+            census.links().iter().any(|l| (l.a, l.b) == (c, b)),
+            "the direction handshaken again links its new node: {:?}",
+            census.links()
+        );
     }
 
     /// A SCOUTING LIST TRIMMED AT ITS FRONT IS READ AGAIN OVER WHAT IT HOLDS: the

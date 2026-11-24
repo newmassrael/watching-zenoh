@@ -36,6 +36,8 @@ const LOW: [u8; 4] = [10, 0, 0, 1];
 const HIGH: [u8; 4] = [10, 0, 0, 2];
 const ZID_A: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
 const ZID_B: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+const ZID_C: &[u8] = &[0xC3, 0xC3, 0xC3, 0xC3];
+const ZID_D: &[u8] = &[0xD4, 0xD4, 0xD4, 0xD4];
 
 /// How many planes a memory folds each message through.
 const PLANES: u64 = 4;
@@ -216,11 +218,11 @@ fn a_handshake_that_arrives_late_begins_every_plane_again() {
     assert_eq!((work.restarts, work.resumes), (0, PLANES), "{work:?}");
 }
 
-/// The node census begins again exactly when a message that arrived names a node,
-/// and continues otherwise, including when a datagram flow it has not seen
-/// appears (a new list after the others).
+/// The node census continues across a message that names a node as across any
+/// other, including when a datagram flow it has not seen appears (a new list
+/// after the others), and folds only what arrived.
 #[test]
-fn the_node_census_begins_again_only_when_a_message_names_a_node() {
+fn the_node_census_continues_across_a_message_that_names_a_node() {
     let mut g = Growing::new(Dissection::new(), "");
     g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
     g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
@@ -247,12 +249,141 @@ fn the_node_census_begins_again_only_when_a_message_names_a_node() {
     assert_eq!(mid.restarts, base.restarts, "{base:?} then {mid:?}");
     assert_eq!(mid.resumes, base.resumes + 2, "{base:?} then {mid:?}");
 
-    // A handshake on the second flow names the two nodes there: begin again.
+    // A handshake on the second flow names the two nodes there: the census
+    // takes the two INITs and credits the flow's earlier bytes by them.
     g.udp_wire(true, 41000, 7447, &init_wire(ZID_A));
     g.udp_wire(false, 41000, 7447, &init_wire(ZID_B));
     g.ask("the second flow is handshaken");
     let end = g.memory.node_stats();
-    assert_eq!(end.restarts, mid.restarts + 1, "{mid:?} then {end:?}");
+    assert_eq!(end.restarts, mid.restarts, "{mid:?} then {end:?}");
+    assert_eq!(end.resumes, mid.resumes + 1, "{mid:?} then {end:?}");
+    assert_eq!(
+        end.messages_folded,
+        mid.messages_folded + 2,
+        "the two INITs and nothing else: {mid:?} then {end:?}"
+    );
+}
+
+/// Ask after a packet pushed when the capture held `held` messages, and require
+/// the memory to have continued every plane and the node census over exactly
+/// the messages that packet added.
+fn require_continued(g: &mut Growing, held: u64, step: &str) {
+    let arrived = g.messages() - held;
+    assert!(
+        arrived > 0,
+        "{step}: the packet produced no message to fold"
+    );
+    let nodes_before = g.memory.node_stats();
+    let (before, after) = g.ask(step);
+    let work = delta(before, after);
+    let nodes_after = g.memory.node_stats();
+    assert_eq!(
+        (
+            nodes_after.restarts - nodes_before.restarts,
+            nodes_after.messages_folded - nodes_before.messages_folded,
+        ),
+        (0, arrived),
+        "{step}: the node census must go on and fold the {arrived} new message(s)"
+    );
+    assert_eq!(
+        (work.restarts, work.resumes, work.messages_folded),
+        (0, PLANES, PLANES * arrived),
+        "{step}: every plane must go on and fold the {arrived} new message(s)"
+    );
+}
+
+/// SESSIONS THAT OPEN ONE AFTER ANOTHER ARE FOLDED ACROSS, NOT AGAIN: each new
+/// datagram flow's two INITs name two nodes no flow named before and give its
+/// list a session of its own. At every step the census is the census a fresh
+/// fold writes (`Growing::ask`), and from the second step on every plane and
+/// the node census go on and fold only the messages that arrived, the INITs
+/// included: a call costs what arrived since.
+#[test]
+fn sessions_that_open_one_after_another_are_folded_across_not_again() {
+    let pairs: [[&[u8]; 2]; 3] = [
+        [ZID_A, ZID_B],
+        [ZID_C, ZID_D],
+        [&[0xE5, 0xE5, 0xE5, 0xE5], &[0xF6, 0xF6, 0xF6, 0xF6]],
+    ];
+    let mut g = Growing::new(Dissection::new(), "");
+    g.udp_wire(true, 40000, 7447, &init_wire(pairs[0][0]));
+    g.ask("the first INIT");
+    let mut steps = 0u32;
+    for (session, pair) in pairs.iter().enumerate() {
+        let sport = 40000 + session as u16;
+        if session > 0 {
+            let held = g.messages();
+            g.udp_wire(true, sport, 7447, &init_wire(pair[0]));
+            require_continued(&mut g, held, &alloc::format!("session {session}: INIT"));
+            steps += 1;
+        }
+        let held = g.messages();
+        g.udp_wire(false, sport, 7447, &init_wire(pair[1]));
+        require_continued(&mut g, held, &alloc::format!("session {session}: the link"));
+        steps += 1;
+        for (i, record) in session_records().iter().enumerate() {
+            let held = g.messages();
+            g.udp(i % 2 == 0, sport, 7447, record);
+            require_continued(
+                &mut g,
+                held,
+                &alloc::format!("session {session}: record {i}"),
+            );
+            steps += 1;
+        }
+    }
+    assert!(steps >= 70, "too few steps to say a fold went on: {steps}");
+    assert_eq!(
+        g.memory.node_stats().restarts,
+        1,
+        "the node census began once, at the first call"
+    );
+    assert_eq!(
+        crate::node::session_grouping(&g.d).sessions(),
+        3,
+        "anti-vacuity: the capture holds three sessions"
+    );
+}
+
+/// A HANDSHAKE THAT ARRIVES LATE ON AN EARLIER LIST: a fresh census numbers that
+/// list's nodes before the ones a later list named, and so does the memory
+/// (`Growing::ask` holds the two documents equal), without folding a message
+/// again. The planes begin again, because that list's traffic was folded
+/// before its session was known.
+#[test]
+fn a_late_handshake_on_an_earlier_list_renumbers_without_folding_again() {
+    let mut g = Growing::new(Dissection::new(), "");
+    for (i, record) in session_records().iter().take(4).enumerate() {
+        g.udp(i % 2 == 0, 40000, 7447, record);
+    }
+    g.ask("traffic on the first flow, no handshake");
+    g.udp_wire(true, 41000, 7447, &init_wire(ZID_C));
+    g.udp_wire(false, 41000, 7447, &init_wire(ZID_D));
+    g.ask("the second flow's session");
+    let nodes_before = g.memory.node_stats();
+
+    g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
+    g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
+    let (before, after) = g.ask("the first flow says who it is, late");
+    let nodes_after = g.memory.node_stats();
+    assert_eq!(
+        (
+            nodes_after.restarts - nodes_before.restarts,
+            nodes_after.messages_folded - nodes_before.messages_folded,
+        ),
+        (0, 2),
+        "the node census takes the two INITs and folds nothing again"
+    );
+    assert_eq!(
+        crate::node::nodes(&g.d).nodes()[0].zid,
+        ZID_A,
+        "anti-vacuity: the late handshake's node is numbered first"
+    );
+    assert_eq!(
+        delta(before, after).restarts,
+        PLANES,
+        "the first flow's traffic was folded before its session was known"
+    );
 }
 
 /// A new STREAM flow is a new list in front of every datagram list, which moves
@@ -1010,13 +1141,13 @@ fn a_history_census_whose_open_exchanges_outgrow_the_holding_begins_again() {
     );
 }
 
-/// A census over its history whose NODE census begins again (a message that
-/// arrived names a node) begins its planes again with it, whatever the grouping
-/// says, so the document has one scope: every plane is a census of what is
-/// held, and `trimmed` is 0.
+/// A census over its history whose nodes say who they are again goes on: the
+/// node census takes the two INITs, the grouping they leave is the one the
+/// planes were folded under, and the planes go on across the trims they have
+/// already gone on across, still counting what the lists no longer hold.
 #[cfg(feature = "dissect")]
 #[test]
-fn a_history_census_whose_node_census_begins_again_begins_its_planes_with_it() {
+fn a_history_census_goes_on_when_its_nodes_say_who_they_are_again() {
     let mut t = Twin::new(6);
     let mut memory = CensusMemory::over_history();
     let any = Filter::any();
@@ -1036,8 +1167,7 @@ fn a_history_census_whose_node_census_begins_again_begins_its_planes_with_it() {
         "the ceiling must have trimmed, or nothing is history yet"
     );
 
-    // The same two nodes say who they are again: the node census begins again
-    // over what is held, and the grouping it finds may be the one it had.
+    // The same two nodes say who they are again.
     t.wire(true, &init_wire(ZID_A));
     t.wire(false, &init_wire(ZID_B));
     let (nodes_before, before) = (memory.node_stats(), memory.stats());
@@ -1045,14 +1175,17 @@ fn a_history_census_whose_node_census_begins_again_begins_its_planes_with_it() {
     let work = delta(before, memory.stats());
     assert_eq!(
         memory.node_stats().restarts - nodes_before.restarts,
-        1,
-        "a message that names a node begins the node census again"
+        0,
+        "a message that names a node is folded like any other"
     );
-    assert_eq!(work.restarts, PLANES, "and the planes with it: {work:?}");
     assert_eq!(
-        planes_of(&again),
-        planes_of(&census_json_where(&t.bounded, &any)),
-        "every plane is a census of what is held"
+        (work.restarts, work.messages_folded),
+        (0, 2 * PLANES),
+        "the planes go on and fold the two INITs: {work:?}"
     );
-    assert_eq!(observed_value(&again, "trimmed"), "0", "{again}");
+    assert_ne!(
+        observed_value(&again, "trimmed"),
+        "0",
+        "the census still counts what the lists no longer hold: {again}"
+    );
 }

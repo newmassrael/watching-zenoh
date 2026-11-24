@@ -8239,25 +8239,43 @@ int wz_dissect_pcap_local_options_of_link_type(
  * memories for pays that for each of them from its second call on. The planes
  * begin again, over what is held (T back to 0), only where a fold cannot go on
  * at all: a flow that appeared in front of the datagram flows or left a flow
- * table, a message decoded after a packet that followed it, a session grouping
- * that changes (a message that names a node), a selector whose memory was given
- * up to make room for another (with the default of one memory, every change of
- * selector), a call the progress callback stopped, and exchanges still open
- * that alone outgrow four times the messages held. The node plane begins again
- * with the others and they with it, so every plane of one document covers the
- * messages its "observed" names. What the planes keep per row is given up for
- * the rows no list holds as it doubles, so it stays near what the lists hold.
+ * table, a message decoded after a packet that followed it, a handshake that
+ * changes who owns a message already folded (see below), a selector whose
+ * memory was given up to make room for another (with the default of one
+ * memory, every change of selector), a call the progress callback stopped,
+ * and exchanges still open that alone outgrow four times the messages held.
+ * The node plane begins again with the others and they with it, so every plane
+ * of one document covers the messages its "observed" names. What the planes
+ * keep per row is given up for the rows no list holds as it doubles, so it
+ * stays near what the lists hold.
  *
- * WHAT STILL FOLDS AGAIN, AND WHY. One cost remains: an INIT or a JOIN that
- * names a node begins every plane again, so a capture whose sessions open one
- * after another pays one fold of what is held per opening. A fold continued past
- * it would write a document the container doors do not write for the same
- * bytes, for three reasons. Which node a direction belongs to is settled by its
- * handshake, and what was credited to that direction before the handshake
- * arrived is credited anew. A node is numbered by the place of its list among
- * the lists, so a node a later INIT names on an earlier list comes before nodes
- * already numbered. And the planes key what they fold (whose request ids, whose
- * declared keys) by the session grouping the new node changes.
+ * A HANDSHAKE IS FOLDED ACROSS, NOT AGAIN. An INIT or a JOIN that names a node
+ * costs what it costs as a message, so a capture whose sessions open one after
+ * another pays for each opening what arrived with it. The census the container
+ * doors write for the same bytes settles three things by the handshake, and the
+ * handle settles each without folding again:
+ *
+ *   - the bytes a direction carried before its handshake are credited to the
+ *     node it names: the handle keeps each flow's bytes per direction and
+ *     credits them when it writes the document;
+ *   - a node is numbered by the place of its list among the lists, so a node a
+ *     late INIT names on an earlier list comes before nodes later lists named:
+ *     the handle keeps the nodes of each list apart and numbers them in list
+ *     order when it writes the document, which renumbers nodes already
+ *     numbered and folds nothing;
+ *   - the planes key what they fold (whose request ids, whose declared keys) by
+ *     the session grouping: a handshake that gives a session to a flow whose
+ *     messages folded so far carry no network message (its INITs, its OPENs,
+ *     keep-alives) changes nothing folded, and the planes go on.
+ *
+ * WHAT STILL FOLDS AGAIN, AND WHY. The planes begin again where a handshake
+ * changes the owner of a message already folded: one that arrives after its
+ * flow's traffic (a capture that began mid-session and sees the handshake
+ * again), one on a list before lists already given a session (which renumbers
+ * their sessions), a flow whose front a ceiling trimmed before its session was
+ * known, and, for a selector with a `zid`, `zids` or `session` term, every
+ * handshake that names a node, since the term is read against the nodes the
+ * capture names.
  *
  * What no longer folds again. Each scouting list is read once as it grows, and
  * again only when the ceiling trims its front; what it named is applied to the

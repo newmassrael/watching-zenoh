@@ -3135,6 +3135,22 @@ fn lent_place(in_container: Option<usize>, packet: &[u8], payload: &[u8]) -> Opt
     in_container.and_then(|at| link::offset_within(packet, payload).map(|offset| at + offset))
 }
 
+/// Whether a message of `kind` (a row head's
+/// [`wz_session_core::inbound::InboundFrame::kind_code`]) is one the transport
+/// reads alone and that carries no network message: what no census plane reads
+/// by the session that owns its list.
+fn carries_no_network_message(kind: u8) -> bool {
+    use wz_session_core::inbound::InboundFrame;
+    [
+        InboundFrame::KIND_INIT,
+        InboundFrame::KIND_OPEN,
+        InboundFrame::KIND_CLOSE,
+        InboundFrame::KIND_KEEPALIVE,
+        InboundFrame::KIND_JOIN,
+    ]
+    .contains(&kind)
+}
+
 /// The capture a flow is lent, as a reader of its kept places takes it: every
 /// container the dissection was lent, read by capture offset.
 fn lent_bytes(
@@ -7888,6 +7904,44 @@ impl Dissection {
                 }
             })
             .sum()
+    }
+
+    /// Whether every message of the list at `list` that the walk which left
+    /// `prev` took carries no network message (an INIT, an OPEN, a CLOSE, a
+    /// KEEPALIVE or a JOIN), as far as the list still holds them: what lets a
+    /// fold go on when a handshake gives that list a session
+    /// ([`node::SessionGrouping::regroups_as`]). A list the walk took nothing
+    /// of answers `true`. `false` where it cannot be known: a list whose front
+    /// was trimmed after the walk took some of it, and lists that are not the
+    /// ones `prev` was taken over.
+    pub(crate) fn walked_only_transport(&self, list: usize, prev: &OrderMarks) -> bool {
+        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, messages::Messages<'_>)> =
+            self.message_lists_with_origin().collect();
+        let Some(continues) = list_continuations(&current, Some(&prev.lists)) else {
+            return false;
+        };
+        let Some((flow, origin, frames)) = current.get(list) else {
+            return false;
+        };
+        let walked = match continues.get(list).copied().flatten() {
+            Some(at) => {
+                let mark = &prev.lists[at];
+                if mark.flow != *flow || mark.origin != *origin {
+                    return false;
+                }
+                mark.produced
+            }
+            None => 0,
+        };
+        if walked == 0 {
+            return true;
+        }
+        let first_held = frames.produced() - frames.len() as u64;
+        first_held == 0
+            && frames
+                .heads_from(0)
+                .take(walked as usize)
+                .all(|head| carries_no_network_message(head.kind))
     }
 
     /// [`Self::capture_order_since`] for a fold that holds the HISTORY of the
