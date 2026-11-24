@@ -3804,6 +3804,14 @@ impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
 use crate::tx_deadline::PushDeadline;
 use crate::tx_deadline::TxExpiry;
 
+/// A link's millisecond value held under its runtime's lock (a stamp of the link's clock, or the
+/// lease its peer advertised), read. Out of line: one copy of the read for every reader of these,
+/// where each read inlined was a copy of the lock.
+#[inline(never)]
+pub(crate) fn read_ms<R: SessionRuntime>(slot: &R::Mutex<Option<u64>>) -> Option<u64> {
+    R::with_mutex_mut(slot, |ms| *ms)
+}
+
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
     #[inline]
@@ -16070,7 +16078,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// arrival (unicast/transport.c:193/269) and every task reads the
     /// same `_common._lease`.
     pub fn adopted_lease_ms(&self) -> u64 {
-        let peer = R::with_mutex_mut(&self.peer_open_lease_ms, |g| *g);
+        let peer = read_ms::<R>(&self.peer_open_lease_ms);
         match peer {
             Some(advertised) => advertised.min(self.params.lease_ms),
             None => self.params.lease_ms,
@@ -18031,7 +18039,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if progress == u64::MAX {
             return None;
         }
-        let established = R::with_mutex_mut(&self.link.established_at, |slot| *slot)?;
+        let established = read_ms::<R>(&self.link.established_at)?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),

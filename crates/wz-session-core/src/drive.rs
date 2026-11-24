@@ -3824,8 +3824,8 @@ fn lease_expiry_deadline<R: SessionRuntime, T: TimeSource>(
     {
         return None;
     }
-    let inbound = R::with_mutex_mut(&actions.link.last_inbound_at, |g| *g);
-    let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
+    let inbound = crate::session_actions::read_ms::<R>(&actions.link.last_inbound_at);
+    let established = crate::session_actions::read_ms::<R>(&actions.link.established_at);
     max_stamp(established, inbound).map(|b| b.saturating_add(actions.adopted_lease_ms()))
 }
 
@@ -3898,8 +3898,8 @@ fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
     {
         return None;
     }
-    let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
-    let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
+    let outbound = crate::session_actions::read_ms::<R>(&actions.link.last_outbound_at);
+    let established = crate::session_actions::read_ms::<R>(&actions.link.established_at);
     let now = actions.clock.now_monotonic_ms();
     // A driver with a queue between hand-over and write reports when its writer last finished
     // a write, and that is when the line spoke (the stamp above then holds only the control
