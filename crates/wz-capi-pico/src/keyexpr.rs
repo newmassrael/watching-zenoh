@@ -15,7 +15,7 @@ use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, WireKey};
+use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, SessionKeys, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::keyexpr_canon::KeyexprCanonError;
 use wz_session_core::WhatAmI;
@@ -160,7 +160,8 @@ impl KeyText {
     /// which keeps nothing more.
     #[inline(never)]
     pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
-        let refused = match shared.key_arena().map(|keys| keys.key(KeyAsk::Hold(text))) {
+        let refused = match key_arena(shared).map(|keys| SessionKeys::key(keys, KeyAsk::Hold(text)))
+        {
             Some(Ok(Some(key))) => {
                 return Ok(Self {
                     key: ManuallyDrop::new(key),
@@ -187,9 +188,8 @@ impl KeyText {
     pub(crate) fn share(&self) -> Self {
         if let Some(engine) = &self.engine {
             // An engine that keeps no key arena made no key of one; a copy reads the same.
-            if let Some(Ok(Some(key))) = engine
-                .key_arena()
-                .map(|keys| keys.key(KeyAsk::Share(&self.key)))
+            if let Some(Ok(Some(key))) =
+                key_arena(engine).map(|keys| SessionKeys::key(keys, KeyAsk::Share(&self.key)))
             {
                 return Self {
                     key: ManuallyDrop::new(key),
@@ -214,14 +214,27 @@ impl Drop for KeyText {
         let key = unsafe { ManuallyDrop::take(&mut self.key) };
         match self.engine.take() {
             Some(engine) => {
-                if let Some(keys) = engine.key_arena() {
-                    let _ = keys.key(KeyAsk::Release(key));
+                if let Some(keys) = key_arena(&engine) {
+                    let _ = SessionKeys::key(keys, KeyAsk::Release(key));
                 }
             }
             // SAFETY: with no engine the key is a copy of its own (`Self::owned`), freed here once.
             None => unsafe { key.free_own() },
         }
     }
+}
+
+/// The key arena of `engine`'s session: the cooperative engine always keeps one and is reached as
+/// its own type, so a key's hold, share and release are calls resolved when the build is made.
+#[cfg(not(feature = "engine-tokio"))]
+fn key_arena(engine: &Engine) -> Option<&Engine> {
+    Some(engine)
+}
+
+/// The key arena of the session behind the port, when its engine keeps one.
+#[cfg(feature = "engine-tokio")]
+fn key_arena(engine: &Engine) -> Option<&dyn SessionKeys> {
+    engine.key_arena()
 }
 
 /// The code a key the session kept no room for is refused with, as zenoh-pico refuses what its heap
@@ -2059,7 +2072,6 @@ mod arena_key_tests {
         listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
         z_session_loan_mut, z_session_move,
     };
-    use wz_capi_port::SessionKeys;
 
     /// A session that listens on a port of the loopback, opened as a program opens one, and the
     /// engine it runs on.
@@ -2079,9 +2091,18 @@ mod arena_key_tests {
 
     /// The session's key arena, which the cooperative engine always keeps.
     fn keys(engine: &Arc<Engine>) -> &dyn SessionKeys {
-        engine
-            .key_arena()
-            .expect("the cooperative engine keeps a key arena")
+        super::key_arena(engine).expect("the cooperative engine keeps a key arena")
+    }
+
+    /// The arena a key of an object is held in is the engine's own, reached as its type and not
+    /// through the port's object.
+    #[test]
+    fn the_key_arena_is_the_engine_itself() {
+        let (session, engine) = listening();
+        let arena: *const Engine = super::key_arena(&engine).expect("the engine keeps a key arena");
+        assert!(core::ptr::eq(arena, Arc::as_ptr(&engine)));
+        drop(engine);
+        close(session);
     }
 
     /// `text` held in the session's key arena, or why not.

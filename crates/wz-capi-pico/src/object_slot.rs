@@ -135,7 +135,8 @@ impl<T> Slot<T> {
         if needed.size() > laid.size() || needed.align() > laid.align() {
             return None;
         }
-        let place = engine.place_lender()?.claim_place(entity)?;
+        // The cooperative engine lends places itself, reached as its own type.
+        let place = wz_capi_port::PlaceLender::claim_place(Arc::as_ref(engine), entity)?;
         Some(Self {
             place: place.as_ptr().cast(),
             lender: Some(Lender {
@@ -234,11 +235,9 @@ impl Lender {
     fn give_back(self) {
         let Self { place, engine } = self;
         // The engine that lent the place lends places, so it takes it back.
-        let given = engine
-            .place_lender()
-            .map(|lender| lender.give_back_place(place));
+        let given = wz_capi_port::PlaceLender::give_back_place(Arc::as_ref(&engine), place);
         debug_assert!(
-            matches!(given, Some(Ok(()))),
+            given.is_ok(),
             "a place goes back to the session that lent it"
         );
     }
