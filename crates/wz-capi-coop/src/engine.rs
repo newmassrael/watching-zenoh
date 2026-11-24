@@ -88,7 +88,7 @@ use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
-use wz_runtime_coop::face_life::{FaceEffect, FaceLife, FaceRole, Next};
+use wz_runtime_coop::face_life::{FaceEffect, FaceRole, Next};
 use wz_runtime_coop::face_send::{self, order_key, Behind, FaceSend, Pass, PublishRun, Then};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
@@ -97,8 +97,7 @@ use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::OwingWaits;
 use wz_runtime_coop::faces::{
-    DialAnswer, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link,
-    LinkSupervisor,
+    DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -2965,29 +2964,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         } else {
             FaceRole::Taken
         };
+        let step = self
+            .transport
+            .face_step(at, id, role, redial_ms.is_some(), now_us);
+        self.carry_out(at, step, redial_ms, now_us)
+    }
+
+    /// Carry out what the face at `at` does at a step (`step`): what its value decided, with the
+    /// answer of its dial when one was asked and the endpoint of a dial that is over, read where
+    /// the step holds it. The session's part of its value's decision. `Err` when the session
+    /// ends: the dial role's link was lost, or no endpoint answered, and `redial_ms` is `None`;
+    /// or the platform gave no entropy.
+    fn carry_out(
+        &mut self,
+        at: usize,
+        step: FaceStep<L::Pump>,
+        redial_ms: Option<u64>,
+        now_us: u64,
+    ) -> Result<(), OpenError> {
         let FaceStep {
             life,
             effect,
             answer,
-        } = self
-            .transport
-            .face_step(at, id, role, redial_ms.is_some(), now_us);
-        self.carry_out(at, &life, effect, answer, redial_ms, now_us)
-    }
-
-    /// Carry out what the face at `at` (`life`) does at a step (`effect`), with the answer of
-    /// its dial when one was asked: the session's part of its value's decision. `Err` when the
-    /// session ends: the dial role's link was lost, or no endpoint answered, and `redial_ms` is
-    /// `None`; or the platform gave no entropy.
-    fn carry_out(
-        &mut self,
-        at: usize,
-        life: &FaceLife,
-        effect: FaceEffect,
-        answer: DialAnswer<L::Pump>,
-        redial_ms: Option<u64>,
-        now_us: u64,
-    ) -> Result<(), OpenError> {
+            endpoint,
+        } = step;
         let id = life.id();
         match effect {
             FaceEffect::Stay => Ok(()),
@@ -3021,17 +3021,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // The dial under way was asked, never waited for: its link's handshake begins once
             // it is made. Refused, or not answered by its deadline, the dial role's face dials the
             // next endpoint, and any other face goes, as one whose handshake fails does.
-            FaceEffect::Handshake {
-                endpoint,
-                next,
-                deadline_us,
-            } => {
+            FaceEffect::Handshake { next, deadline_us } => {
                 let answered = match answer {
                     Some(answer) => {
-                        self.dial_answered(id, Some(&endpoint), next, deadline_us, answer)
+                        self.dial_answered(id, endpoint.as_ref(), next, deadline_us, answer)
                     }
                     None => Err(OpenError::Unreachable(EndpointRefusal::new(
-                        self.transport.endpoint_text(Some(&endpoint)),
+                        self.transport.endpoint_text(endpoint.as_ref()),
                         Refusal::NoAnswerInTime,
                     ))),
                 };
@@ -3044,13 +3040,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Err(last) => self.follow(at, life.after_failure(next), last, redial_ms),
                 }
             }
-            FaceEffect::DialFailed { endpoint, then } => {
+            FaceEffect::DialFailed { then } => {
                 let why = match answer {
                     Some(Err(refused)) => Refusal::Link(refused),
                     _ => Refusal::NoAnswerInTime,
                 };
                 let last = OpenError::Unreachable(EndpointRefusal::new(
-                    self.transport.endpoint_text(Some(&endpoint)),
+                    self.transport.endpoint_text(endpoint.as_ref()),
                     why,
                 ));
                 self.follow(at, then, last, redial_ms)

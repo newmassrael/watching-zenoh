@@ -26,7 +26,7 @@
 
 use wz_session_core::session_zid::SessionZid;
 
-use crate::faces::{DialEndpoint, FaceId, DIAL_LOOK_MS};
+use crate::faces::{FaceId, DIAL_LOOK_MS};
 
 /// Which face of the session it is: the one that dials the session's endpoints, kept for as long
 /// as the session is, or one taken besides (attached, or accepted on a port), which goes with its
@@ -40,7 +40,8 @@ pub enum FaceRole {
 }
 
 /// Where a face's link stands, without the link: what [`Link`](crate::faces::Link) is, less the
-/// wire and the dial the executor holds.
+/// wire and the dial the executor holds. The endpoint a dial reaches is not here: no decision
+/// reads it, and it stays with the dial, which hands it over when it is let go of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
     /// Established.
@@ -52,10 +53,8 @@ pub enum Phase {
         /// When the handshake is given up.
         deadline_us: u64,
     },
-    /// A dial of `endpoint` under way, given up at `deadline_us` as the handshake after it is.
+    /// A dial under way, given up at `deadline_us` as the handshake after it is.
     Dialing {
-        /// The endpoint dialled.
-        endpoint: DialEndpoint,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the dial is given up.
@@ -125,8 +124,6 @@ pub enum Turn {
     DialOver {
         /// Whether the dial made a link: `None` when it was not answered in time.
         made: Option<bool>,
-        /// The endpoint dialled.
-        endpoint: DialEndpoint,
         /// The endpoint the dial role dials next.
         next: usize,
         /// When the dial, and the handshake after it, are given up.
@@ -177,8 +174,6 @@ pub enum FaceEffect {
     /// The dial made a link: begin its handshake, given up at `deadline_us`; a dial role that
     /// fails it goes on from `next`.
     Handshake {
-        /// The endpoint the link reaches.
-        endpoint: DialEndpoint,
         /// The endpoint the dial role dials next.
         next: usize,
         /// When the handshake is given up.
@@ -186,8 +181,6 @@ pub enum FaceEffect {
     },
     /// The dial was refused or not answered in time; then `then`.
     DialFailed {
-        /// The endpoint dialled, which the refusal names.
-        endpoint: DialEndpoint,
         /// What follows.
         then: Next,
     },
@@ -241,16 +234,15 @@ impl FaceLife {
             Phase::Opening { next, deadline_us } if signals.ended || now_us >= *deadline_us => {
                 Turn::HandshakeOver { next: *next }
             }
-            Phase::Dialing {
-                endpoint,
-                next,
-                deadline_us,
-            } if signals.dial.is_some() || now_us >= *deadline_us => Turn::DialOver {
-                made: signals.dial,
-                endpoint: endpoint.clone(),
-                next: *next,
-                deadline_us: *deadline_us,
-            },
+            Phase::Dialing { next, deadline_us }
+                if signals.dial.is_some() || now_us >= *deadline_us =>
+            {
+                Turn::DialOver {
+                    made: signals.dial,
+                    next: *next,
+                    deadline_us: *deadline_us,
+                }
+            }
             Phase::Waiting { at_us } if now_us >= *at_us => Turn::Due,
             Phase::Held { .. } if !signals.node_held => Turn::Due,
             _ => Turn::Stays,
@@ -280,16 +272,10 @@ impl FaceLife {
             },
             Turn::DialOver {
                 made: Some(true),
-                endpoint,
                 next,
                 deadline_us,
-            } => FaceEffect::Handshake {
-                endpoint,
-                next,
-                deadline_us,
-            },
-            Turn::DialOver { endpoint, next, .. } => FaceEffect::DialFailed {
-                endpoint,
+            } => FaceEffect::Handshake { next, deadline_us },
+            Turn::DialOver { next, .. } => FaceEffect::DialFailed {
                 then: self.after_failure(next),
             },
             Turn::Due => FaceEffect::Dial { from: 0 },
@@ -347,7 +333,6 @@ mod tests {
 
     fn dialing() -> Phase {
         Phase::Dialing {
-            endpoint: DialEndpoint::Listed(1),
             next: 2,
             deadline_us: NOW + 10,
         }
@@ -395,7 +380,6 @@ mod tests {
                 dial(dialing()).turn(NOW, signals),
                 Turn::DialOver {
                     made,
-                    endpoint: DialEndpoint::Listed(1),
                     next: 2,
                     deadline_us: NOW + 10,
                 }
@@ -405,7 +389,6 @@ mod tests {
             dial(dialing()).turn(NOW + 10, Signals::default()),
             Turn::DialOver {
                 made: None,
-                endpoint: DialEndpoint::Listed(1),
                 next: 2,
                 deadline_us: NOW + 10,
             }
@@ -482,14 +465,12 @@ mod tests {
     fn a_dial_over_begins_a_handshake_or_fails() {
         let over = |made| Turn::DialOver {
             made,
-            endpoint: DialEndpoint::Listed(1),
             next: 2,
             deadline_us: NOW + 10,
         };
         assert_eq!(
             dial(dialing()).effect(over(Some(true)), true, None),
             FaceEffect::Handshake {
-                endpoint: DialEndpoint::Listed(1),
                 next: 2,
                 deadline_us: NOW + 10,
             }
@@ -498,16 +479,12 @@ mod tests {
             assert_eq!(
                 dial(dialing()).effect(over(made), true, None),
                 FaceEffect::DialFailed {
-                    endpoint: DialEndpoint::Listed(1),
                     then: Next::DialFrom { from: 2 },
                 }
             );
             assert_eq!(
                 taken(dialing()).effect(over(made), true, None),
-                FaceEffect::DialFailed {
-                    endpoint: DialEndpoint::Listed(1),
-                    then: Next::Remove,
-                }
+                FaceEffect::DialFailed { then: Next::Remove }
             );
         }
     }
@@ -576,7 +553,6 @@ mod tests {
         assert_eq!(Phase::Waiting { at_us: 7 }.wake_at(|| read(0)), Some(7));
         assert_eq!(opening().wake_at(|| read(0)), Some(NOW + 10));
         let dialing = Phase::Dialing {
-            endpoint: DialEndpoint::Listed(0),
             next: 1,
             deadline_us: 100_000,
         };
