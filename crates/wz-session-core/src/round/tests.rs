@@ -255,17 +255,10 @@ impl AnswersQueries<Kept> for Answers {
     }
 }
 
-/// A record of a round that keeps samples alone takes less room than one of a round that keeps
-/// every kind: a kind it keeps none of is a variant of no size.
-#[test]
-fn a_round_that_keeps_samples_alone_has_smaller_records() {
-    assert!(RoundRows::<Lean>::RECORD_BYTES < RoundRows::<Kept>::RECORD_BYTES);
-    assert_eq!(
-        RoundRows::<Lean>::CALLBACK_BYTES,
-        RoundRows::<Kept>::CALLBACK_BYTES,
-        "the calls are the same in both"
-    );
-}
+// A record of a round that keeps samples alone takes less room than one of a round that keeps
+// every kind: a kind it keeps none of is a variant of no size. The calls are the same in both.
+const _: () = assert!(RoundRows::<Lean>::RECORD_BYTES < RoundRows::<Kept>::RECORD_BYTES);
+const _: () = assert!(RoundRows::<Lean>::CALLBACK_BYTES == RoundRows::<Kept>::CALLBACK_BYTES);
 
 /// A token is held and handed where the round keeps tokens; where it keeps none it is refused,
 /// counted with the records that hold their sender, and its call ended.
