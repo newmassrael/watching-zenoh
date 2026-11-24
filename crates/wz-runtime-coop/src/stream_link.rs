@@ -859,7 +859,9 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                 // pop below or `drop_owed` gives it back, so nothing writes it.
                 Owed::Slot { slot, from, end } => unsafe { self.tx.held(*slot, *from, *end) },
                 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-                Owed::Bytes { bytes, from } => &bytes[*from..],
+                // `from` only moves by what a write took of the rest, so it never passes the end;
+                // one that did would owe nothing.
+                Owed::Bytes { bytes, from } => bytes.get(*from..).unwrap_or_default(),
             };
             let want = rest.len();
             let written = match self.socket.send_parts_now(&[rest]) {

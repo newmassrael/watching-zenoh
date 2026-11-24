@@ -944,7 +944,21 @@ const TX_CONDUITS: usize = Priority::NUM;
 const TX_CONDUITS: usize = 1;
 
 /// The entry of `rows`, one per conduit, that `priority` rides: its own under `transport-qos`,
-/// where the wire priority is the conduit, and the single one otherwise.
+/// where the wire priority is the conduit, and the single one otherwise. Gated as its readers
+/// (`TxConduits::sender_flag` and `TxConduits::conduit`) are.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+    feature = "transport-batching",
+))]
 fn conduit_row<T>(rows: &[T; TX_CONDUITS], priority: Priority) -> &T {
     #[cfg(feature = "transport-qos")]
     {
@@ -1140,18 +1154,24 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
     /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
     /// every priority collapses onto the single conduit.
+    // Its readers are the batching paths and the lend-only frame open (`open_frame_lent`).
     #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
         feature = "transport-batching",
+        all(
+            feature = "tx-lend-only",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        )
     ))]
     const fn conduit_index(priority: Priority) -> usize {
         #[cfg(feature = "transport-qos")]
@@ -11635,7 +11655,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         let stage = &mut batch.stage;
                         // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
                         // begin_frame may append (symmetric with encode_frame_envelope).
-                        stage.buf.reserve(1 + 10 + 2 + worst_case_payload);
+                        stage
+                            .buf
+                            .reserve(worst_case_payload.saturating_add(1 + 10 + 2));
                         begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos)
                             .expect("a Vec grows, so its sink is infallible");
                         encode_into(&mut stage.buf);
@@ -11704,7 +11726,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         let wpos = stage.buf.len();
                         encode_into(&mut stage.buf);
                         if stage.buf.len() <= mtu {
-                            stage.count += 1;
+                            // One more message than the frame held, which holds at most a batch.
+                            stage.count = stage.count.saturating_add(1);
                             return Ok(UnicastPush::Pushed);
                         }
                         // Overflow: roll the partial encode back, flush this
