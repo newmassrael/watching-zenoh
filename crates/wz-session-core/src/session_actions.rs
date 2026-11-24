@@ -18542,6 +18542,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 
     /// The four `set_close_reason_*` actions: stage the reason the link's
     /// Close frame will carry, where `send_close_frame_with_reason` reads it.
+    // Out of line: each of the actions inlined it whole.
+    #[inline(never)]
     fn stage_close_reason(&self, reason: CloseReason) {
         self.inner
             .note_action(|t| t.set_close_reason_count = t.set_close_reason_count.saturating_add(1));
