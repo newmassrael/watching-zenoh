@@ -983,13 +983,10 @@ mod tests {
     use super::*;
     // .wire() + Push::decode are named only by the two `_with_meta` round-trip
     // tests, which both construct every metadata field, so they gate on the
-    // full metadata feature set; vec! (timestamp tests' zid literal) gates on
-    // pubsub-timestamp.
+    // full metadata feature set.
     use crate::frame_encode::encode_frame_with_push;
     use crate::inbound::{parse_inbound, InboundFrame};
     use crate::network_message::{parse_frame_payload, NetworkMessage};
-    #[cfg(feature = "pubsub-timestamp")]
-    use alloc::vec;
     #[cfg(all(
         feature = "pubsub-attachment",
         feature = "pubsub-timestamp",
