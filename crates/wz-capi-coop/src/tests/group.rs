@@ -485,7 +485,7 @@ mod asked {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{
-        HeldQuery, QueryCallback, QueryHolder, Refusal, ReplyCallback, SessionDrive, SessionEngine,
+        HeldQuery, QueryHolder, QueryableSink, Refusal, ReplyCallback, SessionDrive, SessionEngine,
         WireKey,
     };
     use wz_session_core::locality::Locality;
@@ -548,12 +548,14 @@ mod asked {
                 false,
                 Locality::Remote,
                 None,
-                Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-                    Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         out.reply_keyed(query.keyexpr(), payload)
                             .expect("a reply on the query's own key");
-                    }) as QueryCallback
-                }),
+                    },
+                ),
             )
             .expect("the engine has queryables in this build");
     }
@@ -620,12 +622,13 @@ mod asked {
                 false,
                 Locality::Remote,
                 None,
-                Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                    let slot = Arc::clone(&slot);
-                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          _out: &mut dyn ReplyOut,
+                          holder: &dyn QueryHolder| {
                         *slot.lock().unwrap() = Some(holder.hold_query(query));
-                    }) as QueryCallback
-                }),
+                    },
+                ),
             )
             .expect("the engine has queryables in this build");
         until_members_know_each_other(&first, &second);

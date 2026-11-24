@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Each callback the program hands a declaration is let go of exactly once: when the declaration is
-//! undeclared, when the session closes, or, for a declaration refused, with the refusal itself and
-//! never minted. An undeclaration after the close lets go of nothing more.
+//! undeclared, when the session closes, or, for a declaration refused, with the refusal itself. An
+//! undeclaration after the close lets go of nothing more.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,27 +27,18 @@ impl Drop for Dropped {
     }
 }
 
-/// What became of the callbacks one test handed out: how many a factory minted (the plane whose
-/// sink is a factory: queryables), and how many callbacks were let go of.
+/// What became of the callbacks one test handed out: how many were let go of.
 #[derive(Default)]
 struct Counts {
-    #[cfg(feature = "queryable")]
-    minted: Arc<AtomicUsize>,
     callbacks_dropped: Arc<AtomicUsize>,
 }
 
 impl Counts {
-    #[cfg(feature = "queryable")]
-    fn minted(&self) -> usize {
-        self.minted.load(Ordering::SeqCst)
-    }
-
     fn callbacks_dropped(&self) -> usize {
         self.callbacks_dropped.load(Ordering::SeqCst)
     }
 
-    /// A subscriber's callback, which counts its drop: a subscriber is handed its one callback
-    /// whole, so nothing is minted.
+    /// A subscriber's callback, which counts its drop.
     fn subscriber_sink(&self) -> SubscriberSink {
         let guard = Dropped(self.callbacks_dropped.clone());
         SubscriberSink::shared(move |_sample: &dyn SampleView| {
@@ -248,26 +239,23 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
 }
 
 /// A queryable's callback is let go of once on its undeclaration, once at the close, and a
-/// refused one mints none.
+/// refused one's at once.
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryables_callback_is_dropped_once_on_each_end() {
-    use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+    use wz_capi_port::{QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let sink = |counts: &Counts| -> QueryableSink {
-        let minted = counts.minted.clone();
-        let dropped = counts.callbacks_dropped.clone();
-        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            minted.fetch_add(1, Ordering::SeqCst);
-            let guard = Dropped(dropped.clone());
-            Box::new(move |_query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+        let guard = Dropped(counts.callbacks_dropped.clone());
+        QueryableSink::shared(
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                 let _held = &guard;
-            }) as QueryCallback
-        })
+            },
+        )
     };
     let declare = |key: &str, counts: &Counts| {
         engine.declare_queryable_on_wire(
@@ -289,7 +277,11 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
     declare("demo/drop/q2", &held).expect("the row given back");
     let refused = Counts::default();
     assert_eq!(declare("demo/drop/q3", &refused), Err(Refusal::TableFull));
-    assert_eq!(refused.minted(), 0, "no callback for a refusal");
+    assert_eq!(
+        refused.callbacks_dropped(),
+        1,
+        "a refusal lets its callback go at once"
+    );
 
     SessionDrive::close(&*engine);
     assert_eq!(held.callbacks_dropped(), 1);
@@ -309,7 +301,7 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
 #[test]
 fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
     use std::sync::Mutex;
-    use wz_capi_port::{QblId, QueryCallback, QueryHolder, QueryableSink};
+    use wz_capi_port::{QblId, QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
     let router = Router::start(CatchAll::None);
@@ -324,10 +316,9 @@ fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
             counts.callbacks_dropped.clone(),
         );
         let undeclaring = engine.clone();
-        Arc::new(move |_holder: Arc<dyn QueryHolder>| {
-            let (ids, called, undeclaring) = (ids.clone(), called.clone(), undeclaring.clone());
-            let guard = Dropped(dropped.clone());
-            Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+        let guard = Dropped(dropped);
+        QueryableSink::shared(
+            move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                 let _held = &guard;
                 called.fetch_add(1, Ordering::SeqCst);
                 let both = ids.lock().unwrap().take();
@@ -336,8 +327,8 @@ fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
                 }
                 out.reply_keyed(query.keyexpr(), b"one")
                     .expect("a reply on the query's own key");
-            }) as QueryCallback
-        })
+            },
+        )
     };
     let declare = |me: usize| {
         engine

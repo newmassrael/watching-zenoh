@@ -842,10 +842,11 @@ impl SharedSession {
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
-        // The registry mints a callback per face with the face's own session; the port's
-        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
+        // The registry mints a callback per face with the face's own session; each calls the one
+        // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
+        let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
             wire,
@@ -854,10 +855,17 @@ impl SharedSession {
             links,
             retraction,
             Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
-                sink(Arc::new(FaceHolder {
+                let holder = FaceHolder {
                     face: face.clone(),
                     closed: closed.clone(),
-                }))
+                };
+                let sink = Arc::clone(&sink);
+                Box::new(
+                    move |query: &dyn wz_session_core::query_sink::QueryView,
+                          out: &mut dyn wz_session_core::query_sink::ReplyOut| {
+                        sink.call(query, out, &holder);
+                    },
+                ) as Box<_>
             }),
         )
     }

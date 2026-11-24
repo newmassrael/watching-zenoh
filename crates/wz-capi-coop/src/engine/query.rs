@@ -49,7 +49,7 @@ use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, WireKey};
+use wz_capi_port::{HeldQuery, QblId, QueryHolder, QueryableSink, WireKey};
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -86,22 +86,27 @@ pub(crate) struct QueryableRow {
     /// session held. A build without groups reads none of it and holds it for that alone.
     #[cfg_attr(not(feature = "group"), allow(dead_code))]
     wire: WireKey,
-    /// The program's callback, minted once the tables took the row ([`Self::mint`]), so a refused
-    /// declaration mints none. Called where the row lies, one call at a time, as it is `FnMut`.
-    call: Mutex<Option<QueryCallback>>,
+    /// The program's callback, called where the row lies through a shared borrow, with the holder
+    /// of the face each query came in on; a refused declaration lets it go with the row.
+    sink: QueryableSink,
     /// How many calls of the callback are owed, and whether the queryable was undeclared.
     latch: CallLatch,
 }
 
 impl QueryableRow {
-    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it, its
-    /// callback not minted yet.
-    pub(super) fn new(id: QblId, retraction: Option<RetractionKey>, wire: WireKey) -> Self {
+    /// Queryable `id`, retracted as `retraction` names it, on `wire` as the ABI named it,
+    /// answering through `sink`.
+    pub(super) fn new(
+        id: QblId,
+        retraction: Option<RetractionKey>,
+        wire: WireKey,
+        sink: QueryableSink,
+    ) -> Self {
         Self {
             id,
             retraction,
             wire,
-            call: Mutex::new(None),
+            sink,
             latch: CallLatch::new(),
         }
     }
@@ -117,21 +122,14 @@ impl QueryableRow {
         &self.wire
     }
 
-    /// Hold `call`, the callback the program's sink minted for this row once the tables took it.
-    pub(super) fn mint(&self, call: QueryCallback) {
-        *lock(&self.call) = Some(call);
-    }
-
-    /// Hand `query` to the callback, its replies made through `responder`, unless the queryable
-    /// was undeclared since the call was begun: the one place a query is handed to a queryable's
-    /// callback.
-    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
+    /// Hand `query` to the callback, its replies made through `responder` and its holds taken
+    /// through `holder`, unless the queryable was undeclared since the call was begun: the one
+    /// place a query is handed to a queryable's callback.
+    fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut, holder: &dyn QueryHolder) {
         if self.latch.retired() {
             return;
         }
-        if let Some(call) = lock(&self.call).as_mut() {
-            call(query, responder);
-        }
+        self.sink.call(query, responder, holder);
     }
 
     /// Declare this queryable, on `key`, answering for the whole of it when `complete`, over
@@ -200,7 +198,7 @@ pub(super) struct QueryableCall {
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
 // no one writes after the declaration (its id) and what is made for threads: its latch, and its
-// callback behind its mutex, a callback that is `Send`. The row lies in the session's arena, which
+// callback, which is `Send + Sync` and called through a shared borrow. The row lies in the session's arena, which
 // the tables never move a row in, until its last call ended.
 unsafe impl Send for QueryableCall {}
 
@@ -225,9 +223,15 @@ impl QueryableCall {
         self.row().latch.retired()
     }
 
-    /// Hand `query` to the queryable's callback, its replies made through `responder`.
-    pub(super) fn ask(&self, query: &dyn QueryView, responder: &mut dyn ReplyOut) {
-        self.row().ask(query, responder);
+    /// Hand `query` to the queryable's callback, its replies made through `responder` and its
+    /// holds taken through `holder`.
+    pub(super) fn ask(
+        &self,
+        query: &dyn QueryView,
+        responder: &mut dyn ReplyOut,
+        holder: &dyn QueryHolder,
+    ) {
+        self.row().ask(query, responder, holder);
     }
 
     /// End the call: the handle of its row when it was the last call of an undeclared queryable,

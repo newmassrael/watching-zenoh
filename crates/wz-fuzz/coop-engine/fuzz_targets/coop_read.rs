@@ -26,13 +26,12 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
 use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
 use wz_capi_coop::{CoopConfig, CoopEngine};
 use wz_capi_port::{
-    QueryCallback, QueryHolder, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+    QueryHolder, QueryableSink, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_fuzz_ingress_common::{
     advance_ms, handshake_replies, now_us, reset_clock, units, CountingAlloc, Window, BATCH,
@@ -199,9 +198,9 @@ fuzz_target!(|data: &[u8]| {
         false,
         Locality::Any,
         None,
-        Arc::new(|_holder: Arc<dyn QueryHolder>| {
-            Box::new(|_query: &dyn QueryView, _out: &mut dyn ReplyOut| {}) as QueryCallback
-        }),
+        QueryableSink::shared(
+            |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {},
+        ),
     );
 
     let window = Window::open();

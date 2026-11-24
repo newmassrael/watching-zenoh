@@ -40,7 +40,7 @@ use super::*;
 use crate::drive::{FaceDrive, NodeRole};
 use crate::faces::no_shm_clients;
 use crate::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
-use wz_capi_port::PeerLists;
+use wz_capi_port::{PeerLists, QueryHolder};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -230,14 +230,13 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
             false,
             Locality::Any,
             None,
-            Arc::new(move |_holder| {
-                let counted = Arc::clone(&counted);
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            QueryableSink::shared(
+                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
                     counted.fetch_add(1, Ordering::SeqCst);
                     out.reply_keyed(query.keyexpr(), b"from the router")
                         .expect("a reply on the query's own key");
-                })
-            }),
+                },
+            ),
         )
         .expect("a node has queryables");
 
@@ -312,7 +311,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         .next_entity_id
         .store(u64::from(u32::MAX), Ordering::Relaxed);
     let answer = || -> QueryableSink {
-        Arc::new(|_holder| Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}))
+        QueryableSink::shared(|_: &dyn QueryView, _: &mut dyn ReplyOut, _: &dyn QueryHolder| {})
     };
     let queryables = |key: &str| {
         engine.matching_status(
@@ -1044,9 +1043,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let sink = Arc::clone(&sink);
-                    Box::new(move |query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |query: &dyn QueryView,
+                          _out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let shared = query
                             .payload_shared()
                             .and_then(|bytes| bytes.shm_chunk())
@@ -1054,8 +1054,8 @@ mod shared_memory {
                         sink.lock()
                             .unwrap()
                             .push((query.payload().unwrap_or_default().to_vec(), shared));
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
         (got, id)
@@ -1214,9 +1214,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1224,8 +1225,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a session has queryables");
 
@@ -1315,9 +1316,10 @@ mod shared_memory {
                 false,
                 Locality::Any,
                 None,
-                Arc::new(move |_holder| {
-                    let replied = Arc::clone(&replied);
-                    Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                QueryableSink::shared(
+                    move |_query: &dyn QueryView,
+                          out: &mut dyn ReplyOut,
+                          _holder: &dyn QueryHolder| {
                         let handle = replied.send_handle();
                         let _ = out.reply_keyed_meta(
                             ASKED,
@@ -1325,8 +1327,8 @@ mod shared_memory {
                             wz_session_core::query_sink::ReplyMeta::new()
                                 .with_shared(Some(&handle)),
                         );
-                    })
-                }),
+                    },
+                ),
             )
             .expect("a node has queryables");
 

@@ -23,7 +23,7 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use wz_capi_port::{QueryHolder, QueryRowSink, Ticker, WireKey};
+use wz_capi_port::{QueryHolder, QueryableSink, Ticker, WireKey};
 use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
@@ -165,7 +165,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // One handler for the queryable, kept in its row: it needs no face's session, as a reply
         // goes out on the query's own.
         let answer = store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64);
-        let sink = QueryRowSink::shared(
+        let sink = QueryableSink::shared(
             move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answer(query, out)
             },

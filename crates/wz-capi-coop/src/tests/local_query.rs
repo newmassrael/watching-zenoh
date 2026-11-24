@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, QblId, QueryCallback, QueryHolder, Refusal, ReplyCallback,
+    FilterPlane, HeldQuery, QblId, QueryHolder, QueryableSink, Refusal, ReplyCallback,
     SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -40,9 +40,8 @@ fn declare(
     engine: &Engine,
     keyexpr: &str,
     origin: Locality,
-    answer: impl Fn(&Arc<dyn QueryHolder>, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
+    answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
 ) -> QblId {
-    let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -50,12 +49,7 @@ fn declare(
             false,
             origin,
             None,
-            Arc::new(move |holder: Arc<dyn QueryHolder>| {
-                let answer = answer.clone();
-                Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    answer(&holder, query, out)
-                }) as QueryCallback
-            }),
+            QueryableSink::shared(move |query, out, holder| answer(holder, query, out)),
         )
         .expect("the engine has queryables in this build")
 }
