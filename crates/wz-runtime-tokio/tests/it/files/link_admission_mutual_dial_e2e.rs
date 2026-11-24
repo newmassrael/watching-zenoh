@@ -45,7 +45,8 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::link_admission::LinkAdmission;
+use wz_session_core::limits::SessionLimits;
+use wz_session_core::link_admission::{admitted_links, LinkAdmission};
 use wz_session_core::policy::SessionPolicy;
 
 /// Rounds, alternating which node has the lower zid.
@@ -71,6 +72,7 @@ impl AdmittingNode {
             links: Arc::new(LinkRegistry::with_order(
                 zid,
                 SessionPolicy::defaults().link_tie_order(),
+                admitted_links(&SessionLimits::BUILD),
             )),
         }
     }

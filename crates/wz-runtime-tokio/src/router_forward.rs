@@ -4957,6 +4957,16 @@ impl RouterForwarder {
     /// are staged under the bounds it states. A forwarder not handed one holds the build's.
     pub fn with_limits(mut self, limits: &wz_session_core::limits::SessionLimits) -> Self {
         self.limits = *limits;
+        // The admission reserves a row for each link the limits let the node hold, so it is made
+        // again for them; a builder runs before any link has asked it.
+        #[cfg(feature = "routing-accept")]
+        {
+            self.links = Arc::new(crate::link_registry::LinkRegistry::with_order(
+                self.own_zid.as_slice(),
+                self.policy.link_tie_order(),
+                wz_session_core::link_admission::admitted_links(limits),
+            ));
+        }
         self
     }
 
@@ -5304,6 +5314,9 @@ impl RouterForwarder {
             links: Arc::new(crate::link_registry::LinkRegistry::with_order(
                 self_zid.as_slice(),
                 policy.link_tie_order(),
+                wz_session_core::link_admission::admitted_links(
+                    &wz_session_core::limits::SessionLimits::BUILD,
+                ),
             )),
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never

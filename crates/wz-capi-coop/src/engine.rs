@@ -3894,9 +3894,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
                 #[cfg(feature = "listen")]
+                // A row for each link the plan holds buffers for, reserved here: a link the
+                // session takes after its open is admitted in place.
                 admission: Arc::new(LinkRegistry::<CoopRuntime<C>>::with_order(
                     &wire,
                     policy.link_tie_order(),
+                    plan.links(),
                 )),
                 wire_zid: wire,
                 gate_cells: lent.cells.gate,
@@ -4105,6 +4108,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "connectivity"))]
     pub(crate) fn face_plane(&self) -> &FacePlane {
         &self.faces
+    }
+
+    /// The session's say on a second link to a node, the one its links' handshakes ask, for a
+    /// test that asks it as they do.
+    #[cfg(all(test, feature = "listen"))]
+    pub(crate) fn link_admission(&self) -> Arc<dyn wz_session_core::link_admission::LinkAdmission> {
+        Arc::clone(&self.core.lock().0.transport.admission)
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
