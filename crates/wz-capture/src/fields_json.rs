@@ -12016,9 +12016,11 @@ mod tests {
 
     /// Revision 81 — A PACKET'S COMMENTS ARE ON THE ROWS IT HOLDS THE FIRST
     /// BYTE OF, every one in its block's order, a value that is not UTF-8
-    /// carried replaced and marked. A packet with none says `[]`, and a packet
-    /// the document could not re-read says `null`: not known, which is not
-    /// "none".
+    /// carried replaced and marked. A packet with none says `[]`. A datagram
+    /// row whose packet the document cannot re-read is not written at all (it
+    /// is named under `disagreements`), so it carries no comments to get wrong;
+    /// the stream row whose bytes were discarded, which does say `null`, is the
+    /// C ABI's row-change test's.
     #[test]
     fn a_packets_comments_reach_the_rows_it_holds_the_first_byte_of() {
         use crate::datagram_tests::{init_datagram, udp_packet};
@@ -12059,11 +12061,16 @@ mod tests {
         assert_eq!(doc.matches("\"packet_comments\":[]").count(), 1, "{doc}");
 
         // The same two rows against a container holding only the first packet:
-        // the second row's packet is not in hand.
+        // the commented row still carries its comments, and the other is named
+        // rather than written.
         let first_only = write_with_options(ByteOrder::Little, &ifaces, &[commented]);
         let doc = fields_json(&d, &first_only, None, None);
         assert_eq!(doc.matches(marked).count(), 1, "{doc}");
-        assert_eq!(doc.matches("\"packet_comments\":null").count(), 1, "{doc}");
+        assert_eq!(doc.matches("\"packet_comments\"").count(), 1, "{doc}");
+        assert!(
+            doc.contains("\"named\":[{\"at\":1,\"why\":\"absent\"}]"),
+            "{doc}"
+        );
 
         // A classic pcap has no options: every row says none.
         let classic = crate::pcap::write(

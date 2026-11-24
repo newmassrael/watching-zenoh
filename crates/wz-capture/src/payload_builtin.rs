@@ -959,6 +959,12 @@ mod tests {
             &[0x12, 0x02, 0x08, 0x07],
             "a length-delimited field holding a message -- the `2.1` form",
         ),
+        (
+            "text",
+            br"a.b\c",
+            "text holding a separator and an escape, which name no path: the one \
+             row is the root",
+        ),
     ];
 
     /// Split a path on the separators that are SEPARATORS, honouring the one

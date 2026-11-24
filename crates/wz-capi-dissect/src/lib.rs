@@ -21288,6 +21288,10 @@ mod tests {
                     "/payload_decode/matched_rule",
                     "/payload_decode/state",
                     "/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/payload_decode/chosen_by",
+                    "/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21411,6 +21415,10 @@ mod tests {
                     "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/state",
                     "/above_transport/carried[]/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/above_transport/carried[]/payload_decode/chosen_by",
+                    "/above_transport/carried[]/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21434,6 +21442,10 @@ mod tests {
                     "/payload_decode/matched_rule",
                     "/payload_decode/state",
                     "/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/payload_decode/chosen_by",
+                    "/payload_decode/encoding_schema",
                 ]),
             ),
             (
@@ -21455,6 +21467,10 @@ mod tests {
                     "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/state",
                     "/above_transport/carried[]/payload_decode/why",
+                    // Revision 82 -- a refusal names how its format was chosen and the
+                    // encoding's schema, so they arrive with it.
+                    "/above_transport/carried[]/payload_decode/chosen_by",
+                    "/above_transport/carried[]/payload_decode/encoding_schema",
                 ]),
             ),
             (
