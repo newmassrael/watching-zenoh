@@ -18642,13 +18642,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// a window to where the snapshot holds another.
     #[cfg(feature = "alloc")]
     pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
+        self.watch_deadline(self.link.stamps().established_at, window_ms)
+    }
+
+    /// [`Self::declaration_watch_deadline`] of a link established at `established`, for a reader
+    /// that holds the link's stamps already: the lease reads them once for both its deadlines.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn declaration_watch_deadline_after(&self, established: Option<u64>) -> Option<u64> {
+        self.watch_deadline(
+            established,
+            self.params.limits.declaration_sync_rx_no_progress_ms() as u64,
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn watch_deadline(&self, established: Option<u64>, window_ms: u64) -> Option<u64> {
         let progress = self
             .peer_declaration_progress_ms
             .load(core::sync::atomic::Ordering::Acquire);
         if progress == u64::MAX {
             return None;
         }
-        let established = self.link.stamps().established_at?;
+        let established = established?;
         crate::declaration_sync::stall_deadline(
             self.params.policy.reliable_gap_reconnect(),
             self.peer_declarations_settled(),
