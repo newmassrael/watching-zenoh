@@ -148,6 +148,10 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # gives a program the node clock's time whatever its standing, and the clock-quality-stamping
 # policy holds back only the data the node stamps. No symbol moved.
 #
+# Revision 21 is such a bump too: the reading a program's resource source writes
+# (`wz_capi_c_resource_reading_t`) starts with `struct_size`, which the library sets
+# before calling the source. No symbol moved.
+#
 # Each door maps to the revision that first exported it, so a consumer reads here
 # what its pinned revision can call (`--history` prints the table by revision)
 # and a finding names the revision of the door it is about. The numbers were
@@ -159,7 +163,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # revision that commit introduced with the revision door. A new door is pinned at
 # the revision its own commit moves `EXPECTED_REVISION` to, which `pin_findings`
 # holds.
-EXPECTED_REVISION = 20
+EXPECTED_REVISION = 21
 EXPECTED_SYMBOLS: dict[str, int] = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version": 1,

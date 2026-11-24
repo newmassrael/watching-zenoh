@@ -39,10 +39,14 @@ use core::ffi::{c_char, c_void};
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::session_zid::ZID_MAX;
 
-use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
-use crate::prelude::Box;
+use crate::ffi::{catch, guarded, CClosure, InCallback};
+use crate::object_slot::{
+    closures_of, count_in_entity, kept_at, retire_entity, Answering, Kind, Slot,
+};
 use crate::refusal::{refusal_code, Door};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
+};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 
 /// The peer declared an entity.
@@ -103,22 +107,30 @@ pub struct wz_ext_owned_decl_watch_t {
     pub _val: *mut c_void,
 }
 
-/// The program's callback, its context and its drop, shared by every link's listener of one watch.
+/// The program's callback, its context and its drop, kept in the watch's place ([`WatchPlace`])
+/// and called there by the raw callback the engine holds ([`watch_sink_at`]). The engine calls it
+/// where the session dispatches what its links receive, and lets it go after its last call, which
+/// runs the program's `drop(context)` once.
 type WatchClosure = CClosure<Option<wz_ext_decl_watch_fn>>;
 
-// SAFETY: the callback is reached only through the watch's sink, which the engine calls from where
-// the session dispatches what its links receive, the same place a subscriber's samples are handed
-// over (`crate::pubsub`'s `CClosure` states it), and `drop` runs only when the last reference goes,
-// which a running call holds. The context is the program's, which it hands over for exactly that.
-unsafe impl Sync for WatchClosure {}
-
-/// Behind a [`wz_ext_owned_decl_watch_t`]: the engine the watch is declared on, its id there, and
-/// the latch that opens once the program's `drop(context)` has run.
-struct WatchState {
+/// Behind a [`wz_ext_owned_decl_watch_t`]: the engine the watch is declared on and its id there,
+/// which the watch's drop retracts. It lies in the watch's place, a place of the session's own for
+/// the kind (`crate::object_slot::Kind::DeclWatch`).
+pub(crate) struct WatchState {
     engine: Arc<Engine>,
     id: DeclWatchId,
-    released: Arc<ReleaseLatch>,
 }
+
+/// What a watch's place keeps past its handle, for the callback the engine holds: the program's
+/// closure, which the engine's release takes out, and the entity code each event is told with.
+pub(crate) struct WatchKept {
+    closure: WatchClosure,
+    entity: u8,
+}
+
+/// A declaration watch's place: its handle's state, and what the engine's callback reads past it;
+/// the last of the handle and the closure gives the place back (`crate::object_slot::Answering`).
+pub(crate) type WatchPlace = Answering<WatchState, WatchKept>;
 
 /// The plane an entity code names, or `None` for a code that is none of the three.
 fn plane_of(entity: u8) -> Option<DeclPlane> {
@@ -181,7 +193,8 @@ fn tell(closure: &WatchClosure, entity: u8, event: &DeclWatchEvent<'_>) {
 /// `call` or session; `Z_ERR_INVALID` for an `entity` that is none of the three;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `WZ_EXT_ERR_UNSUPPORTED` when the session's engine
 /// does not watch, or this build hears no declaration of that kind; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
-/// when the session holds as many observers of what a peer declares as its bound allows.
+/// when the session holds as many watches as its `MAX_DECL_WATCHES` admits, or as many observers
+/// of what a peer declares as its bound allows.
 ///
 /// # Safety
 /// `session` is a loaned session of this library or null; `watch` is writable or null; `call` and
@@ -199,7 +212,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
     guarded(|| {
         // From here the closure owns `drop(context)`: every return below that does not hand it to
         // the engine releases it, which runs the program's drop.
-        let closure = Arc::new(WatchClosure::new(context, call, drop));
+        let closure = WatchClosure::uncounted(context, call, drop);
         if watch.is_null() {
             return Z_ERR_NULL;
         }
@@ -217,20 +230,38 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
             return Z_ERR_SESSION_CLOSED;
         }
         let engine = engine_of(handle);
-        let released = closure.release_latch();
-        let sink: DeclWatchSink =
-            Arc::new(move |event: DeclWatchEvent<'_>| tell(&closure, entity, &event));
-        match wz_capi_port::SessionEngine::declare_decl_watch(Arc::as_ref(&engine), plane, sink) {
+        let Some(place) = Slot::<WatchPlace>::take_entity(&engine, Kind::DeclWatch) else {
+            return Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
+        let object = place
+            .fill(Answering::keeping(
+                WatchState {
+                    engine: Arc::clone(&engine),
+                    id: 0,
+                },
+                WatchKept { closure, entity },
+            ))
+            .cast::<WatchState>();
+        // The closure lies in the place now, counted there before the engine can call it or let
+        // it go.
+        let kept = kept_at::<WatchState, WatchKept>(object);
+        count_in_entity::<WatchState, WatchKept, _>(object, &mut (*kept).closure);
+        match wz_capi_port::SessionEngine::declare_decl_watch(
+            Arc::as_ref(&engine),
+            plane,
+            watch_sink_at(object),
+        ) {
             Ok(id) => {
-                let state = Box::new(WatchState {
-                    engine,
-                    id,
-                    released,
-                });
-                (*watch)._val = Box::into_raw(state).cast::<c_void>();
+                (*object).id = id;
+                (*watch)._val = object.cast::<c_void>();
                 Z_OK
             }
-            Err(refusal) => refusal_code(refusal, Door::DeclWatch),
+            Err(refusal) => {
+                // The refusal let go of the callback, and so of the closure; the place goes back
+                // with the state.
+                retire_entity::<WatchState, WatchKept>(object);
+                refusal_code(refusal, Door::DeclWatch)
+            }
         }
     })
 }
@@ -252,15 +283,51 @@ pub unsafe extern "C" fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_wa
         if val.is_null() {
             return Z_OK;
         }
-        // SAFETY: a non-null `_val` is the box `wz_ext_decl_watch_declare` wrote, taken once: the
+        // A non-null `_val` is the object `wz_ext_decl_watch_declare` placed, let go of once: the
         // slot is null from the line above.
-        let state = Box::from_raw(val.cast::<WatchState>());
-        wz_capi_port::SessionEngine::undeclare_decl_watch(Arc::as_ref(&state.engine), state.id);
-        let released = Arc::clone(&state.released);
-        core::mem::drop(state);
-        released.wait();
+        let object = val.cast::<WatchState>();
+        wz_capi_port::SessionEngine::undeclare_decl_watch(
+            Arc::as_ref(&(*object).engine),
+            (*object).id,
+        );
+        closures_of::<WatchState, WatchKept>(object).wait_none();
+        retire_entity::<WatchState, WatchKept>(object);
         Z_OK
     });
+}
+
+/// The callback the engine holds for the watch whose state is at `object`: a raw one whose
+/// context is the place, telling each event to the closure kept there through a shared borrow, and
+/// whose release takes the closure out and drops it once, after the last call: its C
+/// `drop(context)` runs, and the place goes back if the handle let go of it first. Nothing is
+/// allocated.
+///
+/// # Safety
+/// `object` is the object of a live place filled for an `Answering<T, WatchKept>` whose closure
+/// is counted in it and taken out by nothing but the callback made here.
+unsafe fn watch_sink_at<T>(object: *mut T) -> DeclWatchSink {
+    /// # Safety
+    /// `context` is the object of a place whose closure the release has not taken out.
+    unsafe fn call<T>(context: *mut c_void, event: &DeclWatchEvent<'_>) {
+        // SAFETY: the caller's: what is kept stands in the place and is only read here.
+        let kept = unsafe { &*kept_at::<T, WatchKept>(context.cast::<T>()) };
+        tell(&kept.closure, kept.entity, event);
+    }
+    /// # Safety
+    /// As `call`'s, and nothing calls either again.
+    unsafe fn release<T>(context: *mut c_void) {
+        // SAFETY: the caller's: the closure is taken out once, here, and dropped out of the place,
+        // as its drop may give the place back.
+        let closure = unsafe {
+            core::ptr::read(core::ptr::addr_of!(
+                (*kept_at::<T, WatchKept>(context.cast::<T>())).closure
+            ))
+        };
+        drop(closure);
+    }
+    // SAFETY: `call` borrows what the place keeps, which stands until `release` takes the closure
+    // out once, after the last call, as the closure is counted in the place.
+    unsafe { DeclWatchSink::raw(call::<T>, object.cast::<c_void>(), Some(release::<T>)) }
 }
 
 #[cfg(test)]
@@ -352,6 +419,133 @@ mod tests {
             not_a_zid.zid_len, 0,
             "bytes that are no zenoh id name no peer"
         );
+    }
+
+    /// The engine's callback tells each event to the C closure kept in the watch's place, with the
+    /// program's context and the watch's entity code, and letting it go takes the closure out and
+    /// runs the C drop once. Turned red by a callback that tells nothing, one that tells the wrong
+    /// entity, or one whose release is not the closure's drop.
+    #[test]
+    fn a_watchs_callback_tells_the_c_closure_and_drops_it_once() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn on_event(ctx: *mut c_void, event: *const wz_ext_decl_event_t) {
+            if ctx as usize == 0x5a
+                && (*event).entity == WZ_EXT_DECL_QUERYABLE
+                && (*event).kind == WZ_EXT_DECL_UNDECLARED
+                && (*event).id == 3
+            {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        unsafe extern "C" fn on_drop(ctx: *mut c_void) {
+            if ctx as usize == 0x5a {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let mut place = Answering::keeping(
+            0_u8,
+            WatchKept {
+                closure: WatchClosure::uncounted(
+                    0x5a as *mut c_void,
+                    Some(on_event),
+                    Some(on_drop),
+                ),
+                entity: WZ_EXT_DECL_QUERYABLE,
+            },
+        );
+        // SAFETY: `place` holds an `Answering<u8, WatchKept>` that outlives the callback, whose
+        // closure only the callback takes out.
+        let sink = unsafe { watch_sink_at(core::ptr::from_mut(&mut place).cast::<u8>()) };
+        sink.call(DeclWatchEvent::Undeclared { id: 3, peer: None });
+        sink.call(DeclWatchEvent::Undeclared { id: 3, peer: None });
+        assert_eq!(SEEN.load(Ordering::SeqCst), 2);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(sink);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
+    }
+
+    /// A watch holds a place of its session's for the kind from its declare to its drop, and a
+    /// declare that finds every place held is refused with nothing declared and the program's
+    /// drop run once. Turned red by a watch that takes no place (one past the session's limit
+    /// admitted), or one whose drop does not give it back.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_watch_holds_a_place_of_its_session_until_it_is_dropped() {
+        use crate::session::{
+            listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+        };
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn on_event(_: *mut c_void, _: *const wz_ext_decl_event_t) {}
+        unsafe extern "C" fn on_drop(_: *mut c_void) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
+        let engine = engine_of(handle);
+        // How many watch places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<Engine>| {
+            let claimed: alloc::vec::Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::DeclWatch)).collect();
+            claimed.len()
+        };
+        let places = free(&engine);
+        assert!(places >= 1, "the session's limit admits a watch");
+        let declare = |watch: &mut wz_ext_owned_decl_watch_t| {
+            // SAFETY: a live session, a local watch and functions that touch no context.
+            unsafe {
+                wz_ext_decl_watch_declare(
+                    loaned,
+                    watch,
+                    WZ_EXT_DECL_SUBSCRIBER,
+                    Some(on_event),
+                    Some(on_drop),
+                    core::ptr::null_mut(),
+                )
+            }
+        };
+
+        let mut watch = wz_ext_owned_decl_watch_t {
+            _val: core::ptr::null_mut(),
+        };
+        assert_eq!(declare(&mut watch), Z_OK);
+        assert_eq!(free(&engine), places - 1, "the watch holds one place");
+
+        // Every place held, the next declare is refused and lets go of the program's context.
+        let held: alloc::vec::Vec<Slot<u64>> =
+            core::iter::from_fn(|| Slot::<u64>::take_entity(&engine, Kind::DeclWatch)).collect();
+        let mut refused = wz_ext_owned_decl_watch_t {
+            _val: core::ptr::null_mut(),
+        };
+        assert_eq!(declare(&mut refused), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(refused._val.is_null());
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the refused watch's drop ran"
+        );
+        drop(held);
+
+        // SAFETY: `watch` holds the watch declared above.
+        unsafe { wz_ext_decl_watch_drop(&mut watch) };
+        assert!(watch._val.is_null());
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            2,
+            "the dropped watch's drop ran"
+        );
+        assert_eq!(free(&engine), places, "its place went back");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
     /// The doors take the program's context on every path: each refusal runs its drop once,

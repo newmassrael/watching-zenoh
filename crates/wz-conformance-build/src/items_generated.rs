@@ -129,6 +129,12 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         "WZ_LIMIT_MAX_MATCHING_LISTENERS",
         16,
     ),
+    ("MAX_DECL_WATCHES", "WZ_LIMIT_MAX_DECL_WATCHES", 4),
+    (
+        "MAX_TRANSPORT_EVENTS_LISTENERS",
+        "WZ_LIMIT_MAX_TRANSPORT_EVENTS_LISTENERS",
+        4,
+    ),
     (
         "MAX_DECLARED_KEYEXPRS",
         "WZ_LIMIT_MAX_DECLARED_KEYEXPRS",

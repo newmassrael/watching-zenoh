@@ -227,13 +227,18 @@ const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
-/// (`query`) and pending liveliness gets (`liveliness-get`), and matching listeners, as many as
-/// the ABI asks places of, at most these.
+/// (`query`) and pending liveliness gets (`liveliness-get`), matching listeners, and declaration
+/// watches (`remote-declaration-watch` or `declarations-synced-event`), as many as the ABI asks
+/// places of, at most these.
 const ENTITY_PLACE_ROWS: usize = 2
     * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
         + cfg!(feature = "query") as usize
-        + cfg!(feature = "liveliness-get") as usize);
+        + cfg!(feature = "liveliness-get") as usize
+        + cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) as usize);
 
 /// The most rows a plan holds: every row of the build, the cells', the ABI's handle's and its
 /// entities' places among them, the sum of the groups' counts.
@@ -301,6 +306,11 @@ const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static s
             "matching listener place flags",
             "matching listener places",
             "MAX_MATCHING_LISTENERS",
+        ),
+        EntityKind::DeclWatch => (
+            "declaration watch place flags",
+            "declaration watch places",
+            "MAX_DECL_WATCHES",
         ),
     }
 }
@@ -434,6 +444,9 @@ pub struct EntityRows {
     /// The liveliness gets pending at once (`MAX_PENDING_LIVELINESS_GETS`); none in a build
     /// without `liveliness-get`.
     pub pending_liveliness_gets: usize,
+    /// The declaration watches (`MAX_DECL_WATCHES`); none in a build with neither
+    /// `remote-declaration-watch` nor `declarations-synced-event`.
+    pub decl_watches: usize,
 }
 
 /// The tables of pending gets a session's arena lends: how many rows each registry of one is lent,
@@ -525,6 +538,7 @@ impl EntityRows {
             EntityKind::PendingGet => self.pending_gets,
             EntityKind::PendingLivelinessGet => self.pending_liveliness_gets,
             EntityKind::MatchingListener => self.matching_listeners,
+            EntityKind::DeclWatch => self.decl_watches,
         }
     }
 
@@ -1749,6 +1763,14 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
                 "MAX_PENDING_LIVELINESS_GETS",
                 limits.max_pending_liveliness_gets(),
             )?
+        } else {
+            0
+        },
+        decl_watches: if cfg!(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        )) {
+            lent::<{ caps::MAX_DECL_WATCHES }>("MAX_DECL_WATCHES", limits.max_decl_watches())?
         } else {
             0
         },

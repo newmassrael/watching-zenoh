@@ -54,13 +54,15 @@ static void check_layout(void) {
     CHECK(offsetof(wz_capi_c_event_t, sequence) == 8, "sequence");
     CHECK(offsetof(wz_capi_c_event_t, timestamp) == 16, "timestamp");
 
-    CHECK(sizeof(wz_capi_c_resource_reading_t) == 24, "reading is %zu bytes",
+    /* The lane is a 64-bit host, where struct_size takes 8 bytes. */
+    CHECK(sizeof(wz_capi_c_resource_reading_t) == 32, "reading is %zu bytes",
           sizeof(wz_capi_c_resource_reading_t));
-    CHECK(offsetof(wz_capi_c_resource_reading_t, available) == 0, "available");
-    CHECK(offsetof(wz_capi_c_resource_reading_t, cpu_permille) == 2, "cpu_permille");
-    CHECK(offsetof(wz_capi_c_resource_reading_t, tasks) == 4, "tasks");
-    CHECK(offsetof(wz_capi_c_resource_reading_t, heap_in_use) == 8, "heap_in_use");
-    CHECK(offsetof(wz_capi_c_resource_reading_t, heap_high_water) == 16, "heap_high_water");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, struct_size) == 0, "struct_size");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, available) == 8, "available");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, cpu_permille) == 10, "cpu_permille");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, tasks) == 12, "tasks");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, heap_in_use) == 16, "heap_in_use");
+    CHECK(offsetof(wz_capi_c_resource_reading_t, heap_high_water) == 24, "heap_high_water");
 
     CHECK(WZ_CAPI_C_E_FULL == -101, "the code for a full thing is %d", WZ_CAPI_C_E_FULL);
     CHECK(wz_capi_c_abi_version() == WZ_CAPI_C_ABI_REVISION,

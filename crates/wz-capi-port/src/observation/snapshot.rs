@@ -31,9 +31,15 @@ type BuildSnapshot = Snapshot<{ wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKET
 ///
 /// `available` is the bits [`AVAILABLE_CPU`], [`AVAILABLE_HEAP`] and [`AVAILABLE_TASKS`]; a field
 /// whose bit is clear is not read, whatever the source left in it.
+///
+/// The library hands the source this struct with `struct_size` set to its bytes, and the source
+/// writes no byte past them. A field is only ever added at the end, so a source compiled before it
+/// leaves it as the library set it: zeroed, and so unavailable when it carries a bit of its own.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct ResourceReadingC {
+    /// The bytes of the struct the library hands the source.
+    pub struct_size: usize,
     /// Which of the readings the source answers.
     pub available: u8,
     pub reserved: u8,
@@ -46,6 +52,22 @@ pub struct ResourceReadingC {
     pub heap_in_use: u64,
     /// The most bytes there have been in use.
     pub heap_high_water: u64,
+}
+
+impl Default for ResourceReadingC {
+    /// Nothing answered, sized as this build's struct.
+    fn default() -> Self {
+        Self {
+            struct_size: core::mem::size_of::<Self>(),
+            available: 0,
+            reserved: 0,
+            cpu_permille: 0,
+            tasks: 0,
+            reserved2: 0,
+            heap_in_use: 0,
+            heap_high_water: 0,
+        }
+    }
 }
 
 /// The program's resource source: fills `out` and returns 0, or returns anything else when it
@@ -75,6 +97,8 @@ impl Source {
     /// # Safety
     /// Under the contract of [`set_source`].
     unsafe fn read(self) -> ResourceReading {
+        // Sized as this build's struct, so a source compiled against a shorter one writes its own
+        // prefix and the fields past it stay unanswered.
         let mut out = ResourceReadingC::default();
         if (self.read)(self.context, &mut out) != 0 {
             return ResourceReading::default();
@@ -203,4 +227,65 @@ pub fn latest_json() -> Option<String> {
     let mut text = String::new();
     doors.sampler.latest()?.write_json(&mut text).ok()?;
     Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes into the context the `struct_size` it was handed, and answers nothing.
+    unsafe extern "C" fn tell_the_size(context: *mut c_void, out: *mut ResourceReadingC) -> i8 {
+        // SAFETY: the tests hand a `usize` as the context, and the library a whole reading.
+        unsafe { *context.cast::<usize>() = (*out).struct_size };
+        0
+    }
+
+    /// Answers the CPU as a source compiled when the struct ended at `cpu_permille` does,
+    /// writing no byte past it.
+    unsafe extern "C" fn write_a_shorter_struct(
+        _context: *mut c_void,
+        out: *mut ResourceReadingC,
+    ) -> i8 {
+        // SAFETY: the library hands a whole reading.
+        unsafe {
+            (*out).available = HAS_CPU;
+            (*out).cpu_permille = 250;
+        }
+        0
+    }
+
+    #[test]
+    fn the_size_is_the_first_field_and_the_readings_follow_it() {
+        assert_eq!(core::mem::offset_of!(ResourceReadingC, struct_size), 0);
+        assert_eq!(
+            core::mem::offset_of!(ResourceReadingC, available),
+            core::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn a_source_is_handed_the_bytes_of_the_struct_it_writes() {
+        let mut handed = 0usize;
+        let source = Source {
+            read: tell_the_size,
+            context: (&mut handed as *mut usize).cast(),
+        };
+        // SAFETY: the source reads only the struct it is handed and the `usize` above.
+        let reading = unsafe { source.read() };
+        assert_eq!(handed, core::mem::size_of::<ResourceReadingC>());
+        assert_eq!(reading, ResourceReading::default(), "nothing was answered");
+    }
+
+    #[test]
+    fn a_field_past_what_a_source_writes_is_not_answered() {
+        let source = Source {
+            read: write_a_shorter_struct,
+            context: core::ptr::null_mut(),
+        };
+        // SAFETY: the source writes a prefix of the struct it is handed.
+        let reading = unsafe { source.read() };
+        assert_eq!(reading.cpu_permille, Some(250));
+        assert_eq!(reading.tasks, None);
+        assert_eq!(reading.heap, None);
+    }
 }

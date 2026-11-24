@@ -170,6 +170,11 @@ unsafe fn ask_until(
 }
 
 unsafe extern "C" fn platform(_context: *mut c_void, out: *mut wz_ext_resource_reading_t) -> i8 {
+    // A source writes no byte past the size the library hands it; one too short to hold the
+    // readings answers nothing.
+    if (*out).struct_size < std::mem::size_of::<wz_ext_resource_reading_t>() {
+        return -1;
+    }
     *out = wz_ext_resource_reading_t {
         available: WZ_EXT_SNAPSHOT_HAS_CPU | WZ_EXT_SNAPSHOT_HAS_HEAP | WZ_EXT_SNAPSHOT_HAS_TASKS,
         cpu_permille: 420,

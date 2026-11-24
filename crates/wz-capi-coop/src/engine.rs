@@ -5054,8 +5054,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        while let Some((sink, told)) = self.decl_watches.next() {
-            sink(told.event());
+        if let Some(mut turn) = self.decl_watches.begin_handing() {
+            while let Some((id, sink, told)) = turn.next() {
+                sink.call(told.event());
+                // Put back in its row, or let go of here, with no lock held, when the watch went
+                // during the call.
+                let gone = self.decl_watches.put_back(id, sink);
+                drop(gone);
+            }
         }
         // One thread hands the changes out at a time; another that finds it doing so leaves what
         // it queued to it.

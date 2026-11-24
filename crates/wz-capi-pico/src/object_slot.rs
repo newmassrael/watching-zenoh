@@ -70,6 +70,13 @@ pub(crate) enum Kind {
     /// A matching listener of a publisher or a querier, held while its write filter can reach it
     /// (`crate::matching::MatchingPlace`).
     MatchingListener = 17,
+    /// A watch of what the peers declare, held until its handle and the engine let go of it
+    /// (`crate::decl_watch::WatchPlace`).
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclWatch = 18,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
@@ -297,6 +304,14 @@ fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::La
             EntityKind::MatchingListener,
             InSession::<crate::matching::MatchingPlace>::LAYOUT,
         )),
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        Kind::DeclWatch => Some((
+            EntityKind::DeclWatch,
+            InSession::<crate::decl_watch::WatchPlace>::LAYOUT,
+        )),
         _ => None,
     }
 }
@@ -320,6 +335,22 @@ const QUERIER: [Option<Kind>; 2] = [None, None];
 const LIVELINESS_GET: Option<Kind> = Some(Kind::LivelinessGet);
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "liveliness-get")))]
 const LIVELINESS_GET: Option<Kind> = None;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )
+))]
+const DECL_WATCH: Option<Kind> = Some(Kind::DeclWatch);
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))
+))]
+const DECL_WATCH: Option<Kind> = None;
 
 /// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
 /// list the open's places ([`held_places`]) are laid out from.
@@ -337,6 +368,7 @@ fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::allo
         get,
         LIVELINESS_GET,
         Some(Kind::MatchingListener),
+        DECL_WATCH,
     ]
     .into_iter()
     .flatten()

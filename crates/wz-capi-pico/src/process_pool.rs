@@ -113,6 +113,8 @@ pub(crate) struct Counts {
     pub(crate) liveliness_gets: usize,
     /// Matching listeners of each session, its publishers' and queriers' together.
     pub(crate) matching_listeners: usize,
+    /// Declaration watches of each session.
+    pub(crate) decl_watches: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -185,6 +187,7 @@ pub(crate) struct Bounds {
     gets: Option<usize>,
     liveliness_gets: Option<usize>,
     matching_listeners: Option<usize>,
+    decl_watches: Option<usize>,
 }
 
 impl Bounds {
@@ -201,6 +204,7 @@ impl Bounds {
             gets: limits.max_pending_queries().most(),
             liveliness_gets: limits.max_pending_liveliness_gets().most(),
             matching_listeners: limits.max_matching_listeners().most(),
+            decl_watches: limits.max_decl_watches().most(),
         }
     }
 }
@@ -319,12 +323,21 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
             stated.matching_listeners,
             bounds.matching_listeners,
         )),
+        decl_watches: planned!(bounded(
+            cfg!(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )),
+            sessions,
+            stated.decl_watches,
+            bounds.decl_watches,
+        )),
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 18;
+const KINDS: usize = 19;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,6 +423,17 @@ impl Plan {
                 Kind::MatchingListener,
                 objects.matching_listeners,
             );
+        }
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        {
+            plan =
+                plan.with::<crate::decl_watch::WatchPlace>(Kind::DeclWatch, objects.decl_watches);
         }
         let mut kind = 0;
         let mut holds = plan.area != 0;
@@ -930,6 +954,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         matching_listeners: each::<{ caps::MAX_MATCHING_LISTENERS }>(
             limits.max_matching_listeners(),
         ),
+        decl_watches: each::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches()),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -956,6 +981,7 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         gets: 0,
         liveliness_gets: 0,
         matching_listeners: 0,
+        decl_watches: 0,
     };
     resolve(&built, &bounds)
 }
@@ -1200,6 +1226,7 @@ mod tests {
         gets: Some(8),
         liveliness_gets: Some(9),
         matching_listeners: Some(10),
+        decl_watches: Some(11),
     };
 
     const UNBOUNDED: Bounds = Bounds {
@@ -1212,6 +1239,7 @@ mod tests {
         gets: None,
         liveliness_gets: None,
         matching_listeners: None,
+        decl_watches: None,
     };
 
     /// An object takes the smallest slot that holds it; one larger than the largest slot, or
@@ -1311,6 +1339,7 @@ mod tests {
             gets: 1,
             liveliness_gets: 1,
             matching_listeners: 1,
+            decl_watches: 1,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -1726,6 +1755,18 @@ mod tests {
             Kind::MatchingListener,
             core::mem::size_of::<crate::matching::MatchingPlace>(),
         );
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        row(
+            "decl_watch",
+            Kind::DeclWatch,
+            core::mem::size_of::<crate::decl_watch::WatchPlace>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1911,6 +1952,14 @@ mod tests {
         check(Kind::LivelinessGet);
         #[cfg(feature = "engine-tokio")]
         check(Kind::MatchingListener);
+        #[cfg(all(
+            feature = "engine-tokio",
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )
+        ))]
+        check(Kind::DeclWatch);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1937,6 +1986,7 @@ mod tests {
             bounds.matching_listeners,
             limits.max_matching_listeners().most()
         );
+        assert_eq!(bounds.decl_watches, limits.max_decl_watches().most());
     }
 
     /// The free blocks of `order`, by their offsets, first to last.

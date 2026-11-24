@@ -1590,7 +1590,8 @@ const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 struct DeclWatchEntry {
     id: DeclWatchId,
     plane: DeclPlane,
-    sink: DeclWatchSink,
+    /// Shared by the watch's listener on each face, so it is let go of with the last of them.
+    sink: Arc<DeclWatchSink>,
 }
 
 /// Whether this build hears the peers' declarations of `plane`: the runtime's registry of that
@@ -1621,12 +1622,12 @@ const fn hears_declarations_of(plane: DeclPlane) -> bool {
 fn install_decl_watch(
     session: &TokioSession,
     plane: DeclPlane,
-    sink: &DeclWatchSink,
+    sink: &Arc<DeclWatchSink>,
 ) -> Option<DeclListener> {
     let sink = Arc::clone(sink);
     let callback = move |event: DeclEvent| {
         if let Some(event) = port_decl_event(&event) {
-            sink(event);
+            sink.call(event);
         }
     };
     // A subscriber or a queryable the peer declared before the watch was installed (a watch
@@ -6949,6 +6950,7 @@ impl SharedSession {
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;
+        let sink = Arc::new(sink);
         for face in guard.faces.values_mut() {
             if let Some(listener) = install_decl_watch(&face.session, plane, &sink) {
                 face.decl_watches.insert(id, listener);

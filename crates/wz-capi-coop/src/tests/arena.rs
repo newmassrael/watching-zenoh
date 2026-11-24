@@ -2252,6 +2252,36 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
     assert_eq!(plan.entities().of_kind(EntityKind::MatchingListener), rows);
 }
 
+/// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
+/// with the watch, and none without it. Turned red by places counted by another limit, or laid
+/// out in a build that has no watch to hold.
+#[test]
+fn the_places_of_declaration_watches_are_counted_by_their_limit() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = HeldPlaces::default().with_entity(EntityKind::DeclWatch, place);
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    let rows = plan.entities().decl_watches;
+    let laid = plan
+        .rows()
+        .iter()
+        .find(|row| row.part == "declaration watch places")
+        .map(|row| (row.basis, row.count));
+    if cfg!(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )) {
+        assert!(rows > 0, "the build's limits admit declaration watches");
+        assert_eq!(laid, Some(("MAX_DECL_WATCHES", rows)));
+    } else {
+        assert_eq!(rows, 0, "a build without the watch holds none");
+        assert_eq!(laid, None, "and lays no place out for one");
+    }
+    assert_eq!(plan.entities().of_kind(EntityKind::DeclWatch), rows);
+}
+
 /// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
 /// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
 /// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does
