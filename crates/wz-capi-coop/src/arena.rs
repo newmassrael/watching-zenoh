@@ -717,10 +717,15 @@ impl ArenaPlan {
         )?;
         plan.gets = GetTables {
             rows: RequesterRows {
-                queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
-                    "MAX_PENDING_QUERIES",
-                    limits.max_pending_queries(),
-                )?,
+                // A build that asks no query registers no get, so its tables of them hold no row.
+                queries: if cfg!(feature = "query") {
+                    lent::<{ caps::MAX_PENDING_QUERIES }>(
+                        "MAX_PENDING_QUERIES",
+                        limits.max_pending_queries(),
+                    )?
+                } else {
+                    0
+                },
                 liveliness_gets: if cfg!(feature = "liveliness-get") {
                     lent::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                         "MAX_PENDING_LIVELINESS_GETS",
