@@ -749,7 +749,15 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             .filter(|wire| wire.owes_write())
             .filter_map(|wire| wire.input);
         for on in owing {
-            if waits.push(LinkWait::input_or_room(on)).is_err() {
+            let pushed = waits.push(LinkWait::input_or_room(on));
+            // Each link that owes holds one of the pool's slots, so more never owe than
+            // `OWING_WAITS`: one past it is a link that owes with no slot, which a test build
+            // names rather than wait on fewer links than owe.
+            debug_assert!(
+                pushed.is_ok(),
+                "more links owe a write than the outbound slots they hold ({OWING_WAITS})"
+            );
+            if pushed.is_err() {
                 break;
             }
         }
