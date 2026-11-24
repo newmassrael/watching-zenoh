@@ -5,20 +5,23 @@
 //! program ([`wz_capi_port::decl_watch`]).
 //!
 //! The application layer's observers of what a peer declares are installed once for each kind of
-//! entity some watch is of, and stage what they are told while one face's frame is dispatched. The
-//! dispatch of a link then settles what was staged as the events of that link's peer
-//! ([`DeclWatches::settle`]), under the session's lock, where the link still knows who its peer
-//! is; the events wait in a ring and are handed to each watch's sink with the session's other
-//! deliveries, outside the lock (decision D8). A group's dispatch settles nothing, and what it
-//! staged is dropped when the next dispatch begins: the members of a group are not watched, as the
-//! port says.
+//! entity some watch is of. While a link's frame is dispatched, under the session's lock, they hold
+//! each event in the session's round of deliveries as a record of its own, with a call of each
+//! watch it reaches, named as the events of the link's peer ([`DeclWatches::hear_link`]); a
+//! group's dispatch names no link, and its events are held for no one, as the port says. The key
+//! of a declaration lies where the round reads it, in the block of the session's key arena the
+//! declaration's row keeps, of which the record holds a count. The round hands the event to the
+//! watch's sink with every other record, in order, outside the lock (decision D8).
 //!
-//! Everything lies in rows fixed when the session opens: a row for each watch its
-//! `MAX_DECL_WATCHES` admits, and a ring of `MAX_DECL_WATCH_EVENTS` events, each held once with
-//! the rows of the watches still owed it and its key in bytes of its own. An event that finds the
-//! ring full is not held, and each watch it would reach is told how many it lost ahead of its next
-//! event ([`DeclWatchEvent::Lost`]). A watch is told what the peers hold when it is declared from
-//! the same ring, so a watch whose catch-up does not fit is refused.
+//! A watch's row lies in a table fixed when the session opens, a row for each watch its
+//! `MAX_DECL_WATCHES` admits, its sink in a cell the calls the round owes hold a count of, so the
+//! row is not taken by another watch while a call of the last one is owed. An event the round has
+//! no room for is counted for each watch it would reach and told as the loss of that many ahead of
+//! the watch's next event ([`DeclWatchEvent::Lost`]). A watch is told what the peers hold when it
+//! is declared, as records of the same round: at once when the round takes them all, or else as
+//! soon as a delivery has emptied it ([`DeclWatches::owes`]), so a watch declared from inside a
+//! callback, while the round is handed out, is told them by the next round. Until then it is told
+//! no live event, which its catch-up, read off the peers' tables as they stand then, holds.
 
 use alloc::sync::Arc;
 
@@ -32,13 +35,16 @@ use wz_session_core::bounded::{LendRefused, Storage};
 use wz_session_core::caps;
 use wz_session_core::decl_sink::{BoxedDeclSink, DeclSink, DeclView, UndeclSink};
 use wz_session_core::declare::MatchingReport;
+use wz_session_core::key_arena::KeyRef;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
+use wz_session_core::round::{DeclEvent, DeclEventKind};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
+use crate::round::Round;
 
 /// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
 /// declarations the engine reads for its publishers' write filters, queryables with a querier or a
@@ -53,105 +59,46 @@ pub(super) const fn hears(plane: DeclPlane) -> bool {
     }
 }
 
-/// What a watch is told of.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum What {
-    Declared,
-    Undeclared,
-    /// The face's peer ended its initial declarations, which every watch is told whatever its
-    /// kind (`declarations-synced-event`).
-    #[cfg(feature = "declarations-synced-event")]
-    Synced,
-    /// Events the watch was owed and the ring had no room for: `id` counts them.
-    Lost,
-}
-
-impl What {
-    /// Whether a watch of `watched` is told this, of `plane`.
-    fn reaches(self, plane: DeclPlane, watched: DeclPlane) -> bool {
-        match self {
-            Self::Declared | Self::Undeclared => plane == watched,
-            #[cfg(feature = "declarations-synced-event")]
-            Self::Synced => true,
-            Self::Lost => false,
-        }
+/// Whether a watch of `watched` is told `kind` of `plane`: a declaration or a retraction of its
+/// own kind, and the end of a peer's initial declarations whatever its kind.
+fn reaches(kind: DeclEventKind, plane: DeclPlane, watched: DeclPlane) -> bool {
+    match kind {
+        DeclEventKind::Declared | DeclEventKind::Undeclared => plane == watched,
+        DeclEventKind::Synced => true,
+        DeclEventKind::Lost => false,
     }
 }
 
-/// One event owed to a watch, in bytes of its own: what it says, the id it names, the key of a
-/// declaration and the peer it came from.
-#[derive(Clone, Copy)]
-pub(super) struct Told {
-    what: What,
-    id: u64,
-    key: [u8; caps::MAX_KEYEXPR_BYTES],
-    key_len: usize,
-    peer: Option<SessionZid>,
+/// The event in the port's words, borrowed for the sink's call.
+fn port_event(event: DeclEvent<'_>) -> DeclWatchEvent<'_> {
+    match event.kind {
+        DeclEventKind::Declared => DeclWatchEvent::Declared {
+            id: event.id,
+            keyexpr: event.keyexpr,
+            peer: event.peer,
+        },
+        DeclEventKind::Undeclared => DeclWatchEvent::Undeclared {
+            id: event.id,
+            peer: event.peer,
+        },
+        DeclEventKind::Synced => DeclWatchEvent::Synced { peer: event.peer },
+        DeclEventKind::Lost => DeclWatchEvent::Lost { count: event.id },
+    }
 }
 
-impl Told {
-    /// No event: what a row of the ring holds before its first.
-    const NONE: Self = Self {
-        what: What::Lost,
-        id: 0,
-        key: [0; caps::MAX_KEYEXPR_BYTES],
-        key_len: 0,
+/// The loss of `count` events, which names no declaration and no peer.
+fn lost(count: u64) -> DeclEvent<'static> {
+    DeclEvent {
+        kind: DeclEventKind::Lost,
+        id: count,
+        keyexpr: "",
         peer: None,
-    };
-
-    /// `what` of the declaration `id` on `keyexpr`, of no peer yet; `None` for a key longer
-    /// than a row holds, which the session's own tables never keep.
-    fn of(what: What, id: u64, keyexpr: &str) -> Option<Self> {
-        let mut told = Self {
-            what,
-            id,
-            ..Self::NONE
-        };
-        told.key
-            .get_mut(..keyexpr.len())?
-            .copy_from_slice(keyexpr.as_bytes());
-        told.key_len = keyexpr.len();
-        Some(told)
-    }
-
-    /// The loss of `count` events.
-    fn lost(count: u64) -> Self {
-        Self {
-            what: What::Lost,
-            id: count,
-            ..Self::NONE
-        }
-    }
-
-    /// The key of a declaration; empty for the others.
-    fn key(&self) -> &str {
-        // The bytes are a whole `str`'s, copied by `Self::of`.
-        self.key
-            .get(..self.key_len)
-            .and_then(|key| core::str::from_utf8(key).ok())
-            .unwrap_or_default()
-    }
-
-    /// The event in the port's words, borrowed for the sink's call.
-    pub(super) fn event(&self) -> DeclWatchEvent<'_> {
-        let peer = self.peer.as_deref();
-        match self.what {
-            What::Declared => DeclWatchEvent::Declared {
-                id: self.id,
-                keyexpr: self.key(),
-                peer,
-            },
-            What::Undeclared => DeclWatchEvent::Undeclared { id: self.id, peer },
-            #[cfg(feature = "declarations-synced-event")]
-            What::Synced => DeclWatchEvent::Synced { peer },
-            What::Lost => DeclWatchEvent::Lost { count: self.id },
-        }
     }
 }
 
 /// The peer an event is told as: the zid the link's handshake gave, in a build with
 /// `remote-declaration-watch`, and no one without it, whose events name no peer.
-fn named(peer: impl FnOnce() -> Option<SessionZid>) -> Option<SessionZid> {
+pub(super) fn named(peer: impl FnOnce() -> Option<SessionZid>) -> Option<SessionZid> {
     #[cfg(feature = "remote-declaration-watch")]
     {
         peer()
@@ -163,19 +110,111 @@ fn named(peer: impl FnOnce() -> Option<SessionZid>) -> Option<SessionZid> {
     }
 }
 
-/// One watch: the kind of entity it is of, the sink it is told through and what it lost.
+/// The sink of a watch as its row keeps it: out of the cell while a call of it runs, and gone once
+/// the watch is undeclared or the session closed.
+#[derive(Default)]
+struct Slot {
+    sink: Option<DeclWatchSink>,
+    gone: bool,
+}
+
+/// Where a watch's sink lies for the calls the round owes it, each of which holds a count of the
+/// cell: one cell for each row, made when the session opens, so a call allocates nothing.
+struct Cell {
+    slot: Mutex<Slot>,
+}
+
+impl Cell {
+    /// The cell of a row that holds no watch.
+    fn empty() -> Arc<Self> {
+        Arc::new(Self {
+            slot: Mutex::new(Slot::default()),
+        })
+    }
+}
+
+/// A call of a watch's sink a record of the round owes ([`wz_session_core::round::WatchCall`]): a
+/// count of the cell of the watch's row, which keeps the row from another watch until the call
+/// ends. Made under the session's lock as an event reaches the watch, made with no lock held.
+#[must_use = "a call is ended, or its row is never let go of"]
+pub(crate) struct WatchCall {
+    cell: Arc<Cell>,
+}
+
+impl WatchCall {
+    /// A call of the watch whose sink lies in `cell`.
+    fn begun(cell: &Arc<Cell>) -> Self {
+        Self {
+            cell: Arc::clone(cell),
+        }
+    }
+
+    /// Whether `other` is a call of the same watch.
+    pub(crate) fn same_row(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+
+    /// Hand `event` to the watch's sink, taken out of its cell for the call and put back after
+    /// it, or let go of here when the watch went during the call (an undeclare from inside it, or
+    /// the session's close). A watch undeclared before is handed nothing. No lock is held while
+    /// the sink runs, so it may reach back into the session.
+    pub(crate) fn hand(&self, event: DeclEvent<'_>) {
+        let taken = {
+            let mut slot = lock(&self.cell.slot);
+            if slot.gone {
+                None
+            } else {
+                slot.sink.take()
+            }
+        };
+        let Some(sink) = taken else {
+            return;
+        };
+        sink.call(port_event(event));
+        let gone = {
+            let mut slot = lock(&self.cell.slot);
+            if slot.gone {
+                Some(sink)
+            } else {
+                slot.sink = Some(sink);
+                None
+            }
+        };
+        drop(gone);
+    }
+
+    /// End the call: the count of the cell goes with it. No row of the session's tables waits on
+    /// it, so the session's walk of them is never owed one (`false`).
+    pub(crate) fn end(self) -> bool {
+        drop(self.cell);
+        false
+    }
+}
+
+/// One watch: the kind of entity it is of, what it lost, and whether it is still owed what the
+/// peers held when it was declared.
 struct Watch {
     id: DeclWatchId,
     plane: DeclPlane,
-    /// Taken out of the row under the table's lock for each event, called after it and put back
-    /// ([`DeclWatches::put_back`]), or let go of by the thread that called it when the watch went
-    /// meanwhile. `None` while it is out for a call.
-    sink: Option<DeclWatchSink>,
-    /// The events the ring had no room for since the watch was last told, told ahead of its next.
+    /// The events the round had no room for since the watch was last told, told ahead of its next.
     lost: u64,
-    /// Those of the dispatch running now, which its settle owes the watch and a group's drop
-    /// forgets.
-    staged_lost: u64,
+    /// Owed what the peers hold, told before any live event, which it is not told meanwhile.
+    catching_up: bool,
+}
+
+/// A row of the table: the watch it holds, if any, and the cell its sink lies in.
+struct Row {
+    watch: Option<Watch>,
+    cell: Arc<Cell>,
+}
+
+impl Row {
+    /// Whether a new watch may take the row: it holds none, and no call of the last one is owed,
+    /// whose count of the cell would be the only other. Counts are taken under the table's lock
+    /// alone, so one read as none stays none.
+    fn is_free(&self) -> bool {
+        self.watch.is_none() && Arc::strong_count(&self.cell) == 1
+    }
 }
 
 /// The observers installed in the application layer for one kind of entity, by the ids that
@@ -211,207 +250,56 @@ impl PlaneObservers {
     }
 }
 
+/// The link whose frame is dispatched now, which the events its observers are told come from.
+#[derive(Clone, Copy)]
+struct Hearing {
+    peer: Option<SessionZid>,
+}
+
 /// The watches and the observers they are told through.
 struct Table {
     /// A row for each watch the build holds at most, of which the session's limit admits the
     /// first `most`.
-    watches: [Option<Watch>; caps::MAX_DECL_WATCHES],
+    rows: [Row; caps::MAX_DECL_WATCHES],
     most: usize,
     observers: PlaneObservers,
     next_id: DeclWatchId,
+    /// The link being dispatched, while one is; none while a group's frame is.
+    hearing: Option<Hearing>,
 }
 
 impl Table {
     /// A table of no watch, `most` of whose rows hold one (all of them when `most` is more).
     fn holding(most: usize) -> Self {
         Self {
-            watches: [const { None }; caps::MAX_DECL_WATCHES],
+            rows: core::array::from_fn(|_| Row {
+                watch: None,
+                cell: Cell::empty(),
+            }),
             most: most.min(caps::MAX_DECL_WATCHES),
             observers: PlaneObservers::default(),
             next_id: 0,
+            hearing: None,
         }
     }
 
     /// The watches the table holds.
     fn watches(&self) -> impl Iterator<Item = &Watch> + '_ {
-        self.watches.iter().flatten()
-    }
-
-    /// Watch `id`, when the table holds it.
-    fn watch_mut(&mut self, id: DeclWatchId) -> Option<&mut Watch> {
-        self.watches
-            .iter_mut()
-            .flatten()
-            .find(|watch| watch.id == id)
-    }
-
-    /// The rows of the watches `what` of `plane` reaches, and whether there is one.
-    fn reached(&self, what: What, plane: DeclPlane) -> ([bool; caps::MAX_DECL_WATCHES], bool) {
-        let owed = self.watches.each_ref().map(|watch| {
-            watch
-                .as_ref()
-                .is_some_and(|watch| what.reaches(plane, watch.plane))
-        });
-        (owed, owed.contains(&true))
+        self.rows.iter().filter_map(|row| row.watch.as_ref())
     }
 }
 
-/// One event in the ring and the rows of the watches still owed it.
-#[derive(Clone, Copy)]
-struct Held {
-    told: Told,
-    owed: [bool; caps::MAX_DECL_WATCHES],
-}
-
-impl Held {
-    const NONE: Self = Self {
-        told: Told::NONE,
-        owed: [false; caps::MAX_DECL_WATCHES],
-    };
-}
-
-/// The events owed to the watches, oldest first, the first `most` rows of the build's in use.
-/// The last `unsettled` are a dispatch's not yet settled; whether a thread is handing them out
-/// ([`DeclWatches::begin_handing`]).
-struct Ring {
-    rows: [Held; caps::MAX_DECL_WATCH_EVENTS],
-    most: usize,
-    head: usize,
-    len: usize,
-    unsettled: usize,
-    handing: bool,
-}
-
-impl Ring {
-    /// A ring of no event, `most` of whose rows hold one (all of them when `most` is more).
-    fn holding(most: usize) -> Self {
-        Self {
-            rows: [Held::NONE; caps::MAX_DECL_WATCH_EVENTS],
-            most: most.min(caps::MAX_DECL_WATCH_EVENTS),
-            head: 0,
-            len: 0,
-            unsettled: 0,
-            handing: false,
-        }
-    }
-
-    /// The rows no event holds.
-    fn free(&self) -> usize {
-        // `len` never passes `most`: `push` holds it there.
-        self.most.saturating_sub(self.len)
-    }
-
-    /// The row of the `nth` event, oldest first; `None` in a ring of no row.
-    fn row(&self, nth: usize) -> Option<usize> {
-        self.head.checked_add(nth)?.checked_rem(self.most)
-    }
-
-    /// Hold `held` after every event; `false` when the ring is full.
-    fn push(&mut self, held: Held) -> bool {
-        let Some(len) = self.len.checked_add(1).filter(|len| *len <= self.most) else {
-            return false;
-        };
-        let Some(slot) = self.row(self.len).and_then(|row| self.rows.get_mut(row)) else {
-            return false;
-        };
-        *slot = held;
-        self.len = len;
-        true
-    }
-
-    /// Hold `held` after every event as the running dispatch's, which settles it; `false` when
-    /// the ring is full.
-    fn stage(&mut self, held: Held) -> bool {
-        let kept = self.push(held);
-        if kept {
-            // The unsettled are some of the events held, so never more than `most`.
-            self.unsettled = self.unsettled.saturating_add(1);
-        }
-        kept
-    }
-
-    /// The oldest event, when the ring holds one.
-    fn front(&self) -> Option<&Held> {
-        if self.len == 0 {
-            return None;
-        }
-        self.rows.get(self.head)
-    }
-
-    /// [`Self::front`], to write.
-    fn front_mut(&mut self) -> Option<&mut Held> {
-        if self.len == 0 {
-            return None;
-        }
-        self.rows.get_mut(self.head)
-    }
-
-    /// The events held, oldest first, to write: the rows from the head to the last in use, then
-    /// those before the head, `len` of them in all.
-    fn held_mut(&mut self) -> impl Iterator<Item = &mut Held> {
-        let len = self.len;
-        let rows = self.rows.get_mut(..self.most).unwrap_or_default();
-        let (before, from) = rows.split_at_mut_checked(self.head).unwrap_or_default();
-        from.iter_mut().chain(before).take(len)
-    }
-
-    /// Let the oldest event go.
-    fn pop_front(&mut self) {
-        if let Some(len) = self.len.checked_sub(1) {
-            // A ring that held an event has a row, so the head has one after it.
-            self.head = self.row(1).unwrap_or(0);
-            self.len = len;
-        }
-    }
-
-    /// Let the events of a dispatch no one settled go: a group's.
-    fn drop_unsettled(&mut self) {
-        // The unsettled are the last of the events held, never more than `len`.
-        self.len = self.len.saturating_sub(self.unsettled);
-        self.unsettled = 0;
-    }
-
-    /// The settled events no watch is owed any more, oldest first, let go of, so an undeclared
-    /// watch leaves no row taken in front of those still owed.
-    fn let_go_of_the_told(&mut self) {
-        while self.len > self.unsettled
-            && self.front().is_some_and(|held| !held.owed.contains(&true))
-        {
-            self.pop_front();
-        }
-    }
-
-    /// Every watch's row `row` is owed nothing more.
-    fn forget_row(&mut self, row: usize) {
-        for held in self.held_mut() {
-            if let Some(owed) = held.owed.get_mut(row) {
-                *owed = false;
-            }
-        }
-    }
-}
-
-/// What the observers stage into and the deliveries read: the table and the ring, each under its
-/// own lock, the table's taken first where both are.
+/// What the observers and the engine reach: the table, and the round the events are held in.
 struct Shared {
     table: Mutex<Table>,
-    ring: Mutex<Ring>,
+    round: Arc<Round>,
 }
 
-/// The session's declaration watches and what is owed to them. The registry holds it, so a
-/// link's dispatch reaches it, and the engine holds it, so its deliveries do: a clone is the same
-/// watches.
+/// The session's declaration watches. The registry holds it, so a link's dispatch reaches it, and
+/// the engine holds it, so its deliveries do: a clone is the same watches.
 #[derive(Clone)]
 pub(super) struct DeclWatches {
     shared: Arc<Shared>,
-}
-
-#[cfg(test)]
-impl Default for DeclWatches {
-    /// As many watches and events as the build holds.
-    fn default() -> Self {
-        Self::holding(caps::MAX_DECL_WATCHES, caps::MAX_DECL_WATCH_EVENTS)
-    }
 }
 
 /// How many rows the session's value of a limit admits under the build's `ceiling`. A limit past
@@ -425,19 +313,24 @@ fn rows_under(value: Quota, ceiling: usize) -> Result<usize, LendRefused> {
         })
 }
 
-/// What the peer of `tables` holds of `plane` now, each declaration handed to `each` with its id
-/// and key. Tokens hold none, as the port says.
-fn held_of(plane: DeclPlane, tables: &FaceTables, mut each: impl FnMut(u64, &str)) {
+/// What the peer of `tables` holds of `plane` now, each declaration handed to `each` with its id,
+/// its key and the block of the session's key arena its row keeps the key in. Tokens hold none, as
+/// the port says.
+fn held_of(
+    plane: DeclPlane,
+    tables: &FaceTables,
+    mut each: impl FnMut(u64, &str, Option<&KeyRef>),
+) {
     match plane {
         DeclPlane::Subscribers => {
-            for (declared, keyexpr) in tables.peer.remote_subscribers.iter_declared() {
-                each(declared, keyexpr);
+            for (declared, keyexpr, held) in tables.peer.remote_subscribers.iter_declared_held() {
+                each(declared, keyexpr, held);
             }
         }
         #[cfg(any(feature = "query", feature = "queryable"))]
         DeclPlane::Queryables => {
-            for (declared, keyexpr) in tables.peer.remote_queryables.iter_declared() {
-                each(declared, keyexpr);
+            for (declared, keyexpr, held) in tables.peer.remote_queryables.iter_declared_held() {
+                each(declared, keyexpr, held);
             }
         }
         // Refused before it is told anything ([`hears`]).
@@ -447,64 +340,111 @@ fn held_of(plane: DeclPlane, tables: &FaceTables, mut each: impl FnMut(u64, &str
     }
 }
 
-/// How many declarations of `plane` the peer of `tables` holds now: the rows a watch of
-/// `plane` declared now takes of the ring for that peer ([`DeclWatches::tell_held`]).
-pub(super) fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
+/// How many declarations of `plane` the peer of `tables` holds now.
+fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
     let mut count: usize = 0;
-    held_of(plane, tables, |_, _| count = count.saturating_add(1));
+    held_of(plane, tables, |_, _, _| count = count.saturating_add(1));
     count
 }
 
-/// Stage `what` of `plane`, the declaration `id` on `keyexpr`, owed to every watch it reaches
-/// once the dispatch settles: held in the ring, or counted lost for each of them when the ring is
-/// full or the key longer than a row holds.
-fn stage(shared: &Shared, what: What, plane: DeclPlane, id: u64, keyexpr: &str) {
-    let mut table = lock(&shared.table);
-    let (owed, any) = table.reached(what, plane);
-    if !any {
+/// Tell `watch`, whose sink lies in `cell`, the events it lost, as a record of `round` of its own.
+/// Still owed when the round has no room for it.
+///
+/// # Safety
+/// The caller holds the session's lock.
+unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
+    if watch.lost == 0 {
         return;
     }
-    let mut ring = lock(&shared.ring);
-    if Told::of(what, id, keyexpr).is_some_and(|told| ring.stage(Held { told, owed })) {
-        return;
+    // SAFETY: the caller's contract.
+    if unsafe { round.offer_decl_watch(WatchCall::begun(cell), lost(watch.lost), None) } {
+        watch.lost = 0;
     }
-    for (watch, owed) in table.watches.iter_mut().zip(owed) {
-        if let Some(watch) = watch.as_mut().filter(|_| owed) {
-            watch.staged_lost = watch.staged_lost.saturating_add(1);
+}
+
+/// Hold `event` of `plane`, whose key lies in `held` when its row keeps it in the session's key
+/// arena, in `round` for every watch of `table` it reaches, each told its losses first: one record
+/// the watches join one after the other. A watch still owed its catch-up is told none of it.
+///
+/// # Safety
+/// The caller holds the session's lock.
+unsafe fn offer(
+    round: &Round,
+    table: &mut Table,
+    event: DeclEvent<'_>,
+    plane: DeclPlane,
+    held: Option<&KeyRef>,
+) {
+    let reached = |watch: &Watch| !watch.catching_up && reaches(event.kind, plane, watch.plane);
+    for Row { watch, cell } in &mut table.rows {
+        if let Some(watch) = watch.as_mut().filter(|watch| reached(watch)) {
+            // SAFETY: the caller's contract.
+            unsafe { tell_lost(round, watch, cell) };
+        }
+    }
+    for Row { watch, cell } in &mut table.rows {
+        if let Some(watch) = watch.as_mut().filter(|watch| reached(watch)) {
+            // SAFETY: the caller's contract.
+            if !unsafe { round.offer_decl_watch(WatchCall::begun(cell), event, held) } {
+                watch.lost = watch.lost.saturating_add(1);
+            }
         }
     }
 }
 
+/// Hold `kind` of `plane`, the declaration `id` on `keyexpr`, for the watches it reaches, as an
+/// event of the link being dispatched; a group's is held for no one.
+///
+/// # Safety
+/// The caller holds the session's lock: the observers are told as a frame is dispatched.
+unsafe fn heard(
+    shared: &Shared,
+    kind: DeclEventKind,
+    plane: DeclPlane,
+    id: u64,
+    keyexpr: &str,
+    held: Option<&KeyRef>,
+) {
+    let mut table = lock(&shared.table);
+    let Some(Hearing { peer }) = table.hearing else {
+        return;
+    };
+    let event = DeclEvent {
+        kind,
+        id,
+        keyexpr,
+        peer: peer.as_deref(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe { offer(&shared.round, &mut table, event, plane, held) };
+}
+
 impl DeclWatches {
-    /// No watch, and room for as many watches and events as the session's `MAX_DECL_WATCHES` and
-    /// `MAX_DECL_WATCH_EVENTS` admit under the build's.
-    pub(super) fn under(limits: &SessionLimits) -> Result<Self, LendRefused> {
+    /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
+    /// build's, their events held in `round`, the session's round of deliveries.
+    pub(super) fn under(limits: &SessionLimits, round: &Arc<Round>) -> Result<Self, LendRefused> {
         let watches = rows_under(limits.max_decl_watches(), caps::MAX_DECL_WATCHES)?;
-        let events = rows_under(limits.max_decl_watch_events(), caps::MAX_DECL_WATCH_EVENTS)?;
-        Ok(Self::holding(watches, events))
+        Ok(Self::holding(watches, round))
     }
 
-    /// No watch, and room for `watches` of them and `events` events, at most the build's.
-    fn holding(watches: usize, events: usize) -> Self {
+    /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
+    fn holding(watches: usize, round: &Arc<Round>) -> Self {
         Self {
             shared: Arc::new(Shared {
                 table: Mutex::new(Table::holding(watches)),
-                ring: Mutex::new(Ring::holding(events)),
+                round: Arc::clone(round),
             }),
         }
     }
 
-    /// A watch of `plane` told through `sink` from now on, first told `held` declarations the
-    /// peers hold now ([`Self::tell_held`]): its id. The observers of `plane` are installed in
-    /// `app` with the first watch of that kind. Refused, with `sink` handed back for the caller to
-    /// let go of with no lock held, by [`Declined::TableFull`] when the session holds as many
-    /// watches as its limit admits, the ring has fewer than `held` rows free, or the application
-    /// layer's list of observers is at its bound, by [`Declined::NotBuilt`] for a kind the build
-    /// does not hear, and by [`Declined::NoEntityId`] once every id was handed out; nothing is
-    /// installed then.
-    ///
-    /// Called under the session's lock, as every stage is, so the rows found free stay free for
-    /// the catch-up that follows; a delivery meanwhile only frees more.
+    /// A watch of `plane` told through `sink` from now on, owed first what the peers hold now
+    /// ([`Self::tell_owed`]): its id. The observers of `plane` are installed in `app` with the
+    /// first watch of that kind. Refused, with `sink` handed back for the caller to let go of with
+    /// no lock held, by [`Declined::TableFull`] when the session holds as many watches as its limit
+    /// admits (a row a call of an undeclared watch is still owed on counts as held) or the
+    /// application layer's list of observers is at its bound, by [`Declined::NotBuilt`] for a kind
+    /// the build does not hear, and by [`Declined::NoEntityId`] once every id was handed out;
+    /// nothing is installed then.
     ///
     /// Whatever storage `P` the application's tables have: the session's registry holds them in
     /// rows its arena lent, while the lists of observers are the build's profile's in every
@@ -519,26 +459,18 @@ impl DeclWatches {
         app: &mut SlotObserverOf<K, P, M>,
         plane: DeclPlane,
         sink: DeclWatchSink,
-        held: usize,
     ) -> Result<DeclWatchId, (Declined, DeclWatchSink)> {
         let mut table = lock(&self.shared.table);
         let Table {
-            watches,
+            rows,
             most,
             observers,
             next_id,
+            ..
         } = &mut *table;
-        let Some(free) = watches.iter_mut().take(*most).find(|watch| watch.is_none()) else {
+        let Some(free) = rows.iter_mut().take(*most).find(|row| row.is_free()) else {
             return Err((Declined::TableFull, sink));
         };
-        {
-            let mut ring = lock(&self.shared.ring);
-            // What a group's dispatch staged is owed to no one; it gives its rows back first.
-            ring.drop_unsettled();
-            if ring.free() < held {
-                return Err((Declined::TableFull, sink));
-            }
-        }
         let Some(id) = next_id.checked_add(1) else {
             return Err((Declined::NoEntityId, sink));
         };
@@ -550,59 +482,92 @@ impl DeclWatches {
             }
         }
         *next_id = id;
-        *free = Some(Watch {
+        *lock(&free.cell.slot) = Slot {
+            sink: Some(sink),
+            gone: false,
+        };
+        free.watch = Some(Watch {
             id,
             plane,
-            sink: Some(sink),
             lost: 0,
-            staged_lost: 0,
+            catching_up: true,
         });
         Ok(id)
     }
 
-    /// Owe watch `id`, of `plane`, the declarations the peer of `tables` holds now, as declared
-    /// by `peer`: what a watch declared after them is told first, in the rows [`Self::add`] found
-    /// free for them. A watch of tokens is told none, as the port says.
-    pub(super) fn tell_held(
-        &self,
-        id: DeclWatchId,
-        plane: DeclPlane,
-        tables: &FaceTables,
-        peer: impl FnOnce() -> Option<SessionZid>,
-    ) {
-        let mut table = lock(&self.shared.table);
-        let Some((row, watch)) = table
-            .watches
-            .iter_mut()
-            .enumerate()
-            .find_map(|(row, watch)| Some((row, watch.as_mut().filter(|watch| watch.id == id)?)))
-        else {
-            return;
-        };
-        let owed: [bool; caps::MAX_DECL_WATCHES] = core::array::from_fn(|at| at == row);
-        let mut ring = lock(&self.shared.ring);
-        let mut lost: u64 = 0;
-        let mut peer = Some(peer);
-        let mut named_peer = None;
-        held_of(plane, tables, |declared, keyexpr| {
-            if let Some(peer) = peer.take() {
-                named_peer = named(peer);
-            }
-            let told = Told::of(What::Declared, declared, keyexpr).map(|told| Told {
-                peer: named_peer,
-                ..told
-            });
-            if !told.is_some_and(|told| ring.push(Held { told, owed })) {
-                lost = lost.saturating_add(1);
-            }
-        });
-        watch.lost = watch.lost.saturating_add(lost);
+    /// Whether a watch is owed what the round had no room for when it came: its catch-up, or the
+    /// events it lost. What a delivery asks once it has emptied the round ([`Self::tell_owed`]).
+    pub(super) fn owes(&self) -> bool {
+        lock(&self.shared.table)
+            .watches()
+            .any(|watch| watch.catching_up || watch.lost != 0)
     }
 
-    /// Stop watch `id`: nothing more is owed to it, and the observers of its kind leave `app`
-    /// with the last watch of that kind. Its sink, for the caller to let go of with no lock held,
-    /// or `Some(None)` when the sink is out for a call, which the calling thread lets go of as the
-    /// call returns ([`Self::put_back`]); `None` when no watch is declared under `id`.
+    /// Hold in the round what the watches are owed and it now has room for: to each watch still
+    /// owed its catch-up, the declarations of its kind the peers of `faces` hold now, each named as
+    /// its face's peer, all at once ahead of any live event, and to each watch the events it lost.
+    /// A catch-up the round has not the room for waits for a round that has; one larger than a
+    /// whole round is told as the loss of that many declarations. `faces` is read twice, once to
+    /// count and once to hold.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub(super) unsafe fn tell_owed<'f, I>(&self, faces: impl Fn() -> I)
+    where
+        I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
+    {
+        let round = &self.shared.round;
+        let mut table = lock(&self.shared.table);
+        for Row { watch, cell } in &mut table.rows {
+            let Some(watch) = watch.as_mut() else {
+                continue;
+            };
+            if watch.catching_up {
+                let count = faces()
+                    .map(|(tables, _)| held(watch.plane, tables))
+                    .fold(0usize, usize::saturating_add);
+                let records = count.saturating_add(usize::from(watch.lost != 0));
+                // SAFETY: the caller's contract.
+                if unsafe { round.has_room_for(records, records) } {
+                    watch.catching_up = false;
+                    // SAFETY: the caller's contract.
+                    unsafe { tell_lost(round, watch, cell) };
+                    for (tables, peer) in faces() {
+                        held_of(watch.plane, tables, |id, keyexpr, held| {
+                            let event = DeclEvent {
+                                kind: DeclEventKind::Declared,
+                                id,
+                                keyexpr,
+                                peer: peer.as_deref(),
+                            };
+                            // SAFETY: the caller's contract.
+                            if !unsafe {
+                                round.offer_decl_watch(WatchCall::begun(cell), event, held)
+                            } {
+                                watch.lost = watch.lost.saturating_add(1);
+                            }
+                        });
+                    }
+                    continue;
+                }
+                if !round.is_idle() {
+                    continue;
+                }
+                // An empty round with no room for it never has room for it.
+                watch.catching_up = false;
+                watch.lost = watch
+                    .lost
+                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+            }
+            // SAFETY: the caller's contract.
+            unsafe { tell_lost(round, watch, cell) };
+        }
+    }
+
+    /// Stop watch `id`: nothing more is told it, and the observers of its kind leave `app` with
+    /// the last watch of that kind. Its sink, for the caller to let go of with no lock held, or
+    /// `Some(None)` when the sink is out for a call, which the calling thread lets go of as the
+    /// call returns ([`WatchCall::hand`]); `None` when no watch is declared under `id`.
     pub(super) fn undeclare<
         K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
         P: Storage,
@@ -613,178 +578,82 @@ impl DeclWatches {
         id: DeclWatchId,
     ) -> Option<Option<DeclWatchSink>> {
         let mut table = lock(&self.shared.table);
-        let (row, watch) = table
-            .watches
+        let row = table
+            .rows
             .iter_mut()
-            .enumerate()
-            .find_map(|(row, watch)| Some((row, watch.take_if(|watch| watch.id == id)?)))?;
+            .find(|row| row.watch.as_ref().is_some_and(|watch| watch.id == id))?;
+        let watch = row.watch.take()?;
+        let sink = {
+            let mut slot = lock(&row.cell.slot);
+            slot.gone = true;
+            slot.sink.take()
+        };
         if !table.watches().any(|held| held.plane == watch.plane) {
             if let Some(observers) = table.observers.of(watch.plane).take() {
                 uninstall(app, observers);
             }
         }
-        {
-            let mut ring = lock(&self.shared.ring);
-            ring.forget_row(row);
-            ring.let_go_of_the_told();
-        }
         drop(table);
-        Some(watch.sink)
+        Some(sink)
     }
 
-    /// The session is closed: every watch goes, with what was owed to it. The sinks, for the
-    /// caller to let go of with no lock held; one out for a call is let go of by the thread that
-    /// called it. The observers stay in the closed session's application layer, which dispatches
-    /// nothing more.
+    /// The session is closed: every watch goes, and a call of one the round still owes is handed
+    /// nothing. The sinks, for the caller to let go of with no lock held; one out for a call is
+    /// let go of by the thread that called it. The observers stay in the closed session's
+    /// application layer, which dispatches nothing more.
     pub(super) fn close(&self) -> impl Iterator<Item = DeclWatchSink> {
         let mut table = lock(&self.shared.table);
-        let watches =
-            core::mem::replace(&mut table.watches, [const { None }; caps::MAX_DECL_WATCHES]);
-        {
-            let mut ring = lock(&self.shared.ring);
-            ring.len = 0;
-            ring.unsettled = 0;
-        }
+        table.hearing = None;
+        let sinks: [Option<DeclWatchSink>; caps::MAX_DECL_WATCHES] = core::array::from_fn(|at| {
+            let row = table.rows.get_mut(at)?;
+            row.watch.take()?;
+            let mut slot = lock(&row.cell.slot);
+            slot.gone = true;
+            slot.sink.take()
+        });
         drop(table);
-        watches.into_iter().flatten().filter_map(|watch| watch.sink)
+        sinks.into_iter().flatten()
     }
 
-    /// Forget what an earlier dispatch staged and nobody settled: a group's.
-    pub(super) fn drop_staged(&self) {
+    /// The frame dispatched from now on is a link's, whose peer's zid `peer` reads: what its
+    /// observers are told is held as that peer's events, until [`Self::heard_all`]. Read only when
+    /// a watch is declared.
+    pub(super) fn hear_link(&self, peer: impl FnOnce() -> Option<SessionZid>) {
         let mut table = lock(&self.shared.table);
-        for watch in table.watches.iter_mut().flatten() {
-            watch.staged_lost = 0;
-        }
-        lock(&self.shared.ring).drop_unsettled();
+        let watched = table.watches().next().is_some();
+        table.hearing = watched.then(|| Hearing { peer: named(peer) });
+    }
+
+    /// The frame dispatched last is over: what the observers are told until the next link's is a
+    /// group's, held for no one.
+    pub(super) fn heard_all(&self) {
+        lock(&self.shared.table).hearing = None;
     }
 
     /// The face whose frame was just dispatched told that its peer ended its initial
     /// declarations.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
     #[cfg(feature = "declarations-synced-event")]
-    pub(super) fn stage_synced(&self) {
-        stage(&self.shared, What::Synced, DeclPlane::Subscribers, 0, "");
-    }
-
-    /// Owe each watch what the last dispatch staged of its kind, as the events of the link's peer
-    /// `peer`, which is read only when something was staged.
-    pub(super) fn settle(&self, peer: impl FnOnce() -> Option<SessionZid>) {
-        let mut table = lock(&self.shared.table);
-        let mut ring = lock(&self.shared.ring);
-        let lost = table.watches().any(|watch| watch.staged_lost != 0);
-        if ring.unsettled == 0 && !lost {
-            return;
-        }
-        let peer = named(peer);
-        // The unsettled are the last of the events held.
-        let settled = ring.len.saturating_sub(ring.unsettled);
-        for held in ring.held_mut().skip(settled) {
-            held.told.peer = peer;
-        }
-        ring.unsettled = 0;
-        for watch in table.watches.iter_mut().flatten() {
-            watch.lost = watch
-                .lost
-                .saturating_add(core::mem::take(&mut watch.staged_lost));
-        }
-    }
-
-    /// This thread's turn to hand the owed events out, or `None` when none is owed or another
-    /// thread's turn is running, which hands out what this one owed too. One thread hands them
-    /// out at a time, so a sink taken out of its row for a call is out for that call alone and no
-    /// event is passed over for a sink that is out.
-    pub(super) fn begin_handing(&self) -> Option<HandingTurn<'_>> {
-        let table = lock(&self.shared.table);
-        let mut ring = lock(&self.shared.ring);
-        let owed = ring.len > ring.unsettled || table.watches().any(|watch| watch.lost != 0);
-        if !owed || ring.handing {
-            return None;
-        }
-        ring.handing = true;
-        Some(HandingTurn {
-            watches: self,
-            over: false,
-        })
-    }
-
-    /// Put the sink of watch `id` back in its row after its call; the sink again when the watch
-    /// went during the call (an undeclare from inside it, or the session's close), for the caller
-    /// to let go of with no lock held.
-    pub(super) fn put_back(&self, id: DeclWatchId, sink: DeclWatchSink) -> Option<DeclWatchSink> {
-        match lock(&self.shared.table).watch_mut(id) {
-            Some(watch) => {
-                watch.sink = Some(sink);
-                None
-            }
-            None => Some(sink),
-        }
-    }
-}
-
-/// One thread's turn of handing the owed events out ([`DeclWatches::begin_handing`]): it ends
-/// when no event is left, or, should the thread unwind out of a sink, when it is dropped, so the
-/// next thread that finds an event owed hands it.
-pub(super) struct HandingTurn<'a> {
-    watches: &'a DeclWatches,
-    /// Whether the turn ended with no event left ([`Self::next`]).
-    over: bool,
-}
-
-impl HandingTurn<'_> {
-    /// The next event to hand out, the id of the watch it is owed to and that watch's sink, taken
-    /// out of its row: a watch's loss first, then the events in the order they were owed. `None`
-    /// ends the turn, under the locks an event is owed under, so no event owed meanwhile is left
-    /// with no thread to hand it. Each lock is let go of before this returns, so the sink may
-    /// reach back into the session.
-    pub(super) fn next(&mut self) -> Option<(DeclWatchId, DeclWatchSink, Told)> {
-        let shared = &self.watches.shared;
-        let mut table = lock(&shared.table);
-        let mut ring = lock(&shared.ring);
-        if let Some(watch) = table
-            .watches
-            .iter_mut()
-            .flatten()
-            .find(|watch| watch.lost != 0 && watch.sink.is_some())
-        {
-            let count = core::mem::take(&mut watch.lost);
-            if let Some(sink) = watch.sink.take() {
-                return Some((watch.id, sink, Told::lost(count)));
-            }
-        }
-        while ring.len > ring.unsettled {
-            let Some(front) = ring.front_mut() else {
-                break;
-            };
-            let Some((row, owed)) = front.owed.iter_mut().enumerate().find(|(_, owed)| **owed)
-            else {
-                ring.pop_front();
-                continue;
-            };
-            *owed = false;
-            let told = front.told;
-            if let Some(watch) = table.watches.get_mut(row).and_then(Option::as_mut) {
-                if let Some(sink) = watch.sink.take() {
-                    return Some((watch.id, sink, told));
-                }
-            }
-        }
-        ring.handing = false;
-        self.over = true;
-        None
-    }
-}
-
-impl Drop for HandingTurn<'_> {
-    fn drop(&mut self) {
-        // A turn that ended itself is another thread's to begin again, and is not ended twice.
-        if !self.over {
-            lock(&self.watches.shared.ring).handing = false;
-        }
+    pub(super) unsafe fn heard_synced(&self) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            heard(
+                &self.shared,
+                DeclEventKind::Synced,
+                DeclPlane::Subscribers,
+                0,
+                "",
+                None,
+            )
+        };
     }
 }
 
 /// The observer the application layer tells what a peer declares and retracts of one plane, which
-/// stages it for the watches: the plane and the watches' rows, held in the row of the observer
-/// list it is installed in, so installing a pair of them for a watch allocates nothing.
+/// holds it in the round for the watches: the plane and the watches, held in the row of the
+/// observer list it is installed in, so installing a pair of them for a watch allocates nothing.
 pub(super) struct WatchObserver {
     plane: DeclPlane,
     shared: Arc<Shared>,
@@ -799,23 +668,38 @@ const _: () = assert!(
 
 impl DeclSink for WatchObserver {
     fn on_declared(&mut self, decl: &dyn DeclView) {
-        stage(
-            &self.shared,
-            What::Declared,
-            self.plane,
-            decl.id(),
-            decl.keyexpr(),
-        );
+        // SAFETY: the application layer tells its observers as a frame is dispatched, under the
+        // session's lock.
+        unsafe {
+            heard(
+                &self.shared,
+                DeclEventKind::Declared,
+                self.plane,
+                decl.id(),
+                decl.keyexpr(),
+                decl.keyexpr_held(),
+            )
+        };
     }
 }
 
 impl UndeclSink for WatchObserver {
     fn on_undeclared(&mut self, id: u64) {
-        stage(&self.shared, What::Undeclared, self.plane, id, "");
+        // SAFETY: as `on_declared`.
+        unsafe {
+            heard(
+                &self.shared,
+                DeclEventKind::Undeclared,
+                self.plane,
+                id,
+                "",
+                None,
+            )
+        };
     }
 }
 
-/// The observer that stages what a peer declares and retracts of `plane`.
+/// The observer that holds what a peer declares and retracts of `plane` for the watches.
 fn observer(plane: DeclPlane, shared: &Arc<Shared>) -> WatchObserver {
     WatchObserver {
         plane,
@@ -931,6 +815,7 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use crate::arena::{AllocatorMemory, SessionArena};
+    use wz_session_core::decl_sink::BorrowedDecl;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::slot_observer::ObserverRows;
     use wz_session_core::slot_observer::SlotObserver;
@@ -956,7 +841,18 @@ mod tests {
         format!("{event:?}")
     }
 
-    /// Watch `plane` through `sink` in a table with room for it, owed nothing held.
+    /// As many watches as the build holds, their events held in a round of `events` records.
+    fn over(events: usize) -> (DeclWatches, Arc<Round>) {
+        let round = crate::round::leaked(events);
+        (DeclWatches::holding(caps::MAX_DECL_WATCHES, &round), round)
+    }
+
+    /// No face: a session whose link is not up yet.
+    fn no_faces() -> core::iter::Empty<(&'static FaceTables, Option<SessionZid>)> {
+        core::iter::empty()
+    }
+
+    /// Watch `plane` through `sink` in a table with room for it, caught up on no face.
     fn added<
         K: ObserverSinks<Declared = WatchObserver, Undeclared = WatchObserver>,
         P: Storage,
@@ -967,65 +863,54 @@ mod tests {
         plane: DeclPlane,
         sink: DeclWatchSink,
     ) -> DeclWatchId {
-        match watches.add(app, plane, sink, 0) {
+        let id = match watches.add(app, plane, sink) {
             Ok(id) => id,
             Err((refused, _)) => panic!("a table with room refused the watch: {refused:?}"),
-        }
+        };
+        // SAFETY: the test is the session's one thread, as a holder of its lock is.
+        unsafe { watches.tell_owed(no_faces) };
+        id
     }
 
-    /// The undeclaration of `id` of a subscriber, staged as an observer stages it.
-    fn undeclared(watches: &DeclWatches, id: u64) {
-        stage(
-            &watches.shared,
-            What::Undeclared,
-            DeclPlane::Subscribers,
+    /// Seal the round and hand it out: whether it held anything.
+    fn hand(round: &Round) -> bool {
+        // SAFETY: the test is the session's one thread, as a holder of its lock is.
+        unsafe { round.seal() };
+        round.deliver()
+    }
+
+    /// The declaration `id` of `plane` on `keyexpr`, told as an observer is told it.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    fn declared(watches: &DeclWatches, plane: DeclPlane, id: u64, keyexpr: &str) {
+        observer(plane, &watches.shared).on_declared(&BorrowedDecl {
             id,
-            "",
-        );
+            keyexpr,
+            held: None,
+        });
     }
 
-    /// How many events the ring holds.
-    fn held_events(watches: &DeclWatches) -> usize {
-        lock(&watches.shared.ring).len
+    /// The undeclaration of `id` of a subscriber, told as an observer is told it.
+    fn undeclared(watches: &DeclWatches, id: u64) {
+        observer(DeclPlane::Subscribers, &watches.shared).on_undeclared(id);
     }
 
-    fn drain(watches: &DeclWatches) -> usize {
-        let mut told = 0;
-        if let Some(mut turn) = watches.begin_handing() {
-            while let Some((id, sink, event)) = turn.next() {
-                sink.call(event.event());
-                told += 1;
-                assert!(
-                    watches.put_back(id, sink).is_none(),
-                    "the watch stands, so its sink goes back"
-                );
-            }
-        }
-        told
-    }
-
-    /// What one dispatch staged is owed to each watch of its kind and to none of another kind,
-    /// named as the settling link's peer where the build names peers, and what a group's dispatch
-    /// staged is dropped by the next dispatch, owed to no one.
+    /// An event a link's frame told is held for each watch of its kind and for none of another
+    /// kind, named as the link's peer where the build names peers; one a group's frame told is
+    /// held for no one.
     #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
-    fn a_settled_event_reaches_the_watches_of_its_kind_and_a_dropped_one_none() {
-        let watches = DeclWatches::default();
+    fn a_links_event_reaches_the_watches_of_its_kind_and_a_groups_none() {
+        let (watches, round) = over(4);
         let mut app = SlotObserver::new();
         let (queryables, heard) = recording();
         let (subscribers, unheard) = recording();
         added(&watches, &mut app, DeclPlane::Queryables, queryables);
         added(&watches, &mut app, DeclPlane::Subscribers, subscribers);
 
-        stage(
-            &watches.shared,
-            What::Declared,
-            DeclPlane::Queryables,
-            4,
-            "demo/q",
-        );
-        watches.settle(|| SessionZid::new(&PEER).ok());
-        assert_eq!(drain(&watches), 1, "one watch of the kind, one event");
+        watches.hear_link(|| SessionZid::new(&PEER).ok());
+        declared(&watches, DeclPlane::Queryables, 4, "demo/q");
+        watches.heard_all();
+        assert!(hand(&round), "the event is a record of the round");
         let expected_peer = if cfg!(feature = "remote-declaration-watch") {
             Some(&PEER[..])
         } else {
@@ -1043,35 +928,147 @@ mod tests {
             lock(&unheard).is_empty(),
             "a subscriber watch hears no queryable"
         );
-        assert_eq!(held_events(&watches), 0, "a told event gives its row back");
 
-        stage(
-            &watches.shared,
-            What::Undeclared,
-            DeclPlane::Queryables,
-            4,
-            "",
-        );
-        watches.drop_staged();
-        watches.settle(|| panic!("nothing staged, so no peer is read"));
-        assert_eq!(drain(&watches), 0, "a dropped stage is owed to no one");
-        assert_eq!(held_events(&watches), 0);
+        declared(&watches, DeclPlane::Queryables, 5, "demo/q2");
+        assert!(!hand(&round), "a group's event is held for no one");
+        assert_eq!(lock(&heard).len(), 1);
     }
 
-    /// What no watch reaches takes no row of the ring.
+    /// A link's frame reads no peer while no watch is declared, and what it tells is held for no
+    /// one.
     #[test]
-    fn an_event_no_watch_reaches_takes_no_row() {
-        let watches = DeclWatches::default();
+    fn a_frame_no_watch_hears_reads_no_peer_and_holds_nothing() {
+        let (watches, round) = over(2);
+        watches.hear_link(|| panic!("no watch, so no peer is read"));
         undeclared(&watches, 1);
-        assert_eq!(held_events(&watches), 0);
-        assert!(watches.begin_handing().is_none(), "nothing is owed");
+        watches.heard_all();
+        assert!(!hand(&round));
+        assert!(!watches.owes());
     }
 
-    /// An undeclared watch is owed nothing more, the observers of its kind leave with the last
-    /// watch of that kind, and a second undeclare finds none.
+    /// One event a frame told takes one record of the round, which every watch it reaches joins.
     #[test]
-    fn an_undeclared_watch_is_owed_nothing_and_takes_its_observers_with_it() {
-        let watches = DeclWatches::default();
+    fn one_record_holds_an_event_for_every_watch_it_reaches() {
+        let (watches, round) = over(2);
+        let mut app = SlotObserver::new();
+        let (first, first_log) = recording();
+        let (second, second_log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, first);
+        added(&watches, &mut app, DeclPlane::Subscribers, second);
+        watches.hear_link(|| None);
+        undeclared(&watches, 3);
+        watches.heard_all();
+        // SAFETY: the test is the session's one thread, as a holder of its lock is.
+        unsafe {
+            assert!(round.has_room_for(1, 0), "one record of two is taken");
+            assert!(!round.has_room_for(2, 0), "and only one");
+        }
+        assert!(hand(&round));
+        let told = [printed(DeclWatchEvent::Undeclared { id: 3, peer: None })];
+        assert_eq!(*lock(&first_log), told);
+        assert_eq!(*lock(&second_log), told);
+    }
+
+    /// An event the round has no room for is told as a loss ahead of the watch's next event, and a
+    /// loss no event follows is told by the next round that has room for it.
+    #[test]
+    fn an_event_with_no_room_is_told_as_a_loss_by_the_next_round() {
+        let (watches, round) = over(2);
+        let mut app = SlotObserver::new();
+        let (sink, log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
+        for id in [1, 2, 3] {
+            undeclared(&watches, id);
+        }
+        watches.heard_all();
+        assert!(watches.owes(), "the third found no room");
+        assert!(hand(&round));
+        watches.hear_link(|| None);
+        undeclared(&watches, 4);
+        watches.heard_all();
+        assert!(hand(&round));
+        let undeclared_as = |id| printed(DeclWatchEvent::Undeclared { id, peer: None });
+        assert_eq!(
+            *lock(&log),
+            [
+                undeclared_as(1),
+                undeclared_as(2),
+                printed(DeclWatchEvent::Lost { count: 1 }),
+                undeclared_as(4),
+            ]
+        );
+        assert!(!watches.owes());
+
+        let (watches, round) = over(1);
+        let mut app = SlotObserver::new();
+        let (sink, log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
+        undeclared(&watches, 1);
+        undeclared(&watches, 2);
+        watches.heard_all();
+        assert!(hand(&round));
+        assert!(watches.owes());
+        // SAFETY: the test is the session's one thread, as a holder of its lock is.
+        unsafe { watches.tell_owed(no_faces) };
+        assert!(hand(&round));
+        assert_eq!(
+            *lock(&log),
+            [undeclared_as(1), printed(DeclWatchEvent::Lost { count: 1 })]
+        );
+        assert!(!watches.owes());
+    }
+
+    /// A watch declared while the round is handed out (from inside a callback) is declared, owed
+    /// its catch-up, which the next round that has room for it holds; until then it is told no live
+    /// event, which the catch-up, read off the peers' tables then, holds.
+    #[test]
+    fn a_watch_declared_while_the_round_is_handed_out_is_caught_up_by_the_next() {
+        let (watches, round) = over(4);
+        let mut app = SlotObserver::new();
+        let (first, first_log) = recording();
+        added(&watches, &mut app, DeclPlane::Subscribers, first);
+        watches.hear_link(|| None);
+        undeclared(&watches, 1);
+        watches.heard_all();
+        // SAFETY: the test is the session's one thread, as a holder of its lock is.
+        unsafe { round.seal() };
+        let (late, late_log) = recording();
+        assert!(
+            watches.add(&mut app, DeclPlane::Subscribers, late).is_ok(),
+            "a round handed out refuses no watch"
+        );
+        // SAFETY: as above.
+        unsafe { watches.tell_owed(no_faces) };
+        assert!(watches.owes(), "the sealed round took no catch-up");
+        assert!(round.deliver());
+
+        watches.hear_link(|| None);
+        undeclared(&watches, 4);
+        // SAFETY: as above.
+        unsafe { watches.tell_owed(no_faces) };
+        assert!(!watches.owes(), "the next round took the catch-up");
+        undeclared(&watches, 5);
+        watches.heard_all();
+        assert!(hand(&round));
+        let undeclared_as = |id| printed(DeclWatchEvent::Undeclared { id, peer: None });
+        assert_eq!(
+            *lock(&first_log),
+            [undeclared_as(1), undeclared_as(4), undeclared_as(5)]
+        );
+        assert_eq!(
+            *lock(&late_log),
+            [undeclared_as(5)],
+            "told no live event before its catch-up"
+        );
+    }
+
+    /// An undeclared watch is handed nothing the round still holds for it, the observers of its
+    /// kind leave with the last watch of that kind, and a second undeclare finds none.
+    #[test]
+    fn an_undeclared_watch_is_handed_nothing_and_takes_its_observers_with_it() {
+        let (watches, round) = over(2);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
@@ -1089,13 +1086,14 @@ mod tests {
             1,
             "the other watch of the kind keeps them"
         );
+        watches.hear_link(|| None);
         undeclared(&watches, 9);
-        watches.settle(|| None);
+        watches.heard_all();
 
         assert!(matches!(watches.undeclare(&mut app, id), Some(Some(_))));
-        assert_eq!(drain(&watches), 0, "what was owed went with the watch");
-        assert_eq!(held_events(&watches), 0, "and gave its row back");
-        assert!(lock(&log).is_empty());
+        assert!(hand(&round), "the round held the event");
+        assert!(lock(&log).is_empty(), "and handed it to no one");
+        assert_eq!(Arc::strong_count(&log), 1, "the sink was let go of");
         assert_eq!(app.remote_subscribers.on_decl_len(), 0);
         assert_eq!(app.remote_subscribers.on_undecl_len(), 0);
         assert!(watches.undeclare(&mut app, id).is_none());
@@ -1119,7 +1117,7 @@ mod tests {
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
-        let watches = DeclWatches::default();
+        let (watches, _round) = over(2);
         let (sink, _log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Queryables, sink);
         assert_eq!(app.remote_queryables.on_decl_len(), 1);
@@ -1130,18 +1128,22 @@ mod tests {
         assert_eq!(app.remote_queryables.on_undecl_len(), 0);
     }
 
-    /// A close hands back every sink and leaves nothing owed.
+    /// A close hands back every sink, and the round hands nothing it still held to them.
     #[test]
-    fn a_close_gives_back_every_sink_and_owes_nothing() {
-        let watches = DeclWatches::default();
+    fn a_close_gives_back_every_sink_and_hands_nothing_more() {
+        let (watches, round) = over(2);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         added(&watches, &mut app, DeclPlane::Subscribers, sink);
+        watches.hear_link(|| None);
         undeclared(&watches, 2);
-        watches.settle(|| None);
         assert_eq!(watches.close().count(), 1);
-        assert_eq!(drain(&watches), 0);
-        assert_eq!(held_events(&watches), 0);
+        undeclared(&watches, 3);
+        assert!(
+            hand(&round),
+            "the round held the event told before the close"
+        );
+        assert!(lock(&log).is_empty());
         assert_eq!(
             Arc::strong_count(&log),
             1,
@@ -1149,171 +1151,105 @@ mod tests {
         );
     }
 
-    /// A sink is out of its row for its call: a watch undeclared from inside the call hands the
-    /// undeclare no sink, and the sink comes back to the caller to let go of, since its row went.
+    /// A sink is out of its cell for its call: a watch undeclared then hands the undeclare no
+    /// sink, and the call lets go of the sink as it returns, since the watch went.
     #[test]
     fn a_watch_undeclared_during_its_call_leaves_its_sink_with_the_caller() {
-        let watches = DeclWatches::default();
+        let (watches, _round) = over(2);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
-        undeclared(&watches, 3);
-        watches.settle(|| None);
-        let mut turn = watches.begin_handing().expect("an event is owed");
-        let (told_to, sink, event) = turn.next().expect("the event is handed");
-        assert_eq!(told_to, id);
-        assert!(
-            watches.begin_handing().is_none(),
-            "a second thread finds the turn running"
-        );
+        let cell = {
+            let table = lock(&watches.shared.table);
+            let row = table
+                .rows
+                .iter()
+                .find(|row| row.watch.is_some())
+                .expect("the watch's row");
+            Arc::clone(&row.cell)
+        };
+        let out = lock(&cell.slot)
+            .sink
+            .take()
+            .expect("the sink is in its cell");
         assert!(
             matches!(watches.undeclare(&mut app, id), Some(None)),
-            "the watch is found, its sink out for the call"
+            "the watch is found, its sink out for a call"
         );
-        sink.call(event.event());
-        let gone = watches.put_back(id, sink);
-        assert!(gone.is_some(), "the row went, so the sink is the caller's");
-        assert!(turn.next().is_none(), "nothing more is owed");
-        drop(turn);
-        drop(gone);
-        assert_eq!(lock(&log).len(), 1, "told once");
-        assert_eq!(Arc::strong_count(&log), 1, "let go of by the caller");
-    }
+        lock(&cell.slot).sink = Some(out);
 
-    /// A turn dropped before it ran out, as by a sink that unwound, lets the next thread hand
-    /// what is owed.
-    #[test]
-    fn a_turn_dropped_early_lets_the_next_thread_hand() {
-        let watches = DeclWatches::default();
-        let mut app = SlotObserver::new();
-        let (sink, _log) = recording();
-        let id = added(&watches, &mut app, DeclPlane::Subscribers, sink);
-        undeclared(&watches, 1);
-        undeclared(&watches, 2);
-        watches.settle(|| None);
-        let mut turn = watches.begin_handing().expect("events are owed");
-        let (_, sink, _) = turn.next().expect("the first event is handed");
-        drop(turn);
-        assert!(watches.put_back(id, sink).is_none());
+        // A call that finds its watch gone hands nothing; one whose watch goes during the call
+        // lets go of the sink as it returns.
+        let call = WatchCall::begun(&cell);
+        call.hand(lost(1));
+        assert!(lock(&log).is_empty(), "a gone watch is handed nothing");
+        assert!(!call.end());
+
+        let inner = Arc::clone(&cell);
+        let (went, went_log) = {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let into = Arc::clone(&log);
+            let sink = DeclWatchSink::shared(move |_: DeclWatchEvent<'_>| {
+                let mut slot = lock(&inner.slot);
+                lock(&into).push(slot.sink.is_none());
+                slot.gone = true;
+            });
+            (sink, log)
+        };
+        *lock(&cell.slot) = Slot {
+            sink: Some(went),
+            gone: false,
+        };
+        let call = WatchCall::begun(&cell);
+        call.hand(lost(2));
         assert_eq!(
-            drain(&watches),
-            1,
-            "the second event is handed by the next turn"
+            *lock(&went_log),
+            [true],
+            "the sink was out of its cell for the call"
+        );
+        assert!(lock(&cell.slot).sink.is_none(), "the caller let go of it");
+        assert!(!call.end());
+        assert_eq!(
+            Arc::strong_count(&cell),
+            2,
+            "the row and the test hold the cell; the sink and the calls let it go"
         );
     }
 
-    /// An event held once is told to every watch it reaches, in one row of the ring.
+    /// A row a call of its undeclared watch is still owed on is not taken by another watch until
+    /// the round has made the call.
     #[test]
-    fn one_row_holds_an_event_for_every_watch_it_reaches() {
-        let watches = DeclWatches::holding(2, 1);
-        let mut app = SlotObserver::new();
-        let (first, first_log) = recording();
-        let (second, second_log) = recording();
-        added(&watches, &mut app, DeclPlane::Subscribers, first);
-        added(&watches, &mut app, DeclPlane::Subscribers, second);
-        undeclared(&watches, 6);
-        watches.settle(|| None);
-        assert_eq!(held_events(&watches), 1, "one row for the two watches");
-        assert_eq!(drain(&watches), 2);
-        let told = [printed(DeclWatchEvent::Undeclared { id: 6, peer: None })];
-        assert_eq!(*lock(&first_log), told);
-        assert_eq!(*lock(&second_log), told);
-    }
-
-    /// An event that finds the ring full is not held, and each watch it would reach is told how
-    /// many it lost ahead of what it is told next.
-    #[test]
-    fn a_full_ring_tells_each_watch_it_reaches_how_many_it_lost() {
-        let watches = DeclWatches::holding(2, 2);
-        let mut app = SlotObserver::new();
-        let (first, first_log) = recording();
-        let (second, second_log) = recording();
-        added(&watches, &mut app, DeclPlane::Subscribers, first);
-        added(&watches, &mut app, DeclPlane::Subscribers, second);
-        for id in 1..=4 {
-            undeclared(&watches, id);
-        }
-        watches.settle(|| None);
-        assert_eq!(held_events(&watches), 2, "the ring holds two");
-        assert_eq!(drain(&watches), 6, "a loss and two events for each watch");
-        let told = [
-            printed(DeclWatchEvent::Lost { count: 2 }),
-            printed(DeclWatchEvent::Undeclared { id: 1, peer: None }),
-            printed(DeclWatchEvent::Undeclared { id: 2, peer: None }),
-        ];
-        assert_eq!(*lock(&first_log), told);
-        assert_eq!(*lock(&second_log), told);
-        assert!(watches.begin_handing().is_none(), "the loss is told once");
-    }
-
-    /// A key longer than a row holds is told as lost, not cut.
-    #[test]
-    fn a_key_longer_than_a_row_is_told_as_lost() {
-        let watches = DeclWatches::default();
-        let mut app = SlotObserver::new();
-        let (sink, log) = recording();
-        added(&watches, &mut app, DeclPlane::Subscribers, sink);
-        let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
-        stage(
-            &watches.shared,
-            What::Declared,
-            DeclPlane::Subscribers,
-            1,
-            &long,
-        );
-        watches.settle(|| None);
-        assert_eq!(drain(&watches), 1);
-        assert_eq!(*lock(&log), [printed(DeclWatchEvent::Lost { count: 1 })]);
-    }
-
-    /// What a group's dispatch lost is owed to no one, as what it staged.
-    #[test]
-    fn a_loss_of_a_dropped_stage_is_owed_to_no_one() {
-        let watches = DeclWatches::holding(1, 1);
-        let mut app = SlotObserver::new();
-        let (sink, log) = recording();
-        added(&watches, &mut app, DeclPlane::Subscribers, sink);
-        undeclared(&watches, 1);
-        undeclared(&watches, 2);
-        watches.drop_staged();
-        watches.settle(|| panic!("nothing staged, so no peer is read"));
-        assert_eq!(drain(&watches), 0);
-        assert!(lock(&log).is_empty());
-        assert_eq!(held_events(&watches), 0);
-    }
-
-    /// A watch whose catch-up does not fit in the rows free is refused with its sink handed back
-    /// and nothing installed, and one whose catch-up fits is declared; an undeclared watch's rows
-    /// come back.
-    #[test]
-    fn a_watch_whose_catch_up_does_not_fit_is_refused() {
-        let watches = DeclWatches::holding(2, 2);
+    fn a_row_is_not_taken_while_a_call_of_its_last_watch_is_owed() {
+        let round = crate::round::leaked(2);
+        let watches = DeclWatches::holding(1, &round);
         let mut app = SlotObserver::new();
         let (first, _first_log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, first);
+        watches.hear_link(|| None);
         undeclared(&watches, 1);
-        watches.settle(|| None);
-        let (late, late_log) = recording();
-        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Queryables, late, 2)
+        watches.heard_all();
+        assert!(watches.undeclare(&mut app, id).is_some());
+        let (second, second_log) = recording();
+        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, second)
         else {
-            panic!("one row is free and the catch-up takes two");
+            panic!("the one row's cell is held by the call the round owes");
         };
         assert_eq!(refused, Declined::TableFull);
-        drop(handed_back);
-        assert_eq!(
-            Arc::strong_count(&late_log),
-            1,
-            "the refused sink is the caller's"
-        );
-        assert_eq!(lock(&watches.shared.table).watches().count(), 1);
-        assert!(watches.undeclare(&mut app, id).is_some());
-        let (fits, _fits_log) = recording();
+        assert!(hand(&round));
         assert!(
             watches
-                .add(&mut app, DeclPlane::Subscribers, fits, 2)
+                .add(&mut app, DeclPlane::Subscribers, handed_back)
                 .is_ok(),
-            "the undeclared watch gave its row back"
+            "the call ended, so the row is free"
         );
+        assert!(lock(&second_log).is_empty());
+    }
+
+    /// The watches keep no key of their own: a row is a few words, and the key of an event lies
+    /// in the round.
+    #[test]
+    fn a_watch_row_holds_no_key() {
+        assert!(core::mem::size_of::<Row>() <= 6 * core::mem::size_of::<u64>());
     }
 
     /// Tokens are heard with the liveliness plane only, and queryables with a querier or a
@@ -1333,11 +1269,11 @@ mod tests {
     #[cfg(not(any(feature = "query", feature = "queryable")))]
     #[test]
     fn a_build_without_the_queryables_plane_refuses_their_observers() {
-        let watches = DeclWatches::default();
+        let (watches, _round) = over(2);
         let mut app = SlotObserver::new();
         let (sink, log) = recording();
         assert!(matches!(
-            watches.add(&mut app, DeclPlane::Queryables, sink, 0),
+            watches.add(&mut app, DeclPlane::Queryables, sink),
             Err((Declined::NotBuilt, _))
         ));
         assert_eq!(Arc::strong_count(&log), 1, "the refused sink is let go of");
@@ -1355,12 +1291,13 @@ mod tests {
     /// nothing installed for it, and the row an undeclared watch leaves takes the next one.
     #[test]
     fn a_watch_past_the_sessions_limit_is_refused_until_a_row_comes_back() {
-        let watches = DeclWatches::holding(1, 1);
+        let round = crate::round::leaked(1);
+        let watches = DeclWatches::holding(1, &round);
         let mut app = SlotObserver::new();
         let (first, _first_log) = recording();
         let id = added(&watches, &mut app, DeclPlane::Subscribers, first);
         let (second, log) = recording();
-        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, second, 0)
+        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, second)
         else {
             panic!("the session's one row is taken");
         };
@@ -1382,70 +1319,7 @@ mod tests {
         assert_eq!(lock(&watches.shared.table).watches().count(), 1);
     }
 
-    /// A held event owed to the watch of the first row, `id` its id.
-    fn owed_to_first(id: u64) -> Held {
-        Held {
-            told: Told::lost(id),
-            owed: core::array::from_fn(|row| row == 0),
-        }
-    }
-
-    /// The ids of the events a ring holds, oldest first.
-    fn ids(ring: &mut Ring) -> Vec<u64> {
-        ring.held_mut().map(|held| held.told.id).collect()
-    }
-
-    /// A ring of no row holds nothing: a push is refused, there is no front, and a pop changes
-    /// nothing.
-    ///
-    /// # Control
-    ///
-    /// A `push` that skips the `most` bound reds the first assertion.
-    #[test]
-    fn a_ring_of_no_row_holds_nothing() {
-        let mut ring = Ring::holding(0);
-        assert!(!ring.push(owed_to_first(1)), "no row to hold it");
-        assert!(!ring.stage(owed_to_first(2)), "nor to stage it");
-        assert_eq!(ring.unsettled, 0, "a refused stage owes nothing");
-        assert!(ring.front().is_none());
-        ring.pop_front();
-        assert_eq!((ring.len, ring.head), (0, 0));
-        assert!(ids(&mut ring).is_empty());
-        assert_eq!(ring.free(), 0);
-    }
-
-    /// The events a ring holds are read oldest first across its last row, a full ring refuses the
-    /// next, and what a dispatch staged is let go of from the newest end.
-    ///
-    /// # Control
-    ///
-    /// Reading the rows before the head first (`before` ahead of `from` in `held_mut`) reds the
-    /// order after the wrap.
-    #[test]
-    fn a_ring_reads_oldest_first_across_its_last_row() {
-        let mut ring = Ring::holding(3);
-        assert!(ring.push(owed_to_first(1)));
-        assert!(ring.push(owed_to_first(2)));
-        assert!(ring.push(owed_to_first(3)));
-        assert!(!ring.push(owed_to_first(4)), "three rows, three events");
-        ring.pop_front();
-        ring.pop_front();
-        assert_eq!(ring.head, 2);
-        assert!(ring.stage(owed_to_first(5)), "the first row is free again");
-        assert!(ring.stage(owed_to_first(6)));
-        assert_eq!(ids(&mut ring), [3, 5, 6]);
-        assert_eq!(ring.front().map(|held| held.told.id), Some(3));
-        ring.drop_unsettled();
-        assert_eq!(ids(&mut ring), [3], "the two staged went");
-        assert_eq!(ring.free(), 2);
-        ring.forget_row(0);
-        ring.let_go_of_the_told();
-        assert!(ids(&mut ring).is_empty(), "an event owed to no one goes");
-        assert_eq!(ring.head, 0, "the head moved past the last row");
-    }
-
-    /// A watch past the last id the session can hand out is refused by name, its sink handed
-    /// back and nothing installed for it.
+    /// A watch past the last id is refused, and installs nothing.
     ///
     /// # Control
     ///
@@ -1453,11 +1327,11 @@ mod tests {
     /// reds the assertions.
     #[test]
     fn a_watch_past_the_last_id_is_refused_and_installs_nothing() {
-        let watches = DeclWatches::default();
+        let (watches, _round) = over(2);
         let mut app = SlotObserver::new();
         lock(&watches.shared.table).next_id = DeclWatchId::MAX;
         let (sink, log) = recording();
-        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, sink, 0)
+        let Err((refused, handed_back)) = watches.add(&mut app, DeclPlane::Subscribers, sink)
         else {
             panic!("every id was handed out");
         };
@@ -1480,33 +1354,23 @@ mod tests {
         );
     }
 
-    /// The session's limits set the rows a table and its ring admit, under the build's.
+    /// The session's limit sets the rows a table admits, under the build's.
     #[test]
-    fn the_sessions_limits_set_the_rows_under_the_builds() {
+    fn the_sessions_limit_sets_the_rows_under_the_builds() {
+        let round = crate::round::leaked(1);
         let mut limits = SessionLimits::defaults();
         limits
             .select_max_decl_watches(Quota::at_most(1))
             .expect("one watch is within every build's domain");
-        limits
-            .select_max_decl_watch_events(Quota::at_most(1))
-            .expect("one event is within every build's domain");
-        let lowered = DeclWatches::under(&limits).expect("limits under the build's");
+        let lowered = DeclWatches::under(&limits, &round).expect("limits under the build's");
         assert_eq!(lock(&lowered.shared.table).most, 1);
-        assert_eq!(lock(&lowered.shared.ring).most, 1);
         let defaults = SessionLimits::defaults();
-        let built = DeclWatches::under(&defaults).expect("the build's own");
+        let built = DeclWatches::under(&defaults, &round).expect("the build's own");
         let within =
             |value: Quota, ceiling: usize| value.most().map_or(ceiling, |most| most.min(ceiling));
         assert_eq!(
             lock(&built.shared.table).most,
             within(defaults.max_decl_watches(), caps::MAX_DECL_WATCHES)
-        );
-        assert_eq!(
-            lock(&built.shared.ring).most,
-            within(
-                defaults.max_decl_watch_events(),
-                caps::MAX_DECL_WATCH_EVENTS
-            )
         );
     }
 }

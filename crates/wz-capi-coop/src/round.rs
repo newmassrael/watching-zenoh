@@ -23,6 +23,11 @@ use crate::engine::LivelinessCall;
 #[cfg(feature = "queryable")]
 use crate::engine::QueryableCall;
 use crate::engine::SubscriberCall;
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+use crate::engine::WatchCall;
 #[cfg(feature = "query")]
 use wz_capi_port::ReplyCallback;
 #[cfg(feature = "liveliness")]
@@ -79,10 +84,34 @@ pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLi
         .max_subscriptions()
         .lent_under(Quota::at_most(SUBS))
         .unwrap_or(SUBS);
-    let most = most_subscribers(subscribers, session_liveliness::<LIVE>(limits));
+    let most = most_subscribers(subscribers, session_liveliness::<LIVE>(limits))
+        .max(session_watches(limits));
     ReadRoom {
         // A reply owes its leg's callback, whatever the session's subscribers.
         callbacks: most.max(1),
+    }
+}
+
+/// The declaration watches the session's `limits` admit, under the build's: what a record of what a
+/// peer declared owes a callback to at most. None in a build without the watch.
+fn session_watches(limits: &SessionLimits) -> usize {
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    {
+        limits
+            .max_decl_watches()
+            .lent_under(Quota::at_most(wz_session_core::caps::MAX_DECL_WATCHES))
+            .unwrap_or(wz_session_core::caps::MAX_DECL_WATCHES)
+    }
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
+    {
+        let _ = limits;
+        0
     }
 }
 
@@ -112,6 +141,15 @@ impl RoundCalls for CoopCalls {
     type Queryable = QueryableCall;
     #[cfg(not(feature = "queryable"))]
     type Queryable = core::convert::Infallible;
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    type Watch = WatchCall;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
     type Watch = core::convert::Infallible;
     #[cfg(feature = "query")]
     type Leg = LegId;
@@ -133,6 +171,15 @@ impl RoundCalls for CoopCalls {
     type Queries = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "queryable"))]
     type Queries = wz_session_core::session_tables::Absent;
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    type Watches = wz_session_core::session_tables::Present;
+    #[cfg(not(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    )))]
     type Watches = wz_session_core::session_tables::Absent;
     #[cfg(feature = "local-subscriber")]
     type Capture = wz_session_core::session_tables::Present;
@@ -210,6 +257,30 @@ impl wz_session_core::round::TokenCall for LivelinessCall {
 impl RoundCall for QueryableCall {
     fn end(self) -> bool {
         QueryableCall::end(self)
+    }
+}
+
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+impl RoundCall for WatchCall {
+    fn end(self) -> bool {
+        WatchCall::end(self)
+    }
+}
+
+#[cfg(any(
+    feature = "remote-declaration-watch",
+    feature = "declarations-synced-event"
+))]
+impl wz_session_core::round::WatchCall for WatchCall {
+    fn same_row(&self, other: &Self) -> bool {
+        WatchCall::same_row(self, other)
+    }
+
+    fn hand(&self, event: wz_session_core::round::DeclEvent<'_>) {
+        WatchCall::hand(self, event);
     }
 }
 

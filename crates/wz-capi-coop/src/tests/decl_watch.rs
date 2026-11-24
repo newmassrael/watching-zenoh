@@ -337,4 +337,95 @@ mod watched {
             );
         }
     }
+
+    /// A watch declared from inside another watch's call, while the round is handed out, is
+    /// declared, not refused, and told what the peer held by the next round.
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[test]
+    fn a_watch_declared_inside_a_call_is_told_what_the_peer_held_by_the_next_round() {
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let first = Log::new();
+        watch(&engine, DeclPlane::Queryables, &first);
+        router.send(Command::DeclareQueryable(5, "demo/w/held", false));
+        let held = Seen::Declared(5, "demo/w/held".to_owned());
+        until(&engine, "CONTROL: the live declaration", || {
+            first.has(&held)
+        });
+
+        let late = Arc::new(Log::new());
+        let declared_inside: Arc<Mutex<Option<Result<u64, Refusal>>>> = Arc::default();
+        let trigger: SharedCall = {
+            let session = Arc::downgrade(&engine);
+            let late = Arc::clone(&late);
+            let into = Arc::clone(&declared_inside);
+            Arc::new(move |event: DeclWatchEvent<'_>| {
+                if !matches!(event, DeclWatchEvent::Declared { .. }) {
+                    return;
+                }
+                let Some(engine) = session.upgrade() else {
+                    return;
+                };
+                let mut slot = into.lock().unwrap();
+                if slot.is_none() {
+                    *slot = Some(engine.declare_decl_watch(
+                        DeclPlane::Queryables,
+                        DeclWatchSink::Shared(Arc::clone(&late.sink)),
+                    ));
+                }
+            })
+        };
+        engine
+            .declare_decl_watch(DeclPlane::Subscribers, DeclWatchSink::Shared(trigger))
+            .expect("a watch of subscribers");
+        router.send(Command::DeclareSubscriber(3, "demo/w/trigger"));
+        until(
+            &engine,
+            "the held declaration, told to the inner watch",
+            || late.has(&held),
+        );
+        assert!(
+            matches!(*declared_inside.lock().unwrap(), Some(Ok(_))),
+            "declared from inside the call, not refused"
+        );
+        assert_eq!(late.events(), [held]);
+    }
+
+    /// What a peer declares is told in the order it arrived among the session's other deliveries:
+    /// a declaration ahead of the sample the peer sent after it, as records of one round.
+    #[test]
+    fn a_declaration_is_told_ahead_of_the_sample_sent_after_it() {
+        use wz_capi_port::{SubscriberSink, WireKey};
+        use wz_session_core::locality::Locality;
+        use wz_session_core::sink::SampleView;
+
+        let router = Router::start(CatchAll::None);
+        let engine = open(&router);
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let watched: SharedCall = {
+            let order = Arc::clone(&order);
+            Arc::new(move |event: DeclWatchEvent<'_>| {
+                if matches!(event, DeclWatchEvent::Declared { .. }) {
+                    order.lock().unwrap().push("declared");
+                }
+            })
+        };
+        engine
+            .declare_decl_watch(DeclPlane::Subscribers, DeclWatchSink::Shared(watched))
+            .expect("a watch of subscribers");
+        engine
+            .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
+                let order = Arc::clone(&order);
+                SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                    order.lock().unwrap().push("sample");
+                })
+            })
+            .expect("declared");
+        router.send(Command::DeclareSubscriber(3, "demo/w/order"));
+        router.send(Command::Push("demo/w/order", b"x"));
+        until(&engine, "the declaration and the sample", || {
+            order.lock().unwrap().len() >= 2
+        });
+        assert_eq!(*order.lock().unwrap(), ["declared", "sample"]);
+    }
 }
