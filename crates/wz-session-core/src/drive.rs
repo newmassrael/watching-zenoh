@@ -2178,18 +2178,12 @@ where
     // one message is read on where it lies, as [`dispatch_datagram`] reads it.
     let mut hand = through_hand_off(reasm, actions, now_ms, on_event);
     let mut path = None;
-    let mut at = 0;
-    loop {
-        let (read_by, used, _) = dispatch_datagram_reassembling_unit(
-            &unit[at..],
-            None,
-            false,
-            engine,
-            record,
-            &mut hand,
-        );
+    let mut at = 0usize;
+    while let Some(rest) = unit.get(at..) {
+        let (read_by, used, _) =
+            dispatch_datagram_reassembling_unit(rest, None, false, engine, record, &mut hand);
         path.get_or_insert(read_by);
-        at += used;
+        at = at.saturating_add(used);
         if used == 0 || at >= unit.len() {
             break;
         }
@@ -3081,18 +3075,19 @@ where
     let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
     let peer_len = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-        let n = zid.len().min(peer.len());
-        peer[..n].copy_from_slice(&zid[..n]);
-        n
+        for (to, from) in peer.iter_mut().zip(zid) {
+            *to = *from;
+        }
+        zid.len().min(peer.len())
     });
     let mut dropped_by_decode = None;
     let ingest_outcome = reasm.ingest_keeping(
         ReassemblyFragment {
-            peer_key: &peer[..peer_len],
+            peer_key: peer.get(..peer_len).unwrap_or_default(),
             reliable,
             sn,
             more: u8::from(more),
-            payload: &unit[payload_at..],
+            payload: unit.get(payload_at..).unwrap_or_default(),
             priority,
             markers,
         },

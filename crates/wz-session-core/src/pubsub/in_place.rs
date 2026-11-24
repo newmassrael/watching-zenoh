@@ -441,7 +441,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 current_is_set = false;
                 let suffix = match put.suffix {
                     Some((from, to)) => {
-                        let bytes = &frame_bytes[from as usize..to as usize];
+                        // The reader took the range from this frame; one that is not in it is
+                        // dropped, as a frame that changed under the reader is below.
+                        let Some(bytes) = frame_bytes.get(from as usize..to as usize) else {
+                            continue;
+                        };
                         match last_suffix {
                             Some((held, text)) if held == bytes => Some(text),
                             _ => match core::str::from_utf8(bytes) {

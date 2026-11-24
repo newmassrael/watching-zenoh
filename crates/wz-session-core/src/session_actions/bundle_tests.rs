@@ -487,6 +487,30 @@ mod handshake_records {
     }
 }
 
+/// The heap path's handshake senders hand the link the message their encoder answers: one write
+/// each for the opener's InitSyn and OpenSyn. A message the encoder refused is not sent; the
+/// fields of these four leave no input that reaches it, which is why this reads the sent arm.
+#[cfg(all(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "session-unicast-open",
+    not(feature = "tx-lend-only")
+))]
+#[test]
+fn the_heap_paths_opening_handshake_reaches_the_link() {
+    use crate::session_fsm_unicast::SessionFsmUnicastActions;
+    let (actions, link) = bundle();
+    let mut binding = super::SessionActionsBinding::<PlainRuntime, StillClock>::new(
+        Arc::clone(&actions),
+        NoEntropy,
+    );
+    binding.link_driver_open();
+    binding.send_init_syn();
+    assert_eq!(link.written.load(Ordering::SeqCst), 1, "the InitSyn");
+    binding.send_open_syn();
+    assert_eq!(link.written.load(Ordering::SeqCst), 2, "and the OpenSyn");
+}
+
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
 /// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
 /// message, and the send answers that as a value.

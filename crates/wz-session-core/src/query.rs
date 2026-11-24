@@ -174,8 +174,6 @@ use crate::wireexpr_resolve::{
 
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use crate::transport_profile::owned::ResponseFinalOwned;
-#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
-use wz_codecs::lent::ResponseFinal;
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::driver_loop::DriverLoopOutcome;
@@ -845,7 +843,7 @@ pub(crate) fn stage_queryable_interest<R: QueryableRows>(
                 keyexpr: String::from(queryable.pattern),
                 complete: queryable.complete,
             });
-            declared += 1;
+            declared = declared.saturating_add(1);
         }
         false
     });
@@ -856,7 +854,7 @@ pub(crate) fn stage_queryable_interest<R: QueryableRows>(
             keyexpr: String::from(interest_key),
             complete,
         });
-        declared += 1;
+        declared = declared.saturating_add(1);
     }
     staged.push(QueryableInterestReply::Final { interest_id });
     declared
@@ -2844,7 +2842,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
             return Err(RegisterError::KeyexprTooLong);
         }
         // The quota before an id is taken: a refused registration changes nothing.
-        if !self.quota.admits(self.queryables.len() + 1) {
+        if !self.quota.admits(self.queryables.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         // The row's key before an id is taken too: a pattern with no room where the registry keeps
@@ -2868,7 +2866,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
             })
             .map_err(|_| RegisterError::TableFull)?;
         // Taken only after the id above fitted, so the counter stops one past `u32::MAX`.
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         Ok(id)
     }
 
@@ -3610,7 +3608,7 @@ impl QueryPeer {
     /// the queryable table. Each `NetworkMessage::Request` triggers
     /// at most one `dispatch_request` and, when that Request carried a
     /// RESOLVABLE Query body, also enqueues a `pending_final_rids`
-    /// entry so the caller emits exactly one matching [`ResponseFinal`]
+    /// entry so the caller emits exactly one matching `ResponseFinal`
     /// after all per-rid replies have been sent (zenoh-pico semantics:
     /// "many Reply + exactly one Final" per Query).
     ///
@@ -4117,7 +4115,7 @@ impl QueryableRegistry<BoxedQuerySink> {
     }
 }
 
-/// R121j-5c — build the wire-form [`ResponseFinal`] envelope that
+/// R121j-5c — build the wire-form `ResponseFinal` envelope that
 /// terminates a Reply chain for `rid`. zenoh-pico semantics require
 /// exactly one Final per inbound Query whose dispatch produced at
 /// least one Reply (or Err); the caller passes each rid recorded in
@@ -4125,27 +4123,18 @@ impl QueryableRegistry<BoxedQuerySink> {
 /// frame.
 ///
 /// The construction is shape-frozen by the SCE codegen for
-/// [`ResponseFinal`]: `header = _Z_MID_N_RESPONSE_FINAL(0x1A)` + the
+/// `ResponseFinal`: `header = _Z_MID_N_RESPONSE_FINAL(0x1A)` + the
 /// per-rid VLE. Future qos / responder envelope exts on ResponseFinal
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 pub fn response_final_for(rid: crate::wire_id::RequestId) -> ResponseFinalOwned {
-    ResponseFinal {
+    // The header (0x1a, _Z_MID_N_RESPONSE_FINAL) and the absent extension chain are the codec's
+    // default, made in the owned form itself, so there is no copy that could refuse.
+    ResponseFinalOwned {
         request_id: rid,
-        // header = 0x1a (_Z_MID_N_RESPONSE_FINAL) and extensions =
-        // None come from ResponseFinal::default() (see
-        // wz-codecs/.../out/response_final.rs:38-47); the spread
-        // keeps this helper resilient to future field additions
-        // that land with sensible defaults.
-        ..ResponseFinal::default()
+        ..ResponseFinalOwned::default()
     }
-    // `ResponseFinalOwned` has no `Default` (the owned mirrors derive
-    // only Debug/Clone/PartialEq), so build the borrowed view via the
-    // spread default and deep-copy into the owned form at the boundary.
-    // ResponseFinal carries no bounded fields, so the owned copy is infallible.
-    .try_into_owned_in::<crate::transport_profile::TransportStorage>()
-    .expect("ResponseFinal carries no bounded fields")
 }
 
 // R311dx — the behavioural query tests exercise the full
@@ -4171,6 +4160,17 @@ mod tests {
     // staging trait's `nth` and `drain_staged`.
     use crate::reply_stage::ReplyStaging as _;
     use hashbrown::HashMap;
+    /// The Final of a request is the codec's default ResponseFinal, its header and its absent
+    /// extension chain, made in the owned form with the request's id.
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn a_response_final_is_the_codecs_default_with_its_rid() {
+        let built = response_final_for(42);
+        assert_eq!(built.header, 0x1a);
+        assert_eq!(built.request_id, 42);
+        assert!(built.extensions.is_none());
+    }
+
     // R311gb-3b — `Box` lives here (not at module level): its only uses
     // are the `NetworkMessage::Request(Box::new(..))` fixtures below, and
     // this module's gate is exactly the full query feature set, so the

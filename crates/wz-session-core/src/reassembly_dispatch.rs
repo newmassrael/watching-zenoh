@@ -626,20 +626,29 @@ struct ChainKey {
 
 impl ChainKey {
     fn new(peer_key: &[u8], reliable: bool, priority: Priority) -> Self {
-        let mut buf = [0u8; PEER_KEY_MAX];
-        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
-        buf[..n].copy_from_slice(&peer_key[..n]);
+        let (peer_key, peer_key_len) = Self::held(peer_key);
         Self {
-            peer_key: buf,
-            peer_key_len: n as u8,
+            peer_key,
+            peer_key_len,
             reliable,
             priority,
         }
     }
 
+    /// `peer_key` as a key holds it: its first `PEER_KEY_MAX` bytes, the rest of the array zero,
+    /// and how many it kept. Two keys held so are equal exactly when the bytes kept are.
+    fn held(peer_key: &[u8]) -> ([u8; PEER_KEY_MAX], u8) {
+        let mut buf = [0u8; PEER_KEY_MAX];
+        let mut len = 0u8;
+        for (to, from) in buf.iter_mut().zip(peer_key) {
+            *to = *from;
+            len = len.saturating_add(1);
+        }
+        (buf, len)
+    }
+
     fn same_peer(&self, peer_key: &[u8]) -> bool {
-        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
-        self.peer_key_len as usize == n && self.peer_key[..n] == peer_key[..n]
+        Self::held(peer_key) == (self.peer_key, self.peer_key_len)
     }
 
     fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {
@@ -1142,7 +1151,10 @@ where
     ) -> IngestOutcome {
         let staged = self.stage(idx, sn, payload);
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        let Some(slot) = slots.get_mut(idx) else {
+            // No slot holds the chain, so none is delivered and none released.
+            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
+        };
         if !staged {
             slot.release_or_replace(staging);
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
@@ -1375,8 +1387,8 @@ where
             slot.drive(ReassemblySlotEvent::ReassemblyTimeout);
             slot.release_or_replace(staging);
             released(reliable, priority);
-            loss.bytes += staged;
-            loss.chains += 1;
+            loss.bytes = loss.bytes.saturating_add(staged);
+            loss.chains = loss.chains.saturating_add(1);
         }
         loss
     }
@@ -1433,7 +1445,9 @@ where
         let max_message_bytes = self.config.max_message_bytes;
         let opened = self.opened;
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        let Some(slot) = slots.get_mut(idx) else {
+            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
+        };
         let Some(chain) = staging.acquire() else {
             return IngestOutcome::Refused(RefuseReason::PoolExhausted);
         };
@@ -1529,7 +1543,7 @@ where
     /// disagree. The caller ends the chain.
     fn stage(&mut self, idx: usize, sn: u64, payload: &[u8]) -> bool {
         let Self { slots, staging, .. } = self;
-        let Some(open) = slots[idx].open.as_mut() else {
+        let Some(open) = slots.get_mut(idx).and_then(|slot| slot.open.as_mut()) else {
             return false;
         };
         if staging.append(&mut open.chain, payload).is_err() {
@@ -1550,7 +1564,7 @@ where
     ) -> IngestOutcome {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
-        let Some(open) = self.slots[idx].open.as_ref() else {
+        let Some(open) = self.slots.get(idx).and_then(|slot| slot.open.as_ref()) else {
             return self.ingest_chain_start(frag, now_ms, hand, deliver);
         };
         let last_sn = open.last_sn;
@@ -1587,7 +1601,12 @@ where
         }
 
         // The slot FSM's `more` guard decides Continue vs Final.
-        let duties = self.slots[idx].drive_chunk(frag.more);
+        // No slot in `idx` is no machine to drive, and the chain is given up below as one whose
+        // machine answered neither duty.
+        let duties = self
+            .slots
+            .get_mut(idx)
+            .map_or(0, |slot| slot.drive_chunk(frag.more));
         if duties & duty::APPEND != 0 {
             if !self.stage(idx, frag.sn, frag.payload) {
                 return self.abort(
@@ -1605,7 +1624,9 @@ where
         // was not in `Receiving` while the Router held its chain open: the
         // chain is given up and the slot gets a fresh machine.
         let Self { slots, staging, .. } = self;
-        slots[idx].replace(staging);
+        if let Some(slot) = slots.get_mut(idx) {
+            slot.replace(staging);
+        }
         IngestOutcome::Aborted(AbortReason::CapacityOverflow)
     }
 
@@ -1627,7 +1648,10 @@ where
     /// it, is replaced, so the chain the Router ended is ended either way.
     fn end_chain(&mut self, idx: usize, event: ReassemblySlotEvent) {
         let Self { slots, staging, .. } = self;
-        let slot = &mut slots[idx];
+        // No slot in `idx` holds no chain to end.
+        let Some(slot) = slots.get_mut(idx) else {
+            return;
+        };
         if slot.drive(event) & duty::ABORT != 0 {
             slot.release_or_replace(staging);
         } else {
@@ -1665,11 +1689,12 @@ where
     /// splice a later link's fragments of the same peer onto them. Each is driven through the
     /// abort arm [`Self::abort_channel`] drives. Answers how many were ended.
     pub fn abort_peer(&mut self, peer_key: &[u8]) -> usize {
-        let mut ended = 0;
+        let mut ended = 0usize;
         for idx in 0..SLOTS {
-            let of_peer = self.slots[idx]
-                .open
-                .as_ref()
+            let of_peer = self
+                .slots
+                .get(idx)
+                .and_then(|slot| slot.open.as_ref())
                 .is_some_and(|open| open.key.same_peer(peer_key));
             if of_peer {
                 self.abort(
@@ -1677,7 +1702,8 @@ where
                     ReassemblySlotEvent::FragmentOoo,
                     AbortReason::OutOfOrder,
                 );
-                ended += 1;
+                // At most `SLOTS`.
+                ended = ended.saturating_add(1);
             }
         }
         ended
@@ -1736,6 +1762,26 @@ mod tests {
 
     const PEER_A: &[u8] = &[0xAA; 16];
     const PEER_B: &[u8] = &[0xBB; 16];
+
+    /// A chain's key holds a peer key by its first `PEER_KEY_MAX` bytes: a longer key is the
+    /// same peer as that prefix, and a key that differs in its length or in a kept byte is not,
+    /// a trailing zero included.
+    #[test]
+    fn a_chain_key_holds_a_peer_key_by_its_bounded_prefix() {
+        let long = [0x11u8; PEER_KEY_MAX + 4];
+        let key = ChainKey::new(&long, true, Priority::DEFAULT);
+        assert!(key.same_peer(&long));
+        assert!(key.same_peer(&long[..PEER_KEY_MAX]));
+        assert!(!key.same_peer(&long[..PEER_KEY_MAX - 1]));
+        let short = ChainKey::new(&[1, 2, 3], false, Priority::DEFAULT);
+        assert!(short.same_peer(&[1, 2, 3]));
+        assert!(
+            !short.same_peer(&[1, 2, 3, 0]),
+            "a zero past the kept bytes is a byte"
+        );
+        assert!(!short.same_peer(&[1, 2]));
+        assert!(!short.same_peer(&[1, 2, 4]));
+    }
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
     const MASK: u64 = crate::sn::mask_from_res(0x02);

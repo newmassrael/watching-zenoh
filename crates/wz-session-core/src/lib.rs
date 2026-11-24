@@ -1290,11 +1290,7 @@ pub mod encoded_push;
 /// lend-only send and the multicast no-allocator TX. `codec-push` gated.
 #[cfg(feature = "codec-push")]
 // Totality debt TD-031 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used)]
 pub mod lent_push;
 
 /// A strict, allocation-free reader of the one record a data stream is made of (a `Push`
@@ -1500,8 +1496,6 @@ pub mod declared_keyexprs;
 // `local_token` declarer-side responder + `liveliness_sample` /
 // `liveliness_subscriber` keep their `alloc` gates pending their own
 // Track 2 sub-round.
-// Totality debt TD-058 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod declare;
 
 // R311du — application-layer local subscriber registry
@@ -1520,12 +1514,6 @@ pub mod declare;
 // `peer_keyexpr_table` / `own_zid` wire-state fields) stays
 // `alloc`-gated per the Track 2 borrow boundary — the no-heap fire
 // path (borrowed `SampleView` dispatch) lands in a later sub-round.
-// Totality debt TD-045 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod pubsub;
 
 // R311ek — shared `source_info` extension-body encoder
@@ -1892,8 +1880,6 @@ pub mod request_routing_context;
 // `alloc` accumulator), with `QueryReply::into_response` /
 // `response_final_for` further behind `codec-response` /
 // `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
-// Totality debt TD-085 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod query;
 
 /// Fixed-memory step S9a — what a peer's queries make the session OWE it: the
@@ -1975,8 +1961,6 @@ pub mod group_view;
 // `all(codec-response, alloc)` (`dispatch_response_final` on
 // `all(codec-response-final, alloc)`). Mirrors the `SubscriberRegistry`
 // shape.
-// Totality debt TD-094 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod reply;
 
 // R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
@@ -2088,8 +2072,6 @@ pub mod chain_staging;
 pub mod chain_loss;
 
 #[cfg(feature = "reassembly")]
-// Totality debt TD-054 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reassembly_dispatch;
 
 /// SCE-generated active scouting state machine (R311ik). The emit comes
@@ -2176,8 +2158,6 @@ pub mod session_timeouts;
 /// the `Engine`-bound `new_session_engine` factory stay AP-side in
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
-// Totality debt TD-004 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
@@ -2213,8 +2193,6 @@ pub mod declaration_sync;
 /// loop (Stage 4) and the tokio async loop share one dispatch SSOT. Gated like
 /// [`session_actions`] (it names the FSM engine + the action bundle).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
-// Totality debt TD-036 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod drive;
 
 /// The unicast session's own timers (handshake, lease, keep-alive, the application layer's wake),
