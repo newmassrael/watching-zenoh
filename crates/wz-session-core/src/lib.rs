@@ -2211,12 +2211,7 @@ pub mod session_timeouts;
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 // Totality debt TD-004 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used, clippy::unreachable)]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
