@@ -33,7 +33,7 @@ use alloc::borrow::Cow;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
@@ -61,6 +61,9 @@ use wz_session_core::key_arena::{KeyRef, KeySpace, LentKeys};
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{CallLatch, RowCallback};
+#[cfg(feature = "local-queryable")]
+use wz_session_core::session_state::LocalRequests;
+use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
     InterestHandle, InterestKind, InterestName, InterestRow, KeyexprHandle, Plane, RowCallbacks,
     SessionTables, SubscriberHandle, WriteFilterHandle,
@@ -1728,41 +1731,45 @@ struct TransportState<L: SessionLinks + 'static, C: ClockSource + 'static> {
     lend: RouterLend<SessionReassembly>,
 }
 
-/// The session's part of [`Core`]: the tables of what it declared and asked, over every link.
-struct SessionState {
-    /// What the application holds and what the peer declared. It is the session's, so it
-    /// outlives each link: a new link is dispatched to the same registry.
-    registry: Rc<RefCell<Registry>>,
+/// The session's part of [`Core`]: the tables of what it declared and asked, over every link, in
+/// the parts this engine keeps ([`CoopSession`]).
+type SessionState = wz_session_core::session_state::SessionState<CoopSession>;
+
+/// The parts of the coop engine's session state, each `()` where the build leaves it out.
+enum CoopSession {}
+
+impl SessionParts for CoopSession {
+    type Registry = Rc<RefCell<Registry>>;
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
-    watchers: Arc<FacePlane>,
-    /// How many rows each table of the session's own declarations was lent: what a write filter
-    /// of each plane is held to, the filters sharing one table.
-    entities: EntityRows,
-    /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
-    keys: KeySpace,
-    /// The key ids every node of the deployment shares, which the session was opened with: each
-    /// link it opens is handed them, its key expressions are declared under ids past theirs, and
-    /// a key goes on the wire as the session's key-wire form says (`shared-key-ids`).
-    #[cfg(feature = "shared-key-ids")]
-    key_ids: Option<SharedKeyIds>,
-    /// The next request id of a get's leg to the session's own queryables, counted apart from
-    /// the ids the links hand out (`local-queryable`).
-    #[cfg(feature = "local-queryable")]
-    next_local_request: wz_session_core::wire_id::RequestId,
-    /// The count of the faces' writes (`Registry::faces_written`) the matching listeners were last
-    /// read at: a step that finds it moved reads them again ([`CoopEngine::read_matching`]).
-    matching_read: Cell<u64>,
+    type Watchers = Arc<FacePlane>;
+    #[cfg(not(feature = "connectivity"))]
+    type Watchers = ();
+    /// What a write filter of each plane is held to, the filters sharing one table.
+    type Entities = EntityRows;
     #[cfg(feature = "queryable")]
-    plane: Arc<QueryPlane>,
-    /// The legs of the session's gets still pending on its link, in rows the session's arena lent.
+    type Queryables = Arc<QueryPlane>;
+    #[cfg(not(feature = "queryable"))]
+    type Queryables = ();
+    /// The legs of the session's gets still pending on its links, in rows the session's arena lent.
     #[cfg(feature = "query")]
-    pending_gets: Rows<PendingGet, { usize::MAX }>,
+    type PendingGets = Rows<PendingGet, { usize::MAX }>;
+    #[cfg(not(feature = "query"))]
+    type PendingGets = ();
     #[cfg(feature = "query")]
-    gets: Arc<GetPlane>,
-    /// The session's round of deliveries, which every link's gate asks before it reads a record
-    /// (`crate::round::RoundGate`).
-    lane: Arc<Round>,
+    type Gets = Arc<GetPlane>;
+    #[cfg(not(feature = "query"))]
+    type Gets = ();
+    /// Asked by every link's gate before it reads a record (`crate::round::RoundGate`).
+    type Lane = Arc<Round>;
+    #[cfg(feature = "shared-key-ids")]
+    type KeyIds = Option<SharedKeyIds>;
+    #[cfg(not(feature = "shared-key-ids"))]
+    type KeyIds = ();
+    #[cfg(feature = "local-queryable")]
+    type LocalRequests = LocalRequests;
+    #[cfg(not(feature = "local-queryable"))]
+    type LocalRequests = ();
 }
 
 /// One face of the session: the link it holds, and where the telling of the session's
@@ -4315,21 +4322,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             session: SessionState {
                 registry: Rc::new(RefCell::new(lent.registry)),
-                #[cfg(feature = "connectivity")]
-                watchers: Arc::new(FacePlane::default()),
+                // No watcher yet, and `()` without `connectivity`.
+                watchers: Default::default(),
                 entities,
                 keys: lent.keys,
                 #[cfg(feature = "shared-key-ids")]
                 key_ids: key_ids.at_open.ids,
-                #[cfg(feature = "local-queryable")]
-                next_local_request: 0,
-                matching_read: Cell::new(0),
+                #[cfg(not(feature = "shared-key-ids"))]
+                key_ids: (),
+                // From 0, and `()` without `local-queryable`.
+                local_requests: Default::default(),
+                matching: MatchingRead::default(),
                 #[cfg(feature = "queryable")]
                 plane: lent.plane,
+                #[cfg(not(feature = "queryable"))]
+                plane: (),
                 #[cfg(feature = "query")]
                 pending_gets: lent.pending_gets,
+                #[cfg(not(feature = "query"))]
+                pending_gets: (),
                 #[cfg(feature = "query")]
                 gets: lent.gets,
+                #[cfg(not(feature = "query"))]
+                gets: (),
                 lane: lent.samples,
             },
             #[cfg(feature = "time-base")]
@@ -5987,7 +6002,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // What the peers declared moved only where a face's tables were written since the
         // listeners were last read.
-        if core.session.registry.borrow().faces_written() != core.session.matching_read.get() {
+        let written = core.session.registry.borrow().faces_written();
+        if core.session.matching.moved(written) {
             self.read_matching(core);
         }
         Some(now_us)
@@ -6024,7 +6040,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
         let registry = core.session.registry.borrow();
-        core.session.matching_read.set(registry.faces_written());
+        core.session.matching.read_at(registry.faces_written());
         let mut cursor = 0;
         while let Some((handle, matching)) = registry
             .app
@@ -7174,8 +7190,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // the session's own pending gets (`Registry::local`) and answered under the local
             // generation (`query::LOCAL_QUERY`), so no table a link's ids reach holds it, and
             // the two counters never meet.
-            let rid = guard.0.session.next_local_request;
-            guard.0.session.next_local_request = rid.wrapping_add(1);
+            let rid = guard.0.session.local_requests.take();
             Some(query::OwnFinalHold::take(&self.plane.holds, rid).ok_or(Declined::TableFull)?)
         } else {
             None
