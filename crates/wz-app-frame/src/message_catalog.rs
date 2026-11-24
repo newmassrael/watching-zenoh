@@ -68,6 +68,7 @@
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use wz_app_schema::catalog_plan::{read_catalog, CatalogJudge, CatalogPlan, ProtectionRefusal};
@@ -201,12 +202,14 @@ impl CatalogJudge for Judge {
         let Some(protection) = &message.protection else {
             return Ok(());
         };
-        let profile =
-            Profile::from_tree(profile).map_err(|e| ProtectionRefusal::Profile(e.to_string()))?;
+        // One profile shared by every sender and receiver judged here.
+        let profile = Arc::new(
+            Profile::from_tree(profile).map_err(|e| ProtectionRefusal::Profile(e.to_string()))?,
+        );
         for &node in &message.publishers {
             let node = &nodes[node];
             let values = values_for(&protection.values, node).map_err(|e| refused_for(node, &e))?;
-            StreamSender::new(profile.clone(), values, SenderOptions::default())
+            StreamSender::new(Arc::clone(&profile), values, SenderOptions::default())
                 .map_err(|e| refused_for(node, &e))?;
         }
         // A message no node subscribes to is still judged as a receiver would judge it: one with
@@ -220,7 +223,7 @@ impl CatalogJudge for Judge {
         for node in subscribers.chain(unsubscribed) {
             let values = values_for(&protection.values, node).map_err(|e| refused_for(node, &e))?;
             match Receiver::new(
-                profile.clone(),
+                Arc::clone(&profile),
                 &values,
                 keying(message),
                 None,
