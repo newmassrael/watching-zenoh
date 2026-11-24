@@ -1170,7 +1170,10 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             return DriverLoopOutcome::OpenRemoteBoundRejected;
         }
     }
-    #[cfg(feature = "codec-open-body")]
+    // A build without the accepting role reaches this function with no OpenSyn: the frame
+    // maps to no event there (`inbound::control_event`). Gated by the role, so the compiler
+    // need not keep an arm it cannot prove unreachable from `facts` alone.
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
         is_ack: false,
         lease,
@@ -1496,6 +1499,8 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             crate::inbound::ControlFacts::Init(crate::inbound::InitFacts {
                 is_ack: true, ..
             }) => engine.get_current_state() == S::SentInitSyn,
+            // The acceptor's Open, which only a build with the accepting role is handed here.
+            #[cfg(feature = "session-unicast-accept")]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false, ..
             }) => true,

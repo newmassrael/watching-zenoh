@@ -10001,17 +10001,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// delivered was delivered a second time. Spending the nonce here is
     /// what makes the slot behave like the stack value -- the next handshake
     /// draws its own at InitAck ([`Self::draw_cookie_nonce`]).
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
-        #[cfg(feature = "session-unicast-accept")]
-        {
-            // Under `handshake-cookie = fixed` the acceptor held what it negotiated and the
-            // cookie carries nothing to restore.
-            if !self.fixed_cookie() {
-                self.restore_accept_state_from_cookie();
-            }
-            R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
+        // Under `handshake-cookie = fixed` the acceptor held what it negotiated and the
+        // cookie carries nothing to restore.
+        if !self.fixed_cookie() {
+            self.restore_accept_state_from_cookie();
         }
+        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
         // R311ke — the peer's announced initial_sn seeds the RX gate on the
         // ring the restored caps give (peer.c:212-214).
         self.seed_rx_sn(initial_sn);
@@ -10290,7 +10287,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     init.s.map(|s| s.batch_size),
                 )));
             }
-            #[cfg(feature = "codec-init-body")]
+            // A peer's InitSyn and OpenSyn are recorded only by a build with the accepting
+            // role. Without it neither is an event (`inbound::control_event`) and what
+            // these two arms take is the acceptor's: the zid the cookie binds and the caps
+            // its InitAck answers. On an initiator they would overwrite, before the
+            // dispatch drops the message, what the session took off the InitAck.
+            #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
             crate::inbound::ControlFacts::Init(
                 init @ crate::inbound::InitFacts { is_ack: false, .. },
             ) => {
@@ -10325,7 +10327,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     init.s.map(|s| s.batch_size),
                 )));
             }
-            #[cfg(feature = "codec-open-body")]
+            #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false,
                 cookie: Some(cookie),
@@ -19348,16 +19350,18 @@ mod sender_inside_tests {
     }
 }
 
-// The bundle over a runtime of this crate's own, reading what `action-trace` and
-// `reply-egress-gate` compile in. The bundle a test can build needs the heap profile and is not
-// the slot profile's (`new_generic`).
+// The bundle over a runtime of this crate's own, reading what `action-trace`,
+// `reply-egress-gate` and the handshake bodies compile in. The bundle a test can build needs the
+// heap profile and is not the slot profile's (`new_generic`).
 #[cfg(all(
     test,
     feature = "alloc",
     not(feature = "session-slot"),
     any(
         feature = "action-trace",
-        all(feature = "reply-egress-gate", feature = "codec-response")
+        all(feature = "reply-egress-gate", feature = "codec-response"),
+        feature = "codec-init-body",
+        feature = "codec-open-body"
     )
 ))]
 mod bundle_tests;
