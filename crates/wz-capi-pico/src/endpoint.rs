@@ -178,17 +178,29 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 /// handed over as written, for the engine to refuse by name.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
+    let mut kept = wz_session_core::locator_directory::LocatorText::new();
+    use_text(engine_text(endpoint, &mut kept))
+}
+
+/// The text [`with_engine_text`] hands its user: `endpoint` itself, or what pico's link reads of
+/// it, made in `kept`. Out of line and generic over nothing: one body for every user of the text,
+/// where each would otherwise read the endpoint in a copy of its own.
+#[cfg(not(feature = "engine-tokio"))]
+#[inline(never)]
+fn engine_text<'a>(
+    endpoint: &'a str,
+    kept: &'a mut wz_session_core::locator_directory::LocatorText,
+) -> &'a str {
     let Some(keys) = config_keys(scheme_of(endpoint)) else {
-        return use_text(endpoint);
+        return endpoint;
     };
     let read = PicoEndpoint::read(endpoint, keys);
-    let mut kept = wz_session_core::locator_directory::LocatorText::new();
     let mut fits = !read.is_malformed();
     read.write_text("#", |piece| fits = fits && kept.push_str(piece).is_ok());
     if fits {
-        use_text(kept.as_str())
+        kept.as_str()
     } else {
-        use_text(endpoint)
+        endpoint
     }
 }
 
