@@ -1470,7 +1470,7 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
             }) if engine.get_current_state()
                 == crate::session_fsm_unicast::SessionFsmUnicastState::SentInitSyn =>
             {
-                actions.link_admitted(zid.as_deref().unwrap_or_default())
+                actions.link_admitted(zid.as_ref())
             }
             #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {

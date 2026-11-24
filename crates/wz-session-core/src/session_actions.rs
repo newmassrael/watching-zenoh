@@ -11370,7 +11370,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             all(feature = "codec-open-body", feature = "session-unicast-accept")
         )
     ))]
-    pub(crate) fn link_admitted(&self, remote_zid: &[u8]) -> bool {
+    pub(crate) fn link_admitted(&self, remote_zid: Option<&SessionZid>) -> bool {
         R::with_mutex_mut(&self.link.link_lease, |slot| match slot {
             Some(lease) => lease.reserve(remote_zid),
             None => true,
@@ -11395,7 +11395,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let zid = self.fact_remote_peer_zid(|slot| *slot);
         match zid {
-            Some(zid) => self.link_admitted(&zid),
+            Some(zid) => self.link_admitted(Some(&zid)),
             // A link whose peer named no zid cannot collide with another.
             None => true,
         }
