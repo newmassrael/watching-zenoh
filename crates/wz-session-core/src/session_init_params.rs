@@ -82,16 +82,39 @@ pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
     }
 }
 
+/// The storage [`SessionBytes`] is on this build, refilled where it lies.
+///
+/// [`store_session_bytes`] is generic over this storage and not over a capacity: the growable
+/// form of [`SessionBytes`] names no capacity, so a capacity parameter could not be inferred from
+/// a slot of that form and every caller would have to spell it out.
+pub trait SessionBytesStore: Default {
+    /// Hold `src` in place of what was held: `false` when it does not fit, which only the fixed
+    /// form can say.
+    fn refill(&mut self, src: &[u8]) -> bool;
+}
+
+#[cfg(not(feature = "session-fixed-storage"))]
+impl SessionBytesStore for Vec<u8> {
+    fn refill(&mut self, src: &[u8]) -> bool {
+        self.clear();
+        self.extend_from_slice(src);
+        true
+    }
+}
+
+#[cfg(feature = "session-fixed-storage")]
+impl<const N: usize> SessionBytesStore for heapless::Vec<u8, N> {
+    fn refill(&mut self, src: &[u8]) -> bool {
+        self.clear();
+        self.extend_from_slice(src).is_ok()
+    }
+}
+
 /// [`session_bytes`] written into `slot` where it lies: `slot` holds a copy of `src` after, or
-/// `None` when `N` cannot hold it. A slot of the fixed form is `N` bytes wide, and a value built
-/// beside it and moved in was one more such copy in the frame of every caller.
-pub fn store_session_bytes<const N: usize>(slot: &mut Option<SessionBytes<N>>, src: &[u8]) {
-    let held = slot.get_or_insert_with(SessionBytes::<N>::new);
-    held.clear();
-    #[cfg(not(feature = "session-fixed-storage"))]
-    held.extend_from_slice(src);
-    #[cfg(feature = "session-fixed-storage")]
-    if held.extend_from_slice(src).is_err() {
+/// `None` when its storage cannot hold it. A slot of the fixed form is as wide as its capacity,
+/// and a value built beside it and moved in was one more such copy in the frame of every caller.
+pub fn store_session_bytes<B: SessionBytesStore>(slot: &mut Option<B>, src: &[u8]) {
+    if !slot.get_or_insert_with(B::default).refill(src) {
         *slot = None;
     }
 }
@@ -914,7 +937,8 @@ mod cookie_bound_tests {
     }
 
     /// A slot written in place holds what was written last, whatever it held before; one written
-    /// a value the fixed form cannot hold holds none, as `session_bytes` answers.
+    /// a value the fixed form cannot hold holds none, as `session_bytes` answers. The calls name no
+    /// capacity: the slot's own type decides, on the growable form too, whose type names none.
     #[test]
     fn a_slot_written_in_place_holds_the_last_value_that_fits() {
         let mut slot: Option<SessionBytes<8>> = None;
