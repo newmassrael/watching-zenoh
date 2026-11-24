@@ -2700,7 +2700,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     continue;
                 }
             };
-            let next = at + 1;
+            // A resume past every row dials none, so one held at `usize::MAX` still means the
+            // rows are done; `at` is below the count of rows, so it is never held there.
+            let next = at.saturating_add(1);
             let deadline_us = self.open_deadline_us();
             match row {
                 DialRow::Pending(dial) => {
@@ -3018,22 +3020,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// next pass over the faces takes it as lost (`poll_face`).
     fn redeclare(&mut self) -> usize {
         let now_ms = self.clock.now_us() / 1000;
-        let mut told = 0;
-        for at in 0..self.transport.links.faces().len() {
-            let actions = match &self.transport.links.faces()[at].link {
-                Link::Up(wire) => wire.actions.clone(),
-                _ => continue,
-            };
-            match self.begin_replay(at, &actions, now_ms) {
-                TurnEnd::Kept => told += 1,
-                TurnEnd::EndsLink => {
-                    if let Link::Up(wire) = &self.transport.links.faces()[at].link {
-                        wire.abort();
-                    }
+        let faces = self.transport.links.faces().len();
+        (0..faces)
+            .filter(|&at| self.redeclare_on(at, now_ms))
+            .count()
+    }
+
+    /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
+    /// whether it was told, which a place with no face, or a face whose link is not up, is not.
+    fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
+        let actions = match self.transport.links.faces().get(at).map(|face| &face.link) {
+            Some(Link::Up(wire)) => wire.actions.clone(),
+            _ => return false,
+        };
+        match self.begin_replay(at, &actions, now_ms) {
+            TurnEnd::Kept => true,
+            TurnEnd::EndsLink => {
+                if let Some(Link::Up(wire)) =
+                    self.transport.links.faces().get(at).map(|face| &face.link)
+                {
+                    wire.abort();
                 }
+                false
             }
         }
-        told
     }
 
     /// The face at `at`, whose handshake completed, holds its link up: what the session holds is
@@ -3236,16 +3246,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let now_us = self.clock.now_us();
         let again_at = |ms: u64| now_us.saturating_add(ms.saturating_mul(1000));
         for at in 0..self.transport.groups.len() {
-            let id = self.transport.groups[at].id();
-            if let Some(outcome) = self.transport.groups[at].take_outcome(&self.local) {
+            let Some(group) = self.transport.groups.get_mut(at) else {
+                continue;
+            };
+            let id = group.id();
+            if let Some(outcome) = group.take_outcome(&self.local) {
                 self.lose_link(id);
                 if let (true, Some(ms)) = (outcome.warrants_rejoin(), redial_ms) {
-                    self.transport.groups[at].wait_to_rejoin(again_at(ms));
+                    self.rejoin_group_at(at, again_at(ms));
                 }
                 continue;
             }
-            if self.transport.groups[at].rejoin_due(now_us) {
-                let join = self.transport.groups[at].group_join().clone();
+            let due = self
+                .transport
+                .groups
+                .get(at)
+                .filter(|group| group.rejoin_due(now_us))
+                .map(|group| group.group_join().clone());
+            if let Some(join) = due {
                 match self.join_group(id, join) {
                     Ok(face) => {
                         // The liveliness subscribers ask the group again, as they would have
@@ -3265,18 +3283,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                                 row.history(),
                             );
                         }
-                        // A departure owed to a replaying listener outlives the join that ended.
-                        #[cfg(feature = "connectivity")]
-                        face.keep_tombs_of(&self.transport.groups[at]);
-                        self.transport.groups[at] = face;
+                        if let Some(ended) = self.transport.groups.get_mut(at) {
+                            // A departure owed to a replaying listener outlives the join that
+                            // ended.
+                            #[cfg(feature = "connectivity")]
+                            face.keep_tombs_of(ended);
+                            *ended = face;
+                        }
                     }
                     Err(_) => {
                         if let Some(ms) = redial_ms {
-                            self.transport.groups[at].wait_to_rejoin(again_at(ms));
+                            self.rejoin_group_at(at, again_at(ms));
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Join the group at place `at` again at `at_us`, on the session's clock; a place no group
+    /// stands at waits for nothing.
+    #[cfg(feature = "group")]
+    fn rejoin_group_at(&mut self, at: usize, at_us: u64) {
+        if let Some(group) = self.transport.groups.get_mut(at) {
+            group.wait_to_rejoin(at_us);
         }
     }
 
