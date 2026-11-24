@@ -9121,13 +9121,14 @@ mod tests {
                     .with_express(true)
             )
         );
-        let encoding = options
+        let carried = options
             .encoding
             .expect("an encoding that is not the default");
+        let encoding = carried.view();
         let stated: zenoh_protocol::core::Encoding =
             Encoding::APPLICATION_JSON.with_schema("v1").into();
         assert_eq!(encoding.packed_id, (u32::from(stated.id) << 1) | 1);
-        assert_eq!(encoding.schema.as_deref(), Some(&b"v1"[..]));
+        assert_eq!(encoding.schema, Some(&b"v1"[..]));
         let stamp = options.timestamp.expect("the time that was stated");
         assert_eq!(stamp.time, 0x1234_5678_9abc_def0);
         assert_eq!(
