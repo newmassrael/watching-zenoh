@@ -342,16 +342,7 @@ impl Transfer {
             let (sa, sb) = ((a - from) as usize, (b - from) as usize);
             self.buffer[a as usize..b as usize].copy_from_slice(&chunk[sa..sb]);
         }
-        self.have.extend(fresh);
-        self.have.sort_unstable();
-        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.have.len());
-        for &(a, b) in &self.have {
-            match merged.last_mut() {
-                Some(last) if a <= last.1 => last.1 = last.1.max(b),
-                _ => merged.push((a, b)),
-            }
-        }
-        self.have = merged;
+        self.have = merge_ranges(&self.have, &fresh);
         self.high = self.high.max(to);
         overlap
     }
@@ -368,6 +359,28 @@ impl Transfer {
             ending,
         }
     }
+}
+
+/// `have` and `fresh`, each sorted and disjoint, as one sorted list with the
+/// ranges that touch joined. Both are already in order, so one ordered merge
+/// does what a general sort of their union would, without carrying a sort.
+fn merge_ranges(have: &[(u64, u64)], fresh: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(have.len() + fresh.len());
+    let (mut i, mut j) = (0, 0);
+    while i < have.len() || j < fresh.len() {
+        let (a, b) = if j == fresh.len() || (i < have.len() && have[i] <= fresh[j]) {
+            i += 1;
+            have[i - 1]
+        } else {
+            j += 1;
+            fresh[j - 1]
+        };
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
 }
 
 /// The joining state: a transfer per stream seen.
@@ -586,6 +599,53 @@ impl SegmentLedger {
                 self.evicted += 1;
                 ended.push(gone.ended(Ending::Evicted));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::merge_ranges;
+
+    /// What the merge replaces: the union sorted, then the touching ranges
+    /// joined.
+    fn by_sort(have: &[(u64, u64)], fresh: &[(u64, u64)]) -> Vec<(u64, u64)> {
+        let mut all: Vec<(u64, u64)> = have.iter().chain(fresh).copied().collect();
+        all.sort_unstable();
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for (a, b) in all {
+            match out.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => out.push((a, b)),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_received_ranges_merge_as_a_sorted_union_would() {
+        let cases: [(&[(u64, u64)], &[(u64, u64)], &[(u64, u64)]); 7] = [
+            (&[], &[(0, 8)], &[(0, 8)]),
+            (&[(0, 8)], &[], &[(0, 8)]),
+            (&[(0, 8)], &[(8, 16)], &[(0, 16)]),
+            (&[(8, 16)], &[(0, 8)], &[(0, 16)]),
+            (&[(0, 4), (12, 16)], &[(6, 8)], &[(0, 4), (6, 8), (12, 16)]),
+            (&[(0, 4), (8, 12)], &[(4, 8), (12, 20)], &[(0, 20)]),
+            (
+                &[(4, 6), (10, 12)],
+                &[(0, 2), (7, 9), (14, 16)],
+                &[(0, 2), (4, 6), (7, 9), (10, 12), (14, 16)],
+            ),
+        ];
+        for (have, fresh, joined) in cases {
+            assert_eq!(merge_ranges(have, fresh), joined, "{have:?} + {fresh:?}");
+            assert_eq!(
+                merge_ranges(have, fresh),
+                by_sort(have, fresh),
+                "{have:?} + {fresh:?}"
+            );
         }
     }
 }
