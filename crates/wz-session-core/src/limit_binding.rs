@@ -44,6 +44,8 @@
 //! are written by hand, so the generator emits only one row per limit.
 
 use core::fmt;
+use core::marker::PhantomData;
+use core::ptr;
 
 use crate::policy_binding::{Driven, LimitKind};
 
@@ -222,10 +224,6 @@ pub trait LimitValueType: Copy + Eq + fmt::Debug + 'static {
 
     /// The value as a statement names it.
     fn to_value(self) -> LimitValue;
-
-    /// The value a statement names, or `None` where this type has no such value (`unbounded` for a
-    /// parameter).
-    fn from_value(value: LimitValue) -> Option<Self>;
 }
 
 impl LimitValueType for Quota {
@@ -234,10 +232,6 @@ impl LimitValueType for Quota {
     fn to_value(self) -> LimitValue {
         self.as_value()
     }
-
-    fn from_value(value: LimitValue) -> Option<Self> {
-        Some(Self::of_value(value))
-    }
 }
 
 impl LimitValueType for usize {
@@ -245,13 +239,6 @@ impl LimitValueType for usize {
 
     fn to_value(self) -> LimitValue {
         LimitValue::Integer(self)
-    }
-
-    fn from_value(value: LimitValue) -> Option<Self> {
-        match value {
-            LimitValue::Unbounded => None,
-            LimitValue::Integer(value) => Some(value),
-        }
     }
 }
 
@@ -425,18 +412,23 @@ impl LimitDomain {
         }
     }
 
+    /// The one value a domain of one value allows ([`Self::is_singleton`]): `unbounded` where it
+    /// allows that, else its least integer.
+    const fn only(self) -> LimitValue {
+        if self.unbounded {
+            LimitValue::Unbounded
+        } else {
+            LimitValue::Integer(self.least)
+        }
+    }
+
     /// `Ok` where `value` is allowed, else why it is not.
     pub const fn check(self, value: LimitValue) -> Result<(), Outside> {
         if self.contains(value) {
             return Ok(());
         }
         if self.pinned {
-            let only = if self.unbounded {
-                LimitValue::Unbounded
-            } else {
-                LimitValue::Integer(self.least)
-            };
-            return Err(Outside::Pinned { only });
+            return Err(Outside::Pinned { only: self.only() });
         }
         Err(match value {
             LimitValue::Unbounded => match self.kind {
@@ -637,6 +629,7 @@ pub trait LimitSpec: 'static {
 /// is one value ([`LimitSpec::HELD`]), so a limit the build fixes costs its holder no byte. The
 /// generated snapshots name `HELD` per limit, as `SessionPolicy` does for a policy's `Bound`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Limited<L: LimitSpec, const HELD: usize> {
     value: [L::Value; HELD],
 }
@@ -726,32 +719,42 @@ impl<L: LimitSpec, const HELD: usize> Default for Limited<L, HELD> {
     }
 }
 
-/// A limit that is a field of the snapshot `S`: how a reader that names the limit by its id
-/// reaches the field. The generated module implements it for every limit's type.
-pub trait LimitField<S>: LimitSpec {
-    /// Selects `value` in `snapshot`, refusing one the build's domain leaves out; a refusal leaves
-    /// `snapshot` as it was.
-    fn select_in(snapshot: &mut S, value: Self::Value) -> Result<(), OutsideLimitDomain>;
-
-    /// The value `snapshot` holds.
-    fn held_in(snapshot: &S) -> Self::Value;
+/// A limit that is a field of the snapshot `S`: where a reader that names the limit by its id
+/// finds the field. Every entry of a table selects and reads through the same two bodies, which
+/// reach the field by its offset, so no limit links a function of its own. The generated module
+/// implements it for every limit's type.
+///
+/// # Safety
+///
+/// `AT` is the offset in `S` (`core::mem::offset_of!`) of a field of type
+/// `Limited<Self, { Self::HELD }>`, and `Self::Value` is [`Quota`] or `usize`: the field keeps
+/// the value in one `usize` word there, or in no byte where the domain is one value.
+pub unsafe trait LimitField<S>: LimitSpec {
+    /// The offset in `S` of the field that keeps the limit's value.
+    const AT: usize;
 }
-
-/// How an entry selects a value in its snapshot.
-type Selector<S> = fn(&mut S, LimitValue) -> Result<(), OutsideLimitDomain>;
 
 /// One limit as a reader that names it by its id sees it, in the snapshot `S` that holds it.
 pub struct LimitEntry<S: 'static> {
+    row: LimitRow,
+    snapshot: PhantomData<fn(&mut S)>,
+}
+
+/// What an entry knows of its limit, apart from the type of the snapshot that holds it: one
+/// selection and one read serve every limit of every snapshot.
+#[derive(Clone, Copy)]
+struct LimitRow {
     id: &'static str,
     kind: LimitKind,
     driven: Option<Driven>,
+    /// `false` for a limit no machine reads from the snapshot: a statement of it is refused
+    /// before any value is selected.
     read_from_snapshot: bool,
     capacity: Option<usize>,
     domain: LimitDomain,
-    /// `None` for a limit no machine reads from the snapshot: a statement of it is refused before
-    /// any value is selected, so the entry links no selector for it.
-    select: Option<Selector<S>>,
-    held: fn(&S) -> LimitValue,
+    /// The offset of the word the snapshot keeps the value in ([`LimitField::AT`]), read only
+    /// where the domain is more than one value: a field of one value keeps no byte.
+    at: usize,
 }
 
 // Written out rather than derived: a derive would ask `S` for each trait, and an entry holds no `S`.
@@ -765,13 +768,14 @@ impl<S> Copy for LimitEntry<S> {}
 
 impl<S> fmt::Debug for LimitEntry<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let row = &self.row;
         f.debug_struct("LimitEntry")
-            .field("id", &self.id)
-            .field("kind", &self.kind)
-            .field("driven", &self.driven)
-            .field("read_from_snapshot", &self.read_from_snapshot)
-            .field("capacity", &self.capacity)
-            .field("domain", &self.domain)
+            .field("id", &row.id)
+            .field("kind", &row.kind)
+            .field("driven", &row.driven)
+            .field("read_from_snapshot", &row.read_from_snapshot)
+            .field("capacity", &row.capacity)
+            .field("domain", &row.domain)
             .finish()
     }
 }
@@ -779,53 +783,56 @@ impl<S> fmt::Debug for LimitEntry<S> {
 impl<S> LimitEntry<S> {
     /// The entry of the limit whose type is `L`.
     pub const fn of<L: LimitField<S>>() -> Self {
+        // A wrong offset is refused where the table is evaluated, before any read or write.
+        assert!(
+            L::HELD == 0
+                || ((L::AT & (core::mem::align_of::<usize>() - 1)) == 0
+                    && L::AT + core::mem::size_of::<usize>() <= core::mem::size_of::<S>()),
+            "a limit's field is not one word inside its snapshot"
+        );
         Self {
-            id: L::LIMIT,
-            kind: <L::Value as LimitValueType>::KIND,
-            driven: L::DRIVEN,
-            read_from_snapshot: L::READ_FROM_SNAPSHOT,
-            capacity: L::CAPACITY,
-            domain: L::DOMAIN,
-            // Decided where the table is evaluated: a limit read from the build gets no selector,
-            // and a build links the selection of none of them.
-            select: if L::READ_FROM_SNAPSHOT {
-                Some(select_at::<S, L>)
-            } else {
-                None
+            row: LimitRow {
+                id: L::LIMIT,
+                kind: <L::Value as LimitValueType>::KIND,
+                driven: L::DRIVEN,
+                read_from_snapshot: L::READ_FROM_SNAPSHOT,
+                capacity: L::CAPACITY,
+                domain: L::DOMAIN,
+                at: L::AT,
             },
-            held: held_at::<S, L>,
+            snapshot: PhantomData,
         }
     }
 
     /// The limit's id, as the declaration spells it ([`LimitSpec::LIMIT`]).
     pub const fn id(&self) -> &'static str {
-        self.id
+        self.row.id
     }
 
     /// Whether it is a bound or a parameter.
     pub const fn kind(&self) -> LimitKind {
-        self.kind
+        self.row.kind
     }
 
     /// Who makes the table a bound limits grow; `None` for a parameter ([`LimitSpec::DRIVEN`]).
     pub const fn driven(&self) -> Option<Driven> {
-        self.driven
+        self.row.driven
     }
 
     /// Whether the machines of the limit's scope read it from the snapshot their creator hands
     /// them ([`LimitSpec::READ_FROM_SNAPSHOT`]).
     pub const fn read_from_snapshot(&self) -> bool {
-        self.read_from_snapshot
+        self.row.read_from_snapshot
     }
 
     /// The capacity this build sized storage by ([`LimitSpec::CAPACITY`]).
     pub const fn capacity(&self) -> Option<usize> {
-        self.capacity
+        self.row.capacity
     }
 
     /// The values the build allows a later stage to select ([`LimitSpec::DOMAIN`]).
     pub const fn domain(&self) -> LimitDomain {
-        self.domain
+        self.row.domain
     }
 
     /// Selects `value` in `snapshot`. A refusal leaves `snapshot` as it was. `None` for a limit no
@@ -836,35 +843,86 @@ impl<S> LimitEntry<S> {
         snapshot: &mut S,
         value: LimitValue,
     ) -> Option<Result<(), OutsideLimitDomain>> {
-        self.select.map(|select| select(snapshot, value))
+        if !self.row.read_from_snapshot {
+            return None;
+        }
+        // SAFETY: the entry was made by `Self::of` from a `LimitField<S>`, whose `AT` is the
+        // offset of the limit's word in `S`, and `snapshot` is borrowed for the write.
+        Some(unsafe {
+            self.row
+                .select_at(ptr::from_mut(snapshot).cast::<u8>(), value)
+        })
     }
 
     /// The value `snapshot` holds.
     pub fn value_in(&self, snapshot: &S) -> LimitValue {
-        (self.held)(snapshot)
+        // SAFETY: as in `Self::select`, for a read.
+        unsafe { self.row.value_at(ptr::from_ref(snapshot).cast::<u8>()) }
     }
 }
 
-/// The selection behind [`LimitEntry::select`]: `value` read as `L`'s type, through
-/// [`LimitField::select_in`]. `unbounded` for a parameter is refused here, as its domain refuses it.
-fn select_at<S, L: LimitField<S>>(
-    snapshot: &mut S,
-    value: LimitValue,
-) -> Result<(), OutsideLimitDomain> {
-    match <L::Value as LimitValueType>::from_value(value) {
-        Some(typed) => L::select_in(snapshot, typed),
-        None => Err(OutsideLimitDomain {
-            limit: L::LIMIT,
+impl LimitRow {
+    /// Selects `value` in the snapshot at `base`; a refusal writes nothing.
+    ///
+    /// # Safety
+    ///
+    /// `base` points at a snapshot, writable, whose field at `self.at` keeps the limit's word.
+    unsafe fn select_at(&self, base: *mut u8, value: LimitValue) -> Result<(), OutsideLimitDomain> {
+        let word = self.admit(value)?;
+        if !self.domain.is_singleton() {
+            // SAFETY: the caller's contract.
+            unsafe { base.add(self.at).cast::<usize>().write(word) };
+        }
+        Ok(())
+    }
+
+    /// The value the snapshot at `base` holds: the domain's one value where it is one, else the
+    /// word its field keeps, read as the limit's kind.
+    ///
+    /// # Safety
+    ///
+    /// `base` points at a snapshot whose field at `self.at` keeps the limit's word.
+    unsafe fn value_at(&self, base: *const u8) -> LimitValue {
+        if self.domain.is_singleton() {
+            return self.domain.only();
+        }
+        // SAFETY: the caller's contract.
+        let word = unsafe { base.add(self.at).cast::<usize>().read() };
+        match self.kind {
+            LimitKind::Bound => Quota(word).as_value(),
+            LimitKind::Parameter => LimitValue::Integer(word),
+        }
+    }
+
+    /// The word `value` is kept in where the domain allows it, else why not. A bound states the
+    /// value as its quota does, so every bit set is `unbounded`; a parameter has no `unbounded`,
+    /// refused before its domain is asked, whatever the domain keeps.
+    fn admit(&self, value: LimitValue) -> Result<usize, OutsideLimitDomain> {
+        let (stated, word) = match (self.kind, value) {
+            (LimitKind::Bound, _) => {
+                let quota = Quota::of_value(value);
+                (quota.as_value(), quota.0)
+            }
+            (LimitKind::Parameter, LimitValue::Integer(word)) => (value, word),
+            (LimitKind::Parameter, LimitValue::Unbounded) => {
+                return Err(self.outside(value, Outside::UnboundedParameter));
+            }
+        };
+        match self.domain.check(stated) {
+            Ok(()) => Ok(word),
+            Err(why) => Err(self.outside(stated, why)),
+        }
+    }
+
+    /// The refusal of `value`, for `why`.
+    fn outside(&self, value: LimitValue, why: Outside) -> OutsideLimitDomain {
+        OutsideLimitDomain {
+            limit: self.id,
             value,
-            domain: L::DOMAIN,
-            why: Outside::UnboundedParameter,
-        }),
+            domain: self.domain,
+            why,
+        }
     }
-}
-
-/// The value `snapshot` holds of `L`, as a statement names it.
-fn held_at<S, L: LimitField<S>>(snapshot: &S) -> LimitValue {
-    L::held_in(snapshot).to_value()
 }
 
 #[cfg(test)]
@@ -914,31 +972,77 @@ mod tests {
         const DEFAULT: usize = 4;
     }
 
+    /// A bound of a build that sized a table of 8 rows by it, read from the snapshot.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Read8;
+
+    impl LimitSpec for Read8 {
+        type Value = Quota;
+        const LIMIT: &'static str = "TEST_READ";
+        const DRIVEN: Option<Driven> = Some(Driven::Local);
+        const READ_FROM_SNAPSHOT: bool = true;
+        const CAPACITY: Option<usize> = Some(8);
+        const DOMAIN: LimitDomain = LimitDomain::bound(Self::CAPACITY);
+        const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+    }
+
+    /// A parameter in `1..=64` whose every value the build leaves to a later stage.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Range64;
+
+    impl LimitSpec for Range64 {
+        type Value = usize;
+        const LIMIT: &'static str = "TEST_RANGE";
+        const DRIVEN: Option<Driven> = None;
+        const READ_FROM_SNAPSHOT: bool = true;
+        const CAPACITY: Option<usize> = None;
+        const DOMAIN: LimitDomain = LimitDomain::parameter(1, 64, None);
+        const DEFAULT: usize = 4;
+    }
+
     struct Snapshot {
         open: Limited<Open, { Open::HELD }>,
         sized: Limited<Sized8, { Sized8::HELD }>,
+        read: Limited<Read8, { Read8::HELD }>,
+        range: Limited<Range64, { Range64::HELD }>,
+        pinned: Limited<Pinned4, { Pinned4::HELD }>,
     }
 
-    impl LimitField<Snapshot> for Open {
-        fn select_in(snapshot: &mut Snapshot, value: Quota) -> Result<(), OutsideLimitDomain> {
-            snapshot.open = Limited::select(value)?;
-            Ok(())
-        }
-
-        fn held_in(snapshot: &Snapshot) -> Quota {
-            snapshot.open.get()
+    impl Snapshot {
+        fn build() -> Self {
+            Self {
+                open: Limited::default(),
+                sized: Limited::default(),
+                read: Limited::default(),
+                range: Limited::default(),
+                pinned: Limited::default(),
+            }
         }
     }
 
-    impl LimitField<Snapshot> for Sized8 {
-        fn select_in(snapshot: &mut Snapshot, value: Quota) -> Result<(), OutsideLimitDomain> {
-            snapshot.sized = Limited::select(value)?;
-            Ok(())
-        }
+    // SAFETY: each `AT` is the offset of the field of `Snapshot` that holds the limit.
+    unsafe impl LimitField<Snapshot> for Open {
+        const AT: usize = core::mem::offset_of!(Snapshot, open);
+    }
 
-        fn held_in(snapshot: &Snapshot) -> Quota {
-            snapshot.sized.get()
-        }
+    // SAFETY: as above.
+    unsafe impl LimitField<Snapshot> for Sized8 {
+        const AT: usize = core::mem::offset_of!(Snapshot, sized);
+    }
+
+    // SAFETY: as above.
+    unsafe impl LimitField<Snapshot> for Read8 {
+        const AT: usize = core::mem::offset_of!(Snapshot, read);
+    }
+
+    // SAFETY: as above.
+    unsafe impl LimitField<Snapshot> for Range64 {
+        const AT: usize = core::mem::offset_of!(Snapshot, range);
+    }
+
+    // SAFETY: as above.
+    unsafe impl LimitField<Snapshot> for Pinned4 {
+        const AT: usize = core::mem::offset_of!(Snapshot, pinned);
     }
 
     /// A preset is taken where the build's domain holds it, and the build's value kept where the
@@ -1156,10 +1260,7 @@ mod tests {
 
     #[test]
     fn an_entry_selects_by_the_value_a_statement_names_and_reads_it_back() {
-        let mut snapshot = Snapshot {
-            open: Limited::default(),
-            sized: Limited::default(),
-        };
+        let mut snapshot = Snapshot::build();
         let open = LimitEntry::<Snapshot>::of::<Open>();
         let sized = LimitEntry::<Snapshot>::of::<Sized8>();
         assert_eq!(open.id(), "TEST_OPEN");
@@ -1177,11 +1278,153 @@ mod tests {
         assert!(sized
             .select(&mut snapshot, LimitValue::Integer(4))
             .is_none());
-        let refused =
-            select_at::<Snapshot, Sized8>(&mut snapshot, LimitValue::Unbounded).unwrap_err();
+        let read = LimitEntry::<Snapshot>::of::<Read8>();
+        let refused = read
+            .select(&mut snapshot, LimitValue::Unbounded)
+            .expect("a limit read from the snapshot has a selector")
+            .unwrap_err();
+        assert_eq!(refused.limit, "TEST_READ");
         assert_eq!(refused.why, Outside::UnboundedOverCapacity { capacity: 8 });
         // A refusal leaves the snapshot as it was.
+        assert_eq!(read.value_in(&snapshot), LimitValue::Integer(8));
+        assert_eq!(snapshot.read.get(), Quota::at_most(8));
         assert_eq!(sized.value_in(&snapshot), LimitValue::Integer(8));
+    }
+
+    /// An entry writes the field of its own limit and no other: the one selection reaches each
+    /// field by the offset its `LimitField` states. Turned red by a write that ignores the offset,
+    /// or a read of a field that is not the limit's.
+    #[test]
+    fn an_entry_writes_its_own_field_and_no_other() {
+        let mut snapshot = Snapshot::build();
+        let select = |entry: LimitEntry<Snapshot>, snapshot: &mut Snapshot, value| {
+            entry
+                .select(snapshot, value)
+                .expect("a limit read from the snapshot has a selector")
+                .expect("inside the domain");
+        };
+        select(
+            LimitEntry::of::<Open>(),
+            &mut snapshot,
+            LimitValue::Integer(12),
+        );
+        select(
+            LimitEntry::of::<Range64>(),
+            &mut snapshot,
+            LimitValue::Integer(9),
+        );
+        select(
+            LimitEntry::of::<Read8>(),
+            &mut snapshot,
+            LimitValue::Integer(3),
+        );
+        assert_eq!(snapshot.open.get(), Quota::at_most(12));
+        assert_eq!(snapshot.range.get(), 9);
+        assert_eq!(snapshot.read.get(), Quota::at_most(3));
+        assert_eq!(snapshot.sized.get(), Quota::at_most(8), "not selected");
+        assert_eq!(snapshot.pinned.get(), 4, "one value");
+        let range = LimitEntry::<Snapshot>::of::<Range64>();
+        assert_eq!(range.value_in(&snapshot), LimitValue::Integer(9));
+        assert_eq!(range.kind(), LimitKind::Parameter);
+    }
+
+    /// A parameter has no `unbounded`: it is refused as such before the domain is asked, even
+    /// where the build keeps one value, which another integer is refused by. The one value is read
+    /// from the domain, as a field of one value keeps no byte. Turned red by a parameter's
+    /// `unbounded` judged by its domain first, or a pinned value read from the snapshot.
+    #[test]
+    fn a_parameter_is_never_unbounded_whatever_its_domain_keeps() {
+        let mut snapshot = Snapshot::build();
+        let range = LimitEntry::<Snapshot>::of::<Range64>();
+        let refused = range
+            .select(&mut snapshot, LimitValue::Unbounded)
+            .expect("a limit read from the snapshot has a selector")
+            .unwrap_err();
+        assert_eq!(refused.why, Outside::UnboundedParameter);
+        assert_eq!(refused.value, LimitValue::Unbounded);
+        assert_eq!(
+            std::format!("{refused}"),
+            "the limit `TEST_RANGE` is a parameter, which is never `unbounded`"
+        );
+        assert_eq!(
+            range.select(&mut snapshot, LimitValue::Integer(0)),
+            Some(Err(OutsideLimitDomain {
+                limit: "TEST_RANGE",
+                value: LimitValue::Integer(0),
+                domain: Range64::DOMAIN,
+                why: Outside::Below { least: 1 },
+            }))
+        );
+        assert_eq!(snapshot.range.get(), 4, "refused, so the build's");
+        let pinned = LimitEntry::<Snapshot>::of::<Pinned4>();
+        assert_eq!(
+            pinned
+                .select(&mut snapshot, LimitValue::Unbounded)
+                .map(|selected| selected.map_err(|refused| refused.why)),
+            Some(Err(Outside::UnboundedParameter))
+        );
+        assert_eq!(
+            pinned
+                .select(&mut snapshot, LimitValue::Integer(5))
+                .map(|selected| selected.map_err(|refused| refused.why)),
+            Some(Err(Outside::Pinned {
+                only: LimitValue::Integer(4)
+            }))
+        );
+        assert_eq!(
+            pinned.select(&mut snapshot, LimitValue::Integer(4)),
+            Some(Ok(()))
+        );
+        assert_eq!(pinned.value_in(&snapshot), LimitValue::Integer(4));
+    }
+
+    /// A bound states a value as its quota holds it: every bit set is `unbounded`, so that is the
+    /// value a refusal names and the value read back. Turned red by a refusal that names the
+    /// integer as it came, or a quota read back as an integer.
+    #[test]
+    fn a_bound_of_every_bit_set_is_unbounded() {
+        let mut snapshot = Snapshot::build();
+        let read = LimitEntry::<Snapshot>::of::<Read8>();
+        let refused = read
+            .select(&mut snapshot, LimitValue::Integer(usize::MAX))
+            .expect("a limit read from the snapshot has a selector")
+            .unwrap_err();
+        assert_eq!(refused.value, LimitValue::Unbounded);
+        assert_eq!(refused.why, Outside::UnboundedOverCapacity { capacity: 8 });
+        let open = LimitEntry::<Snapshot>::of::<Open>();
+        open.select(&mut snapshot, LimitValue::Integer(5))
+            .expect("a limit read from the snapshot has a selector")
+            .expect("inside");
+        open.select(&mut snapshot, LimitValue::Integer(usize::MAX))
+            .expect("a limit read from the snapshot has a selector")
+            .expect("no bound, which a build with no capacity allows");
+        assert_eq!(open.value_in(&snapshot), LimitValue::Unbounded);
+        assert_eq!(snapshot.open.get(), Quota::UNBOUNDED);
+    }
+
+    /// A limit whose `LimitField` states an offset past its snapshot is refused when its entry is
+    /// made, before anything is read or written there. Turned red by an entry made of any offset.
+    #[test]
+    #[should_panic(expected = "a limit's field is not one word inside its snapshot")]
+    fn an_offset_outside_the_snapshot_is_refused() {
+        struct Past;
+
+        impl LimitSpec for Past {
+            type Value = usize;
+            const LIMIT: &'static str = "TEST_PAST";
+            const DRIVEN: Option<Driven> = None;
+            const READ_FROM_SNAPSHOT: bool = true;
+            const CAPACITY: Option<usize> = None;
+            const DOMAIN: LimitDomain = LimitDomain::parameter(1, 64, None);
+            const DEFAULT: usize = 4;
+        }
+
+        // SAFETY: deliberately not a field of `Snapshot`; the entry refuses it before any access.
+        unsafe impl LimitField<Snapshot> for Past {
+            const AT: usize = core::mem::size_of::<Snapshot>();
+        }
+
+        let _ = LimitEntry::<Snapshot>::of::<Past>();
     }
 
     #[test]

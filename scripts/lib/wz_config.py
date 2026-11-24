@@ -2796,10 +2796,10 @@ def camel_limit(lid: str) -> str:
 def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
                         presets: dict[str, int] | None = None) -> list[str]:
     """The snapshot `snapshot` of `lims`: one field per limit, its build defaults, an accessor and a
-    `select_*` per field, the `LimitField` impl of each limit's type, and the table a reader that
-    names a limit by its id dispatches on. With `presets` (`limit_presets`), the snapshot of the pico
-    preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the build's
-    environment states."""
+    `select_*` per field, the `LimitField` impl that states where each limit's field is, and the
+    table a reader that names a limit by its id dispatches on. With `presets` (`limit_presets`),
+    the snapshot of the pico preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens
+    under, whatever the build's environment states."""
     table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
     count = f"{table[:-len('LIMITS')]}LIMIT_COUNT"
     out = rust_doc(f"The value of every limit {what}, as one snapshot: what a creator resolved and "
@@ -2882,19 +2882,14 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
         out += [f"        self.{field} = Limited::select(value)?;", "        Ok(())", "    }"]
     out += ["}", "", f"impl Default for {snapshot} {{", "    fn default() -> Self {",
             "        Self::BUILD", "    }", "}"]
+    # A field's offset, not a function per limit: every entry of the table selects and reads through
+    # the one body of `LimitEntry`, so the table links nothing per limit.
     for lim in lims:
         field, name = lim["id"].lower(), camel_limit(lim["id"])
-        ty = "Quota" if lim["kind"] == "bound" else "usize"
-        head = f"    fn select_in(snapshot: &mut {snapshot}, value: {ty}) -> Result<(), OutsideLimitDomain> {{"
-        if len(head) <= RUST_MAX_WIDTH:
-            sel = [head]
-        else:
-            sel = ["    fn select_in(", f"        snapshot: &mut {snapshot},", f"        value: {ty},",
-                   "    ) -> Result<(), OutsideLimitDomain> {"]
-        out += ["", f"impl LimitField<{snapshot}> for {name} {{"] + sel + [
-                f"        snapshot.select_{field}(value)", "    }", "",
-                f"    fn held_in(snapshot: &{snapshot}) -> {ty} {{",
-                f"        snapshot.{field}()", "    }", "}"]
+        out += ["", "// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.",
+                f"unsafe impl LimitField<{snapshot}> for {name} {{"]
+        out += rust_assoc_const("AT", "usize", f"core::mem::offset_of!({snapshot}, {field})")
+        out.append("}")
     out += ["", f"/// How many limits [`{snapshot}`] holds: the length of [`{table}`].",
             f"pub const {count}: usize = {len(lims)};", "",
             f"/// Every limit of [`{snapshot}`] as a reader that names it by its id sees it, in the order of",
@@ -6477,6 +6472,12 @@ def cmd_selftest() -> int:
     rsnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(limit_text(scope='"runtime"'))))
     expect("a runtime-scope limit is a field of RuntimeLimits",
            "pub const RUNTIME_LIMIT_COUNT: usize = 1;" in rsnap)
+    expect("a limit's entry reaches its field by the offset its LimitField states, not by a function",
+           "unsafe impl LimitField<SessionLimits> for MaxA {\n"
+           "    const AT: usize = core::mem::offset_of!(SessionLimits, max_a);\n}\n" in bsnap
+           and "unsafe impl LimitField<RuntimeLimits> for MaxA {\n"
+           "    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_a);\n}\n" in rsnap
+           and "fn select_in(" not in bsnap and "fn held_in(" not in bsnap)
     csnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(
         SAMPLE.replace('on_heap = "advisory"', 'on_heap = "capacity"'))))
     expect("a bound the heap sizes too has its capacity in every build",

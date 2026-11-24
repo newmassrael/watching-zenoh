@@ -3359,684 +3359,344 @@ impl Default for SessionLimits {
     }
 }
 
-impl LimitField<SessionLimits> for MaxKeyexprBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_keyexpr_bytes(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_keyexpr_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxKeyexprBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_keyexpr_bytes);
 }
-
-impl LimitField<SessionLimits> for KeyArenaBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_key_arena_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.key_arena_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for KeyArenaBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, key_arena_bytes);
 }
 
-impl LimitField<SessionLimits> for MaxSubscriptions {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_subscriptions(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_subscriptions()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxSubscriptions {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_subscriptions);
 }
-
-impl LimitField<SessionLimits> for MatchMemoSlots {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_match_memo_slots(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.match_memo_slots()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MatchMemoSlots {
+    const AT: usize = core::mem::offset_of!(SessionLimits, match_memo_slots);
 }
 
-impl LimitField<SessionLimits> for DeliveryLaneEvents {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_delivery_lane_events(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.delivery_lane_events()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeliveryLaneEvents {
+    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_events);
 }
-
-impl LimitField<SessionLimits> for DeliveryLaneBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_delivery_lane_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.delivery_lane_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeliveryLaneBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_bytes);
 }
 
-impl LimitField<SessionLimits> for DeliveryLaneCallbacks {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_delivery_lane_callbacks(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.delivery_lane_callbacks()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeliveryLaneCallbacks {
+    const AT: usize = core::mem::offset_of!(SessionLimits, delivery_lane_callbacks);
 }
-
-impl LimitField<SessionLimits> for MaxQueryables {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_queryables(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_queryables()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxQueryables {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_queryables);
 }
 
-impl LimitField<SessionLimits> for MaxPendingQueries {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_pending_queries(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_pending_queries()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPendingQueries {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_queries);
 }
-
-impl LimitField<SessionLimits> for LinkNotedRequests {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_link_noted_requests(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.link_noted_requests()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for LinkNotedRequests {
+    const AT: usize = core::mem::offset_of!(SessionLimits, link_noted_requests);
 }
 
-impl LimitField<SessionLimits> for MaxDeclObservers {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_decl_observers(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_decl_observers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxDeclObservers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_observers);
 }
-
-impl LimitField<SessionLimits> for MaxLivelinessSubscriptions {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_liveliness_subscriptions(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_liveliness_subscriptions()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxLivelinessSubscriptions {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_liveliness_subscriptions);
 }
 
-impl LimitField<SessionLimits> for MaxLocalTokens {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_local_tokens(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_local_tokens()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxLocalTokens {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_local_tokens);
 }
-
-impl LimitField<SessionLimits> for MaxPublishers {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_publishers(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_publishers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPublishers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_publishers);
 }
 
-impl LimitField<SessionLimits> for MaxQueriers {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_queriers(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_queriers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxQueriers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_queriers);
 }
 
-impl LimitField<SessionLimits> for MaxMatchingListeners {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_matching_listeners(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_matching_listeners()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxMatchingListeners {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_matching_listeners);
 }
-
-impl LimitField<SessionLimits> for MaxDeclWatches {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_decl_watches(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_decl_watches()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxDeclWatches {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_decl_watches);
 }
 
-impl LimitField<SessionLimits> for MaxTransportEventsListeners {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_transport_events_listeners(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_transport_events_listeners()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxTransportEventsListeners {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_transport_events_listeners);
 }
-
-impl LimitField<SessionLimits> for MaxLinkEventsListeners {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_link_events_listeners(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_link_events_listeners()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxLinkEventsListeners {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_link_events_listeners);
 }
 
-impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_declared_keyexprs(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_declared_keyexprs()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_declared_keyexprs);
 }
-
-impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_pending_liveliness_gets(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_pending_liveliness_gets()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_liveliness_gets);
 }
 
-impl LimitField<SessionLimits> for MaxPendingDeclares {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_pending_declares(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_pending_declares()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPendingDeclares {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_declares);
 }
-
-impl LimitField<SessionLimits> for MaxInboundSubInterests {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_inbound_sub_interests(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_inbound_sub_interests()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxInboundSubInterests {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_inbound_sub_interests);
 }
 
-impl LimitField<SessionLimits> for MaxPeerKeyexprAliases {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_peer_keyexpr_aliases(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_peer_keyexpr_aliases()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPeerKeyexprAliases {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_peer_keyexpr_aliases);
 }
-
-impl LimitField<SessionLimits> for MaxSharedKeyIds {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_shared_key_ids(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_shared_key_ids()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxSharedKeyIds {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_shared_key_ids);
 }
 
-impl LimitField<SessionLimits> for MaxRemoteDecls {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_remote_decls(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_remote_decls()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxRemoteDecls {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_remote_decls);
 }
-
-impl LimitField<SessionLimits> for MaxPendingReplies {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_pending_replies(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_pending_replies()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPendingReplies {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_replies);
 }
 
-impl LimitField<SessionLimits> for MaxPendingFinals {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_pending_finals(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_pending_finals()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxPendingFinals {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_pending_finals);
 }
-
-impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_reply_payload_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_reply_payload_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_reply_payload_bytes);
 }
 
-impl LimitField<SessionLimits> for MaxMulticastReplies {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_multicast_replies(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_multicast_replies()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxMulticastReplies {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_multicast_replies);
 }
-
-impl LimitField<SessionLimits> for MaxAdvancedPublishers {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_advanced_publishers(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_advanced_publishers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_publishers);
 }
 
-impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_advanced_subscribers(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_advanced_subscribers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_advanced_subscribers);
 }
 
-impl LimitField<SessionLimits> for MaxFaces {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_faces(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_faces()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxFaces {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_faces);
 }
-
-impl LimitField<SessionLimits> for MaxAcceptPending {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_accept_pending(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.max_accept_pending()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for MaxAcceptPending {
+    const AT: usize = core::mem::offset_of!(SessionLimits, max_accept_pending);
 }
 
-impl LimitField<SessionLimits> for RxPoolBuffers {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_rx_pool_buffers(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.rx_pool_buffers()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for RxPoolBuffers {
+    const AT: usize = core::mem::offset_of!(SessionLimits, rx_pool_buffers);
 }
-
-impl LimitField<SessionLimits> for TxPoolSlots {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_tx_pool_slots(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.tx_pool_slots()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for TxPoolSlots {
+    const AT: usize = core::mem::offset_of!(SessionLimits, tx_pool_slots);
 }
 
-impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_session_max_peer_keyexpr_aliases(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.session_max_peer_keyexpr_aliases()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
+    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_peer_keyexpr_aliases);
 }
-
-impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_session_max_remote_decls(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.session_max_remote_decls()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
+    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_remote_decls);
 }
 
-impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_session_max_inbound_sub_interests(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.session_max_inbound_sub_interests()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
+    const AT: usize = core::mem::offset_of!(SessionLimits, session_max_inbound_sub_interests);
 }
-
-impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_querier_max_pending_queries(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.querier_max_pending_queries()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
+    const AT: usize = core::mem::offset_of!(SessionLimits, querier_max_pending_queries);
 }
 
-impl LimitField<SessionLimits> for TxNoProgressWindowUs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_tx_no_progress_window_us(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.tx_no_progress_window_us()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for TxNoProgressWindowUs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, tx_no_progress_window_us);
 }
-
-impl LimitField<SessionLimits> for TxExpiryCloseAfter {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_tx_expiry_close_after(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.tx_expiry_close_after()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for TxExpiryCloseAfter {
+    const AT: usize = core::mem::offset_of!(SessionLimits, tx_expiry_close_after);
 }
 
-impl LimitField<SessionLimits> for DatagramFragmentBurst {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_datagram_fragment_burst(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.datagram_fragment_burst()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DatagramFragmentBurst {
+    const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_burst);
 }
-
-impl LimitField<SessionLimits> for DatagramFragmentGapUs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_datagram_fragment_gap_us(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.datagram_fragment_gap_us()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DatagramFragmentGapUs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, datagram_fragment_gap_us);
 }
 
-impl LimitField<SessionLimits> for QueryParametersMaxBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_query_parameters_max_bytes(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.query_parameters_max_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for QueryParametersMaxBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, query_parameters_max_bytes);
 }
-
-impl LimitField<SessionLimits> for QueryAttachmentMaxBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_query_attachment_max_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.query_attachment_max_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for QueryAttachmentMaxBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, query_attachment_max_bytes);
 }
 
-impl LimitField<SessionLimits> for PicoTxQueueSize {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_tx_queue_size(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_tx_queue_size()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoTxQueueSize {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_tx_queue_size);
 }
-
-impl LimitField<SessionLimits> for AppLinkQueueBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_app_link_queue_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.app_link_queue_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for AppLinkQueueBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, app_link_queue_bytes);
 }
 
-impl LimitField<SessionLimits> for E2eSenderSlots {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_e2e_sender_slots(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.e2e_sender_slots()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for E2eSenderSlots {
+    const AT: usize = core::mem::offset_of!(SessionLimits, e2e_sender_slots);
 }
 
-impl LimitField<SessionLimits> for ReplayDepthMax {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_replay_depth_max(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.replay_depth_max()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for ReplayDepthMax {
+    const AT: usize = core::mem::offset_of!(SessionLimits, replay_depth_max);
 }
-
-impl LimitField<SessionLimits> for InstanceKeyFields {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_instance_key_fields(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.instance_key_fields()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for InstanceKeyFields {
+    const AT: usize = core::mem::offset_of!(SessionLimits, instance_key_fields);
 }
 
-impl LimitField<SessionLimits> for InstancesPerMessage {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_instances_per_message(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.instances_per_message()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for InstancesPerMessage {
+    const AT: usize = core::mem::offset_of!(SessionLimits, instances_per_message);
 }
-
-impl LimitField<SessionLimits> for DeclarationSyncBurstMessages {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_burst_messages(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_burst_messages()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncBurstMessages {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_burst_messages);
 }
 
-impl LimitField<SessionLimits> for DeclarationSyncFinalTimeoutMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_final_timeout_ms(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_final_timeout_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncFinalTimeoutMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_final_timeout_ms);
 }
-
-impl LimitField<SessionLimits> for DeclarationSyncIntervalMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_interval_ms(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_interval_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncIntervalMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_interval_ms);
 }
 
-impl LimitField<SessionLimits> for DeclarationSyncRxNoProgressMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_rx_no_progress_ms(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_rx_no_progress_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncRxNoProgressMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_rx_no_progress_ms);
 }
-
-impl LimitField<SessionLimits> for DeclarationSyncRetryIntervalMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_retry_interval_ms(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_retry_interval_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncRetryIntervalMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_retry_interval_ms);
 }
 
-impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_declaration_sync_tx_no_progress_ms(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.declaration_sync_tx_no_progress_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, declaration_sync_tx_no_progress_ms);
 }
-
-impl LimitField<SessionLimits> for HandedLegBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_handed_leg_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.handed_leg_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for HandedLegBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, handed_leg_bytes);
 }
 
-impl LimitField<SessionLimits> for UdpPortSlots {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_udp_port_slots(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.udp_port_slots()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for UdpPortSlots {
+    const AT: usize = core::mem::offset_of!(SessionLimits, udp_port_slots);
 }
-
-impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_unicast_batch_bytes(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_unicast_batch_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_unicast_batch_bytes);
 }
 
-impl LimitField<SessionLimits> for PicoMulticastBatchBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_multicast_batch_bytes(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_multicast_batch_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoMulticastBatchBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_multicast_batch_bytes);
 }
-
-impl LimitField<SessionLimits> for PicoLeaseMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_lease_ms(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_lease_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoLeaseMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_lease_ms);
 }
 
-impl LimitField<SessionLimits> for PicoSocketTimeoutMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_socket_timeout_ms(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_socket_timeout_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoSocketTimeoutMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_socket_timeout_ms);
 }
-
-impl LimitField<SessionLimits> for PicoConnectTimeoutMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_connect_timeout_ms(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_connect_timeout_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoConnectTimeoutMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_connect_timeout_ms);
 }
 
-impl LimitField<SessionLimits> for PicoFragMaxBytes {
-    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_frag_max_bytes(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> Quota {
-        snapshot.pico_frag_max_bytes()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoFragMaxBytes {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_frag_max_bytes);
 }
 
-impl LimitField<SessionLimits> for PicoAcceptTimeoutMs {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_accept_timeout_ms(value)
-    }
-
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_accept_timeout_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoAcceptTimeoutMs {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_accept_timeout_ms);
 }
-
-impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
-    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_pico_keepalives_per_lease(value)
-    }
 
-    fn held_in(snapshot: &SessionLimits) -> usize {
-        snapshot.pico_keepalives_per_lease()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
+    const AT: usize = core::mem::offset_of!(SessionLimits, pico_keepalives_per_lease);
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
@@ -4364,104 +4024,54 @@ impl Default for RuntimeLimits {
     }
 }
 
-impl LimitField<RuntimeLimits> for MaxLocatorLen {
-    fn select_in(snapshot: &mut RuntimeLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_locator_len(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> Quota {
-        snapshot.max_locator_len()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for MaxLocatorLen {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_locator_len);
 }
 
-impl LimitField<RuntimeLimits> for MaxStaticConnect {
-    fn select_in(snapshot: &mut RuntimeLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_max_static_connect(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> Quota {
-        snapshot.max_static_connect()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for MaxStaticConnect {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, max_static_connect);
 }
 
-impl LimitField<RuntimeLimits> for SnapshotPeriodMs {
-    fn select_in(snapshot: &mut RuntimeLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_snapshot_period_ms(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> usize {
-        snapshot.snapshot_period_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for SnapshotPeriodMs {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_period_ms);
 }
 
-impl LimitField<RuntimeLimits> for SnapshotHistogramBuckets {
-    fn select_in(snapshot: &mut RuntimeLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_snapshot_histogram_buckets(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> usize {
-        snapshot.snapshot_histogram_buckets()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for SnapshotHistogramBuckets {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, snapshot_histogram_buckets);
 }
 
-impl LimitField<RuntimeLimits> for SupervisionCheckpoints {
-    fn select_in(snapshot: &mut RuntimeLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_supervision_checkpoints(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> usize {
-        snapshot.supervision_checkpoints()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for SupervisionCheckpoints {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, supervision_checkpoints);
 }
 
-impl LimitField<RuntimeLimits> for E2eSupervisedStreams {
-    fn select_in(snapshot: &mut RuntimeLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_e2e_supervised_streams(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> Quota {
-        snapshot.e2e_supervised_streams()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for E2eSupervisedStreams {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, e2e_supervised_streams);
 }
 
-impl LimitField<RuntimeLimits> for EventRingSlots {
-    fn select_in(snapshot: &mut RuntimeLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_event_ring_slots(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> usize {
-        snapshot.event_ring_slots()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for EventRingSlots {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, event_ring_slots);
 }
 
-impl LimitField<RuntimeLimits> for ClockSources {
-    fn select_in(snapshot: &mut RuntimeLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_clock_sources(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> Quota {
-        snapshot.clock_sources()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for ClockSources {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_sources);
 }
 
-impl LimitField<RuntimeLimits> for MessageCatalogEntries {
-    fn select_in(snapshot: &mut RuntimeLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_message_catalog_entries(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> Quota {
-        snapshot.message_catalog_entries()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for MessageCatalogEntries {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, message_catalog_entries);
 }
 
-impl LimitField<RuntimeLimits> for ClockMaxForwardStepMs {
-    fn select_in(snapshot: &mut RuntimeLimits, value: usize) -> Result<(), OutsideLimitDomain> {
-        snapshot.select_clock_max_forward_step_ms(value)
-    }
-
-    fn held_in(snapshot: &RuntimeLimits) -> usize {
-        snapshot.clock_max_forward_step_ms()
-    }
+// SAFETY: `AT` is the offset of this limit's field, which is of its `Held` type.
+unsafe impl LimitField<RuntimeLimits> for ClockMaxForwardStepMs {
+    const AT: usize = core::mem::offset_of!(RuntimeLimits, clock_max_forward_step_ms);
 }
 
 /// How many limits [`RuntimeLimits`] holds: the length of [`RUNTIME_LIMITS`].
