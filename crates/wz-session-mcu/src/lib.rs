@@ -192,8 +192,6 @@ pub mod slot_getter;
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
 // session on the firmware's task set, over whichever stack opens the link.
-// Totality debt TD-208 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "dial")]
 pub mod dial;
 // A node that is a client of a router and answers queries: the dialer over a fixed list of

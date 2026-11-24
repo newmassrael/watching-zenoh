@@ -217,16 +217,18 @@ fn ipv6_groups(text: &mut Text<'_>, groups: &mut [u16]) -> (usize, bool) {
         if index > 0 && !group.eat(b':') {
             return (index, false);
         }
-        if index + 1 < limit {
+        // `index` is below the groups' length, so neither sum wraps.
+        let (next, after_pair) = (index.wrapping_add(1), index.wrapping_add(2));
+        if next < limit {
             let mut embedded = group;
             if let (Some([a, b, c, d]), Some([high, low])) = (
                 ipv4_address(&mut embedded),
-                groups.get_mut(index..index + 2),
+                groups.get_mut(index..after_pair),
             ) {
                 *high = u16::from_be_bytes([a, b]);
                 *low = u16::from_be_bytes([c, d]);
                 *text = embedded;
-                return (index + 2, true);
+                return (after_pair, true);
             }
         }
         let (digits, value) = group.number(16);
@@ -311,9 +313,10 @@ impl Text<'_> {
 /// The value of one ASCII digit of `radix` (10 or 16, either case), `None` for any other byte.
 fn digit_of(byte: u8, radix: u8) -> Option<u8> {
     let value = match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
+        // Each arm's byte is at or past the arm's first, and below it plus 16.
+        b'0'..=b'9' => byte.wrapping_sub(b'0'),
+        b'a'..=b'f' => byte.wrapping_sub(b'a').wrapping_add(10),
+        b'A'..=b'F' => byte.wrapping_sub(b'A').wrapping_add(10),
         _ => return None,
     };
     (value < radix).then_some(value)

@@ -202,7 +202,11 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
     /// given back, so even that costs the open frame and not the slot.
     pub fn resume(driver: &'a D, held: HeldSlot) -> Option<Self> {
         let (base, total) = driver.tx_slot_storage(held.slot);
-        if base.is_null() || held.headroom + held.len > total {
+        let fits = held
+            .headroom
+            .checked_add(held.len)
+            .is_some_and(|end| end <= total);
+        if base.is_null() || !fits {
             held.abort(driver);
             return None;
         }
@@ -265,7 +269,18 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
 
     /// How many frame bytes the slot can hold after its headroom.
     pub fn capacity(&self) -> usize {
-        self.total - self.headroom
+        // The headroom is never past the slot: `acquire` and `resume` refuse one that is.
+        self.total.wrapping_sub(self.headroom)
+    }
+
+    /// The bytes of the slot not written yet: `len` never passes the capacity.
+    fn room(&self) -> usize {
+        self.capacity().wrapping_sub(self.len)
+    }
+
+    /// Where the next byte goes, past the headroom: inside the slot, as `len` is.
+    fn write_at(&self) -> usize {
+        self.headroom.wrapping_add(self.len)
     }
 
     /// Hand the written frame to the link and give it the slot. From here the
@@ -313,7 +328,7 @@ impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        if self.capacity() - self.len < bytes.len() {
+        if self.room() < bytes.len() {
             return Err(CodecError::BufferOverflow);
         }
         // SAFETY: the destination `[headroom + len, headroom + len + n)` lies in
@@ -321,13 +336,10 @@ impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
         // `as_slice`), and `bytes` is a borrowed slice of the caller's, which
         // cannot overlap a slot the link granted exclusively.
         unsafe {
-            ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.base.add(self.headroom + self.len),
-                bytes.len(),
-            );
+            ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(self.write_at()), bytes.len());
         }
-        self.len += bytes.len();
+        // Within the room checked above.
+        self.len = self.len.wrapping_add(bytes.len());
         Ok(())
     }
 
@@ -336,29 +348,28 @@ impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
     /// is one; a frame's header is written a byte at a time, so that call was paid
     /// several times per message.
     fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
-        if self.capacity() - self.len < 1 {
+        if self.room() < 1 {
             return Err(CodecError::BufferOverflow);
         }
         // SAFETY: the destination byte `headroom + len` lies in the slot (checked
         // above) and the slot is this lease's alone (see `as_slice`).
         unsafe {
-            self.base.add(self.headroom + self.len).write(byte);
+            self.base.add(self.write_at()).write(byte);
         }
-        self.len += 1;
+        self.len = self.len.wrapping_add(1);
         Ok(())
     }
 
     /// The next `n` bytes of the slot as a window: the room is checked once, here.
     fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
-        if self.capacity() - self.len < n {
+        if self.room() < n {
             return Err(CodecError::BufferOverflow);
         }
         // SAFETY: the window `[headroom + len, headroom + len + n)` lies in the slot (checked
         // above), the slot is this lease's alone (see `as_slice`), and the borrow of the
         // window is the borrow of `self`, so nothing else touches the slot while it lives.
-        let window =
-            unsafe { slice::from_raw_parts_mut(self.base.add(self.headroom + self.len), n) };
-        self.len += n;
+        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
+        self.len = self.len.wrapping_add(n);
         Ok(Some(window))
     }
 }
