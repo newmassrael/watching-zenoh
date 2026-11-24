@@ -188,10 +188,11 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
         let mut at = at;
         for face in self.face_snapshots() {
-            if at < face.links.len() {
-                return FaceLinkRow::of_snapshot(&face, at);
+            // Past this face's links the cursor moves on by them; within them it is the row.
+            match at.checked_sub(face.links.len()) {
+                Some(rest) => at = rest,
+                None => return FaceLinkRow::of_snapshot(&face, at),
             }
-            at -= face.links.len();
         }
         None
     }
