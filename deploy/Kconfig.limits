@@ -586,6 +586,18 @@ config WZ_LIMIT_MAX_LOCATOR_LEN
 	  is skipped, never cut short. The default fits an IPv6 locator with its
 	  scheme and port.
 
+config WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN
+	int "MAX_GROUP_ENDPOINT_LEN"
+	default 96
+	help
+	  The longest endpoint, in bytes, a session joins a multicast group by, its
+	  socket keys included (for example udp/224.0.0.224:7447#iface=eth0): the
+	  text a connectivity row reports a group member's link by. A longer one is
+	  refused when the group is joined, never cut short. Apart from
+	  MAX_LOCATOR_LEN, so the keys of a group endpoint do not lengthen every
+	  locator row of a node. The default holds a raweth group endpoint with an
+	  interface name of fifteen bytes and two whitelisted addresses (90 bytes).
+
 config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"
 	default 8

@@ -229,6 +229,11 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
         8,
     ),
     ("MAX_LOCATOR_LEN", "WZ_LIMIT_MAX_LOCATOR_LEN", 64),
+    (
+        "MAX_GROUP_ENDPOINT_LEN",
+        "WZ_LIMIT_MAX_GROUP_ENDPOINT_LEN",
+        96,
+    ),
     ("MAX_STATIC_CONNECT", "WZ_LIMIT_MAX_STATIC_CONNECT", 8),
     ("MAX_PEER_NODES", "WZ_LIMIT_MAX_PEER_NODES", 0),
     ("MAX_FACES", "WZ_LIMIT_MAX_FACES", 1000),

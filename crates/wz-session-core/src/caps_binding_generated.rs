@@ -706,6 +706,18 @@ pub const MAX_LOCATOR_LEN: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_GROUP_ENDPOINT_LEN`] is bound.
+pub const MAX_GROUP_ENDPOINT_LEN: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_STATIC_CONNECT`] is bound.
 pub const MAX_STATIC_CONNECT: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
