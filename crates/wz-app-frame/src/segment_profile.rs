@@ -90,7 +90,7 @@ use alloc::vec::Vec;
 
 use wz_session_core::json5::Json5Value;
 
-use crate::e2e_crc::{width_mask, Crc};
+use crate::e2e_crc::{width_mask, Crc, Digest};
 use crate::e2e_profile::{
     field_called, optional, read_crc_object, read_field_head, read_json, read_name, CrcFields,
     DocError, Pointer, MAX_FIELDS,
@@ -443,7 +443,7 @@ impl SegmentProfile {
     /// `cover` lists. The one place that order is applied: a reader checks a
     /// piece with it and [`crate::segment_sender`] writes a piece's CRC with it.
     pub fn crc_over(&self, spec: &CrcSpec, header: &[u8], chunk: &[u8]) -> u64 {
-        let mut digest = spec.engine.start();
+        let mut digest = Digest::start(&spec.engine);
         for cover in &spec.cover {
             match cover {
                 Cover::Field(i) => {
@@ -611,7 +611,7 @@ fn read_crc(value: &Json5Value, path: &Pointer<'_>, fields: &[Field]) -> Result<
 pub mod synthetic {
     use alloc::vec::Vec;
 
-    use crate::e2e_crc::{Crc, CrcParams};
+    use crate::e2e_crc::{Crc, CrcParams, Digest};
 
     /// The profile's name.
     pub const NAME: &str = "demo-split";
@@ -654,7 +654,7 @@ pub mod synthetic {
             xorout: 0,
         })
         .expect("a valid CRC model");
-        let mut digest = crc.start();
+        let mut digest = Digest::start(&crc);
         digest.update(&covered);
         digest.update(chunk);
         let check = digest.finish() as u16;

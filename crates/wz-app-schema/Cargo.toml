@@ -36,8 +36,8 @@ default = ["alloc"]
 
 # Every reader, each keeping what it reads on the heap: the JSON documents and the message catalog,
 # read with the core's reader (`wz_session_core::json5`, behind the core's own `alloc`), and the
-# `.proto` schema. Off, the crate is `message_catalog_table`, which an image with no allocator
-# links.
+# `.proto` schema. Off, the crate is `message_catalog_table`, `crc_table` and `judge_config`, which
+# an image with no allocator links.
 alloc = ["dep:wz-session-core", "wz-session-core/alloc"]
 
 # `docs`: the comments `protoc` attaches to a message and a field, kept as the tokenizer reads them

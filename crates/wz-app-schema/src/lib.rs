@@ -10,6 +10,8 @@
 //! | module | what it is | feature |
 //! |---|---|---|
 //! | `message_catalog_table` | a deployment's message catalog as static tables, for an image that links it | always |
+//! | `crc_table` | the parameters of a CRC, checked, and the table derived from them once | always |
+//! | `judge_config` | what a receiver's judge of a stream of frames is configured with | always |
 //! | `json_doc` | a JSON document read under a bound on its nesting, the pointer a reader walks it with, and the refusal at that pointer | `alloc` |
 //! | `catalog_plan` | the reader of a message catalog: every rule judged in the order a refusal is reported, the catalog resolved into plain data | `alloc` |
 //! | `proto_lex` | the `.proto` tokenizer | `alloc` |
@@ -20,15 +22,18 @@
 //! reads or writes a sample, are `wz-app-frame`'s, which re-exports these modules at its own
 //! paths. The split is the boundary between what runs once and what runs per sample: the release
 //! profiles build this crate for size and the other for speed. Without `alloc` the crate is the
-//! static tables alone, which an image with no allocator links.
+//! static tables, the CRC parameters and table and the judge's configuration, which an image
+//! with no allocator links.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
 pub mod catalog_plan;
+pub mod crc_table;
 #[cfg(feature = "alloc")]
 pub mod json_doc;
+pub mod judge_config;
 pub mod message_catalog_table;
 #[cfg(feature = "alloc")]
 pub mod proto_lex;

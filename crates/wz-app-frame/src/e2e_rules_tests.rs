@@ -567,7 +567,7 @@ fn a_frame_that_fails_integrity_is_reported_moves_nothing_and_keeps_its_payload(
     let refit = {
         let mut copy = long.clone();
         let crc = p.crc();
-        let mut digest = crc.engine.start();
+        let mut digest = crate::e2e_crc::Digest::start(&crc.engine);
         for &item in &crc.cover {
             crate::e2e_frame::feed(&p, &mut digest, item, &copy);
         }

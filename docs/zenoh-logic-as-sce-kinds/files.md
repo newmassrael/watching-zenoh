@@ -91,7 +91,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-app-frame/src/segment_profile.rs` | S10 | |
 | `crates/wz-app-frame/src/segment_sender.rs` | S10 | |
 | `crates/wz-app-schema/src/catalog_plan.rs` | S11 | |
+| `crates/wz-app-schema/src/crc_table.rs` | S10 | |
 | `crates/wz-app-schema/src/json_doc.rs` | S11 | |
+| `crates/wz-app-schema/src/judge_config.rs` | S10 | |
 | `crates/wz-app-schema/src/lib.rs` | S11 | |
 | `crates/wz-app-schema/src/message_catalog_table.rs` | S11 | |
 | `crates/wz-app-schema/src/proto_lex.rs` | S11 | |

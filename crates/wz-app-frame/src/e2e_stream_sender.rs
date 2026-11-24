@@ -35,7 +35,7 @@
 //! unchanged payload is then the kept frame with the new counter written in,
 //! and its CRC is the kept register fed only the pieces from the counter on. It
 //! is the same CRC by construction, because feeding is associative
-//! ([`crate::e2e_crc::Crc::resume`]); the tests compare it, byte for byte, with
+//! ([`crate::e2e_crc::Digest::resume`]); the tests compare it, byte for byte, with
 //! the full computation of [`crate::e2e_frame::build`], which stays the
 //! reference.
 
@@ -44,6 +44,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::e2e_crc::Digest;
 use crate::e2e_frame::{build, crc_over, feed, write_be, BuildError, Values};
 use crate::e2e_profile::{Cover, Profile};
 
@@ -415,7 +416,7 @@ impl StreamSender {
         let crc = crc_over(&self.profile, out);
         write(out, crc_at, crc);
         if self.crc_cache {
-            let mut digest = self.profile.crc().engine.start();
+            let mut digest = Digest::start(&self.profile.crc().engine);
             for &item in &self.profile.crc().cover[..self.prefix] {
                 feed(&self.profile, &mut digest, item, out);
             }
@@ -447,7 +448,7 @@ impl StreamSender {
             counter ^ field.xor,
         );
         let crc = self.profile.crc();
-        let mut digest = crc.engine.resume(register);
+        let mut digest = Digest::resume(&crc.engine, register);
         for &item in &crc.cover[self.prefix..] {
             feed(&self.profile, &mut digest, item, out);
         }
