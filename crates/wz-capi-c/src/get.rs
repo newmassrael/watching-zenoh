@@ -1076,14 +1076,12 @@ pub(crate) fn issue_get(
     let fan = match &token {
         None => None,
         Some(token) => {
-            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
                 return crate::result::Z_EGENERIC;
             };
-            Some((fan, Arc::new(registration)))
+            Some(fan)
         }
     };
-    let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
-    let fan = fan.map(|(f, _)| f);
     let anyke = parameters
         .as_deref()
         .is_some_and(crate::reply_keyexpr::parameters_has_anyke);
@@ -1113,7 +1111,7 @@ pub(crate) fn issue_get(
             let leg = LegReply {
                 closure: closure.clone(),
                 gate: gate.clone(),
-                _registration: registration.clone(),
+                _fan: fan.clone(),
             };
             // Only `on_reply` carries the `Arc`. Completion is signalled by the
             // pending entry's sink being DROPPED, which covers a real final, a
@@ -1135,9 +1133,10 @@ pub(crate) fn issue_get(
     );
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
-    // left implicit the registration would go first and a concurrent `cancel`
-    // could return before a zero-leg get's C `drop(context)` had run.
-    drop(registration);
+    // left implicit the fan, which is the registration, would go first and a
+    // concurrent `cancel` could return before a zero-leg get's C
+    // `drop(context)` had run.
+    drop(fan);
     Z_OK
 }
 
@@ -1194,9 +1193,9 @@ pub(crate) fn with_promoted_value(
 }
 
 /// R2949 — what one leg's reply callback owns: the C closure, the reply gate,
-/// and the token registration, dropped in that order (fields drop in
-/// declaration order, so a `cancel` waiting on the registration cannot return
-/// while this leg's share of the C `drop(context)` is pending).
+/// and the get's fan, which is its registration on its token, dropped in that
+/// order (fields drop in declaration order, so a `cancel` waiting on the fan
+/// cannot return while this leg's share of the C `drop(context)` is pending).
 ///
 /// ⚠ The callback must name the WHOLE struct, which [`Self::fire`] taking
 /// `&self` guarantees. A closure writing `leg.closure` and `leg.gate` captures
@@ -1206,7 +1205,7 @@ pub(crate) fn with_promoted_value(
 pub(crate) struct LegReply {
     pub(crate) closure: Arc<CReplyClosure>,
     pub(crate) gate: Arc<ReplyGate>,
-    pub(crate) _registration: Option<Arc<wz_capi_core::cancellation::Registration>>,
+    pub(crate) _fan: Option<Arc<wz_capi_core::cancellation::CancellableFan>>,
 }
 
 impl LegReply {
@@ -1542,16 +1541,12 @@ pub(crate) fn issue_get_on_node(
     let fan = match &token {
         None => None,
         Some(token) => {
-            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+            let Some(fan) = wz_capi_core::cancellation::register_fan(token) else {
                 return crate::result::Z_EGENERIC;
             };
-            Some((fan, Arc::new(registration)))
+            Some(fan)
         }
     };
-    let registration = fan
-        .as_ref()
-        .map(|(_, registration)| Arc::clone(registration));
-    let fan = fan.map(|(fan, _)| fan);
     let anyke = parameters
         .as_deref()
         .is_some_and(crate::reply_keyexpr::parameters_has_anyke);
@@ -1566,7 +1561,7 @@ pub(crate) fn issue_get_on_node(
     let leg = LegReply {
         closure,
         gate,
-        _registration: registration.clone(),
+        _fan: fan.clone(),
     };
     let on_reply = Box::new(move |view: &dyn ReplyView| leg.fire(view));
     // A value sent from shared memory goes as the buffer: its descriptor to a face that
@@ -1594,9 +1589,8 @@ pub(crate) fn issue_get_on_node(
     // the query was being asked ends it here.
     if let Some(fan) = &fan {
         let node = Arc::clone(node);
-        fan.record(move || node.cancel_get(id));
+        wz_capi_core::fan_undo::record(fan, Box::new(move || node.cancel_get(id)));
     }
-    drop(registration);
     Z_OK
 }
 

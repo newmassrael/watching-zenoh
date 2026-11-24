@@ -131,7 +131,7 @@
 use alloc::sync::Arc;
 use core::ffi::c_void;
 
-use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{Refusal, ReplyCallback};
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
@@ -1272,7 +1272,15 @@ pub(crate) unsafe fn get_inner(
         qos,
         value_meta,
     };
-    issue_get(&engine, ke, wire, &ask, cclosure, token, target_peer)
+    issue_get(
+        &engine,
+        ke,
+        wire,
+        &ask,
+        cclosure,
+        token.map(TokenRef::shared),
+        target_peer,
+    )
 }
 
 /// Adopt a moved reply closure and null the source, exactly as pico does
@@ -1391,7 +1399,7 @@ pub(crate) fn issue_get(
     wire: WireKey,
     ask: &GetAsk<'_>,
     closure: CReplyClosure,
-    token: Option<Arc<CancellationToken>>,
+    token: Option<TokenRef>,
     target_peer: Option<Vec<u8>>,
 ) -> ZResult {
     let params = transmit_parameters(ask.parameters, ask.accept_replies);
@@ -1476,7 +1484,7 @@ pub(crate) fn fan_get(
     kind: crate::object_slot::Kind,
     closure: CReplyClosure,
     gate: ReplyGate,
-    token: Option<Arc<CancellationToken>>,
+    token: Option<TokenRef>,
     issue: impl FnOnce(
         &str,
         Option<&CancellableFan>,
@@ -1496,31 +1504,36 @@ pub(crate) fn fan_get(
     // R2949 — the registration lies in the get's place, so it drops only when the
     // LAST leg lets the place go, after the C closure, and the token's `cancel`
     // waits for that, as pico's `_z_sync_group_wait` does.
-    let (fan, registration) = match &token {
-        None => (None, None),
-        Some(token) => match register_fan(token) {
-            Some((fan, registration)) => (Some(fan), Some(registration)),
+    //
+    // The fan is the registration: it lies in the place, and is linked into the token's list
+    // where it lies, so registering takes no memory.
+    let cancellable = token.is_some();
+    let place = slot.fill(GetPlace {
+        get: PendingGet {
+            closure,
+            gate,
+            fan: CancellableFan::new(),
+        },
+        legs: crate::ffi::OpenClosures::default(),
+    });
+    if let Some(token) = token {
+        // SAFETY: the place was filled just above and does not move until it is given back,
+        // which drops the fan; no engine has the fan yet.
+        if !unsafe { (*place).get.fan.register(token) } {
             // ALREADY CANCELLED. Upstream's
             // `_z_cancellation_token_add_on_cancel_handler` answers
             // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
             // query it had just created and returns that error, and NO
             // Query reaches the wire
             // (`src/session/cancellation.c:171-181`,
-            // `src/net/primitives.c:606-629`). The closure and the unfilled
-            // place drop on this return, so the C `drop(context)` still runs —
-            // the get is correctly reported over, exactly as upstream's
-            // `_z_unregister_pending_query` rollback reports it.
-            None => return crate::result::Z_ERR_CANCELLED,
-        },
-    };
-    let place = slot.fill(GetPlace {
-        get: PendingGet {
-            closure,
-            gate,
-            _registration: registration,
-        },
-        legs: crate::ffi::OpenClosures::default(),
-    });
+            // `src/net/primitives.c:606-629`). The place goes back with no leg,
+            // so the C `drop(context)` still runs: the get is reported over,
+            // as upstream's `_z_unregister_pending_query` rollback reports it.
+            // SAFETY: the owner lets go of the place once, here, having minted no leg.
+            unsafe { release_get(place) };
+            return crate::result::Z_ERR_CANCELLED;
+        }
+    }
     // R2959 — a declared key goes out as its alias where the leg can name one, and the
     // reply gate still matches the literal. A leg whose issue fails is not one: its
     // callback was dropped with its rolled-back pending entry, letting its count go, so
@@ -1528,7 +1541,9 @@ pub(crate) fn fan_get(
     // SAFETY: the place was filled just above and this thread holds it as its owner until
     // the release below, so the key read here stands for the call.
     let asked = unsafe { (*place).get.gate.query_keyexpr.as_str() };
-    let issued = issue(asked, fan.as_deref(), &mut || {
+    // SAFETY: as the key's: the fan stands in the place while its owner holds it.
+    let fan = cancellable.then(|| unsafe { &(*place).get.fan });
+    let issued = issue(asked, fan, &mut || {
         // SAFETY: the place stands while its owner holds it, which it does until every leg
         // is minted.
         unsafe { leg_callback(place) }
@@ -1545,12 +1560,12 @@ pub(crate) fn fan_get(
 /// One get the program issued, as its place keeps it ([`GetPlace`]).
 ///
 /// R2949 — the DROP ORDER is the contract: fields drop in declaration order, so
-/// the C closure goes before the token registration, and a `cancel` waiting on
-/// the registration cannot return while the C `drop(context)` is still pending.
+/// the C closure goes before the fan, which is the get's registration on its token, and a
+/// `cancel` waiting on the fan cannot return while the C `drop(context)` is still pending.
 pub(crate) struct PendingGet {
     closure: CReplyClosure,
     gate: ReplyGate,
-    _registration: Option<Registration>,
+    fan: CancellableFan,
 }
 
 /// The place of one get the program issued: the get, and the count of what holds it, its legs'
@@ -2448,8 +2463,9 @@ mod tests {
     }
     /// A get lies in a place of its session's from its fan to its last leg's end: two legs held past
     /// the fan keep it, the second one's end runs the C drop once and gives the place back; a get
-    /// with no leg is over at once; and a session with no place left refuses the get, its C drop
-    /// run. Turned red by a get whose place goes back under a leg still held, or never, or by one
+    /// with no leg is over at once; a session with no place left refuses the get, its C drop
+    /// run; a get with a token registers the fan lying in its place, and one whose token is
+    /// cancelled already is refused with its place given back. Turned red by a get whose place goes back under a leg still held, or never, or by one
     /// that takes memory of its own instead of a place.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
@@ -2528,6 +2544,47 @@ mod tests {
             "the refused get is reported over"
         );
         drop(held);
+
+        // A get with a token: its fan, registered on the token where it lies in the place, is
+        // the one the engine is handed, and goes with the last leg.
+        let token = CancellationToken::new();
+        let mut legs = Vec::new();
+        let code = fan_get(
+            &engine,
+            Kind::Get,
+            closure(),
+            gate(),
+            Some(TokenRef::shared(Arc::clone(&token))),
+            |_, fan, leg| {
+                assert!(fan.is_some(), "a get with a token hands its fan");
+                legs.push(leg());
+                Ok(1)
+            },
+        );
+        assert_eq!(code, Z_OK);
+        assert_eq!(token.active(), 1, "the fan in the place is registered");
+        drop(legs);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 4);
+        assert_eq!(token.active(), 0, "the fan went with the place");
+        assert_eq!(free(&engine), places);
+
+        // A token already cancelled refuses the get before any leg, its place given back.
+        token.cancel();
+        let code = fan_get(
+            &engine,
+            Kind::Get,
+            closure(),
+            gate(),
+            Some(TokenRef::shared(Arc::clone(&token))),
+            |_, _, _| panic!("a cancelled get issues no leg"),
+        );
+        assert_eq!(code, crate::result::Z_ERR_CANCELLED);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            5,
+            "the cancelled get is reported over"
+        );
+        assert_eq!(free(&engine), places, "and its place is back");
 
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
