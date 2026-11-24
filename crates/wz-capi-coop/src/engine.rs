@@ -1822,17 +1822,17 @@ impl SubscriberRow {
             .is_ok()
     }
 
-    /// Retract subscriber `id` over `actions`, naming its key as `retraction` does when its
-    /// declaration asked to. Read off the row before it is undeclared: a row a call of which runs
-    /// is kept out of every lookup until the call ends.
+    /// Retract subscriber `id` over `actions`, naming its key as `names` says (the declaration's
+    /// id and the rest of the key) when its declaration asked to. Read off the row before it is
+    /// undeclared: a row a call of which runs is kept out of every lookup until the call ends.
     fn retract<C: ClockSource + 'static>(
         id: SubId,
-        retraction: Option<&RetractionKey>,
+        names: Option<(ExprId, &str)>,
         actions: &McuActions<C>,
     ) {
-        match retraction {
-            Some(key) => {
-                actions.send_undeclare_subscriber_naming(u64::from(id), key.mapping_id, &key.suffix)
+        match names {
+            Some((mapping, suffix)) => {
+                actions.send_undeclare_subscriber_naming(u64::from(id), mapping, suffix)
             }
             None => actions.send_undeclare_subscriber(u64::from(id)),
         }
@@ -6176,7 +6176,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (
                         handle,
                         row.key().prefix(),
-                        row.callback().retraction.clone(),
+                        // Read against the key, held past the row.
+                        row.callback()
+                            .retraction
+                            .map(|names| (names, row.key().backing().clone())),
                     )
                 })?;
             // The links are asked while the rows stand, which are their places in the replay's
@@ -6190,7 +6193,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions| {
-                SubscriberRow::retract(id, retraction.as_ref(), actions);
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                SubscriberRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.
@@ -7111,7 +7115,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     (
                         handle,
                         row.key().prefix(),
-                        row.callback().retraction().cloned(),
+                        // Read against the key, held past the row.
+                        row.callback()
+                            .retraction()
+                            .map(|names| (*names, row.key().backing().clone())),
                     )
                 })?;
             // The links are asked while the rows stand, which are their places in the replay's
@@ -7124,7 +7131,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let row = undeclared.row.map(|row| row.into_callback());
             // The rows went before the links are told: a send never finds the tables borrowed.
             core.retract_at(place, &|actions| {
-                QueryableRow::retract(id, retraction.as_ref(), actions);
+                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                QueryableRow::retract(id, names, actions);
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             // One that counted it may now match no more.

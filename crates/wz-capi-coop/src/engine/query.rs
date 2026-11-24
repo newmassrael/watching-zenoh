@@ -155,16 +155,17 @@ impl QueryableRow {
             .is_ok()
     }
 
-    /// Retract queryable `id` over `actions`, naming its key as `retraction` does when its
-    /// declaration asked to. Read off the row before it is undeclared, as a subscriber's is.
+    /// Retract queryable `id` over `actions`, naming its key as `names` says (the declaration's
+    /// id and the rest of the key) when its declaration asked to. Read off the row before it is
+    /// undeclared, as a subscriber's is.
     pub(super) fn retract<C: ClockSource + 'static>(
         id: QblId,
-        retraction: Option<&RetractionKey>,
+        names: Option<(wz_session_core::wire_id::ExprId, &str)>,
         actions: &McuActions<C>,
     ) {
-        match retraction {
-            Some(key) => {
-                actions.send_undeclare_queryable_naming(u64::from(id), key.mapping_id, &key.suffix)
+        match names {
+            Some((mapping, suffix)) => {
+                actions.send_undeclare_queryable_naming(u64::from(id), mapping, suffix)
             }
             None => actions.send_undeclare_queryable(u64::from(id)),
         }

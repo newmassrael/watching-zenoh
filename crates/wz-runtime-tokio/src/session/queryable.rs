@@ -147,7 +147,7 @@ pub struct QueryableOptions {
     pub complete: bool,
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].
-    retraction_key: Option<RetractionKey>,
+    retraction_key: Option<RetractionName>,
     /// Whether this queryable stamps the replies it is given a time for: see
     /// [`Self::with_stamp_timestamp`].
     stamp_timestamp: wz_session_core::timestamp_visibility::StampTimestamp,
@@ -189,13 +189,13 @@ impl QueryableOptions {
     /// for the same reason: zenoh-pico does in every mode but client
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&q)->_key, zn);`).
-    pub fn with_retraction_naming(mut self, key: Option<RetractionKey>) -> Self {
+    pub fn with_retraction_naming(mut self, key: Option<RetractionName>) -> Self {
         self.retraction_key = key;
         self
     }
 
     /// See [`Self::with_retraction_naming`].
-    pub fn retraction_key(&self) -> Option<&RetractionKey> {
+    pub fn retraction_key(&self) -> Option<&RetractionName> {
         self.retraction_key.as_ref()
     }
 
