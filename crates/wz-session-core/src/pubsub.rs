@@ -114,7 +114,9 @@ use crate::id_map::{IdMap, IdRead, KeyText, PeerAliases, PeerIds};
 use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
 #[cfg(feature = "key-set-closed")]
 use crate::keyexpr_match::keyexpr_intersects_text;
-use crate::keyexpr_match::{keyexpr_intersects_text_with, KeyFacts, MAX_KEYEXPR_CHUNKS};
+use crate::keyexpr_match::{
+    keyexpr_intersects_asked, keyexpr_intersects_text_with, AskedKey, KeyFacts, MAX_KEYEXPR_CHUNKS,
+};
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
 use crate::row_pool::{PeerSeq, RowList, RowRead};
@@ -2691,6 +2693,12 @@ pub(crate) fn row_reaches(
     facts: KeyFacts,
     is_remote: bool,
 ) -> bool {
+    row_reaches_asked(row, &mut AskedKey::with_facts(keyexpr, facts), is_remote)
+}
+
+/// [`row_reaches`] for a key whose facts are read only where a row's answer needs them
+/// ([`AskedKey`]): the one rule, which a walk over every row asks with the key it keeps.
+pub(crate) fn row_reaches_asked(row: &RowRef<'_>, key: &mut AskedKey<'_>, is_remote: bool) -> bool {
     let pass = if is_remote {
         row.origin.allows_remote()
     } else {
@@ -2699,7 +2707,7 @@ pub(crate) fn row_reaches(
     // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
     // applies the fixed backing's depth bound to it, the same defensive
     // over-depth skip every scan inherits from the one seam.
-    pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts)
+    pass && keyexpr_intersects_asked(row.pattern, row.facts, key)
 }
 
 /// The one matcher: every subscriber whose locality admits the origin and whose pattern
@@ -2733,21 +2741,14 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     // So this widens delivery to the wildcard case and changes nothing about
     // the concrete one.
     //
-    // The arriving key is read once for the whole table, and each pattern was read when it
-    // registered: a pattern and a key that hold no wildcard are compared as text, and only a
-    // wildcard on either side walks them, which zenoh-pico's matcher does too
+    // The arriving key is read at most once for the whole table, and only when a row's answer
+    // needs it; each pattern was read when it registered: a pattern and a key that hold no
+    // wildcard are compared as text, and only a wildcard on either side walks them, which
+    // zenoh-pico's matcher does too
     // (`vendor/zenoh-pico/src/session/keyexpr.c` @ `fast path for identical key expressions`).
-    let facts = KeyFacts::of(keyexpr);
-    // Over-depth arriving key on the fixed backing: delivered to nobody and
-    // answered `None`, so a caller that remembers answers does not remember
-    // it. The matcher would refuse it for every subscriber anyway; the depth
-    // is counted here only for that answer, and only for a key the facts do not
-    // already place within the bound.
-    if past_matcher_depth(keyexpr, facts) {
-        return None;
-    }
+    let mut key = AskedKey::new(keyexpr);
     rows.each_row_mut(|position, row, id, sink| {
-        if row_reaches(&row, keyexpr, facts, is_remote) {
+        if row_reaches_asked(&row, &mut key, is_remote) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -2756,6 +2757,14 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
             fired = fired.saturating_add(1);
         }
     });
+    // Over-depth arriving key on the fixed backing: delivered to nobody and
+    // answered `None`, so a caller that remembers answers does not remember
+    // it. The matcher refuses it for every subscriber, so it is asked only of a
+    // key that reached none, after the walk; the depth is counted only for a key
+    // the facts do not already place within the bound.
+    if fired == 0 && past_matcher_depth(keyexpr, key.facts()) {
+        return None;
+    }
     Some(fired)
 }
 
@@ -9446,6 +9455,36 @@ mod tests {
             remembered,
             "a registration is seen by the next message, then the key is remembered again"
         );
+    }
+
+    /// A key is matched by every row whatever the facts of the key an answer reads: a wildcard
+    /// row and an equal row reach it, a row that differs does not, and on the fixed backing a key
+    /// deeper than the matcher's bound reaches no row, the wildcard one included. Turned red by a
+    /// walk that delivers an over-depth key to a wildcard row, or an equal row answered from the
+    /// key's facts wrongly.
+    #[test]
+    fn a_key_reaches_the_rows_it_matches_and_an_over_depth_one_none() {
+        use crate::sink::BorrowedSample;
+        const DEEP: &str = "k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k/k";
+        assert_eq!(DEEP.split('/').count(), MAX_KEYEXPR_CHUNKS + 1);
+        let key = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let mut reg = SubscriberRegistry::new();
+        for pattern in ["**", "a/b", "a/*"] {
+            reg.register(pattern, |_: &dyn SampleView| {})
+                .expect("no quota is stated on this table");
+        }
+        assert_eq!(reg.dispatch_borrowed(&key("a/b"), true), 3);
+        assert_eq!(reg.dispatch_borrowed(&key("a/c"), true), 2);
+        assert_eq!(reg.dispatch_borrowed(&key("b"), true), 1);
+        assert_eq!(reg.dispatch_borrowed(&key("a/*"), true), 3);
+        // The wildcard row alone reaches it where no bound applies.
+        let deep_reaches = usize::from(!crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(reg.dispatch_borrowed(&key(DEEP), true), deep_reaches);
     }
 
     /// A table of the fixed storage policy holds its cache in RAM and so reads its own count,
