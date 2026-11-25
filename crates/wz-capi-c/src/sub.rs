@@ -573,7 +573,7 @@ pub(crate) unsafe fn declare_subscriber_delivered(
                 // A session that has handed out every entity id refuses the subscriber with the
                 // code this ABI gives a declaration whose id space is spent; the closure the
                 // session dropped has run its drop.
-                let Some(id) = state.shared.declare_subscriber_on_links(
+                let Ok(id) = state.shared.declare_subscriber_on_links(
                     ke,
                     WireKey::literal(),
                     allowed_origin,

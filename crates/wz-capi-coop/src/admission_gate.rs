@@ -19,21 +19,23 @@ use core::cell::Cell;
 
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::sync::{LockKind, Shared};
 use wz_runtime_coop::ClockSource;
-use wz_session_core::link::{LostCause, RxFrame};
+use wz_session_core::link::{BoxedLinkDriver, LostCause, RxFrame};
 
 /// `pump`, which gives the session nothing from the moment `actions` is established until the
 /// gate is granted ([`Self::grant`]). The gate keeps whether it was granted itself: it lies in the
 /// link's cell of the session's table, and the engine's wire for the link holds a handle on that
-/// cell, so a link made after the open takes no memory of the heap for its admission.
-pub(crate) struct AdmissionGate<P, C: ClockSource + 'static> {
+/// cell, so a link made after the open takes no memory of the heap for its admission. `K` is how
+/// the session's runtime holds what it lends the link's session.
+pub(crate) struct AdmissionGate<P, C: ClockSource + 'static, K: LockKind = Shared> {
     pump: P,
-    actions: SessionHandle<C>,
+    actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
     admitted: Cell<bool>,
 }
 
-impl<P, C: ClockSource + 'static> AdmissionGate<P, C> {
-    pub(crate) fn new(pump: P, actions: SessionHandle<C>) -> Self {
+impl<P, C: ClockSource + 'static, K: LockKind> AdmissionGate<P, C, K> {
+    pub(crate) fn new(pump: P, actions: SessionHandle<C, dyn BoxedLinkDriver, K>) -> Self {
         Self {
             pump,
             actions,
@@ -53,7 +55,9 @@ impl<P, C: ClockSource + 'static> AdmissionGate<P, C> {
     }
 }
 
-impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for AdmissionGate<P, C> {
+impl<P: SessionDatagramLink, C: ClockSource + 'static, K: LockKind> SessionDatagramLink
+    for AdmissionGate<P, C, K>
+{
     fn service(&self) {
         self.pump.service()
     }

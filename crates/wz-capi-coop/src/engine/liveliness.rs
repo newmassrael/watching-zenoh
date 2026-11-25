@@ -20,6 +20,7 @@
 
 use core::ptr::NonNull;
 
+use super::LinkActions;
 use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
 #[cfg(feature = "group")]
 use wz_runtime_coop::session_drive::SessionLinks;
@@ -29,7 +30,6 @@ use wz_session_core::named_key::NamedKey;
 use wz_session_core::row_callback::RowCallback;
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
-use wz_session_mcu::dial::McuActions;
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -41,7 +41,7 @@ use super::transport::TellGroups;
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
 pub(super) fn declare_token<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: TokenId,
     key: NamedKey<'_>,
 ) -> bool {
@@ -79,7 +79,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
 /// Retract the token `id` over `actions`, naming its key as `names` says (the declaration's id
 /// and the rest of the key) when its declaration asked to.
 pub(super) fn retract_token<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: TokenId,
     names: Option<(ExprId, &str)>,
 ) {
@@ -130,7 +130,7 @@ impl LivelinessRow {
 /// come, and with `history` the ones alive now, its key named as the session's tables name it
 /// (`form`) or as the link's key-wire form says: whether the link took it.
 pub(super) fn ask<C: ClockSource + 'static>(
-    actions: &McuActions<C>,
+    actions: &LinkActions<C>,
     id: SubId,
     keyexpr: &str,
     form: WireForm<'_>,
