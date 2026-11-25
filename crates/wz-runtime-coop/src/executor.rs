@@ -117,6 +117,9 @@ struct Ops {
 /// Drop the value at the buffer, of a type erased with the task that wrote it.
 type DropFn = unsafe fn(*mut u8);
 
+/// A cell taken for a task and the bytes its future goes into, or why none was.
+type CellClaim = Result<(&'static TaskCell, *mut u8), SpawnRefusal>;
+
 /// What a cell's bookkeeping holds; touched only inside a critical section.
 struct Meta {
     state: State,
@@ -970,8 +973,7 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Option<*mut u8> {
 /// it walks, so a build that makes no table of many links none of the walks over many.
 struct Walks {
     /// Take a free cell for a task ([`ExecutorState::claim_bytes`]).
-    claim:
-        fn(&ExecutorState, u32, usize, usize) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal>,
+    claim: fn(&ExecutorState, u32, usize, usize) -> CellClaim,
     /// Poll what was woken and sweep what was aborted ([`ExecutorState::run_until_idle`]).
     run: fn(&ExecutorState),
     /// Drop the tasks that have not ended (`ExecutorState::drop_live`).
@@ -1215,12 +1217,7 @@ impl ExecutorState {
     }
 
     /// Take a free cell for a task of `need` bytes at `align`, or refuse, counted.
-    fn claim_bytes(
-        &self,
-        set: u32,
-        need: usize,
-        align: usize,
-    ) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal> {
+    fn claim_bytes(&self, set: u32, need: usize, align: usize) -> CellClaim {
         (self.walks.claim)(self, set, need, align)
     }
 
@@ -1245,12 +1242,7 @@ impl ExecutorState {
     /// [`Self::claim_bytes`] over a table of one cell at most, which takes no memory after it is
     /// made: the cell when it is free and the task fits it; refused, counted, otherwise.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn claim_one(
-        &self,
-        set: u32,
-        need: usize,
-        align: usize,
-    ) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal> {
+    fn claim_one(&self, set: u32, need: usize, align: usize) -> CellClaim {
         let fits = self.cell_bytes.is_some_and(|cap| need <= cap) && align <= CELL_ALIGN;
         let found = match self.fixed_cells().first() {
             Some(cell) if fits => crate::cs::with(|cs| Self::take_free(cell, set, cs)),
@@ -1270,12 +1262,7 @@ impl ExecutorState {
 
     /// [`Self::claim_bytes`] over the cells of a table of any count of them, and the cells it
     /// took memory for.
-    fn claim_among(
-        &self,
-        set: u32,
-        need: usize,
-        align: usize,
-    ) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal> {
+    fn claim_among(&self, set: u32, need: usize, align: usize) -> CellClaim {
         let fixed = self.fixed_cells();
         // Every cell the table was made with has its bytes, so a task fits all of them or none.
         let fits = self.cell_bytes.is_some_and(|cap| need <= cap) && align <= CELL_ALIGN;

@@ -267,14 +267,20 @@ impl KeyText {
     /// the arena has no room or the key is longer than the session's
     /// `MAX_KEYEXPR_BYTES`; a copy of its own for a session with no key arena or a closed one,
     /// which keeps nothing more.
-    #[inline(never)]
     pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
-        let refused = match key_arena(shared).map(|keys| SessionKeys::key(keys, KeyAsk::Hold(text)))
-        {
+        Self::kept(shared, KeyAsk::Hold(text), text)
+    }
+
+    /// `text` kept as `ask` asks of `engine`'s key arena, held or shared: a block of it, refused
+    /// as [`refusal_of`] answers why the arena kept none, and a copy of its own when the session
+    /// keeps no arena or is closed. One body for holding and sharing, which differ only in the ask.
+    #[inline(never)]
+    fn kept(engine: &Arc<Engine>, ask: KeyAsk<'_>, text: &str) -> Result<Self, ZResult> {
+        let refused = match key_arena(engine).map(|keys| SessionKeys::key(keys, ask)) {
             Some(Ok(Some(key))) => {
                 return Ok(Self {
                     key: ManuallyDrop::new(key),
-                    engine: ManuallyDrop::new(Some(shared.clone())),
+                    engine: ManuallyDrop::new(Some(engine.clone())),
                 })
             }
             Some(Err(why)) => refusal_of(why),
@@ -302,20 +308,13 @@ impl KeyText {
 
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
     /// copy for one of its own, refused as [`Self::owned`] refuses it.
-    #[inline(never)]
     pub(crate) fn share(&self) -> Result<Self, ZResult> {
-        if let Some(engine) = &*self.engine {
-            // An engine that keeps no key arena made no key of one; a copy reads the same.
-            if let Some(Ok(Some(key))) =
-                key_arena(engine).map(|keys| SessionKeys::key(keys, KeyAsk::Share(&self.key)))
-            {
-                return Ok(Self {
-                    key: ManuallyDrop::new(key),
-                    engine: ManuallyDrop::new(Some(engine.clone())),
-                });
-            }
+        match &*self.engine {
+            // An engine that keeps no key arena made no key of one, and a closed session shares
+            // none: a copy reads the same. A share is only counted, so the arena refuses none.
+            Some(engine) => Self::kept(engine, KeyAsk::Share(&self.key), self.as_str()),
+            None => Self::owned(self.as_str()),
         }
-        Self::owned(self.as_str())
     }
 
     /// Whether the text is a block of the session's key arena.

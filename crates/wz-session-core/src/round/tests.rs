@@ -1061,21 +1061,24 @@ fn a_captured_fan_out_hands_every_call_in_order() {
     assert!(log.handed().is_empty(), "the put hands the sample itself");
 }
 
+// The arena lends a round of one thread no record, and a round of threads its records: the
+// two rounds the test below compares.
+const _: () = assert!(
+    RoundRows::<Single>::RECORD_BYTES == 0,
+    "the arena lends a round of one thread no record"
+);
+const _: () = assert!(
+    RoundRows::<Lean>::RECORD_BYTES > 0,
+    "CONTROL: a round of threads is lent its records"
+);
+
 /// A round of one thread keeps the records of one message in itself: two, as a token held for its
 /// liveliness subscribers and for the declaration watches makes, and a third finds no room and is
-/// counted; its arena lends it no row of records. The CONTROL is the round of threads, whose lent
-/// rows take the third. Turned red by a round of one thread that keeps its records in lent rows.
+/// counted; its arena lends it no row of records (held at compile time above). The CONTROL is the
+/// round of threads, whose lent rows take the third. Turned red by a round of one thread that
+/// keeps its records in lent rows.
 #[test]
 fn a_round_of_one_thread_keeps_two_records_in_itself_and_refuses_a_third() {
-    assert_eq!(
-        RoundRows::<Single>::RECORD_BYTES,
-        0,
-        "the arena lends a round of one thread no record"
-    );
-    assert!(
-        RoundRows::<Lean>::RECORD_BYTES > 0,
-        "CONTROL: a round of threads is lent its records"
-    );
     let log = Arc::new(Log::default());
     let threads = round::<Lean>();
     let single = round::<Single>();

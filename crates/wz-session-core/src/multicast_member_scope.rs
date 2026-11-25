@@ -124,7 +124,7 @@ impl MemberKeyexprs {
     }
 
     fn held(&self) -> &[crate::wire_id::ExprId] {
-        &self.ids[..self.held]
+        self.ids.get(..self.held).unwrap_or_default()
     }
 
     /// Note that the member declared `id`: `false` for a new id with every row held, which is
@@ -137,15 +137,18 @@ impl MemberKeyexprs {
             return false;
         };
         *row = id;
-        self.held += 1;
+        // Below the rows' count, as the row just taken says.
+        self.held = self.held.saturating_add(1);
         true
     }
 
     /// Note that the member retracted `id`.
     fn undeclare(&mut self, id: crate::wire_id::ExprId) {
-        if let Some(at) = self.held().iter().position(|held| *held == id) {
-            self.held -= 1;
-            self.ids.swap(at, self.held);
+        let at = self.held().iter().position(|held| *held == id);
+        // A held id was found, so at least one is held.
+        if let (Some(at), Some(last)) = (at, self.held.checked_sub(1)) {
+            self.held = last;
+            self.ids.swap(at, last);
         }
     }
 }
