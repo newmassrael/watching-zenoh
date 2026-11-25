@@ -2097,7 +2097,7 @@ impl SessionParts for CoopSession {
 /// declarations to that link's peer stands (`replay`).
 struct Face<C: ClockSource + 'static, L: CoopLinks> {
     id: FaceId,
-    link: Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount>,
+    link: Link<Wire<C>, L::Dial>,
     replay: Replay,
     /// What the connectivity listeners whose history is being replayed were told of the face, and
     /// the tomb of a row of it that went (`told`).
@@ -2106,20 +2106,19 @@ struct Face<C: ClockSource + 'static, L: CoopLinks> {
 }
 
 impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord<LinkCount> for Face<C, L> {
-    type Session = LinkSession<C>;
+    type Wire = Wire<C>;
     type Pump = L::Pump;
     type Dial = L::Dial;
-    type End = FaceEnd;
 
     fn id(&self) -> FaceId {
         self.id
     }
 
-    fn link(&self) -> &Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount> {
+    fn link(&self) -> &Link<Wire<C>, L::Dial> {
         &self.link
     }
 
-    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, L::Dial, FaceEnd, LinkCount> {
+    fn link_mut(&mut self) -> &mut Link<Wire<C>, L::Dial> {
         &mut self.link
     }
 }
@@ -2187,7 +2186,6 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 }
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
 /// How the session of a face's link ends: with its task, or, where the read steps the one link

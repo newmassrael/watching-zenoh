@@ -49,7 +49,7 @@ use crate::face_life::{FaceEffect, FaceLife, FaceRole, Next, Turn};
 use crate::faces::Accepted;
 use crate::faces::{
     Dial, DialAnswer, DialEndpoint, EndpointTexts, FaceId, FacePlaces, FaceRead, FaceRecord,
-    IdleWait, Link, LinkEnd, LinkSupervisor, TaskEnd, Wire,
+    FaceWire, IdleWait, Link, LinkEnd, LinkSupervisor, TaskEnd, Wire,
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
@@ -123,10 +123,13 @@ pub trait TransportFaces {
     type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
     /// The session's half of one link.
     type Session: TransportSession<Self::Clock, Self::Lock>;
+    /// What a face holds of its link while the link is up or in its handshake, read as the
+    /// session's half of the link.
+    type Wire: FaceWire + Deref<Target = Self::Session>;
     /// The engine's record of one face.
     type Face: FaceRecord<
         <Self::Lock as LockKind>::LinkCount,
-        Session = Self::Session,
+        Wire = Self::Wire,
         Pump = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Pump,
         Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Dial,
     >;

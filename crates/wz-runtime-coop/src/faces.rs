@@ -75,8 +75,10 @@ pub trait FaceSession {
 /// One face as the session keeps it: the face's number and its link, beside whatever else the
 /// session keeps of the face. The supervisor reads and replaces the link alone.
 pub trait FaceRecord<N: CountKind = OneTask> {
-    /// The session's half of the face's link.
-    type Session: FaceSession;
+    /// What the face holds of its link while the link is up or in its handshake ([`FaceWire`]):
+    /// the link's parts themselves ([`Wire`]), or a handle on the place they lie in apart from
+    /// the session's state.
+    type Wire: FaceWire;
 
     /// What the drive loop pumps for the face's link, which a dial under way makes.
     type Pump;
@@ -87,15 +89,42 @@ pub trait FaceRecord<N: CountKind = OneTask> {
     /// The face's number.
     fn id(&self) -> FaceId;
 
-    /// How the session of the face's link ends ([`LinkEnd`]): a task's handle, or the end of a
-    /// link whose session the owner steps itself.
-    type End: LinkEnd;
-
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session, Self::Dial, Self::End, N>;
+    fn link(&self) -> &Link<Self::Wire, Self::Dial>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial, Self::End, N>;
+    fn link_mut(&mut self) -> &mut Link<Self::Wire, Self::Dial>;
+}
+
+/// What the supervisor reads of a face's link while it is up or in its handshake, and how it ends
+/// it: the session's half of it ([`FaceSession`]), the end of its session ([`LinkEnd`]), and
+/// what its owner waits on for its input and its room.
+pub trait FaceWire: FaceSession {
+    /// Whether the link's session has ended.
+    fn finished(&self) -> bool;
+
+    /// End the link's session, whatever it is doing.
+    fn abort(&self);
+
+    /// Whether the link holds input it has already taken from its stack.
+    fn holds_input(&self) -> bool;
+
+    /// Whether the link owes its stack the rest of a frame it was handed.
+    fn owes_write(&self) -> bool;
+
+    /// Whether the link has input in its stack it cannot read until another link gives a receive
+    /// buffer back.
+    fn waits_for_buffer(&self) -> bool;
+
+    /// What a wait for the link's input waits on, when its stack gives one.
+    fn input_wait(&self) -> Option<WaitOn>;
+
+    /// What a wait for room on the link waits on, when its stack gives one.
+    fn room_wait(&self) -> Option<WaitOn>;
+
+    /// Have the link write what it owes its stack, as far as the stack takes it now.
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self);
 }
 
 /// How a face's owner tells that the session of a link ended, and ends it ([`Wire`]). A
@@ -206,18 +235,76 @@ impl<S, E, N: CountKind> Deref for Wire<S, E, N> {
     }
 }
 
+impl<S: FaceSession, E, N: CountKind> FaceSession for Wire<S, E, N> {
+    fn established(&self) -> bool {
+        self.session.established()
+    }
+
+    fn node(&self) -> Option<SessionZid> {
+        self.session.node()
+    }
+
+    fn end(&self) {
+        self.session.end();
+    }
+
+    fn close_reason(&self) -> Option<CloseReason> {
+        self.session.close_reason()
+    }
+
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn input_seen(&self, ready: bool) {
+        self.session.input_seen(ready);
+    }
+}
+
+impl<S: FaceSession, E: LinkEnd, N: CountKind> FaceWire for Wire<S, E, N> {
+    fn finished(&self) -> bool {
+        self.end.finished()
+    }
+
+    fn abort(&self) {
+        self.end.abort();
+    }
+
+    fn holds_input(&self) -> bool {
+        self.link.holds_input()
+    }
+
+    fn owes_write(&self) -> bool {
+        self.link.owes_write()
+    }
+
+    fn waits_for_buffer(&self) -> bool {
+        waits_for_buffer(&self.link)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.input
+    }
+
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.room
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        self.link.write_owed_now();
+    }
+}
+
 /// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
 /// dial under way is held in its face's link, so a face has one dial at most and the faces' table
 /// is the dials' table too.
-pub enum Link<S, D, E = TaskEnd, N: CountKind = OneTask> {
+pub enum Link<W, D> {
     /// Established: the session's sends go through it.
-    Up(Wire<S, E, N>),
+    Up(W),
     /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
     /// endpoint before `next` and goes on to the one after; another face holds a link it dialled
     /// once or took off a port, and is removed when the handshake fails.
     Opening {
         /// The link in its handshake.
-        wire: Wire<S, E, N>,
+        wire: W,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the handshake is given up.
@@ -247,9 +334,9 @@ pub enum Link<S, D, E = TaskEnd, N: CountKind = OneTask> {
     },
 }
 
-impl<S, D, E, N: CountKind> Link<S, D, E, N> {
+impl<W, D> Link<W, D> {
     /// The link's wire while it is up or in its handshake.
-    pub fn wire(&self) -> Option<&Wire<S, E, N>> {
+    pub fn wire(&self) -> Option<&W> {
         match self {
             Link::Up(wire) | Link::Opening { wire, .. } => Some(wire),
             _ => None,
@@ -1030,7 +1117,7 @@ impl<
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End, N>) {
+    pub fn put_link(&mut self, at: usize, link: Link<F::Wire, L::Dial>) {
         self.regenerated();
         if let Some(face) = self.face_mut(at) {
             *face.link_mut() = link;
@@ -1079,7 +1166,7 @@ impl<
     /// Whether a face's link holds input it has already taken from its stack.
     pub fn holds_input(&self) -> bool {
         self.faces()
-            .any(|face| face.link().wire().is_some_and(Wire::holds_input))
+            .any(|face| face.link().wire().is_some_and(FaceWire::holds_input))
     }
 
     /// What the face at `at`, numbered `id`, holds: its role, where its link stands and what it
@@ -1179,7 +1266,7 @@ impl<
     #[cfg(feature = "session-unicast-accept")]
     pub fn write_owed_now(&self) {
         for wire in self.faces().filter_map(|face| face.link().wire()) {
-            wire.link.write_owed_now();
+            wire.write_owed_now();
         }
     }
 
@@ -1193,7 +1280,7 @@ impl<
             .faces()
             .filter_map(|face| face.link().wire())
             .filter(|wire| wire.owes_write())
-            .filter_map(|wire| wire.input);
+            .filter_map(|wire| wire.input_wait());
         for on in owing {
             let pushed = waits.push(LinkWait::input_or_room(on));
             // Each link that owes holds one of the pool's slots, so more never owe than
@@ -1253,13 +1340,13 @@ impl<
             }
             match face.link() {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
-                    if wire.link.holds_input() {
+                    if wire.holds_input() {
                         holds = true;
-                    } else if waits_for_buffer(&wire.link) {
+                    } else if wire.waits_for_buffer() {
                         // Its input waits in the stack until another link gives a receive
                         // buffer back, which that link's own input wakes the read for.
-                    } else if let Some(on) = wire.input {
-                        let wait = if wire.link.owes_write() {
+                    } else if let Some(on) = wire.input_wait() {
+                        let wait = if wire.owes_write() {
                             LinkWait::input_or_room(on)
                         } else {
                             LinkWait::input(on)
@@ -1355,9 +1442,8 @@ impl<
             // and the next wait or move reads its stack.
             #[cfg(any(feature = "listen", feature = "group"))]
             for wire in self.faces().filter_map(|face| face.link().wire()) {
-                if let Some(port) = wire.input {
-                    wire.session
-                        .input_seen(on.iter().any(|ready| ready.on == port));
+                if let Some(port) = wire.input_wait() {
+                    wire.input_seen(on.iter().any(|ready| ready.on == port));
                 }
             }
             for listening in &mut self.listeners {
@@ -1381,8 +1467,8 @@ impl<
     #[cfg(any(feature = "listen", feature = "group"))]
     pub fn links_moved(&self) {
         for wire in self.faces().filter_map(|face| face.link().wire()) {
-            if wire.input.is_some() {
-                wire.session.input_seen(true);
+            if wire.input_wait().is_some() {
+                wire.input_seen(true);
             }
         }
     }
@@ -1470,7 +1556,7 @@ mod tests {
         }
     }
 
-    type TestLink = Link<Session, Answer>;
+    type TestLink = Link<Wire<Session>, Answer>;
 
     struct TestFace {
         id: FaceId,
@@ -1478,10 +1564,9 @@ mod tests {
     }
 
     impl FaceRecord for TestFace {
-        type Session = Session;
+        type Wire = Wire<Session>;
         type Pump = Rc<Quiet>;
         type Dial = Answer;
-        type End = TaskEnd;
 
         fn id(&self) -> FaceId {
             self.id
@@ -1779,6 +1864,114 @@ mod tests {
     fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
         LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 2)
             .expect("the heap holds two waits")
+    }
+
+    /// What a face holds of a link whose parts lie apart from it: a handle that reads and ends
+    /// the link as the parts answer, which it is told here.
+    struct ApartWire {
+        holds: bool,
+        finished: bool,
+        aborted: Rc<Cell<u32>>,
+    }
+
+    impl FaceSession for ApartWire {
+        fn established(&self) -> bool {
+            true
+        }
+
+        fn node(&self) -> Option<SessionZid> {
+            None
+        }
+
+        fn end(&self) {}
+
+        fn close_reason(&self) -> Option<CloseReason> {
+            None
+        }
+    }
+
+    impl FaceWire for ApartWire {
+        fn finished(&self) -> bool {
+            self.finished
+        }
+
+        fn abort(&self) {
+            self.aborted.set(self.aborted.get() + 1);
+        }
+
+        fn holds_input(&self) -> bool {
+            self.holds
+        }
+
+        fn owes_write(&self) -> bool {
+            false
+        }
+
+        fn waits_for_buffer(&self) -> bool {
+            false
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            None
+        }
+
+        fn room_wait(&self) -> Option<WaitOn> {
+            None
+        }
+
+        #[cfg(feature = "session-unicast-accept")]
+        fn write_owed_now(&self) {}
+    }
+
+    struct ApartFace {
+        id: FaceId,
+        link: Link<ApartWire, Answer>,
+    }
+
+    impl FaceRecord for ApartFace {
+        type Wire = ApartWire;
+        type Pump = Rc<Quiet>;
+        type Dial = Answer;
+
+        fn id(&self) -> FaceId {
+            self.id
+        }
+
+        fn link(&self) -> &Link<ApartWire, Answer> {
+            &self.link
+        }
+
+        fn link_mut(&mut self) -> &mut Link<ApartWire, Answer> {
+            &mut self.link
+        }
+    }
+
+    /// A face whose link is held as a handle of the record's own kind, not as the link's parts,
+    /// is read and ended through that handle alone. Turned red by a supervisor that reads a
+    /// face's input or end off a `Wire`'s fields rather than through `FaceWire`.
+    #[test]
+    fn a_face_whose_link_lies_apart_is_read_and_ended_through_its_handle() {
+        let aborted = Rc::new(Cell::new(0));
+        let apart = |holds, finished| ApartWire {
+            holds,
+            finished,
+            aborted: Rc::clone(&aborted),
+        };
+        let dial = ApartFace {
+            id: 100,
+            link: Link::Up(apart(false, false)),
+        };
+        let mut faces: LinkSupervisor<Net, ApartFace> =
+            LinkSupervisor::new(Net, dial, 1, 2).expect("the heap holds two waits");
+        assert!(!faces.holds_input(), "CONTROL: a link that holds no input");
+        faces.put_link(0, Link::Up(apart(true, true)));
+        assert!(faces.holds_input(), "the handle's input read");
+        let mut answer = None;
+        let read = faces.read_face(0, 100, &mut answer);
+        assert!(read.signals.ended, "the handle's end read");
+        assert_eq!(aborted.get(), 0, "CONTROL: nothing ended the link yet");
+        faces.end_faces(|_| {});
+        assert_eq!(aborted.get(), 1, "the handle ended the link");
     }
 
     /// A reach of a face to change it is counted, and a look at one is not: what a session that
