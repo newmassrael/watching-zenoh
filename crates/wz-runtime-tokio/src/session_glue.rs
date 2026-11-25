@@ -4288,12 +4288,16 @@ mod negotiated_mtu_tests {
         actions.handle_inbound(&wire).expect("parse InitAck");
         actions.enter_established();
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::Reliable).0,
-            BATCH - length
+            actions
+                .negotiated_tx_limits_for(Reliability::Reliable)
+                .map(|(budget, _)| budget),
+            Some(BATCH - length)
         );
         assert_eq!(
-            actions.negotiated_tx_limits_for(Reliability::BestEffort).0,
-            COMPANION
+            actions
+                .negotiated_tx_limits_for(Reliability::BestEffort)
+                .map(|(budget, _)| budget),
+            Some(COMPANION)
         );
         assert_eq!(actions.batch_envelope_bytes_for(Reliability::BestEffort), 0);
         assert_eq!(actions.batch_envelope_bytes(), length);
@@ -4334,9 +4338,11 @@ mod negotiated_mtu_tests {
             crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
         plain.handle_inbound(&wire).expect("parse InitAck");
         plain.enter_established();
+        let reliable = plain.negotiated_tx_limits_for(Reliability::Reliable);
+        assert!(reliable.is_some(), "established, the limits are settled");
         assert_eq!(
             plain.negotiated_tx_limits_for(Reliability::BestEffort),
-            plain.negotiated_tx_limits_for(Reliability::Reliable),
+            reliable,
             "a link without a companion sizes both classes the same"
         );
     }
@@ -7369,11 +7375,10 @@ mod reconnect_tx_tests {
             3,
             "a rejected declare caches nothing"
         );
-        // Simulate the re-handshake reaching Established (the supervisor
-        // replays only after `drive_open_loop`; `record_established_at`
-        // re-opens the gate) — direct-stamp idiom shared with
-        // `reset_for_reopen_clears_handshake_scoped_state_only`.
-        actions.link.transport_available.open();
+        // The re-handshake reaches Established (the supervisor replays only after
+        // `drive_open_loop`): through the one door that settles the send limits and opens the
+        // gate, as a session does.
+        actions.enter_established();
         let replayed = actions
             .replay_declarations()
             .expect("replay over validated cache entries cannot reject");
@@ -7428,7 +7433,7 @@ mod reconnect_tx_tests {
     /// is held, and the declarations are in the cache and owed to the new peer.
     fn reopened(actions: &super::SessionLinkActions) {
         actions.reset_for_reopen();
-        actions.link.transport_available.open();
+        actions.enter_established();
     }
 
     /// With the policy off nothing is paced, and a paced replay that sends everything in one turn
@@ -7879,7 +7884,8 @@ mod reconnect_tx_tests {
             "the send is refused and the turn says so"
         );
         assert!(actions.paced_replay_running(), "the replay is still owed");
-        actions.link.transport_available.open();
+        // The link is established again.
+        actions.enter_established();
         let turn = actions.replay_turn(10).expect("the rest");
         assert_eq!(
             (turn.emitted, turn.finished),
@@ -7987,10 +7993,9 @@ mod reconnect_tx_tests {
             "the declaration cache IS the replay source — must survive"
         );
         // SN re-seed: the next emitted frame repeats the initial SN. The
-        // probe send happens post-re-handshake in production, so re-open
-        // the F2 transport gate first (Established re-entry does this via
-        // `record_established_at`).
-        actions.link.transport_available.open();
+        // probe send happens post-re-handshake in production, so the link is
+        // established again first, through the door a session takes.
+        actions.enter_established();
         let pre_reset_first_frame = driver.frame_bytes(0);
         actions
             .send_push_literal("home/x", b"p", true)
@@ -8083,7 +8088,7 @@ mod reconnect_tx_tests {
         // Register the bundle's own link into the aggregation set and mark it
         // live -> a surviving aggregate member (`live_link_count() == 1`).
         actions.register_first_link(actions.link.clone());
-        actions.link.transport_available.open();
+        actions.enter_established();
         assert_eq!(actions.live_link_count(), 1);
 
         // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.

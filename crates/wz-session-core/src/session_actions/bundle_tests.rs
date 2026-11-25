@@ -1089,7 +1089,9 @@ mod lent_frame_refusal {
             SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock);
         actions.enter_established();
         assert_eq!(put(&actions), Some(Ok(())));
-        let (budget, _) = actions.negotiated_tx_limits_for(Reliability::Reliable);
+        let (budget, _) = actions
+            .negotiated_tx_limits_for(Reliability::Reliable)
+            .expect("the limits are settled at establishment");
         assert_eq!(
             *link.asked.lock().expect("the asks"),
             [budget],
@@ -1373,7 +1375,8 @@ mod facts_lock {
     }
 
     /// Every fact the closed transport's handshake took is cleared in the reopen's one hold,
-    /// and the reopened link takes no data send until it is established again.
+    /// and the reopened link takes no data send, and holds no send limits, until it is
+    /// established again.
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_every_handshake_fact_and_closes_the_data_send_gate() {
@@ -1388,6 +1391,11 @@ mod facts_lock {
         }));
         actions.enter_established();
         assert!(actions.link.transport_available.is_open(), "established");
+        #[cfg(feature = "codec-push")]
+        assert!(
+            actions.negotiated_tx_limits().is_some(),
+            "the send limits are settled at establishment"
+        );
         actions.reset_for_reopen();
         let (awaiting, zid, whatami, caps) = actions.with_facts(|facts| {
             (
@@ -1404,6 +1412,12 @@ mod facts_lock {
         assert!(
             !actions.link.transport_available.is_open(),
             "the reopened link waits for its establishment"
+        );
+        #[cfg(feature = "codec-push")]
+        assert_eq!(
+            actions.negotiated_tx_limits(),
+            None,
+            "the send limits are the closed transport's"
         );
     }
 
@@ -1434,7 +1448,7 @@ mod facts_lock {
         );
         assert_eq!(
             actions.negotiated_tx_limits(),
-            (0, 0),
+            None,
             "no limits are settled yet"
         );
 
@@ -1443,10 +1457,10 @@ mod facts_lock {
         let settled = actions.negotiated_tx_limits();
         assert_eq!(
             settled,
-            (
+            Some((
                 actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
                 actions.negotiated_sn_mask()
-            ),
+            )),
             "settled from the capabilities the handshake wrote"
         );
         assert_eq!(actions.send_push_literal("a/b", b"x", true), Ok(()));
@@ -1459,8 +1473,8 @@ mod facts_lock {
         );
         actions.enter_established();
         assert_eq!(
-            actions.negotiated_tx_limits().0,
-            actions.negotiated_batch_mtu() - actions.batch_envelope_bytes(),
+            actions.negotiated_tx_limits().map(|(budget, _)| budget),
+            Some(actions.negotiated_batch_mtu() - actions.batch_envelope_bytes()),
             "established again, the limits are the new capabilities'"
         );
         assert_ne!(actions.negotiated_tx_limits(), settled);
@@ -1468,14 +1482,16 @@ mod facts_lock {
 
     /// A link no handshake runs over takes a data send once it is opened without one, with the
     /// limits the session's own advertisement sets, and is not established. Turned red by a door
-    /// that leaves the gate shut (the send refused), settles no limits (`(0, 0)`), or stamps the
+    /// that leaves the gate shut (the send refused), settles no limits (`None`), or stamps the
     /// establishment.
     #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
     #[test]
     fn a_link_opened_without_a_handshake_sends_with_its_own_limits_unestablished() {
         let (actions, _link) = bundle();
         actions.open_without_handshake();
-        let limits = actions.negotiated_tx_limits();
+        let limits = actions
+            .negotiated_tx_limits()
+            .expect("opening without a handshake settles the limits");
         assert_eq!(
             limits,
             (

@@ -1901,13 +1901,20 @@ impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
 
 /// The frame budget and SN ring this link's sends are held to, one word for each reliability
 /// class, settled when the link is established ([`SessionLinkActions::enter_established`]) and
-/// read by every send without a lock. Nothing reads them before: the data-send gate opens after
-/// they are settled. What they are computed from does not move while the link is established
-/// (the peer's capabilities and the lowlatency and compression outcomes are the handshake's),
-/// and a reconnect establishes the link again, which settles them again.
+/// read by every send without a lock. What they are computed from does not move while the link
+/// is established (the peer's capabilities and the lowlatency and compression outcomes are the
+/// handshake's), and a reconnect establishes the link again, which settles them again.
 ///
-/// A word holds the ring resolution in bits 0-7 and the budget in bits 8-23 (at most 65535: the
-/// batch advertisements are `u16`).
+/// Before the first establishment, and from a reopen ([`SessionLinkActions::reset_for_reopen`],
+/// which clears the capabilities they are computed from) until the next one, the limits are
+/// unsettled and `get` answers `None`. That state is a bit of its own: every ring
+/// resolution and every budget, `0` included, is a value a settled word can hold, so neither
+/// can stand for "not settled".
+///
+/// A word holds the ring resolution in bits 0-7, the budget in bits 8-23 (at most 65535: the
+/// batch advertisements are `u16`) and the settled bit (`SETTLED`) in bit 24. The three are stored and
+/// loaded as one word, so a reader never sees a budget of one establishment with the ring or
+/// the settled bit of another.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -1939,6 +1946,10 @@ pub struct TxLimits {
     feature = "liveliness-token",
 ))]
 impl TxLimits {
+    /// The bit of a word that says the word was settled.
+    const SETTLED: u32 = 1 << 24;
+
+    /// Limits not settled yet.
     const fn new() -> Self {
         Self {
             reliable: AtomicU32::new(0),
@@ -1956,15 +1967,27 @@ impl TxLimits {
     /// Settle the limits of `class`.
     fn settle(&self, class: Reliability, budget: usize, ring: u8) {
         let budget = u32::from(u16::try_from(budget).unwrap_or(u16::MAX));
-        self.word(class)
-            .store((budget << 8) | u32::from(ring), Ordering::Release);
+        self.word(class).store(
+            Self::SETTLED | (budget << 8) | u32::from(ring),
+            Ordering::Release,
+        );
     }
 
-    /// The settled `(budget, ring resolution)` of `class`.
+    /// Withdraw the limits of both classes: the link they were settled for is being opened
+    /// again, and its next establishment settles them anew.
+    #[cfg(feature = "session-reconnect")]
+    fn unsettle(&self) {
+        for class in [Reliability::Reliable, Reliability::BestEffort] {
+            self.word(class).store(0, Ordering::Release);
+        }
+    }
+
+    /// The settled `(budget, ring resolution)` of `class`, or `None` while it is unsettled.
     #[inline]
-    fn get(&self, class: Reliability) -> (usize, u8) {
+    fn get(&self, class: Reliability) -> Option<(usize, u8)> {
         let word = self.word(class).load(Ordering::Acquire);
-        (((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8)
+        ((word & Self::SETTLED) != 0)
+            .then_some((((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8))
     }
 }
 
@@ -8455,8 +8478,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// envelope the link and the compression wrap put around the frame, and a frame that
     /// filled the whole batch would reach the peer as a batch past what it negotiated.
     ///
-    /// Settled when this link was established ([`TxLimits`]): before that no data send is let
-    /// through, and the answer is `(0, 0)`.
+    /// Settled when this link was established ([`TxLimits`]); `None` before that and from a
+    /// reopen until the link is established again, when the data-send gate refuses every data
+    /// send too. A send reads them behind that gate, and reads `None` as its refusal: the gate
+    /// can close between the two reads.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -8469,7 +8494,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits(&self) -> (usize, crate::sn::Sn) {
+    pub fn negotiated_tx_limits(&self) -> Option<(usize, crate::sn::Sn)> {
         self.negotiated_tx_limits_for(Reliability::Reliable)
     }
 
@@ -8490,9 +8515,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, crate::sn::Sn) {
-        let (budget, ring) = self.link.tx_limits.get(class);
-        (budget, crate::sn::mask_from_res(ring))
+    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> Option<(usize, crate::sn::Sn)> {
+        let (budget, ring) = self.link.tx_limits.get(class)?;
+        Some((budget, crate::sn::mask_from_res(ring)))
     }
 
     /// Settle this link's send limits ([`TxLimits`]) from what the handshake negotiated, once
@@ -13119,12 +13144,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A session a congestion close was ordered of is not available either: the message
         // would wait another `wait_before_close` for a link that has just been found not to
         // take one (zenoh 1.10.2 disables the pipelines when it decides the close).
-        if self.congestion_close_ordered() || !self.session_send_available() {
+        //
+        // The gate's answer is the frame budget and SN ring the message's class is sent with
+        // ([`Self::negotiated_tx_limits_for`]): they are settled before the gate opens, and a
+        // reopen withdraws them behind the closed gate, so limits not settled when they are read
+        // are the same refusal as a gate found closed (the gate closed between the two reads).
+        // Read once, here, before any conduit lock is taken.
+        let wire_reliability = Reliability::from_reliable_bool(reliable);
+        let limits = if self.congestion_close_ordered() || !self.session_send_available() {
+            None
+        } else {
+            self.negotiated_tx_limits_for(wire_reliability)
+        };
+        let Some((mtu, sn_mask)) = limits else {
             // R2825 — no link can take it: upstream's `no-link` drop.
             #[cfg(feature = "transport-stats")]
             self.drop_for_no_link(message_priority, &_stats_class);
             return Err(SendWireError::TransportUnavailable);
-        }
+        };
         // R2825 — the network-message counter, on the link this message's
         // conduit is routed to: the same `(reliability, priority)` choice the
         // frame carrying it will make in `send_wire`, so a message and its
@@ -13134,7 +13171,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `stats.inc_network_message(zenoh_stats::Tx, msg);`):
         // a message its link had no room for is a congestion drop instead,
         // never both.
-        let wire_reliability = Reliability::from_reliable_bool(reliable);
         let count_pushed = || {
             // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
             // bound there is no run to end.
@@ -13177,7 +13213,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let want = worst_case_payload;
                 // A lend-only build asks for the whole batch budget, as each of its frames does.
                 #[cfg(feature = "tx-lend-only")]
-                let want = self.negotiated_tx_limits_for(wire_reliability).0;
+                let want = mtu;
                 let write = lent_write(|slot| {
                     let mut sink = crate::tx_buf::TxSink::new(slot);
                     encode_body(&mut sink)
@@ -13238,24 +13274,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // cap is below the 65535 default, so a UDP deployment expecting
         // >64 KB payloads must configure `batch_size <= 65507`.) R311jp —
         // the same budget bounds the batching accumulator (pico shares one
-        // `_wbuf` capacity between both concerns). Resolved before the
-        // batch lock for the same disjoint-mutex discipline as `sn_mask`
-        // below (the accessor takes `inbound_peer_init_caps`). The budget is
+        // `_wbuf` capacity between both concerns). The budget is
         // the batch less its envelope ([`Self::batch_envelope_bytes`]): a
         // streamed link's length and a compressing session's header ride in
         // the same negotiated batch as the frame.
         //
         // R311kb — and the negotiated SN ring every mint below walks
-        // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
-        // lock, in the same hold of the `inbound_peer_init_caps` mutex
-        // ([`Self::negotiated_tx_limits_for`]): session mutex scopes stay disjoint
-        // by discipline. The budget is the message's class's: a best-effort
+        // ([`Self::negotiated_sn_mask`]). Both are `mtu` and `sn_mask`, the
+        // gate's answer above, settled at establishment
+        // ([`Self::negotiated_tx_limits_for`]) and read before any conduit
+        // lock. The budget is the message's class's: a best-effort
         // message batches and fragments to what the link's best-effort carriage
         // takes, which a datagram companion bounds below its streams.
-        let (mtu, sn_mask) = self.negotiated_tx_limits_for(wire_reliability);
 
-        // This profile's own reassembly budget, resolved HERE for the same
-        // reason as `mtu` and `sn_mask` above: the accessor takes a mutex,
+        // This profile's own reassembly budget, resolved HERE, before the
+        // batch lock: the accessor takes a mutex,
         // and session mutex scopes stay disjoint by discipline. Without
         // `transport-fragmentation` nothing fragments, so no cap applies.
         #[cfg(feature = "transport-fragmentation")]
@@ -15307,17 +15340,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and the frame budget the send cuts by. Any message but a Push is counted one frame, as
     /// only a Push is sent under a reservation. What [`Self::try_reserve_wire_frames`] is asked
     /// for by a sender that reserves a whole chain before it sends.
+    ///
+    /// A Push measured while the link's limits are unsettled
+    /// ([`Self::negotiated_tx_limits_for`] answers `None`) has no budget to be cut by: it is
+    /// refused with [`SendWireError::TransportUnavailable`], the refusal the data-send gate
+    /// gives such a link, which the reservation would give it next.
     #[cfg(feature = "codec-push")]
     #[cfg(feature = "alloc")]
     pub fn wire_frames_of(
         &self,
         msg: &crate::network_message::NetworkMessage,
         reliable: bool,
-    ) -> usize {
+    ) -> Result<usize, SendWireError> {
         #[cfg(feature = "transport-fragmentation")]
         {
             let crate::network_message::NetworkMessage::Push(push) = msg else {
-                return 1;
+                return Ok(1);
             };
             let encode_body = crate::frame_encode::push_body(push);
             #[cfg(feature = "transport-tx-lend")]
@@ -15333,15 +15371,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             };
             // A body the codec cannot write is refused by the send itself; one frame is asked.
             let Ok(body_len) = body_len else {
-                return 1;
+                return Ok(1);
             };
-            let (mtu, _) = self.negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable));
-            crate::frame_encode::chain_frames(body_len, mtu)
+            let (mtu, _) = self
+                .negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable))
+                .ok_or(SendWireError::TransportUnavailable)?;
+            Ok(crate::frame_encode::chain_frames(body_len, mtu))
         }
         #[cfg(not(feature = "transport-fragmentation"))]
         {
             let _ = (msg, reliable);
-            1
+            Ok(1)
         }
     }
 
@@ -19663,6 +19703,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
             self.link.transport_available.close();
+            // The send limits were settled from the capabilities cleared below: withdrawn with
+            // them, behind the closed gate, until the next establishment settles them anew.
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            ))]
+            self.link.tx_limits.unsettle();
             // The next peer has been asked for nothing: the answers owed by the last are not
             // owed to it, and the replay asks again, noting each interest as it does.
             R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());

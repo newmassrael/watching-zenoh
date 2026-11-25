@@ -1445,6 +1445,7 @@ fn the_send_limits_are_the_capabilities_of_each_establishment() {
     ];
     let mut seen = std::collections::BTreeSet::new();
     let mut settled = actions.negotiated_tx_limits();
+    assert_eq!(settled, None, "nothing is settled before an establishment");
     for write in writes {
         actions.set_peer_init_caps(write);
         assert_eq!(
@@ -1456,10 +1457,10 @@ fn the_send_limits_are_the_capabilities_of_each_establishment() {
         let want = (actions.negotiated_batch_mtu(), actions.negotiated_sn_mask());
         assert_eq!(
             actions.negotiated_tx_limits(),
-            want,
+            Some(want),
             "established with {write:?}"
         );
-        settled = want;
+        settled = Some(want);
         seen.insert(want);
     }
     assert!(
