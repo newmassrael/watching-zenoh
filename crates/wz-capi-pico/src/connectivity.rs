@@ -2629,41 +2629,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every allocation of the test's own thread while `run` runs, counted.
-    pub(crate) fn allocations(run: impl FnOnce()) -> usize {
-        COUNTING.with(|count| count.set(Some(0)));
-        run();
-        COUNTING.with(|count| count.take()).unwrap_or(0)
-    }
-
-    std::thread_local! {
-        static COUNTING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    }
-
-    /// The test binary's allocator: the system's, counting on a thread that asked
-    /// ([`allocations`]).
-    struct Counting;
-
-    // SAFETY: every call is the system allocator's; the count is a thread's own cell.
-    unsafe impl std::alloc::GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-            let _ = COUNTING.try_with(|count| {
-                if let Some(seen) = count.get() {
-                    count.set(Some(seen.saturating_add(1)));
-                }
-            });
-            // SAFETY: the caller's.
-            unsafe { std::alloc::System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, at: *mut u8, layout: std::alloc::Layout) {
-            // SAFETY: the caller's.
-            unsafe { std::alloc::System.dealloc(at, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: Counting = Counting;
+    pub(crate) use crate::test_heap::allocations;
 
     fn transport_with_zid(first: u8) -> z_loaned_transport_t {
         let mut zid = [0u8; 16];

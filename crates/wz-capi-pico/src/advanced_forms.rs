@@ -349,7 +349,7 @@ mod tests {
         let forms = unsafe {
             PicoSubscriberForms::new(
                 &session,
-                DeclaredKeyexpr::literal_only(key),
+                DeclaredKeyexpr::literal_only(key).expect("the test's heap"),
                 NonNull::from(&*rooms),
                 None,
             )
@@ -380,8 +380,8 @@ mod tests {
     fn an_anchor_lies_in_its_room_and_takes_no_memory() {
         let rooms = AnchorRooms::new();
         let anchor = Anchor {
-            key: DeclaredKeyexpr::literal_only(BASE),
-            announced: DeclaredKeyexpr::literal_only(BASE),
+            key: DeclaredKeyexpr::literal_only(BASE).expect("the test's heap"),
+            announced: DeclaredKeyexpr::literal_only(BASE).expect("the test's heap"),
         };
         let taken = crate::connectivity::tests::allocations(|| {
             // SAFETY: the room is vacant, lodged in by this thread alone, and the rooms outlive

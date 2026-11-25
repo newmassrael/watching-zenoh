@@ -67,6 +67,15 @@ pub enum GroupLocator {
     Udp(UdpGroup),
 }
 
+impl GroupLocator {
+    /// The UDP group this names, `None` for a group of another kind.
+    pub fn udp(&self) -> Option<&UdpGroup> {
+        match self {
+            Self::Udp(group) => Some(group),
+        }
+    }
+}
+
 /// A UDP multicast group and the socket keys its endpoint states. Made only by
 /// [`parse_group_locator`], so each extra group and the bound address are of the group's family.
 #[derive(Debug, Clone, PartialEq, Eq)]

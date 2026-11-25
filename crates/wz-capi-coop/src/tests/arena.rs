@@ -231,11 +231,15 @@ fn held_plan(
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
     let links = PosixLinks::new(super::LOOPBACK, PosixTcpDial);
+    let runtime = crate::engine::RuntimeTables::of::<PosixClock>(config)
+        .placed_bytes::<PosixClock>()
+        .ok_or(ArenaRefused::TooLarge)?;
     crate::engine::lay_out_open(
         &mut plan,
         crate::engine::link_cells::<PosixClock>(&links),
         crate::engine::link_rooms_bytes(&links),
         held,
+        runtime,
     )?;
     Ok(plan)
 }
@@ -2600,6 +2604,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .expect("the build's limits lay the rooms out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
+    plan.holding_runtime(64)
+        .expect("the build's limits lay the runtime's span out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
     let mut parts: Vec<&str> = plan.rows().map(|row| row.part()).collect();
     parts.sort_unstable();

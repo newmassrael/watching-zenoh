@@ -27,6 +27,7 @@ use core::ffi::c_int;
 use core::fmt::Debug;
 
 use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::group_locator::GroupLocator;
 
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::{heap_link, HeapLink};
@@ -734,8 +735,12 @@ where
         }))
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        self.links.open_group(endpoint)
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        self.links.open_group(endpoint, group)
     }
 
     fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {

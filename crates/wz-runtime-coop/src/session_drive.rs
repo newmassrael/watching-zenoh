@@ -1109,18 +1109,20 @@ pub trait SessionLinks {
         Err(LinkOpenError::Unsupported)
     }
 
-    /// The multicast group `endpoint` names, joined: the
+    /// The multicast group `group` names, joined: the
     /// [`GroupTransport`](crate::group_transport::GroupTransport) a group session runs over,
-    /// opened as the session's link when the session takes it. The endpoint is the text the
-    /// config states (a `udp/` locator naming an interface), which each stack reads as it reads
-    /// a group. A stack that joins no group, or not the one named, is
+    /// opened as the session's link when the session takes it. `group` is the endpoint as
+    /// `wz_session_core::group_locator::parse_group_locator` read it, once, for every stack;
+    /// `endpoint` is the text it was read from, which a stack whose links are a program's hands
+    /// the program as written. A stack that joins no group, or not the one named, is
     /// [`LinkOpenError::Unsupported`]: the default, so a stack without groups writes nothing here.
     #[cfg(feature = "alloc")]
     fn open_group(
         &self,
         endpoint: &str,
+        group: &wz_session_core::group_locator::GroupLocator,
     ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
-        let _ = endpoint;
+        let _ = (endpoint, group);
         Err(LinkOpenError::Unsupported)
     }
 

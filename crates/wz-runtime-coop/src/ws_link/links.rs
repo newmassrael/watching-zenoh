@@ -25,6 +25,7 @@ use core::ffi::c_int;
 
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::entropy::EntropyUnavailable;
+use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::ws_link::{
     client_key, read_request, read_response, write_request, write_response, MaskKeys, RequestRead,
     UpgradeRead, KEY_LEN, MASK_SEED_LEN, MAX_HEAD_LEN,
@@ -586,8 +587,12 @@ where
         }))
     }
 
-    fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        self.links.open_group(endpoint)
+    fn open_group(
+        &self,
+        endpoint: &str,
+        group: &GroupLocator,
+    ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+        self.links.open_group(endpoint, group)
     }
 
     fn share_pump(pump: HeapLink) -> CellRc<dyn SessionDatagramLink> {

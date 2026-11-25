@@ -71,9 +71,9 @@ use core::alloc::Layout;
 use critical_section::{CriticalSection, Mutex};
 use wz_runtime_core::RuntimeError;
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::atomic::Arc;
 use crate::atomic::{AtomicBool, Ordering};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::kept::{Kept, Shared};
 
 pub use crate::yield_now::{yield_now, YieldNow};
 
@@ -170,10 +170,11 @@ pub struct TaskCell {
     cancel: AtomicBool,
     /// Reached only inside a critical section (`Self::with_meta`).
     meta: UnsafeCell<Meta>,
-    /// The store that owns the cell, whose count a waker and a handle hold; null for a cell of a
-    /// `static` table, which is never freed. Written when the cell is made and never after.
+    /// The count of the store that owns the cell, which a waker and a handle hold one of; null for
+    /// a cell of a `static` table, which is never freed. Written when the cell is made and never
+    /// after.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    owner: *const TaskStore,
+    owner: *const Kept,
 }
 
 // SAFETY: see the module's contract. The flags are atomics; `meta` is reached only inside a
@@ -197,7 +198,7 @@ impl TaskCell {
     /// A free cell over `cap` bytes at `buf` (none for a bare one) of the store `owner` (null for
     /// a cell no store holds).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn owned(buf: *mut u8, cap: usize, owner: *const TaskStore) -> Self {
+    fn owned(buf: *mut u8, cap: usize, owner: *const Kept) -> Self {
         let mut meta = Meta::new();
         meta.buf = buf;
         meta.cap = cap;
@@ -217,7 +218,7 @@ impl TaskCell {
     /// `place` is valid for a write of a cell and aligned for one.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[inline(never)]
-    unsafe fn write_owned(place: *mut Self, buf: *mut u8, cap: usize, owner: *const TaskStore) {
+    unsafe fn write_owned(place: *mut Self, buf: *mut u8, cap: usize, owner: *const Kept) {
         // SAFETY: the caller's contract.
         unsafe { place.write(Self::owned(buf, cap, owner)) };
     }
@@ -266,7 +267,7 @@ fn retain(cell: &TaskCell) {
     if !cell.owner.is_null() {
         // SAFETY: the caller reached the cell through the executor or through a waker or handle
         // that holds a count, so the store is alive.
-        unsafe { Arc::increment_strong_count(cell.owner) }
+        unsafe { &*cell.owner }.retain();
     }
 }
 
@@ -280,10 +281,10 @@ fn retain(_cell: &TaskCell) {}
 /// # Safety
 /// `owner` is a cell's `owner`, and the caller holds a count on it that it gives back here.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-unsafe fn release_owner(owner: *const TaskStore) {
-    if !owner.is_null() {
+unsafe fn release_owner(owner: *const Kept) {
+    if let Some(owner) = NonNull::new(owner.cast_mut()) {
         // SAFETY: the caller's contract.
-        unsafe { Arc::decrement_strong_count(owner) }
+        unsafe { Kept::release(owner) }
     }
 }
 
@@ -347,7 +348,8 @@ impl<const TASKS: usize, const BYTES: usize> Default for TaskTable<TASKS, BYTES>
 pub(crate) struct TaskStore {
     /// The cells, at the front of the block: written by `new`, dropped by the store's drop.
     cells: *const [TaskCell],
-    /// The block, null when the store has no bytes at all, and its layout.
+    /// The block, null when the store has no bytes at all or its block is not its own to give back
+    /// (one placed in counted memory), and its layout.
     block: *mut u8,
     layout: Layout,
     /// The bytes each cell has of the block; `None` for bare cells, and for a store whose bytes
@@ -366,45 +368,109 @@ unsafe impl Send for TaskStore {}
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 unsafe impl Sync for TaskStore {}
 
+/// How a store's cells and their bytes lie in its block: the cells first, then each cell's bytes.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl TaskStore {
-    /// `count` free cells in one block: each with `bytes` of the block behind the cells, at steps
-    /// of the cells' alignment, when `bytes` is given; bare otherwise, with `unfit` to give back
-    /// what spawns give them. Bytes past the address space are not reserved: the cells are made
-    /// with none and a spawn is refused at the call, counted. A count past it makes no cells.
-    /// `AT_MOST_ONE`: a count past one is held to one, which the layout and the writing of the
-    /// cells are then made for.
-    fn new<const AT_MOST_ONE: bool>(
-        count: usize,
-        bytes: Option<usize>,
-        unfit: Option<fn(&[TaskCell])>,
-    ) -> Arc<Self> {
+#[derive(Clone, Copy)]
+pub(crate) struct StoreLayout {
+    /// The cells: none for a count whose cells would lie past the address space.
+    count: usize,
+    /// The block, its bytes padded to its alignment.
+    layout: Layout,
+    /// Where the first cell's bytes start in the block, how far apart each cell's are and how many
+    /// each has; `None` for bare cells, and for bytes that would lie past the address space.
+    reserved: Option<(usize, usize, usize)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl StoreLayout {
+    /// The block of `count` cells, each with `bytes` behind the cells at steps of the cells'
+    /// alignment when `bytes` is given, bare otherwise. `AT_MOST_ONE`: a count past one is held
+    /// to one.
+    pub(crate) fn of<const AT_MOST_ONE: bool>(count: usize, bytes: Option<usize>) -> Self {
         let count = if AT_MOST_ONE { count.min(1) } else { count };
         let (count, cells_layout) = match Layout::array::<TaskCell>(count) {
             Ok(layout) => (count, layout),
             Err(_) => (0, Layout::new::<[TaskCell; 0]>()),
         };
-        // Where each cell's bytes start in the block and how far apart they are, with the layout of
-        // the block that holds them behind the cells.
         let reserved = bytes.and_then(|bytes| {
             let stride = round_up(bytes.max(1), CELL_ALIGN);
             let tail = Layout::from_size_align(stride.checked_mul(count)?, CELL_ALIGN).ok()?;
             let (layout, offset) = cells_layout.extend(tail).ok()?;
             Some((layout, offset, stride, bytes))
         });
-        let layout = reserved
-            .map_or(cells_layout, |(layout, ..)| layout)
-            .pad_to_align();
-        let block = if layout.size() == 0 {
+        Self {
+            count,
+            layout: reserved
+                .map_or(cells_layout, |(layout, ..)| layout)
+                .pad_to_align(),
+            reserved: reserved.map(|(_, offset, stride, bytes)| (offset, stride, bytes)),
+        }
+    }
+
+    /// The block's bytes and alignment.
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl TaskStore {
+    /// `count` free cells in one block of the heap: each with `bytes` of the block behind the
+    /// cells, at steps of the cells' alignment, when `bytes` is given; bare otherwise, with `unfit`
+    /// to give back what spawns give them. Bytes past the address space are not reserved: the cells
+    /// are made with none and a spawn is refused at the call, counted. A count past it makes no
+    /// cells. `AT_MOST_ONE`: a count past one is held to one, which the layout and the writing of
+    /// the cells are then made for.
+    fn new<const AT_MOST_ONE: bool>(
+        count: usize,
+        bytes: Option<usize>,
+        unfit: Option<fn(&[TaskCell])>,
+    ) -> Shared<Self> {
+        let laid = StoreLayout::of::<AT_MOST_ONE>(count, bytes);
+        let block = if laid.layout.size() == 0 {
             ptr::null_mut()
         } else {
             // SAFETY: the layout's size is not zero.
-            let block = unsafe { alloc::alloc::alloc(layout) };
+            let block = unsafe { alloc::alloc::alloc(laid.layout) };
             if block.is_null() {
-                alloc::alloc::handle_alloc_error(layout);
+                alloc::alloc::handle_alloc_error(laid.layout);
             }
             block
         };
+        Self::over(laid, block, true, unfit, Shared::boxed)
+    }
+
+    /// The store `laid` lays out, its count at `header` and its block at `block` (null for a
+    /// layout of no bytes), both in memory `memory` keeps: the store holds a count of it, given
+    /// back when the store's last holder lets go, and gives no block back of its own.
+    ///
+    /// # Safety
+    /// `header` is aligned and valid for a write of `Shared::<TaskStore>::layout()`, `block` for
+    /// `laid.layout`, the two apart, and nothing else uses them while a count of `memory` is held;
+    /// `memory` is live and its memory holds both.
+    pub(crate) unsafe fn placed(
+        laid: StoreLayout,
+        header: NonNull<u8>,
+        block: *mut u8,
+        memory: NonNull<Kept>,
+    ) -> Shared<Self> {
+        Self::over(laid, block, false, None, |store| {
+            // SAFETY: the caller's.
+            unsafe { Shared::placed(header, store, memory) }
+        })
+    }
+
+    /// The store of the cells `laid` lays out in `block`, held as `hold` holds it: the block is
+    /// the store's to give back when `owns`. The store is held before its cells are written, so
+    /// each cell is written once, naming the count it is held by: the store is not shared and reads
+    /// no cell until this returns it.
+    fn over(
+        laid: StoreLayout,
+        block: *mut u8,
+        owns: bool,
+        unfit: Option<fn(&[TaskCell])>,
+        hold: impl FnOnce(Self) -> Shared<Self>,
+    ) -> Shared<Self> {
         let first: *mut TaskCell = if block.is_null() {
             NonNull::dangling().as_ptr()
         } else {
@@ -413,20 +479,19 @@ impl TaskStore {
         // Where the first cell's bytes start, how far apart each cell's are and how many each has:
         // a bare cell's are at null, a step of none apart, so every cell is written by one body.
         // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn takes the cell.
-        let (base, stride, cap) = match reserved {
-            Some((_, offset, stride, bytes)) => (block.wrapping_add(offset), stride, bytes),
+        let (base, stride, cap) = match laid.reserved {
+            Some((offset, stride, bytes)) => (block.wrapping_add(offset), stride, bytes),
             None => (ptr::null_mut(), 0, 0),
         };
-        // The store is made before its cells are written, so each cell is written once, naming
-        // it: the store is not shared and reads no cell until this returns it.
-        let store = Arc::new(Self {
+        let count = laid.count;
+        let store = hold(Self {
             cells: ptr::slice_from_raw_parts(first.cast_const(), count),
-            block,
-            layout,
-            cell_bytes: reserved.map(|(.., bytes)| bytes),
+            block: if owns { block } else { ptr::null_mut() },
+            layout: laid.layout,
+            cell_bytes: laid.reserved.map(|(.., bytes)| bytes),
             unfit,
         });
-        let owner = Arc::as_ptr(&store);
+        let owner = Shared::kept(&store).as_ptr().cast_const();
         for at in 0..count {
             // The strides of `count` cells were laid out without overflow, so no product wraps,
             // and each lies inside the block.
@@ -516,7 +581,7 @@ enum Taken {
 /// adds for what its open spawns, or the chunks a grown table adds when every cell is taken.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct Taking {
-    chunks: Mutex<RefCell<Vec<Arc<TaskStore>>>>,
+    chunks: Mutex<RefCell<Vec<Shared<TaskStore>>>>,
     /// A chunk is added when every cell is taken, and a free cell too small for a task is given
     /// new bytes: what a grown table does.
     grows: bool,
@@ -526,7 +591,7 @@ struct Taking {
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl Taking {
-    fn over(chunks: Vec<Arc<TaskStore>>, grows: bool) -> Self {
+    fn over(chunks: Vec<Shared<TaskStore>>, grows: bool) -> Self {
         Self {
             chunks: Mutex::new(RefCell::new(chunks)),
             grows,
@@ -788,7 +853,7 @@ enum Cells {
     Table(&'static [TaskCell]),
     /// A table the runtime owns: the cells it reserved (none for a grown one).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    Store(Arc<TaskStore>),
+    Store(Shared<TaskStore>),
 }
 
 /// The task pool of a runtime: a view of its table that spawns into it and polls it.
@@ -963,7 +1028,15 @@ impl ExecutorState {
     /// added cell taken. The table never holds more cells than it was made with.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
-        let store = TaskStore::new::<false>(tasks, Some(task_bytes), None);
+        Self::opening_in(
+            TaskStore::new::<false>(tasks, Some(task_bytes), None),
+            added,
+        )
+    }
+
+    /// [`Self::opening`] over the cells `store` reserved.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn opening_in(store: Shared<TaskStore>, added: usize) -> Self {
         let cell_bytes = store.cell_bytes;
         let mut state = Self::over(Cells::Store(store), cell_bytes, &MANY_CELLS);
         let mut chunks = Vec::new();
@@ -987,7 +1060,12 @@ impl ExecutorState {
     /// refused, counted, and none allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
-        let store = TaskStore::new::<false>(tasks, Some(task_bytes), None);
+        Self::reserved_in(TaskStore::new::<false>(tasks, Some(task_bytes), None))
+    }
+
+    /// [`Self::reserved`] over the cells `store` reserved.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
         Self::over(Cells::Store(store), cell_bytes, &MANY_CELLS)
     }
@@ -997,7 +1075,12 @@ impl ExecutorState {
     /// handle has not read, is refused, counted; none allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved_one(tasks: usize, task_bytes: usize) -> Self {
-        let store = TaskStore::new::<true>(tasks, Some(task_bytes), None);
+        Self::reserved_one_in(TaskStore::new::<true>(tasks, Some(task_bytes), None))
+    }
+
+    /// [`Self::reserved_one`] over the cell `store` reserved, one at most.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved_one_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
         Self::over(Cells::Store(store), cell_bytes, &ONE_CELL)
     }
@@ -1929,7 +2012,7 @@ mod tests {
     fn every_cell_of_a_store_names_the_store() {
         for bytes in [Some(100), None] {
             let store = TaskStore::new::<false>(3, bytes, None);
-            let owner = Arc::as_ptr(&store);
+            let owner = Shared::kept(&store).as_ptr().cast_const();
             assert_eq!(store.cells().len(), 3);
             for cell in store.cells() {
                 assert!(ptr::eq(cell.owner, owner), "the cell names its store");
