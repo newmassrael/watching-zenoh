@@ -1310,7 +1310,6 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
             let count = count.clone();
             let own_id = own_id.clone();
-            let session = session.clone();
             SubscriberSink::shared(move |_sample: &dyn SampleView| {
                 if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
                     let id = own_id.lock().unwrap().take();
@@ -1598,7 +1597,6 @@ fn a_sample_for_three_subscribers_is_handed_to_each_in_order_with_the_session_fr
     for tag in 1..=3u8 {
         let handed = handed.clone();
         let published = published.clone();
-        let session = session.clone();
         engine
             .declare_subscriber_on_wire(
                 "demo/**",
