@@ -530,6 +530,22 @@ def profile_cargo_args(decl: dict, row: dict, view: dict) -> list[str]:
     return wz_config.cargo_args(decl, row["abi"], set(view["capabilities"])).split()
 
 
+def artifact_build(decl: dict, row: dict, profile_id: str | None) -> tuple[list[str], dict[str, str]] | None:
+    """The cargo arguments and the environment a library artifact is built with: the registered
+    profile's, or with none its ABI's original defconfig, both from the one resolver
+    (`wz_config.build_of`), so a package ships the limits and policies of the build it names and
+    not the host defaults of its build constants. `None` for an artifact that is not an ABI's
+    library, which is built as its package states."""
+    if row["kind"] != "shared-library" or row.get("abi") not in wz_config.ABIS:
+        return None
+    presets = [PROFILES_DIR / f"{profile_id}.conf"] if profile_id is not None else []
+    try:
+        args, env = wz_config.build_of(decl, row["abi"], presets)
+    except wz_config.PresetError as err:
+        raise Refusal(f"the build of {row['id']} does not resolve: {err}") from err
+    return args, dict(line.partition("=")[::2] for line in env)
+
+
 def profile_findings(decl: dict, view: dict, entries: list[dict]) -> list[str]:
     """What is wrong with the artifacts a profile built: a capability the profile turns on that a
     library lacks, or one it leaves off that the library has."""
@@ -1195,6 +1211,8 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
         view = resolve_profile(decl, profile_id)
         for row in rows:
             profile_cargo_args(decl, row, view)
+    # Every library's build, resolved before anything is built or created.
+    builds = {row["id"]: artifact_build(decl, row, profile_id) for row in rows}
     rustc, host = rustc_identity()
     cross = platform["triple"] != host
     check_toolchain_env(platform, cross)
@@ -1206,10 +1224,11 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
         toolchain = {"rustc": rustc, "cc": cc_identity(platform, cross), "sdk": sdk_identity(platform, cross)}
         entries = []
         for row in rows:
+            build = builds[row["id"]]
             built, features, resolved = cargo_build(
                 platform, cross, row, cargo_profile,
-                profile_cargo_args(decl, row, view) if view else None,
-                {k: str(v) for k, v in view["limits"].items()} if view else None,
+                build[0] if build else None,
+                build[1] if build else None,
                 node if row.get("input") == "node" else None)
             want = f"lib{row['file']}.so" if row["kind"] == "shared-library" else row["file"]
             if built.name != want:

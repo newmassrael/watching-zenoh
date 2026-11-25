@@ -84,6 +84,11 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   prints for the same header, the whole drop-in build
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
+    --resolve-build ABI [PRESET...]
+                                  the whole build of ABI the presets name, or with none its
+                                  original's defconfig: the cargo arguments --resolve-features
+                                  prints on the first line, then the lines --resolve-env prints.
+                                  Every path that builds a preset or an original reads this
     --original-env ORIGINAL       the same defconfig, resolved alone; print what --resolve-env
                                   prints of it. With --original-features, the whole build the
                                   defconfig names: a limit its preset switch sets (the pico
@@ -187,6 +192,7 @@ Usage:
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
     wz_config.py --original-env zenoh-pico|zenoh-c|zenoh
+    wz_config.py --resolve-build pico|c|core [PRESET...]
     wz_config.py --conformance-statement pico [--engine coop] CONFIG
     wz_config.py --conformance-statement c HEADER
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
@@ -4766,6 +4772,28 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
     return out
 
 
+# The original whose default build an ABI's build is when it names no preset.
+ORIGINAL_OF_ABI = {abi: original for original, abi in BASE_ABI.items()}
+
+
+def resolved_build(decl: dict, abi: str, kconf) -> tuple[list[str], list[str]]:
+    """The whole build a resolved configuration names for `abi`: the cargo arguments of its
+    capabilities on the engine it chose, and the `WZ_LIMIT_` and `WZ_POLICY_` environment cargo
+    runs under. The one place a configuration becomes a build: the limits and policies reach the
+    code only through the environment (`option_env!`), so a path that took the arguments alone
+    would build the configuration's capabilities at the host defaults of every build constant."""
+    return (cargo_args_of(resolved_features(decl, abi, kconf)).split(),
+            resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf))
+
+
+def build_of(decl: dict, abi: str, presets: list[pathlib.Path]) -> tuple[list[str], list[str]]:
+    """The build of `abi` the presets name (`resolved_build`), or with none the build of its
+    original's defconfig alone: a build that names no preset is the ABI's own preset, never the
+    host defaults of its limits."""
+    kconf = resolve(presets) if presets else resolve([], original=ORIGINAL_OF_ABI[abi])
+    return resolved_build(decl, abi, kconf)
+
+
 # The conformance statement of one build, in the
 # sense of an implementation conformance statement (ISO/IEC 9646-7): what the build exports and
 # the value of every limit and policy it was built with, in the declaration's vocabulary, so
@@ -7472,6 +7500,27 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                     for lid, value in limit_presets(decl["limits"]).items()
                     if value != declared[lid]["default"]}
                    <= set(resolved_limit_env(decl, resolve([], original="zenoh-pico"))))
+            shipped_args, shipped_env = build_of(decl, "pico", [])
+            expect("a build of the pico ABI that names no preset is its defconfig's: the "
+                   "arguments --resolve-features gives it and every pico preset limit",
+                   shipped_args == cargo_args_of(resolved_features(
+                       decl, "pico", resolve([], original="zenoh-pico"))).split()
+                   and {f"{declared[lid]['kconfig']}={value}"
+                        for lid, value in limit_presets(decl["limits"]).items()
+                        if value != declared[lid]["default"]} <= set(shipped_env))
+            carried = None
+            for pol in decl["policies"]:
+                if pol["kind"] != "bool" or pol["default"] == "on":
+                    continue
+                try:
+                    _, policy_env = build_of(decl, "c", [preset(
+                        d, "policy.conf", f"CONFIG_{pol['kconfig']}=y\n")])
+                except PresetError:
+                    continue
+                carried = f"{pol['kconfig']}=on" in policy_env
+                break
+            expect("a policy a preset turns on reaches the build's environment with its limits",
+                   carried is True)
             resolved_doc = resolved_statement(decl, "c", resolve([first]),
                                               {"kind": "presets", "inputs": ["first.conf"]})
             expect("a preset's statement states the value its preset gives and the features "
@@ -7618,6 +7667,19 @@ def main(argv: list[str]) -> int:
         return cmd_check_presets()
     if len(argv) == 2 and argv[1] == "--check-equivalence":
         return cmd_check_equivalence()
+    if len(argv) >= 3 and argv[1] == "--resolve-build" and argv[2] in ABIS:
+        # The whole build in one answer: the cargo arguments on the first line, then one
+        # `NAME=value` line for each limit and policy, as `build_of` gives them.
+        decl = load_decl()
+        try:
+            args, env = build_of(decl, argv[2], [pathlib.Path(p) for p in argv[3:]])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(" ".join(args))
+        for line in env:
+            print(line)
+        return 0
     if len(argv) >= 4 and argv[1] == "--resolve-features" and argv[2] in ABIS:
         decl = load_decl()
         try:
@@ -7667,8 +7729,7 @@ def main(argv: list[str]) -> int:
         # build constant, which the defconfig's conformance statement does not describe.
         decl = load_decl()
         try:
-            kconf = resolve([], original=argv[2])
-            lines = resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf)
+            _, lines = build_of(decl, BASE_ABI[argv[2]], [])
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1

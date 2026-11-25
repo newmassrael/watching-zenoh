@@ -13383,22 +13383,20 @@ _c1p32_pico_profile_tests() {
 # leg ledger: the gate's own fixtures do not wait on the build, and the reading is judged only after
 # both passed.
 layer_c1nh_no_heap_after_open() {
-    local profile="configs/profiles/host-peer-ext.conf" resolved limits
+    local profile="configs/profiles/host-peer-ext.conf" resolved
     local -a args=() limit_env=()
     # The profile is read by the one pinned Kconfig interpreter, provisioned as Layer C1p32 does.
     bash scripts/provision-kconfiglib.sh || return 1
-    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico "$profile")"; then
+    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-build pico "$profile")"; then
         echo "  C1nh FAIL: profile $profile did not resolve" >&2
         return 1
     fi
-    read -r -a args <<<"$resolved"
-    if ! limits="$(python3 scripts/lib/wz_config.py --resolve-env "$profile")"; then
-        echo "  C1nh FAIL: the limits of profile $profile did not resolve" >&2
-        return 1
-    fi
-    if [[ -n "$limits" ]]; then
-        mapfile -t limit_env <<<"$limits"
-    fi
+    # The one resolver's build (`wz_config.py --resolve-build`): the arguments on its first line,
+    # the limits and policies after.
+    local -a build_lines=()
+    mapfile -t build_lines <<<"$resolved"
+    read -r -a args <<<"${build_lines[0]}"
+    limit_env=("${build_lines[@]:1}")
     local reading="$WZ_ARTIFACTS/target/no-heap/reading.txt"
     mkdir -p "${reading%/*}" || return 1
     rm -f "$reading"
