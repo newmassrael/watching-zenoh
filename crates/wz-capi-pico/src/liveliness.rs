@@ -41,7 +41,7 @@ use wz_capi_port::WireKey;
 use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 
 use crate::abi::z_loaned_keyexpr_t;
-use crate::ffi::{guard_val, guarded};
+use crate::ffi::guarded;
 use crate::keyexpr::{declared_of, outbound_keyexpr, DeclaredKeyexpr, EntityKey};
 // The engine's operations, which a build of the cooperative engine reaches as its own type; a
 // build that reaches it as the port's object calls them on that object.
@@ -255,12 +255,13 @@ pub unsafe extern "C" fn z_liveliness_undeclare_token(
     })
 }
 
+// A token's drop is its undeclaration, a door of its own.
+crate::abi::impl_type_facts!(z_owned_liveliness_token_t, None);
+
 /// Zero an owned token in place (pico `z_internal_liveliness_token_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_liveliness_token_null(obj: *mut z_owned_liveliness_token_t) {
-    if !obj.is_null() {
-        *obj = z_owned_liveliness_token_t::null_value();
-    }
+    crate::abi::obj_null(obj.cast(), <z_owned_liveliness_token_t>::facts());
 }
 
 /// `true` iff the owned token holds a live declaration (pico
@@ -269,7 +270,7 @@ pub unsafe extern "C" fn z_internal_liveliness_token_null(obj: *mut z_owned_live
 pub unsafe extern "C" fn z_internal_liveliness_token_check(
     obj: *const z_owned_liveliness_token_t,
 ) -> bool {
-    guard_val(false, || !obj.is_null() && !(*obj).handle.is_null())
+    crate::abi::obj_check(obj.cast())
 }
 
 /// Borrow a token (pico `z_liveliness_token_loan`).
@@ -302,12 +303,11 @@ pub unsafe extern "C" fn z_liveliness_token_take(
     dst: *mut z_owned_liveliness_token_t,
     src: *mut z_moved_liveliness_token_t,
 ) {
-    if dst.is_null() || src.is_null() {
-        return;
-    }
-    (*dst).handle = (*src)._this.handle;
-    (*dst)._pad = (*src)._this._pad;
-    (*src)._this = z_owned_liveliness_token_t::null_value();
+    crate::abi::obj_move(
+        dst.cast(),
+        src.cast(),
+        <z_owned_liveliness_token_t>::facts(),
+    );
 }
 
 /// Drop a liveliness token (pico `z_liveliness_token_drop`).

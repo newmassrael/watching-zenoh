@@ -101,6 +101,8 @@ pub struct z_owned_closure_zid_t {
     pub(crate) drop: z_closure_drop_callback_t,
 }
 
+crate::abi::closure_shares_the_block!(z_owned_closure_zid_t);
+
 /// Loaned zid closure, same layout.
 #[repr(C)]
 pub struct z_loaned_closure_zid_t {
@@ -131,9 +133,7 @@ impl z_owned_closure_zid_t {
 /// Null an owned zid closure (pico `z_internal_closure_zid_null`).
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_closure_zid_null(closure: *mut z_owned_closure_zid_t) {
-    if !closure.is_null() {
-        *closure = z_owned_closure_zid_t::null_value();
-    }
+    crate::abi::obj_null(closure.cast(), &crate::abi::CLOSURE);
 }
 
 /// Whether an owned zid closure carries a callback (pico
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn z_internal_closure_zid_null(closure: *mut z_owned_closu
 pub unsafe extern "C" fn z_internal_closure_zid_check(
     closure: *const z_owned_closure_zid_t,
 ) -> bool {
-    !closure.is_null() && (*closure).call.is_some()
+    crate::abi::closure_check(closure.cast())
 }
 
 /// Borrow an owned zid closure (pico `z_closure_zid_loan`) — offset-0 identity.
@@ -168,26 +168,18 @@ pub unsafe extern "C" fn z_closure_zid_take(
     closure: *mut z_owned_closure_zid_t,
     src: *mut z_moved_closure_zid_t,
 ) -> ZResult {
-    guarded_null2(closure, src, || {
-        *closure = core::mem::replace(&mut (*src)._this, z_owned_closure_zid_t::null_value());
-        Z_OK
-    })
+    if closure.is_null() || src.is_null() {
+        return Z_ERR_NULL;
+    }
+    crate::abi::obj_move(closure.cast(), src.cast(), &crate::abi::CLOSURE);
+    Z_OK
 }
 
 /// Release a zid closure (pico `z_closure_zid_drop`), running its
 /// `drop(context)` once.
 #[no_mangle]
 pub unsafe extern "C" fn z_closure_zid_drop(closure: *mut z_moved_closure_zid_t) -> ZResult {
-    crate::ffi::guarded(|| {
-        if closure.is_null() {
-            return Z_OK;
-        }
-        let taken = core::mem::replace(&mut (*closure)._this, z_owned_closure_zid_t::null_value());
-        if let Some(dropfn) = taken.drop {
-            dropfn(taken.context);
-        }
-        Z_OK
-    })
+    crate::abi::closure_drop(closure.cast())
 }
 
 /// Invoke a zid closure (pico `z_closure_zid_call`).
@@ -202,18 +194,6 @@ pub unsafe extern "C" fn z_closure_zid_call(
     if let Some(call) = (*closure).call {
         call(id, (*closure).context);
     }
-}
-
-/// Shared shape for the two-pointer null guard, so the take exports read the
-/// same way across this crate.
-#[inline]
-unsafe fn guarded_null2<A, B>(a: *mut A, b: *mut B, body: impl FnOnce() -> ZResult) -> ZResult {
-    crate::ffi::guarded(|| {
-        if a.is_null() || b.is_null() {
-            return Z_ERR_NULL;
-        }
-        body()
-    })
 }
 
 // --- z_info_* --------------------------------------------------------------
