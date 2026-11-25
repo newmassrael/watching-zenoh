@@ -477,8 +477,11 @@ pub trait ObserverSinks {
     /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples,
     /// its queries and its tokens go to. `()` for rows that deliver themselves ([`SampleSink`],
     /// `crate::query::ResponderSink`, [`LivelinessSampleSink`]). How each kind's rows are told
-    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`].
-    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
+    /// through it is the rows' own: [`Self::Queryable`], [`Self::LivelinessSubscriber`]; a
+    /// subscriber's sample is handed to it ([`SampleDelivery`]) only by a dispatch that hands the
+    /// samples out through it, so a caller that hands each sample out itself
+    /// ([`SlotObserverOf::dispatch_event_but_samples`]) names a context that takes none.
+    type Delivery;
     /// The application's tables, of storage `P`, as one bundle: the registries of the storage
     /// policies ([`RegistryTables`]), or the session's one table set, whose rows are the session's
     /// only record of each entity. One type for every kind the bundle holds, so a kind that moves
@@ -1353,7 +1356,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers: &mut PeerTables<T>,
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
-    ) {
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
         self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
     }
 
@@ -1372,7 +1377,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-    ) {
+    ) where
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
+    {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
@@ -1683,6 +1690,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+        K::Delivery: SampleDelivery<K::Subscriber, K::SubscriberId>,
     {
         self.dispatch_event(cx, peers, requesters, event);
         self.flush_pending(peers, requesters, actions);

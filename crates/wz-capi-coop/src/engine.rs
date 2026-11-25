@@ -176,7 +176,17 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
-use wz_session_core::sink::{FanOut, RowAccess, SampleDelivery, SampleRef, SampleView};
+#[cfg(any(
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness",
+    feature = "queryable"
+))]
+use wz_session_core::sink::RowAccess;
+use wz_session_core::sink::SampleRef;
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+use wz_session_core::sink::{FanOut, SampleDelivery, SampleView};
 use wz_session_core::sn::sn_resolution_admitted;
 use wz_session_core::step_lend::LendCell;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -2413,6 +2423,10 @@ impl RoundDelivery {
     }
 }
 
+// The read that hands each record out as it is read hands every sample out itself, one subscriber
+// at a time (`pinned`): only a build whose read runs beside the program's calls offers the round
+// a sample.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
     fn deliver(
         &mut self,
