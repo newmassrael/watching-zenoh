@@ -134,8 +134,7 @@ where
     M: crate::id_map::IdRead<'a, K>,
     K: AsRef<str> + 'a,
 {
-    declared
-        .entries()
+    crate::id_map::IdRead::into_entries(*declared)
         .any(|(_, candidate)| crate::keyexpr_match::keyexpr_intersects(candidate.as_ref(), keyexpr))
 }
 

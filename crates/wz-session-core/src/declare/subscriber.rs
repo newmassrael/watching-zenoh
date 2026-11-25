@@ -427,7 +427,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, ke)| (id, ke.as_ref()))
     }
 
@@ -439,7 +439,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         &self,
     ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, ke)| (id, ke.as_ref(), crate::bounded::KeyBacking::held(ke)))
     }
 
@@ -563,7 +563,7 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
     ))]
     fn told_as(&self, key: &str) -> Option<u64> {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .find(|(_, held)| held.as_ref() == key)
             .map(|(other, _)| {
                 Self::aliases_ref(&self.aliases, &self.keys)
@@ -1380,7 +1380,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
             let declared = RemoteSubscriberPeer::<Q>::declared_ref(&peer.declared, &peer.keys);
             declared.find(id).is_some_and(|key| {
                 declared
-                    .entries()
+                    .into_entries()
                     .any(|(other, held)| other != id && held.as_ref() == key.as_ref())
             })
         };

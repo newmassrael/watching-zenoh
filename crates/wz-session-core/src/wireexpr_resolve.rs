@@ -57,7 +57,7 @@ use hashbrown::HashMap;
 
 use crate::bounded::{BoundedString, InlineKeys, KeyBacking, Static, Storage};
 use crate::caps;
-use crate::id_map::{IdRead, KeyText, PeerAliases, PeerIds};
+use crate::id_map::{IdRead, PairedIds, PeerAliases};
 use crate::peer_tables::PeerSlot;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
@@ -449,9 +449,10 @@ enum PeerSpaceRepr<'a, P: Storage> {
     Aliases(AliasesRef<'a, P>),
 }
 
-/// The alias table of the session's policy lent its owner's keys, to read
-/// ([`PeerIds::lend_ref`]): what it hands out lives as long as the lend.
-type AliasesRef<'a, P> = <PeerAliases<P> as PeerIds<KeyText<P>, <P as Storage>::Keys>>::Ref<'a>;
+/// The alias table of the session's policy beside its owner's keys, lent them at each read
+/// ([`PairedIds`]): held as the pair and not as the lent table, which keeps the spaces covariant
+/// in `'a`, so a pair is handed on to a resolver whose buffer lives shorter than the tables.
+type AliasesRef<'a, P> = PairedIds<'a, PeerAliases<P>, <P as Storage>::Keys>;
 
 impl<P: Storage> Clone for PeerSpaceRepr<'_, P> {
     fn clone(&self) -> Self {
@@ -615,9 +616,9 @@ impl<'a, P: Storage, O: Storage> MappingSpaces<'a, P, O> {
         }
     }
 
-    /// The pair over the peer's aliases in the table of its storage policy, lent by the owner that
-    /// holds it ([`PeerIds::lend_ref`]), with `own` as our own space: the session's table of its
-    /// declarations, or a space a host keeps behind a handle.
+    /// The pair over the peer's aliases in the table of its storage policy, beside the keys of the
+    /// owner that holds it ([`PairedIds`]), with `own` as our own space: the session's table of
+    /// its declarations, or a space a host keeps behind a handle.
     pub(crate) fn of_aliases(peer: AliasesRef<'a, P>, own: Option<OwnSpace<'a, O>>) -> Self {
         Self {
             peer: PeerSpace::of_aliases(peer),
@@ -678,13 +679,7 @@ impl<'a, P: Storage<Keys = InlineKeys>> MappingSpaces<'a, P> {
     pub fn for_aliases(peer: &'a PeerAliases<P>, own: Option<&'a dyn OwnMappingSpace>) -> Self {
         // SAFETY: the one handle of a policy whose keys are `InlineKeys` names no space, so it is
         // every owner's handle: its tables keep their rows themselves and are lent nothing.
-        let peer = unsafe {
-            <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::lend_ref(
-                peer,
-                &InlineKeys,
-                PeerSlot::Aliases,
-            )
-        };
+        let peer = unsafe { PairedIds::new(peer, &InlineKeys, PeerSlot::Aliases) };
         Self::of_aliases(peer, own.map(OwnSpace::of_handle))
     }
 }

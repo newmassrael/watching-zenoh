@@ -119,15 +119,21 @@ pub trait IdMap<V> {
 /// only to read answers too ([`LentIdsRef`]). What it hands out lives for `'a`, not for the
 /// reader value, so a lent table made in a call hands out what outlives it. Every [`IdMap`]
 /// answers it by a shared reference.
-pub trait IdRead<'a, V: 'a> {
+///
+/// A reader is a copy of a shared borrow (`Copy`), so [`Self::into_entries`] takes it by value: an
+/// `impl Trait` a trait method returns captures every lifetime in its signature, and one taken
+/// from `&self` would tie the iterator to the reader value, which a view made in the call that
+/// returns the iterator does not outlive. It is named apart from [`IdMap::entries`]: a shared
+/// reference to a table answers both traits, and a call on a table must name one method.
+pub trait IdRead<'a, V: 'a>: Copy {
     /// The value bound to `id`, if any.
     fn find(&self, id: u64) -> Option<&'a V>;
 
     /// How many ids are bound.
     fn count(&self) -> usize;
 
-    /// Every binding, in no order a caller may rely on.
-    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a;
+    /// Every binding, in no order a caller may rely on, for as long as `'a`.
+    fn into_entries(self) -> impl Iterator<Item = (u64, &'a V)> + 'a;
 
     /// How many NEW ids were refused since the table was made ([`IdMap::refusals`]).
     fn refusals(&self) -> u32;
@@ -147,8 +153,8 @@ impl<'a, V: 'a, T: IdMap<V> + ?Sized> IdRead<'a, V> for &'a T {
         T::count(*self)
     }
 
-    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
-        T::entries(*self)
+    fn into_entries(self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
+        T::entries(self)
     }
 
     fn refusals(&self) -> u32 {
@@ -585,6 +591,66 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
     }
 }
 
+/// A table of values by a peer's ids beside the handle of the owner that holds it and the slot it
+/// was attached to, to read: the table is lent the handle ([`PeerIds::lend_ref`]) at each read.
+///
+/// What a type that is passed on with a shorter borrow holds in place of [`PeerIds::Ref`]
+/// ([`crate::wireexpr_resolve::MappingSpaces`], handed to a resolver whose buffer lives shorter
+/// than the tables). `PeerIds::Ref<'a>` is a projection through `'a`, and a type that holds a
+/// projection through a lifetime is invariant in it, so it could not be shortened; this pair
+/// holds only shared borrows and is covariant in `'a`, as a `&'a` of the table is.
+pub struct PairedIds<'a, T, H> {
+    table: &'a T,
+    keys: &'a H,
+    slot: crate::peer_tables::PeerSlot,
+}
+
+impl<T, H> Clone for PairedIds<'_, T, H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, H> Copy for PairedIds<'_, T, H> {}
+
+impl<'a, T: 'a, H: 'a> PairedIds<'a, T, H> {
+    /// `table` beside `keys`, its owner's handle, for the slot `slot`.
+    ///
+    /// # Safety
+    /// As [`PeerIds::lend`]'s, for as long as `'a`: `keys` is the handle of the owner that holds
+    /// `table`, and `slot` the one it attached the table's rows to.
+    pub unsafe fn new(table: &'a T, keys: &'a H, slot: crate::peer_tables::PeerSlot) -> Self {
+        Self { table, keys, slot }
+    }
+
+    /// The table lent the handle, to read.
+    pub fn lend<V: 'a>(self) -> <T as PeerIds<V, H>>::Ref<'a>
+    where
+        T: PeerIds<V, H>,
+    {
+        // SAFETY: the pairing the caller of `Self::new` promised for `'a`.
+        unsafe { <T as PeerIds<V, H>>::lend_ref(self.table, self.keys, self.slot) }
+    }
+}
+
+impl<'a, V: 'a, T: PeerIds<V, H> + 'a, H: 'a> IdRead<'a, V> for PairedIds<'a, T, H> {
+    fn find(&self, id: u64) -> Option<&'a V> {
+        self.lend::<V>().find(id)
+    }
+
+    fn count(&self) -> usize {
+        self.lend::<V>().count()
+    }
+
+    fn into_entries(self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
+        self.lend::<V>().into_entries()
+    }
+
+    fn refusals(&self) -> u32 {
+        self.lend::<V>().refusals()
+    }
+}
+
 /// A [`PooledIdMap`] lent its owner's space, to bind and unbind ([`PooledIdMap::lend`]): the lent
 /// backing of [`IdMap`].
 pub struct LentIds<'a, V, const N: usize> {
@@ -682,7 +748,7 @@ impl<'a, V: 'a, const N: usize> IdRead<'a, V> for LentIdsRef<'a, V, N> {
         self.rows.len()
     }
 
-    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
+    fn into_entries(self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
         self.rows.iter()
     }
 
@@ -987,7 +1053,7 @@ impl<P: Storage> LentAliases<'_, P> {
 impl<P: Storage> LentAliasesRef<'_, P> {
     /// The id the application was told the keyexpr of `id` under, if `id` is an alias.
     pub fn told_as(&self, id: u64) -> Option<u64> {
-        told_among(crate::row_pool::RowRead::iter(&self.0), id)
+        told_among(crate::row_pool::RowRead::into_rows(self.0), id)
     }
 }
 

@@ -1729,17 +1729,17 @@ impl<T, const N: usize> LentRows<'_, Seq<T>, N> {
     /// Keep only the values `keep` accepts, in order; each other row is given back.
     #[inline]
     pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut keep: F) {
+        // Made outside the block below, whose unsafe context a closure would inherit: the read of
+        // a row states its own contract.
+        let mut keep_row = |row: NonNull<u8>| {
+            // SAFETY: the core hands each row the table holds once, holding its value, which
+            // nothing else reaches during the call.
+            keep(unsafe { <Seq<T> as RowKind>::get(row) })
+        };
         // SAFETY: the space is the table's (`PooledRows::lend`'s contract).
         unsafe {
-            self.raw.retain(
-                self.space,
-                <Seq<T> as RowKind>::SHAPE,
-                &mut |row: NonNull<u8>| {
-                    // SAFETY: the core hands each row the table holds once, holding its value,
-                    // which nothing else reaches during the call.
-                    keep(unsafe { <Seq<T> as RowKind>::get(row) })
-                },
-            );
+            self.raw
+                .retain(self.space, <Seq<T> as RowKind>::SHAPE, &mut keep_row);
         }
     }
 
@@ -2030,7 +2030,12 @@ impl<T, L: RowList<T> + ?Sized> RowList<T> for &mut L {
 /// lent for: the part of [`RowList`] that writes nothing, which a table lent its owner's space only
 /// to read answers too ([`LentRowsRef`]). What it hands out lives for `'a`, not for the reader
 /// value.
-pub trait RowRead<'a, T: 'a> {
+///
+/// A reader is a copy of a shared borrow (`Copy`), so [`Self::into_rows`] takes it by value, as
+/// [`crate::id_map::IdRead::into_entries`] does and for its reasons: an iterator taken from `&self`
+/// would be tied to the reader value, and a shared reference to a table answers [`RowList::iter`]
+/// too.
+pub trait RowRead<'a, T: 'a>: Copy {
     /// How many values the table holds.
     fn len(&self) -> usize;
 
@@ -2039,8 +2044,8 @@ pub trait RowRead<'a, T: 'a> {
         self.len() == 0
     }
 
-    /// The values, in order.
-    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a;
+    /// The values, in order, for as long as `'a`.
+    fn into_rows(self) -> impl Iterator<Item = &'a T> + 'a;
 }
 
 impl<'a, T: 'a, L: RowList<T> + ?Sized> RowRead<'a, T> for &'a L {
@@ -2048,8 +2053,8 @@ impl<'a, T: 'a, L: RowList<T> + ?Sized> RowRead<'a, T> for &'a L {
         L::len(*self)
     }
 
-    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a {
-        L::iter(*self)
+    fn into_rows(self) -> impl Iterator<Item = &'a T> + 'a {
+        L::iter(self)
     }
 }
 
@@ -2058,8 +2063,8 @@ impl<'a, T: 'a, const N: usize> RowRead<'a, T> for LentRowsRef<'a, Seq<T>, N> {
         LentRowsRef::len(self)
     }
 
-    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a {
-        LentRowsRef::iter(self)
+    fn into_rows(self) -> impl Iterator<Item = &'a T> + 'a {
+        LentRowsRef::iter(&self)
     }
 }
 

@@ -3565,9 +3565,10 @@ impl<P: Storage> SubscriberPeer<P> {
 #[cfg(feature = "storage-profile")]
 type AliasesMut<'a, P> = <PeerAliases<P> as PeerIds<KeyText<P>, <P as Storage>::Keys>>::Mut<'a>;
 
-/// The peer's alias table lent its side's keys, to read ([`PeerIds::lend_ref`]).
+/// The peer's alias table beside its side's keys, lent them at each read
+/// ([`crate::id_map::PairedIds`]): the form a [`MappingSpaces`] holds, covariant in `'a`.
 #[cfg(feature = "storage-profile")]
-type AliasesRef<'a, P> = <PeerAliases<P> as PeerIds<KeyText<P>, <P as Storage>::Keys>>::Ref<'a>;
+type AliasesRef<'a, P> = crate::id_map::PairedIds<'a, PeerAliases<P>, <P as Storage>::Keys>;
 
 #[cfg(feature = "storage-profile")]
 impl<P: Storage> PeerNaming<P> {
@@ -3587,11 +3588,12 @@ impl<P: Storage> PeerNaming<P> {
         }
     }
 
-    /// The peer's aliases lent the side's keys, to read.
+    /// The peer's aliases beside the side's keys, to read.
     fn aliases_ref(&self) -> AliasesRef<'_, P> {
-        // SAFETY: as `aliases_mut`'s: the keys name the space the table was attached to.
+        // SAFETY: as `aliases_mut`'s: the keys name the space the table was attached to, for as
+        // long as the shared borrow of the side holds them both unchanged.
         unsafe {
-            <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::lend_ref(
+            crate::id_map::PairedIds::new(
                 &self.aliases,
                 &self.keys,
                 crate::peer_tables::PeerSlot::Aliases,
@@ -3807,7 +3809,7 @@ impl<P: Storage> InterestSide<P> {
         // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
         let row_held = if self
             .rows_ref()
-            .iter()
+            .into_rows()
             .any(|row| row.interest_id == interest_id)
         {
             true
@@ -3966,7 +3968,7 @@ impl<P: Storage> InterestSide<P> {
             let Some(new_pattern) = subs.pattern_of(new_id) else {
                 return;
             };
-            for row in self.rows_ref().iter() {
+            for row in self.rows_ref().into_rows() {
                 if subscription_matches_interest(new_pattern, Some(&*row.keyexpr))
                     && hits.push((row.interest_id, row.aggregate)).is_err()
                 {
@@ -4007,7 +4009,7 @@ impl<P: Storage> InterestSide<P> {
         // A buffer of its own, as in `push_registered`.
         let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, P::Scratch> =
             BoundedVec::default();
-        for row in self.rows_ref().iter() {
+        for row in self.rows_ref().into_rows() {
             if row.aggregate
                 && row.announced
                 && !any_matches(subs, Some(&*row.keyexpr))
@@ -4367,7 +4369,7 @@ impl<P: Storage> SubscriberPeer<P> {
             SubInterestReply::Aggregate { interest_id } => self
                 .interests
                 .rows_ref()
-                .iter()
+                .into_rows()
                 .find(|row| row.interest_id == *interest_id)
                 .filter(|row| any_matches(subs, Some(&*row.keyexpr)))
                 .map(|row| (u64::from(row.aggregate_decl_id), &*row.keyexpr)),

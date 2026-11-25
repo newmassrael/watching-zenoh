@@ -251,7 +251,7 @@ where
     if complete_required || remote_includes {
         #[cfg(feature = "keyexpr-includes")]
         {
-            declared.entries().any(|(_, candidate)| {
+            IdRead::into_entries(*declared).any(|(_, candidate)| {
                 (candidate.complete() || !complete_required)
                     && crate::keyexpr_match::keyexpr_includes(candidate.keyexpr(), keyexpr)
             })
@@ -266,7 +266,7 @@ where
             false
         }
     } else {
-        declared.entries().any(|(_, candidate)| {
+        IdRead::into_entries(*declared).any(|(_, candidate)| {
             crate::keyexpr_match::keyexpr_intersects(candidate.keyexpr(), keyexpr)
         })
     }
@@ -542,7 +542,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, q)| (id, q.keyexpr.as_ref()))
     }
 
@@ -553,7 +553,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         &self,
     ) -> impl Iterator<Item = (u64, &str, Option<&crate::key_arena::KeyRef>)> + '_ {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, q)| {
                 (
                     id,
@@ -571,7 +571,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, q)| (id, q.keyexpr.as_ref(), q.complete))
     }
 
@@ -735,7 +735,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     ))]
     fn told_as(&self, key: &str, complete: bool) -> Option<u64> {
         Self::declared_ref(&self.declared, &self.keys)
-            .entries()
+            .into_entries()
             .find(|(_, held)| held.complete == complete && held.keyexpr.as_ref() == key)
             .map(|(other, _)| {
                 Self::aliases_ref(&self.aliases, &self.keys)
@@ -1516,7 +1516,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
         let remains = {
             let declared = RemoteQueryablePeer::<Q>::declared_ref(&peer.declared, &peer.keys);
             declared.find(id).is_some_and(|row| {
-                declared.entries().any(|(other, held)| {
+                declared.into_entries().any(|(other, held)| {
                     other != id
                         && held.complete == row.complete
                         && held.keyexpr.as_ref() == row.keyexpr.as_ref()

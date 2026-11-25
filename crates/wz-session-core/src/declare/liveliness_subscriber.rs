@@ -548,7 +548,7 @@ impl<P: Storage> PeerTokens<P> {
     #[cfg(feature = "storage-profile")]
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         Self::tokens_ref(&self.table, &self.keys)
-            .entries()
+            .into_entries()
             .map(|(id, keyexpr)| (id, keyexpr.as_ref()))
     }
 
@@ -631,7 +631,7 @@ impl<P: Storage> PeerTokens<P> {
     /// the table holds one.
     fn sourced_id(&self, keyexpr: &str) -> Option<u64> {
         let tokens = Self::tokens_ref(&self.table, &self.keys);
-        tokens.entries().find_map(|(id, held)| {
+        tokens.into_entries().find_map(|(id, held)| {
             (id >= SOURCED_ID_BASE && held.as_ref() == keyexpr).then_some(id)
         })
     }
@@ -641,7 +641,7 @@ impl<P: Storage> PeerTokens<P> {
     fn next_sourced_id(&self) -> Option<u64> {
         let tokens = Self::tokens_ref(&self.table, &self.keys);
         tokens
-            .entries()
+            .into_entries()
             .map(|(id, _)| id)
             .filter(|id| *id >= SOURCED_ID_BASE)
             .max()
@@ -1867,7 +1867,7 @@ impl<P: Storage> PeerTokens<P> {
             // intersected truncated: the matcher applies the chunk bound itself, the same refusal
             // `tell` gets from it.
             let mut next: Option<(u64, &str)> = None;
-            for (token_id, keyexpr) in peer_token_table.entries() {
+            for (token_id, keyexpr) in peer_token_table.into_entries() {
                 if after.is_some_and(|last| token_id <= last)
                     || next.is_some_and(|(lowest, _)| token_id >= lowest)
                 {
