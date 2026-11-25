@@ -34,7 +34,8 @@
 //!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
 //!   takes each from its heap as it comes. A session of one face shares with no one: its tables
 //!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
-//!   link and no pool state;
+//!   link and no pool state. Either way one span more names where each kind's rows lie, which every
+//!   face's tables reach them through by the session's key arena;
 //! - the buffers of the links the session may hold: a pool of receive buffers of the batch the
 //!   session advertises, a streamed batch's length counted inside it, as many as
 //!   `RX_POOL_BUFFERS` and no more than the links, which a link holds only while it holds part of
@@ -278,6 +279,7 @@ pub enum ArenaPart {
     PeerAliasPool,
     PeerDeclarationPools,
     PeerInterestPool,
+    PeerRowDirectory,
     OwedTokens,
     HeldFinals,
     RefusedFinals,
@@ -389,6 +391,7 @@ impl ArenaPart {
             Self::PeerAliasPool => ("peer alias pool", ALIAS_LIMITS.session.name()),
             Self::PeerDeclarationPools => ("peer declaration pools", DECL_LIMITS.session.name()),
             Self::PeerInterestPool => ("peer interest pool", INTEREST_LIMITS.session.name()),
+            Self::PeerRowDirectory => ("peer row directory", ""),
             Self::OwedTokens => ("owed tokens", "SESSION_MAX_REMOTE_DECLS"),
             Self::HeldFinals => ("held finals", "MAX_PENDING_FINALS"),
             Self::RefusedFinals => ("refused finals", "MAX_PENDING_FINALS"),
@@ -533,9 +536,9 @@ const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES a
 /// for each set of face tables, where the arena lends them (`runtime-plan`); a region holds its
 /// one set's place otherwise.
 const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
-/// The peers' tables, and the pools their rows lie in where the faces share them, where the arena
-/// lends them (`runtime-plan`).
-const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 3 * SHARES_ROWS as usize);
+/// The peers' tables, and the pools their rows lie in where the faces share them with the one span
+/// naming where those rows lie, where the arena lends them (`runtime-plan`).
+const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 4 * SHARES_ROWS as usize);
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
 /// session whose faces share their pools, so counted where a build shares them at all.
 const OWED_ROWS: usize = (cfg!(all(
@@ -2110,6 +2113,11 @@ impl ArenaPlan {
             self.put(ArenaPart::PeerDeclarationPools, 1, declarations);
             let interests = self.sized(pools.interest_bytes());
             self.put(ArenaPart::PeerInterestPool, 1, interests);
+            // `PeerPools::lent` lends one span past the three, the directory the session's key
+            // arena names them by: a plan without it leaves the arena a span short of the open's
+            // last place.
+            let directory = self.sized(pools.directory_bytes());
+            self.put(ArenaPart::PeerRowDirectory, 1, directory);
         }
         // The tokens the faces that went still owe, lent with the pools
         // (`engine::registry::Registry::new`).
