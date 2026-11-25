@@ -2852,11 +2852,11 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         let (plane, generation) = (&self.plane, self.generation);
         let dispatched = self.registry.with(|registry| {
             #[cfg(feature = "queryable")]
-            for (rid, qos) in registry.after_pushes(face, actions) {
+            registry.after_pushes(face, actions, |rid, qos| {
                 if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
                     actions.send_response_final(rid, qos);
                 }
-            }
+            });
             #[cfg(not(feature = "queryable"))]
             registry.after_pushes(face, actions);
         });

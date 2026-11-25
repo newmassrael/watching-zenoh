@@ -1112,21 +1112,27 @@ impl<H: Holders> RegistryOf<H> {
     /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
     /// under one lookup of the face: the subscribers' tables reconciled with what the application
     /// registered since, what anything staged drained through `actions`
-    /// ([`Self::flush_pending_replies`]), and the `Final`s owed taken for the caller
-    /// ([`Self::take_pending_final_rids`]). A face the session no longer holds owes nothing.
+    /// ([`Self::flush_pending_replies`]), and each `Final` owed handed to `owe` where the face's
+    /// table holds it, the table left empty after: a run of Pushes almost never owes one, so no
+    /// table of them is made and moved out for each run, as [`Self::take_pending_final_rids`]
+    /// makes one. A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
-    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S) -> FinalStage<Static>
-    where
+    pub(super) fn after_pushes<S>(
+        &mut self,
+        face: HeldFace,
+        actions: &S,
+        mut owe: impl FnMut(wz_session_core::wire_id::RequestId, wz_session_core::sample::QosLevel),
+    ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        match self.split(self.place(face)) {
-            Some(Split { app, face, .. }) => {
-                #[cfg(feature = "interest-answer")]
-                reconcile_face(app, face);
-                app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
-                face.peer.finals.take_owed()
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
+            #[cfg(feature = "interest-answer")]
+            reconcile_face(app, face);
+            app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
+            for &(rid, qos) in face.peer.finals.iter() {
+                owe(rid, qos);
             }
-            None => FinalStage::default(),
+            face.peer.finals.clear();
         }
     }
 
