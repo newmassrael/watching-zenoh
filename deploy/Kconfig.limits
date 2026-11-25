@@ -251,6 +251,18 @@ config WZ_LIMIT_CALLBACK_THREADS
 	  and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
 	  one entry whatever this says, as one thread calls the library at a time.
 
+config WZ_LIMIT_ENGINE_ROWS
+	int "ENGINE_ROWS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 256
+	help
+	  The sessions open at once in a process: the rows of the one table a reach
+	  of a session's engine names it by. A holder that must not keep the session
+	  open (a key expression the program keeps, a query kept past its callback,
+	  a cancellation token) holds a row and its generation. The close of a
+	  session vacates its row and moves the generation on, so a reach kept past
+	  the close reaches nothing. The open of one more session is refused.
+
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
 	default 5 if WZ_LIMITS_ZENOH_PICO
