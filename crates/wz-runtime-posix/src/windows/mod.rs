@@ -523,51 +523,106 @@ fn wait_entry(socket: ws::SOCKET, room: bool) -> ws::WSAPOLLFD {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WindowsWaits;
 
+/// One `WSAPoll` over what `on` names, in `fds`, for at most `timeout_ms`: how many entries of
+/// `fds` it filled, in the order of `on`, and whether the poll answered. A wake found ready is
+/// made quiet.
+fn poll_on(
+    on: &[wz_runtime_coop::session_drive::LinkWait],
+    timeout_ms: u32,
+    fds: &mut [ws::WSAPOLLFD; crate::WAIT_SET_SOCKETS],
+) -> (usize, bool) {
+    use wz_runtime_coop::session_drive::WaitOn;
+    let mut count = 0;
+    let mut look = false;
+    let mut wakes = false;
+    for wait in on {
+        match (wait.on, fds.get_mut(count)) {
+            (WaitOn::Socket(socket), Some(entry)) => {
+                *entry = wait_entry(socket, wait.room);
+                count += 1;
+            }
+            (WaitOn::Wake(socket), Some(entry)) => {
+                *entry = wait_entry(socket, false);
+                count += 1;
+                wakes = true;
+            }
+            // A handle this cannot name to the system, or one past the set: the bounded look,
+            // so it is not starved behind a wait on the others.
+            _ => look = true,
+        }
+    }
+    let timeout_ms = if look { timeout_ms.min(1) } else { timeout_ms };
+    if count == 0 {
+        // `WSAPoll` refuses an empty set: the look is a sleep.
+        // SAFETY: a plain system call with a value argument.
+        unsafe { windows_sys::Win32::System::Threading::Sleep(timeout_ms) };
+        return (0, true);
+    }
+    // SAFETY: the first `count` entries of `fds` are written and live for the call, and the
+    // timeout bounds the wait. A failed wait is a quiet link: the step that follows reads and
+    // reports the error.
+    let answered =
+        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) } >= 0;
+    // A wake found ready is made quiet, so the next wait waits for the next word.
+    if wakes {
+        for wait in on {
+            if let WaitOn::Wake(socket) = wait.on {
+                net::drain_wake(socket);
+            }
+        }
+    }
+    (count, answered)
+}
+
 impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
     fn wait(&self, on: &[wz_runtime_coop::session_drive::LinkWait], timeout_ms: u32) {
-        use wz_runtime_coop::session_drive::WaitOn;
         if on.is_empty() {
             return;
         }
         let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
-        let mut count = 0;
-        let mut look = false;
-        let mut wakes = false;
-        for wait in on {
-            match (wait.on, fds.get_mut(count)) {
-                (WaitOn::Socket(socket), Some(entry)) => {
-                    *entry = wait_entry(socket, wait.room);
-                    count += 1;
+        let _ = poll_on(on, timeout_ms, &mut fds);
+    }
+
+    /// The entries `WSAPoll` found with an event, any event (an error or a hang-up is one the
+    /// step reads), and every entry it could not name to the system, whose wait was the bounded
+    /// look. A poll that failed tells nothing, so every entry is answered.
+    fn wait_ready(
+        &self,
+        on: &mut [wz_runtime_coop::session_drive::LinkWait],
+        timeout_ms: u32,
+    ) -> usize {
+        use wz_runtime_coop::session_drive::WaitOn;
+        if on.is_empty() {
+            return 0;
+        }
+        let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
+        let (count, answered) = poll_on(on, timeout_ms, &mut fds);
+        if !answered {
+            return on.len();
+        }
+        // The entries are walked in the order `poll_on` filled `fds` in, so the next entry it
+        // named is the next of `fds`; each ready one is swapped to the front, past every entry
+        // walked already.
+        let mut named = 0;
+        let mut front = 0;
+        for at in 0..on.len() {
+            let Some(wait) = on.get(at) else {
+                break;
+            };
+            let ready = match wait.on {
+                WaitOn::Socket(_) | WaitOn::Wake(_) if named < count => {
+                    let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
+                    named += 1;
+                    polled
                 }
-                (WaitOn::Wake(socket), Some(entry)) => {
-                    *entry = wait_entry(socket, false);
-                    count += 1;
-                    wakes = true;
-                }
-                // A handle this cannot name to the system, or one past the set: the bounded look,
-                // so it is not starved behind a wait on the others.
-                _ => look = true,
+                _ => true,
+            };
+            if ready {
+                on.swap(front, at);
+                front += 1;
             }
         }
-        let timeout_ms = if look { timeout_ms.min(1) } else { timeout_ms };
-        if count == 0 {
-            // `WSAPoll` refuses an empty set: the look is a sleep.
-            // SAFETY: a plain system call with a value argument.
-            unsafe { windows_sys::Win32::System::Threading::Sleep(timeout_ms) };
-            return;
-        }
-        // SAFETY: the first `count` entries of `fds` are written and live for the call, and the
-        // timeout bounds the wait. A failed wait is a quiet link: the step that follows reads and
-        // reports the error.
-        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) };
-        // A wake found ready is made quiet, so the next wait waits for the next word.
-        if wakes {
-            for wait in on {
-                if let WaitOn::Wake(socket) = wait.on {
-                    net::drain_wake(socket);
-                }
-            }
-        }
+        front
     }
 
     fn wait_room(&self, on: wz_runtime_coop::session_drive::WaitOn, timeout_us: u64) -> bool {

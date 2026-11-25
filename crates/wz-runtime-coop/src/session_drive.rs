@@ -330,6 +330,14 @@ pub trait LinkWaits: Send + Sync {
     /// behind a wait on the others.
     fn wait(&self, on: &[LinkWait], timeout_ms: u32);
 
+    /// [`Self::wait`], moving the entries of `on` the wait found ready to its front, in any
+    /// order: how many they are. A port is asked for a connection only once a wait found it ready,
+    /// so a stack that cannot tell which were ready answers every entry, and each is looked at.
+    fn wait_ready(&self, on: &mut [LinkWait], timeout_ms: u32) -> usize {
+        self.wait(on, timeout_ms);
+        on.len()
+    }
+
     /// Wait up to `timeout_us` microseconds for `on` to take more bytes: `true` once it will
     /// (or once it has failed or gone, which the send that follows reports), `false` when it
     /// still would not when the time is up.
@@ -1160,6 +1168,14 @@ pub trait LinkListener<P> {
     /// work of its own under way, or no room for another connection) is waited on as it is now.
     fn input_wait(&self) -> Option<WaitOn> {
         None
+    }
+
+    /// Whether a connection lies on the port only while its wait ([`Self::input_wait`]) finds it
+    /// ready, so the node asks for one only after a wait did: a stream port's queue of
+    /// connections. `false` for a port whose accept does work of its own, or takes what a link
+    /// read off a socket they share, which the node asks at every step.
+    fn asked_when_ready(&self) -> bool {
+        false
     }
 }
 

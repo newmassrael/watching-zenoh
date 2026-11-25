@@ -972,6 +972,11 @@ impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
     fn input_wait(&self) -> Option<WaitOn> {
         self.listener.input_wait()
     }
+
+    // A connection is the stream listener's queue's alone, which its wait reports.
+    fn asked_when_ready(&self) -> bool {
+        true
+    }
 }
 
 /// A platform's datagram sockets `U` and the streams its dial `D` opens as one stack of the slot

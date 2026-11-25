@@ -272,6 +272,12 @@ impl<C: ClockSource> CoopLocalSet<C> {
         self.runtime.run_until_idle();
     }
 
+    /// One executor pass that reads no clock: the timers due by `due_at` woken first when it is
+    /// given, then every ready task at most once ([`CoopRuntime::run_ready`]).
+    pub fn run_ready(&self, due_at: Option<u64>) {
+        self.runtime.run_ready(due_at);
+    }
+
     /// Count of this runtime's local tasks that have not ended; a result waiting for its
     /// handle is not one.
     pub fn live_local_task_count(&self) -> usize {

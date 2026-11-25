@@ -16,7 +16,7 @@ extern crate std;
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::rc::Rc;
@@ -400,6 +400,71 @@ fn sleeper(
         time.sleep(ms).await;
         answer
     })
+}
+
+/// A clock a test moves by hand that counts how often it is read. One per test, so its two words
+/// are statics of the test.
+struct Counted(&'static AtomicU64, &'static AtomicUsize);
+
+impl ClockSource for Counted {
+    fn now_us(&self) -> u64 {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A pass over the ready tasks reads no clock and wakes no timer, though one is due; a pass given
+/// a time wakes the timers due by it, so the sleep ends. CONTROL: a pass that looks at the timers
+/// itself reads the clock once. Turned red by a ready pass that reads the clock or wakes the timers
+/// by its own reading, or a pass given a time that does not wake what is due by it.
+#[test]
+fn a_pass_over_the_ready_tasks_reads_no_clock() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let runtime = CoopRuntime::new(Counted(&NOW, &READS));
+    let local = CoopLocalSet::new(&runtime);
+    let time = CoopTime::new(&runtime);
+    let task = local.spawn_local(async move {
+        time.sleep(5).await;
+        3u32
+    });
+    local.run_until_idle();
+    assert_eq!(
+        runtime.timers().pending_count(),
+        1,
+        "the sleep took an entry"
+    );
+    NOW.store(10_000, Ordering::SeqCst);
+
+    let before = READS.load(Ordering::SeqCst);
+    local.run_ready(None);
+    assert_eq!(
+        READS.load(Ordering::SeqCst) - before,
+        0,
+        "a pass over the ready tasks reads no clock"
+    );
+    assert_eq!(
+        runtime.timers().pending_count(),
+        1,
+        "and wakes no timer, though it is due"
+    );
+    assert!(!task.is_finished(), "the sleeper was not polled");
+
+    local.run_ready(Some(10_000));
+    assert_eq!(
+        runtime.timers().pending_count(),
+        0,
+        "the pass at a time woke it"
+    );
+    assert!(task.is_finished(), "and its task ran in the same pass");
+
+    let before = READS.load(Ordering::SeqCst);
+    local.run_until_idle();
+    assert_eq!(
+        READS.load(Ordering::SeqCst) - before,
+        1,
+        "CONTROL: a pass that looks at the timers reads the clock once"
+    );
 }
 
 #[test]

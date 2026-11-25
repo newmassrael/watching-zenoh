@@ -561,12 +561,13 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     );
 }
 
-/// A read whose step left a link holding input steps the next read at once: here a second batch,
-/// whole in the stream link's buffer behind the one the first read handed out, is read with the
-/// session taken once, for the step, where a read that works out its wait takes it twice. The
-/// CONTROL is the first read, which finds nothing held before it and takes the session twice.
+/// A read whose step left a link holding input goes on with it at once, with no wait worked out
+/// for it: here a second batch lies whole in the stream link's buffer behind the first, and the
+/// one read hands both out, the session taken once for its wait and once a batch, and moves the
+/// links once, after the second. Turned red by a read that ends after the first batch while the
+/// link holds the second, or one that moves the links after each batch.
 #[test]
-fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
+fn a_read_goes_on_with_the_input_its_step_left_held() {
     let engine = open_with(CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(0xa1),
@@ -625,19 +626,17 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     );
     std::thread::sleep(Duration::from_millis(100));
     let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
-    let before = takes(&engine);
+    let (before, polls) = (takes(&engine), engine.link_polls());
     let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
         (takes(&engine) - before, received.load(Ordering::SeqCst)),
-        (2, PUTS),
-        "CONTROL: the first read works out its wait and steps, and hands out the first batch"
+        (3, 2 * PUTS),
+        "the read works out its wait, steps once a batch and hands both batches out"
     );
-    let before = takes(&engine);
-    let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
-        (takes(&engine) - before, received.load(Ordering::SeqCst)),
-        (1, 2 * PUTS),
-        "the second batch was held: the read steps at once and hands it out"
+        engine.link_polls() - polls,
+        1,
+        "one move of the links, after the second batch"
     );
 }
 
