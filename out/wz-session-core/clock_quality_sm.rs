@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut Engine<Self>` and per-state
+// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -185,14 +185,23 @@ pub type ClockQualityConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bou
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
+/// `selection` is what enables each written transition (docs/adr/0127): each
+/// state's range of written transitions (`first_written`, one entry past the
+/// last state), and for each transition the list of events that enable it
+/// (`triggers`, a position in `trigger_events`, each list its length first),
+/// as the numbers of `ClockQualityEvent`. The runtime's one selection
+/// reads them for every machine and asks this machine only whether a guard
+/// holds (`guard_holds`).
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const CLOCK_QUALITY_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
-        Target, TransitionId, TransitionRow,
+        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
+        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
+        TriggerRow,
     };
     DocumentTables {
         states: &[
@@ -230,12 +239,17 @@ pub const CLOCK_QUALITY_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         #[cfg(not(feature = "clock-source"))] null_event: ::sce_rust_runtime::EventId(2),
         #[cfg(feature = "clock-source")] null_event: ::sce_rust_runtime::EventId(3),
         error_events: &[],
-        walk: &::sce_rust_runtime::ROW_WALK,
-        entry_rows: &[EntryRow::at(0), EntryRow::at(2), #[cfg(not(feature = "clock-source"))] EntryRow::at(2),
-#[cfg(feature = "clock-source")] EntryRow::at(4), #[cfg(feature = "clock-source")] EntryRow::at(0), #[cfg(feature = "clock-source")] EntryRow::at(6), #[cfg(feature = "clock-source")] EntryRow::at(0), #[cfg(feature = "clock-source")] EntryRow::at(4),],
-        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), #[cfg(feature = "clock-source")] EntryStep::new(StateId(2), false), #[cfg(feature = "clock-source")] EntryStep::count(1), EntryStep::new(StateId(0), false), #[cfg(feature = "clock-source")] EntryStep::count(1), #[cfg(feature = "clock-source")] EntryStep::new(StateId(3), false),],
+        walk: &::sce_rust_runtime::NO_WALK,
+        entry_rows: &[],
+        entry_paths: &[],
         history: None,
         parallel: None,
+        selection: Some(SelectionRows {
+            first_written: &[TransitionId(0), TransitionId(1), #[cfg(not(feature = "clock-source"))] TransitionId(2),
+#[cfg(feature = "clock-source")] TransitionId(3), #[cfg(feature = "clock-source")] TransitionId(5), #[cfg(feature = "clock-source")] TransitionId(6),],
+            triggers: &[TriggerRow::at(0), TriggerRow::at(2), #[cfg(feature = "clock-source")] TriggerRow::at(2), #[cfg(feature = "clock-source")] TriggerRow::at(0), #[cfg(feature = "clock-source")] TriggerRow::at(4), #[cfg(feature = "clock-source")] TriggerRow::at(0), TriggerRow::NONE,],
+            trigger_events: &[TriggerEvent::count(1), #[cfg(not(feature = "clock-source"))] TriggerEvent::new(EventId(0)), #[cfg(not(feature = "clock-source"))] TriggerEvent::count(1), TriggerEvent::new(EventId(1)), #[cfg(feature = "clock-source")] TriggerEvent::count(1), #[cfg(feature = "clock-source")] TriggerEvent::new(EventId(2)), #[cfg(feature = "clock-source")] TriggerEvent::count(1), #[cfg(feature = "clock-source")] TriggerEvent::new(EventId(0)),],
+        }),
     }
 };
 
@@ -392,6 +406,114 @@ impl<A: ClockQualityActions + 'static> ClockQualityPolicy<A> {
 
 
 // ======================================================================
+// The document's own step function (docs/adr/0129)
+// ======================================================================
+
+/// This document printed as its own step function: what Appendix D does for
+/// each step of this document, written out when it was built. The engine runs
+/// these arms in place of its shared procedures, and calls the hooks of this
+/// policy from them as it would from those.
+impl<A: ClockQualityActions + 'static> ::sce_rust_runtime::StepFunction for ClockQualityPolicy<A> {
+    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+    ) -> ::sce_rust_runtime::Entered {
+        machine.enter(ClockQualityState::ID_Unsynchronized, false);
+        ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_Unsynchronized), ended_in: None }
+    }
+
+    fn select_transition<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match atomic {
+            ClockQualityState::ID_Unsynchronized => {
+                machine.enabled(ClockQualityState::ID_Unsynchronized, event)
+            },
+            ClockQualityState::ID_Synchronized => {
+                machine.enabled(ClockQualityState::ID_Synchronized, event)
+            },
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_Holdover => {
+                machine.enabled(ClockQualityState::ID_Holdover, event)
+            },
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
+                machine.enabled(ClockQualityState::ID_FreeRunning, event)
+            },
+            _ => None,
+        }
+    }
+
+    fn microstep<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        transition: ::sce_rust_runtime::TransitionId,
+    ) -> ::sce_rust_runtime::Entered {
+        match (transition, atomic) {
+            (::sce_rust_runtime::TransitionId(0), ClockQualityState::ID_Unsynchronized) => {
+                machine.exit(ClockQualityState::ID_Unsynchronized);
+                machine.enter(ClockQualityState::ID_Synchronized, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_Synchronized), ended_in: None }
+            },
+            (::sce_rust_runtime::TransitionId(1), ClockQualityState::ID_Synchronized) => {
+                machine.exit(ClockQualityState::ID_Synchronized);
+                #[cfg(not(feature = "clock-source"))] machine.enter(ClockQualityState::ID_Unsynchronized, false);
+                #[cfg(feature = "clock-source")] machine.enter(ClockQualityState::ID_Holdover, false);
+                ::sce_rust_runtime::Entered { states: 1, #[cfg(not(feature = "clock-source"))] current: Some(ClockQualityState::ID_Unsynchronized),
+#[cfg(feature = "clock-source")] current: Some(ClockQualityState::ID_Holdover), ended_in: None, }
+            },
+            #[cfg(feature = "clock-source")] (::sce_rust_runtime::TransitionId(2), ClockQualityState::ID_Synchronized) => {
+                machine.exit(ClockQualityState::ID_Synchronized);
+                machine.enter(ClockQualityState::ID_Unsynchronized, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_Unsynchronized), ended_in: None }
+            },
+            #[cfg(feature = "clock-source")] (::sce_rust_runtime::TransitionId(3), ClockQualityState::ID_Holdover) => {
+                machine.exit(ClockQualityState::ID_Holdover);
+                machine.enter(ClockQualityState::ID_Synchronized, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_Synchronized), ended_in: None }
+            },
+            #[cfg(feature = "clock-source")] (::sce_rust_runtime::TransitionId(4), ClockQualityState::ID_Holdover) => {
+                machine.exit(ClockQualityState::ID_Holdover);
+                machine.enter(ClockQualityState::ID_FreeRunning, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_FreeRunning), ended_in: None }
+            },
+            #[cfg(feature = "clock-source")] (::sce_rust_runtime::TransitionId(5), ClockQualityState::ID_FreeRunning) => {
+                machine.exit(ClockQualityState::ID_FreeRunning);
+                machine.enter(ClockQualityState::ID_Synchronized, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(ClockQualityState::ID_Synchronized), ended_in: None }
+            },
+            // No other pair is selected: a transition is selected only from
+            // an atomic state below the state it is written in.
+            _ => ::sce_rust_runtime::Entered {
+                states: 0,
+                current: None,
+                ended_in: None,
+            },
+        }
+    }
+
+    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+    ) {
+        match atomic {
+            ClockQualityState::ID_Unsynchronized => {
+                machine.exit(ClockQualityState::ID_Unsynchronized);
+            },
+            ClockQualityState::ID_Synchronized => {
+                machine.exit(ClockQualityState::ID_Synchronized);
+            },
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_Holdover => {
+                machine.exit(ClockQualityState::ID_Holdover);
+            },
+            #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
+                machine.exit(ClockQualityState::ID_FreeRunning);
+            },
+            _ => {},
+        }
+    }
+}
+
+// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -492,6 +614,12 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0129: this document is printed as its own step function, the
+    // `StepFunction` above, which the engine runs in place of the shared
+    // interpreter.
+    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
+        Some(::sce_rust_runtime::StepFunctionForm::of());
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -506,9 +634,9 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0125: this document's microsteps are walked from the entry rows
-    // of its tables, which builds no set of states and walks no stack, so the
-    // workspace holds the enabled set alone.
+    // docs/adr/0129: this document's microsteps are its step function's, which
+    // takes one transition a microstep and builds no set of states, so the
+    // workspace holds that one transition alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     #[cfg(not(feature = "clock-source"))] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(2) }, { ::sce_rust_runtime::record_words(2, 0) }, 0>;
     #[cfg(feature = "clock-source")] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(4) }, { ::sce_rust_runtime::record_words(4, 0) }, 0>;
@@ -602,7 +730,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: clock_quality.scxml:51 :: _machine"]
 // SCE-MAP: clock_quality.scxml:51 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
         match state {
             #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
                 // SCE-MAP: clock_quality.scxml:86 :: FreeRunning :: _state_body
@@ -661,7 +789,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -673,76 +801,6 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
 
 
 
-
-    // Appendix D selectTransitions, the half only this document can answer:
-    // the first of `state`'s own transitions, in document order, that `event`
-    // enables, as its row of the tables, which holds its targets and its
-    // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
-    // state and the event are the numbers the tables are indexed by
-    // (docs/adr/0123).
-    #[doc = "SCE-MAP: clock_quality.scxml:51 :: _machine"]
-// SCE-MAP: clock_quality.scxml:51 :: _machine
-    fn first_enabled_transition(
-        &mut self,
-        state: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-        sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match state {
-            #[cfg(feature = "clock-source")] ClockQualityState::ID_FreeRunning => {
-                if event == ClockQualityEvent::ID_SyncAcquired {
-                    {
-                        // FreeRunning, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(5));
-                    }
-                }
-                None
-            },
-            #[cfg(feature = "clock-source")] ClockQualityState::ID_Holdover => {
-                if event == ClockQualityEvent::ID_SyncAcquired {
-                    {
-                        // Holdover, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(3));
-                    }
-                }
-                if event == ClockQualityEvent::ID_HoldoverExpired {
-                    {
-                        // Holdover, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(4));
-                    }
-                }
-                None
-            },
-            ClockQualityState::ID_Synchronized => {
-                if event == ClockQualityEvent::ID_SyncLost {
-                    {
-                        // Synchronized, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(1));
-                    }
-                }
-                #[cfg(feature = "clock-source")] if event == ClockQualityEvent::ID_SyncLost {
-                    {
-                        // Synchronized, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(2));
-                    }
-                }
-                None
-            },
-            ClockQualityState::ID_Unsynchronized => {
-                if event == ClockQualityEvent::ID_SyncAcquired {
-                    {
-                        // Unsynchronized, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(0));
-                    }
-                }
-                None
-            },
-            _ => None,
-        }
-    }
-
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -752,7 +810,7 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.
         let _ = (transition, engine);

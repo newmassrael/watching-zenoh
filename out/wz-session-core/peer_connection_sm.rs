@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut Engine<Self>` and per-state
+// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -227,14 +227,23 @@ pub type PeerConnectionConfiguration = ::sce_rust_runtime::helpers::hierarchy::B
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
+/// `selection` is what enables each written transition (docs/adr/0127): each
+/// state's range of written transitions (`first_written`, one entry past the
+/// last state), and for each transition the list of events that enable it
+/// (`triggers`, a position in `trigger_events`, each list its length first),
+/// as the numbers of `PeerConnectionEvent`. The runtime's one selection
+/// reads them for every machine and asks this machine only whether a guard
+/// holds (`guard_holds`).
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const PEER_CONNECTION_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
-        Target, TransitionId, TransitionRow,
+        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
+        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
+        TriggerRow,
     };
     DocumentTables {
         states: &[
@@ -326,11 +335,16 @@ pub const PEER_CONNECTION_TABLES: ::sce_rust_runtime::DocumentTables<'static> = 
         default_state: ::sce_rust_runtime::StateId(PeerConnectionState::Idle as u16),
         null_event: ::sce_rust_runtime::EventId(13),
         error_events: &[],
-        walk: &::sce_rust_runtime::ROW_WALK,
-        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(7), EntryRow::at(0), EntryRow::at(9), EntryRow::at(2), EntryRow::at(11), EntryRow::at(9), EntryRow::at(13), EntryRow::at(15), EntryRow::at(9), EntryRow::at(11), EntryRow::at(18), EntryRow::at(20), EntryRow::at(23), EntryRow::at(9), EntryRow::at(18), EntryRow::at(9), EntryRow::at(0), EntryRow::at(9), EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(9), EntryRow::NONE, EntryRow::at(9)],
-        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(2), EntryStep::new(StateId(7), false), EntryStep::new(StateId(11), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false), EntryStep::count(1), EntryStep::new(StateId(5), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(2), EntryStep::new(StateId(7), false), EntryStep::new(StateId(8), false), EntryStep::count(1), EntryStep::new(StateId(6), false), EntryStep::count(2), EntryStep::new(StateId(7), false), EntryStep::new(StateId(9), false), EntryStep::count(2), EntryStep::new(StateId(7), false), EntryStep::new(StateId(10), false)],
+        walk: &::sce_rust_runtime::NO_WALK,
+        entry_rows: &[],
+        entry_paths: &[],
         history: None,
         parallel: None,
+        selection: Some(SelectionRows {
+            first_written: &[TransitionId(0), TransitionId(3), TransitionId(6), TransitionId(9), TransitionId(12), TransitionId(17), TransitionId(19), TransitionId(21), TransitionId(25), TransitionId(25), TransitionId(25), TransitionId(25), TransitionId(25)],
+            triggers: &[TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(0), TriggerRow::at(8), TriggerRow::at(10), TriggerRow::at(0), TriggerRow::at(8), TriggerRow::at(12), TriggerRow::at(14), TriggerRow::at(8), TriggerRow::at(16), TriggerRow::at(18), TriggerRow::at(20), TriggerRow::at(22), TriggerRow::at(8), TriggerRow::at(10), TriggerRow::at(8), TriggerRow::at(24), TriggerRow::at(8), TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(8), TriggerRow::NONE, TriggerRow::NONE],
+            trigger_events: &[TriggerEvent::count(1), TriggerEvent::new(EventId(6)), TriggerEvent::count(1), TriggerEvent::new(EventId(7)), TriggerEvent::count(1), TriggerEvent::new(EventId(5)), TriggerEvent::count(1), TriggerEvent::new(EventId(4)), TriggerEvent::count(1), TriggerEvent::new(EventId(8)), TriggerEvent::count(1), TriggerEvent::new(EventId(12)), TriggerEvent::count(1), TriggerEvent::new(EventId(10)), TriggerEvent::count(1), TriggerEvent::new(EventId(9)), TriggerEvent::count(1), TriggerEvent::new(EventId(0)), TriggerEvent::count(1), TriggerEvent::new(EventId(1)), TriggerEvent::count(1), TriggerEvent::new(EventId(3)), TriggerEvent::count(1), TriggerEvent::new(EventId(2)), TriggerEvent::count(1), TriggerEvent::new(EventId(11))],
+        }),
     }
 };
 
@@ -503,6 +517,342 @@ impl<A: PeerConnectionActions + 'static> PeerConnectionPolicy<A> {
 
 
 // ======================================================================
+// The document's own step function (docs/adr/0129)
+// ======================================================================
+
+/// This document printed as its own step function: what Appendix D does for
+/// each step of this document, written out when it was built. The engine runs
+/// these arms in place of its shared procedures, and calls the hooks of this
+/// policy from them as it would from those.
+impl<A: PeerConnectionActions + 'static> ::sce_rust_runtime::StepFunction for PeerConnectionPolicy<A> {
+    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+    ) -> ::sce_rust_runtime::Entered {
+        machine.enter(PeerConnectionState::ID_Idle, false);
+        ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+    }
+
+    fn select_transition<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match atomic {
+            PeerConnectionState::ID_Idle => {
+                machine.enabled(PeerConnectionState::ID_Idle, event)
+            }
+            PeerConnectionState::ID_Passive => {
+                machine.enabled(PeerConnectionState::ID_Passive, event)
+            }
+            PeerConnectionState::ID_PassiveUp => {
+                machine.enabled(PeerConnectionState::ID_PassiveUp, event)
+            }
+            PeerConnectionState::ID_Resolving => {
+                machine.enabled(PeerConnectionState::ID_Resolving, event)
+            }
+            PeerConnectionState::ID_Connecting => {
+                machine.enabled(PeerConnectionState::ID_Connecting, event)
+            }
+            PeerConnectionState::ID_Established => {
+                machine.enabled(PeerConnectionState::ID_Established, event)
+            }
+            PeerConnectionState::ID_Backoff => {
+                machine.enabled(PeerConnectionState::ID_Backoff, event)
+            }
+            PeerConnectionState::ID_NoLocator => {
+                machine.enabled(PeerConnectionState::ID_Refused, event)
+            }
+            PeerConnectionState::ID_NoSlot => {
+                machine.enabled(PeerConnectionState::ID_Refused, event)
+            }
+            PeerConnectionState::ID_IdentityMismatch => {
+                machine.enabled(PeerConnectionState::ID_Refused, event)
+            }
+            PeerConnectionState::ID_AuthorityRefused => {
+                machine.enabled(PeerConnectionState::ID_Refused, event)
+            }
+            _ => None,
+        }
+    }
+
+    fn microstep<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        transition: ::sce_rust_runtime::TransitionId,
+    ) -> ::sce_rust_runtime::Entered {
+        match (transition, atomic) {
+            (::sce_rust_runtime::TransitionId(0), PeerConnectionState::ID_Idle) => {
+                machine.exit(PeerConnectionState::ID_Idle);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(1), PeerConnectionState::ID_Idle) => {
+                machine.exit(PeerConnectionState::ID_Idle);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(2), PeerConnectionState::ID_Idle) => {
+                machine.exit(PeerConnectionState::ID_Idle);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_AuthorityRefused, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_AuthorityRefused), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(3), PeerConnectionState::ID_Passive) => {
+                machine.exit(PeerConnectionState::ID_Passive);
+                machine.enter(PeerConnectionState::ID_PassiveUp, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_PassiveUp), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(4), PeerConnectionState::ID_Passive) => {
+                machine.exit(PeerConnectionState::ID_Passive);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(5), PeerConnectionState::ID_Passive) => {
+                machine.exit(PeerConnectionState::ID_Passive);
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(6), PeerConnectionState::ID_PassiveUp) => {
+                machine.exit(PeerConnectionState::ID_PassiveUp);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(7), PeerConnectionState::ID_PassiveUp) => {
+                machine.exit(PeerConnectionState::ID_PassiveUp);
+                machine.enter(PeerConnectionState::ID_Established, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Established), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(8), PeerConnectionState::ID_PassiveUp) => {
+                machine.exit(PeerConnectionState::ID_PassiveUp);
+                machine.content(::sce_rust_runtime::TransitionId(8));
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(9), PeerConnectionState::ID_Resolving) => {
+                machine.exit(PeerConnectionState::ID_Resolving);
+                machine.enter(PeerConnectionState::ID_Connecting, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Connecting), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(10), PeerConnectionState::ID_Resolving) => {
+                machine.exit(PeerConnectionState::ID_Resolving);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_NoLocator, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_NoLocator), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(11), PeerConnectionState::ID_Resolving) => {
+                machine.exit(PeerConnectionState::ID_Resolving);
+                machine.content(::sce_rust_runtime::TransitionId(11));
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(12), PeerConnectionState::ID_Connecting) => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+                machine.enter(PeerConnectionState::ID_Established, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Established), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(13), PeerConnectionState::ID_Connecting) => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+                machine.enter(PeerConnectionState::ID_Backoff, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Backoff), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(14), PeerConnectionState::ID_Connecting) => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_NoSlot, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_NoSlot), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(15), PeerConnectionState::ID_Connecting) => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_IdentityMismatch, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_IdentityMismatch), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(16), PeerConnectionState::ID_Connecting) => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+                machine.content(::sce_rust_runtime::TransitionId(16));
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(17), PeerConnectionState::ID_Established) => {
+                machine.exit(PeerConnectionState::ID_Established);
+                machine.enter(PeerConnectionState::ID_Backoff, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Backoff), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(18), PeerConnectionState::ID_Established) => {
+                machine.exit(PeerConnectionState::ID_Established);
+                machine.content(::sce_rust_runtime::TransitionId(18));
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(19), PeerConnectionState::ID_Backoff) => {
+                machine.exit(PeerConnectionState::ID_Backoff);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(20), PeerConnectionState::ID_Backoff) => {
+                machine.exit(PeerConnectionState::ID_Backoff);
+                machine.content(::sce_rust_runtime::TransitionId(20));
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(21), PeerConnectionState::ID_NoLocator) => {
+                machine.exit(PeerConnectionState::ID_NoLocator);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(21), PeerConnectionState::ID_NoSlot) => {
+                machine.exit(PeerConnectionState::ID_NoSlot);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(21), PeerConnectionState::ID_IdentityMismatch) => {
+                machine.exit(PeerConnectionState::ID_IdentityMismatch);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(21), PeerConnectionState::ID_AuthorityRefused) => {
+                machine.exit(PeerConnectionState::ID_AuthorityRefused);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Resolving, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Resolving), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(22), PeerConnectionState::ID_NoLocator) => {
+                machine.exit(PeerConnectionState::ID_NoLocator);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(22), PeerConnectionState::ID_NoSlot) => {
+                machine.exit(PeerConnectionState::ID_NoSlot);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(22), PeerConnectionState::ID_IdentityMismatch) => {
+                machine.exit(PeerConnectionState::ID_IdentityMismatch);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(22), PeerConnectionState::ID_AuthorityRefused) => {
+                machine.exit(PeerConnectionState::ID_AuthorityRefused);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Passive, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Passive), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(23), PeerConnectionState::ID_NoLocator) => {
+                machine.exit(PeerConnectionState::ID_NoLocator);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_AuthorityRefused, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_AuthorityRefused), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(23), PeerConnectionState::ID_NoSlot) => {
+                machine.exit(PeerConnectionState::ID_NoSlot);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_AuthorityRefused, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_AuthorityRefused), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(23), PeerConnectionState::ID_IdentityMismatch) => {
+                machine.exit(PeerConnectionState::ID_IdentityMismatch);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_AuthorityRefused, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_AuthorityRefused), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(23), PeerConnectionState::ID_AuthorityRefused) => {
+                machine.exit(PeerConnectionState::ID_AuthorityRefused);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Refused, false);
+                machine.enter(PeerConnectionState::ID_AuthorityRefused, false);
+                ::sce_rust_runtime::Entered { states: 2, current: Some(PeerConnectionState::ID_AuthorityRefused), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(24), PeerConnectionState::ID_NoLocator) => {
+                machine.exit(PeerConnectionState::ID_NoLocator);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(24), PeerConnectionState::ID_NoSlot) => {
+                machine.exit(PeerConnectionState::ID_NoSlot);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(24), PeerConnectionState::ID_IdentityMismatch) => {
+                machine.exit(PeerConnectionState::ID_IdentityMismatch);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(24), PeerConnectionState::ID_AuthorityRefused) => {
+                machine.exit(PeerConnectionState::ID_AuthorityRefused);
+                machine.exit(PeerConnectionState::ID_Refused);
+                machine.enter(PeerConnectionState::ID_Idle, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(PeerConnectionState::ID_Idle), ended_in: None }
+            }
+            // No other pair is selected: a transition is selected only from
+            // an atomic state below the state it is written in.
+            _ => ::sce_rust_runtime::Entered {
+                states: 0,
+                current: None,
+                ended_in: None,
+            },
+        }
+    }
+
+    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+    ) {
+        match atomic {
+            PeerConnectionState::ID_Idle => {
+                machine.exit(PeerConnectionState::ID_Idle);
+            }
+            PeerConnectionState::ID_Passive => {
+                machine.exit(PeerConnectionState::ID_Passive);
+            }
+            PeerConnectionState::ID_PassiveUp => {
+                machine.exit(PeerConnectionState::ID_PassiveUp);
+            }
+            PeerConnectionState::ID_Resolving => {
+                machine.exit(PeerConnectionState::ID_Resolving);
+            }
+            PeerConnectionState::ID_Connecting => {
+                machine.exit(PeerConnectionState::ID_Connecting);
+            }
+            PeerConnectionState::ID_Established => {
+                machine.exit(PeerConnectionState::ID_Established);
+            }
+            PeerConnectionState::ID_Backoff => {
+                machine.exit(PeerConnectionState::ID_Backoff);
+            }
+            PeerConnectionState::ID_NoLocator => {
+                machine.exit(PeerConnectionState::ID_NoLocator);
+                machine.exit(PeerConnectionState::ID_Refused);
+            }
+            PeerConnectionState::ID_NoSlot => {
+                machine.exit(PeerConnectionState::ID_NoSlot);
+                machine.exit(PeerConnectionState::ID_Refused);
+            }
+            PeerConnectionState::ID_IdentityMismatch => {
+                machine.exit(PeerConnectionState::ID_IdentityMismatch);
+                machine.exit(PeerConnectionState::ID_Refused);
+            }
+            PeerConnectionState::ID_AuthorityRefused => {
+                machine.exit(PeerConnectionState::ID_AuthorityRefused);
+                machine.exit(PeerConnectionState::ID_Refused);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -621,6 +971,12 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0129: this document is printed as its own step function, the
+    // `StepFunction` above, which the engine runs in place of the shared
+    // interpreter.
+    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
+        Some(::sce_rust_runtime::StepFunctionForm::of());
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -635,9 +991,9 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0125: this document's microsteps are walked from the entry rows
-    // of its tables, which builds no set of states and walks no stack, so the
-    // workspace holds the enabled set alone.
+    // docs/adr/0129: this document's microsteps are its step function's, which
+    // takes one transition a microstep and builds no set of states, so the
+    // workspace holds that one transition alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(12) }, { ::sce_rust_runtime::record_words(12, 0) }, 0>;
     type Configuration = PeerConnectionConfiguration;
@@ -766,7 +1122,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: peer_connection.scxml:87 :: _machine"]
 // SCE-MAP: peer_connection.scxml:87 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
         match state {
             PeerConnectionState::ID_Backoff => {
                 // SCE-MAP: peer_connection.scxml:157 :: Backoff :: _state_body
@@ -825,7 +1181,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -837,202 +1193,6 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
 
 
 
-
-    // Appendix D selectTransitions, the half only this document can answer:
-    // the first of `state`'s own transitions, in document order, that `event`
-    // enables, as its row of the tables, which holds its targets and its
-    // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
-    // state and the event are the numbers the tables are indexed by
-    // (docs/adr/0123).
-    #[doc = "SCE-MAP: peer_connection.scxml:87 :: _machine"]
-// SCE-MAP: peer_connection.scxml:87 :: _machine
-    fn first_enabled_transition(
-        &mut self,
-        state: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-        sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match state {
-            PeerConnectionState::ID_Backoff => {
-                if event == PeerConnectionEvent::ID_RetryDue {
-                    {
-                        // Backoff, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(19));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Backoff, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(20));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Connecting => {
-                if event == PeerConnectionEvent::ID_DialEstablished {
-                    {
-                        // Connecting, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(12));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_DialFailed {
-                    {
-                        // Connecting, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(13));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_DialNoSlot {
-                    {
-                        // Connecting, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(14));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_DialMismatch {
-                    {
-                        // Connecting, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(15));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Connecting, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(16));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Established => {
-                if event == PeerConnectionEvent::ID_SessionLost {
-                    {
-                        // Established, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(17));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Established, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(18));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Idle => {
-                if event == PeerConnectionEvent::ID_ManualStart {
-                    {
-                        // Idle, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(0));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStartPassive {
-                    {
-                        // Idle, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(1));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualRefused {
-                    {
-                        // Idle, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(2));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Passive => {
-                if event == PeerConnectionEvent::ID_InboundEstablished {
-                    {
-                        // Passive, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(3));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStart {
-                    {
-                        // Passive, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(4));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Passive, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(5));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_PassiveUp => {
-                if event == PeerConnectionEvent::ID_SessionLost {
-                    {
-                        // PassiveUp, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(6));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStart {
-                    {
-                        // PassiveUp, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(7));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // PassiveUp, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(8));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Refused => {
-                if event == PeerConnectionEvent::ID_ManualStart {
-                    {
-                        // Refused, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(21));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStartPassive {
-                    {
-                        // Refused, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(22));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualRefused {
-                    {
-                        // Refused, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(23));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Refused, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(24));
-                    }
-                }
-                None
-            }
-            PeerConnectionState::ID_Resolving => {
-                if event == PeerConnectionEvent::ID_ResolveFound {
-                    {
-                        // Resolving, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(9));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ResolveEmpty {
-                    {
-                        // Resolving, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(10));
-                    }
-                }
-                if event == PeerConnectionEvent::ID_ManualStop {
-                    {
-                        // Resolving, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(11));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -1042,7 +1202,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         match transition.0 {
             // Backoff, transition 1
