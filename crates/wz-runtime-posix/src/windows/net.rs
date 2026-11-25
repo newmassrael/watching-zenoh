@@ -870,6 +870,22 @@ mod tests {
             );
         }
 
+        /// Whether the wake `on` holds its datagram within `ms` milliseconds, asked of `WSAPoll`
+        /// alone: nothing is read, so the wake is still ready for the wait a test makes after.
+        #[cfg(feature = "alloc")]
+        fn readable_within(on: wz_runtime_coop::session_drive::WaitOn, ms: i32) -> bool {
+            let wz_runtime_coop::session_drive::WaitOn::Wake(handle) = on else {
+                return false;
+            };
+            let mut entry = ws::WSAPOLLFD {
+                fd: handle,
+                events: ws::POLLRDNORM,
+                revents: 0,
+            };
+            // SAFETY: one live entry for the call; the timeout bounds the wait.
+            unsafe { ws::WSAPoll(&mut entry, 1, ms) > 0 }
+        }
+
         /// A wake is read only by a wait that found it ready, as on a POSIX host: one past the
         /// set, which the wait did not name to `WSAPoll`, keeps its word for the next wait, which
         /// ends at once. CONTROL: the first wait is the bounded look. Turned red by a wait that
@@ -889,18 +905,19 @@ mod tests {
                 .collect();
             set.push(LinkWait::input(wake.on));
             wake.waker.wake_by_ref();
+            assert!(
+                readable_within(wake.on, 5_000),
+                "CONTROL: the wake's datagram has landed"
+            );
             let started = Instant::now();
             waits.wait(&set, 5_000);
             assert!(
                 started.elapsed() < Duration::from_millis(1_000),
                 "CONTROL: a wait past the set is the bounded look"
             );
-            let started = Instant::now();
-            waits.wait(&[LinkWait::input(wake.on)], 5_000);
             assert!(
-                started.elapsed() < Duration::from_millis(1_000),
-                "the wake the first wait did not look at was left ready, took {:?}",
-                started.elapsed()
+                readable_within(wake.on, 0),
+                "the wake the first wait did not look at was left ready"
             );
         }
 
@@ -930,8 +947,11 @@ mod tests {
                 "CONTROL: the datagram waits on its socket"
             );
             wake.waker.wake_by_ref();
-            // The wake is a datagram the loopback carries: it has landed well within this.
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                readable_within(wake.on, 5_000),
+                "CONTROL: the wake's datagram has landed"
+            );
+            // Every entry the wait names is ready now, so its bounded look finds them so.
             let elsewhere = LinkWait::input(WaitOn::AppLink(7));
             waits.wait(&[elsewhere, on(&ready), LinkWait::input(wake.on)], 5_000);
             assert_eq!(
