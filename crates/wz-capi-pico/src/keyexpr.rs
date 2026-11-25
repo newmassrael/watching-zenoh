@@ -1068,6 +1068,10 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// whole-key declaration from a prefix one.
 /// `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` as it was and `key` let go of, when the heap
 /// refuses the key's box.
+///
+/// Out of line: the clone, the owned constructor and the canonizing body each carried their own
+/// copy of the box, its move into place and the drop of a key the heap refused.
+#[inline(never)]
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) -> ZResult {
     match crate::bytes::try_box(key) {
         Ok(key) => {
