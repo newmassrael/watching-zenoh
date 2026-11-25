@@ -46,9 +46,10 @@ impl ClockSource for FrozenClock {
 #[test]
 fn multicast_profile_admits_peer_and_reassembles_fragmented_put_over_lwip() {
     // The routed link: lwip_test_link inits lwIP once AND routes multicast TX
-    // over the IGMP-capable loop netif, so the self-injected JOIN + the echoed
-    // fragment chain loop back into ip_input and are accepted on the joined
-    // group. The MutexGuard serialises lwIP's process-global group membership.
+    // over the IGMP-capable loop netif, so the member's JOIN and fragment chain
+    // and the node's fragments loop back into ip_input and are accepted on the
+    // joined group. The MutexGuard serialises lwIP's process-global group
+    // membership.
     let (_serial, link) = wz_link_lwip::lwip_test_link();
 
     let mut stages: Vec<MulticastStage> = Vec::new();
@@ -80,13 +81,13 @@ fn multicast_profile_admits_peer_and_reassembles_fragmented_put_over_lwip() {
     );
     assert!(
         report.tx_fragmented,
-        "the 200-byte Put must split into >1 datagram at batch_size 64 (so the \
-         round trip exercises the Fragment RX arm); report = {report:#?}"
+        "the node's 200-byte Put must leave it as >1 fragment at batch_size 64, \
+         as the member read them; report = {report:#?}"
     );
     assert!(
         report.peer_admitted,
-        "the crafted peer JOIN must be admitted into the §3.2 table (our own \
-         beacon is zid-filtered); report = {report:#?}"
+        "the member's JOIN must be admitted into the §3.2 table; \
+         report = {report:#?}"
     );
     assert!(
         !report.saw_drop,
@@ -95,9 +96,9 @@ fn multicast_profile_admits_peer_and_reassembles_fragmented_put_over_lwip() {
     );
     assert!(
         report.saw_push,
-        "the fragmented Put must be split by multicast_tx_emit, multicast to \
-         the group, echoed back, and reassembled by the Fragment RX arm into \
-         one Push; report = {report:#?}"
+        "the member's fragmented Put must be split by multicast_tx_emit, \
+         multicast to the node's port, and reassembled by the node's Fragment \
+         RX arm into one Push; report = {report:#?}"
     );
     assert!(
         report.departed,
