@@ -48,6 +48,7 @@ use wz_codecs::timestamp::Timestamp;
 
 use super::ReplyRegistry;
 use crate::bounded::Storage;
+use crate::driver_loop::OwedToProjection;
 use crate::ext_view::walked;
 #[cfg(any(
     feature = "pubsub-put",
@@ -394,7 +395,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     }
 
     /// The owned projection of `response`, which the lent form does not represent
-    /// ([`LentResponse::Owned`]): the reply the copying receive delivers for it, owned, for a
+    /// ([`OwedToProjection`]): the reply the copying receive delivers for it, owned, for a
     /// caller that hands it to the pending gets itself. `None` for one the projection drops, and
     /// for every one in a build that lends only (`rx-lent-only`).
     #[cfg(feature = "alloc")]
@@ -440,18 +441,12 @@ impl Default for ReplyRoom {
 }
 
 /// A Response the in-place receive path lent, read for a caller that hands its reply to the
-/// pending gets itself ([`lend_response`]).
-pub enum LentResponse<'r, 'f> {
-    /// The reply, over the frame, the peer's tables and the caller's room.
-    Reply(LentReply<'r, 'f>),
-    /// A Response the owned path drops too (an unknown body, a kind this build does not
-    /// deliver, a key no space holds), and, in a build with no owned projection to fall back
-    /// on, one the lent form does not represent.
-    Nothing,
-    /// A Response the lent form does not represent, which its owned projection delivers
-    /// (`ReplyRegistry::project_response`).
-    Owned,
-}
+/// pending gets itself ([`lend_response`]): the reply, over the frame, the peer's tables and the
+/// caller's room; `None` for a Response the owned path drops too (an unknown body, a kind this
+/// build does not deliver, a key no space holds) and, in a build with no owned projection to fall
+/// back on, for one the lent form does not represent; [`OwedToProjection`] for one the lent form
+/// does not represent, which its owned projection delivers (`ReplyRegistry::project_response`).
+pub type LentResponse<'r, 'f> = Result<Option<LentReply<'r, 'f>>, OwedToProjection>;
 
 /// Read `response` into the reply its pending gets are handed, over its frame, the peer's tables
 /// `spaces` names and `room`, for a caller that hands it to them itself: what
@@ -463,13 +458,12 @@ pub fn lend_response<'r, 'f, PS: Storage, OS: Storage>(
     room: &'r mut ReplyRoom,
 ) -> LentResponse<'r, 'f> {
     match lent_reply(response, spaces, room) {
-        Ok(Some(reply)) => LentResponse::Reply(reply),
-        Ok(None) => LentResponse::Nothing,
+        Ok(reply) => Ok(reply),
         #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-        Err(_) => LentResponse::Owned,
+        Err(_) => Err(OwedToProjection),
         // No owned projection to fall back on: dropped, as the registry's own dispatch drops it.
         #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
-        Err(_) => LentResponse::Nothing,
+        Err(_) => Ok(None),
     }
 }
 
@@ -679,9 +673,7 @@ mod tests {
             .encode_to_vec();
         let decoded = ResponseView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let mut room = ReplyRoom::default();
-        let LentResponse::Reply(reply) =
-            lend_response(&decoded, MappingSpaces::from(&peer), &mut room)
-        else {
+        let Ok(Some(reply)) = lend_response(&decoded, MappingSpaces::from(&peer), &mut room) else {
             panic!("a reply lent where it lies");
         };
         let (mut registry, log) = recording();
@@ -695,7 +687,7 @@ mod tests {
         let mut room = ReplyRoom::default();
         assert!(matches!(
             lend_response(&decoded, MappingSpaces::from(&peer), &mut room),
-            LentResponse::Nothing
+            Ok(None)
         ));
     }
 

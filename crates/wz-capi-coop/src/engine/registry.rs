@@ -516,7 +516,7 @@ pub(super) struct RegistryOf<H: Holders> {
     set_reads: core::cell::Cell<usize>,
     /// The lent Pushes handed to the subscribers' plane alone (`Self::dispatch_push`, or
     /// `Self::lend_push`), the face lookups their dispatches made with the drains after them, and
-    /// the lent Pushes that reached the fan over every plane instead ([`Self::dispatch_event`]):
+    /// the lent Pushes that reached the fan over every plane instead ([`Self::dispatch_event_to`]):
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
@@ -991,11 +991,13 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(super) fn dispatch_event(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         self.dispatch_event_to(face, event, Planes::All);
     }
 
-    /// [`Self::dispatch_event`] to the planes `planes` names.
+    /// Fan one iteration's event of face `face` into the planes `planes` names, against that
+    /// face's tables. A face the session no longer holds hears nothing.
     pub(super) fn dispatch_event_to(
         &mut self,
         face: HeldFace,
@@ -1091,7 +1093,7 @@ impl<H: Holders> RegistryOf<H> {
             .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
     }
 
-    /// The next [`Self::dispatch_event`] is of a link whose peer's zid `peer` reads: what the
+    /// The next [`Self::dispatch_event_to`] is of a link whose peer's zid `peer` reads: what the
     /// watches are told of it is held as that peer's events (`DeclWatches::hear_link`). A group's
     /// dispatch says nothing, and what it tells is held for no one.
     #[cfg(any(
@@ -1121,7 +1123,7 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// Drain what the last [`Self::dispatch_event`] of face `id` staged, EXCEPT the `Final`s the
+    /// Drain what the last [`Self::dispatch_event_to`] of face `id` staged, EXCEPT the `Final`s the
     /// queries owe: the replies, the answers to the peer's interests and the terminated-get
     /// prunes leave through `actions`. The `Final`s are taken with
     /// [`Self::take_pending_final_rids`].
@@ -1150,7 +1152,7 @@ impl<H: Holders> RegistryOf<H> {
 
     /// A Push of face `id` lent where its frame lies ([`super::lent_push`]), handed to the
     /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
-    /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
+    /// plane ([`Self::dispatch_event_to`]) is spared, and so are the watches' staging, which a Push
     /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
     /// of Pushes it is one of ([`Self::after_pushes`]): a Push stages nothing for it to drain, so
     /// it is done once for the run and not once for each. A face the session no longer holds hears
@@ -1192,7 +1194,7 @@ impl<H: Holders> RegistryOf<H> {
                     .subscribers
                     .lend_in_place(&app.tables, record, room)
             }
-            None => LentPush::Nothing,
+            None => Ok(None),
         }
     }
 
@@ -1235,7 +1237,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The owned projection of the Push of face `face` that `record` lends, which the lent form
-    /// does not represent (`LentPush::Owned`): the sample the copying receive delivers for it.
+    /// does not represent (`OwedToProjection`): the sample the copying receive delivers for it.
     /// A face the session no longer holds projects nothing.
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     pub(super) fn project_push(
@@ -1263,7 +1265,7 @@ impl<H: Holders> RegistryOf<H> {
         room: &'s mut wz_session_core::reply::ReplyRoom,
     ) -> wz_session_core::reply::LentResponse<'s, 'f> {
         let Some(response) = record.response() else {
-            return wz_session_core::reply::LentResponse::Nothing;
+            return Ok(None);
         };
         match self.split_unwritten(self.place(face)) {
             Some(Split { app, face, .. }) => {
@@ -1275,12 +1277,12 @@ impl<H: Holders> RegistryOf<H> {
                     .from_sender(record.sender());
                 wz_session_core::reply::lend_response(response, spaces, room)
             }
-            None => wz_session_core::reply::LentResponse::Nothing,
+            None => Ok(None),
         }
     }
 
     /// The owned projection of the Response of face `face` that `record` lends, which the lent
-    /// form does not represent (`LentResponse::Owned`): the reply the copying receive delivers
+    /// form does not represent (`OwedToProjection`): the reply the copying receive delivers
     /// for it. A face the session no longer holds projects nothing.
     #[cfg(all(
         feature = "query",
@@ -1359,7 +1361,10 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
     /// to wait for does with each event.
-    #[cfg(not(feature = "queryable"))]
+    #[cfg(all(
+        not(feature = "queryable"),
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn dispatch<S>(&mut self, face: HeldFace, event: IterationEvent<'_, '_>, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -1367,7 +1372,8 @@ impl<H: Holders> RegistryOf<H> {
         self.dispatch_to(face, event, Planes::All, actions);
     }
 
-    /// [`Self::dispatch`] to the planes `planes` names.
+    /// Fan and drain one event of face `face` into the planes `planes` names, the `Final`s with
+    /// the rest.
     #[cfg(not(feature = "queryable"))]
     pub(super) fn dispatch_to<S>(
         &mut self,
@@ -1387,7 +1393,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// What follows the dispatch of a run of lent Pushes of face `id` (`Self::dispatch_push`, or
-    /// `Self::lend_push`), drained under one lookup of the face, as [`Self::dispatch`] drains after
+    /// `Self::lend_push`), drained under one lookup of the face, as `dispatch_to` drains after
     /// every other record.
     #[cfg(not(feature = "queryable"))]
     pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)

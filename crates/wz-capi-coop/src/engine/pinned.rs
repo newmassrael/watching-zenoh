@@ -22,8 +22,7 @@
 
 use super::*;
 
-use wz_session_core::driver_loop::InPlaceRecord;
-use wz_session_core::pubsub::LentPush;
+use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::sample::Sample;
 use wz_session_core::session_tables::PinnedFanOut;
 
@@ -44,15 +43,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let lookups = held.0.session.registry.lookups();
         let push = held.0.session.registry.lend_push(face, record, &mut room);
         #[cfg(test)]
-        let lent = matches!(push, LentPush::Sample(_));
+        let lent = matches!(push, Ok(Some(_)));
         let sample = match push {
             // SAFETY: what the sample borrows outlives the walk below, which holds it no longer
             // than this call: the frame is lent by the pump the read holds through it, `room`
             // stays in this frame, and the face's peer and its buffer are neither written nor let
             // go of while it runs (see the module's docs).
-            LentPush::Sample(sample) => Some(unsafe { past_the_lock(sample, record) }),
-            LentPush::Nothing => None,
-            LentPush::Owned => {
+            Ok(Some(sample)) => Some(unsafe { past_the_lock(sample, record) }),
+            Ok(None) => None,
+            Err(OwedToProjection) => {
                 owned = held.0.session.registry.project_push(face, record);
                 owned.as_ref().map(|projected| SampleRef::of(projected))
             }

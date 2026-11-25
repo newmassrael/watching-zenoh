@@ -19,8 +19,8 @@
 
 use super::*;
 
-use wz_session_core::driver_loop::InPlaceRecord;
-use wz_session_core::reply::{InboundReply, LentReply, LentResponse, ReplyRoom};
+use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
+use wz_session_core::reply::{InboundReply, LentReply, ReplyRoom};
 use wz_session_core::reply_sink::ReplyView;
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
@@ -40,12 +40,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // SAFETY: what the reply borrows outlives its delivery below: the frame is lent by
             // the pump the read holds through it, `room` stays in this frame, and the face's peer
             // is neither written nor let go of while it runs (see the module's docs).
-            LentResponse::Reply(reply) => {
+            Ok(Some(reply)) => {
                 lent = unsafe { past_the_lock(reply, record) };
                 &lent
             }
-            LentResponse::Nothing => return,
-            LentResponse::Owned => match held.0.session.registry.project_reply(face, record) {
+            Ok(None) => return,
+            Err(OwedToProjection) => match held.0.session.registry.project_reply(face, record) {
                 Some(projected) => {
                     owned = projected;
                     &owned

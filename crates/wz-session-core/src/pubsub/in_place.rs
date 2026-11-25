@@ -45,7 +45,7 @@ use wz_codecs::timestamp::Timestamp;
 
 use super::{InPlaceFallbacks, LocalSubscribers, PeerDelivery, PeerNaming, SubscriberPeer};
 use crate::bounded::Storage;
-use crate::driver_loop::InPlaceRecord;
+use crate::driver_loop::{InPlaceRecord, OwedToProjection};
 use crate::reliability::Reliability;
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
@@ -97,17 +97,11 @@ impl Fallback {
 }
 
 /// What a Push the in-place receive path lent comes to before anyone is handed it
-/// ([`SubscriberPeer::lend_in_place`]).
-pub enum LentPush<'s> {
-    /// The sample to hand to each subscriber its key reaches from a peer.
-    Sample(SampleRef<'s>),
-    /// Nothing to hand anyone: a record that is not a Push, a body or a key the delivery drops,
-    /// or the session's own sample echoed back.
-    Nothing,
-    /// A Push the lent form does not represent (a sliced payload, a key past the room it is
-    /// composed in, a timestamp stack): the owned projection delivers it.
-    Owned,
-}
+/// ([`SubscriberPeer::lend_in_place`]): the sample to hand to each subscriber its key reaches
+/// from a peer; `None` for nothing to hand anyone (a record that is not a Push, a body or a key
+/// the delivery drops, the session's own sample echoed back); [`OwedToProjection`] for a Push
+/// the lent form does not represent, which its owned projection delivers.
+pub type LentPush<'s> = Result<Option<SampleRef<'s>>, OwedToProjection>;
 
 /// What a lent Push's sample borrows beside the frame and the peer's table: the buffer a key is
 /// composed in where the policy composes in the delivering call's frame, and the source info read
@@ -244,7 +238,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// this peer's records, so it holds for as long as the caller reads no other.
     ///
     /// A Push the lent form does not represent is counted, as the dispatch counts it, and is
-    /// [`LentPush::Owned`]: the caller hands out its owned projection
+    /// [`OwedToProjection`]: the caller hands out its owned projection
     /// ([`Self::project_in_place`]).
     pub fn lend_in_place<'s, 'a: 's, L: LocalSubscribers>(
         &'s mut self,
@@ -254,7 +248,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) -> LentPush<'s> {
         // A lent Request or Response is the queryables' or the pending gets'.
         let Some(push) = record.push() else {
-            return LentPush::Nothing;
+            return Ok(None);
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
         let SubscriberPeer {
@@ -263,7 +257,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             in_place_fallbacks,
             ..
         } = self;
-        match Self::lend_sample(
+        Self::lend_sample(
             naming,
             compose,
             subs,
@@ -271,18 +265,15 @@ impl<Q: Storage> SubscriberPeer<Q> {
             reliability,
             record.sender(),
             room,
-        ) {
-            Ok(Some(sample)) => LentPush::Sample(sample),
-            Ok(None) => LentPush::Nothing,
-            Err(why) => {
-                why.count_in(in_place_fallbacks);
-                LentPush::Owned
-            }
-        }
+        )
+        .map_err(|why| {
+            why.count_in(in_place_fallbacks);
+            OwedToProjection
+        })
     }
 
     /// The owned projection of the Push `record` lends, which the lent form does not represent
-    /// ([`LentPush::Owned`]): the sample the copying receive delivers for it, owned, so whoever
+    /// ([`OwedToProjection`]): the sample the copying receive delivers for it, owned, so whoever
     /// hands it out holds nothing of this side. `None` for a record that is no Push, one the
     /// projection drops, and every one in a build that lends only (`rx-lent-only`).
     #[cfg(feature = "alloc")]
@@ -1265,9 +1256,9 @@ mod tests {
         let mut side = lent_side("mine/", true);
         let mut room = LentRoom::default();
         let key = match side.lend_in_place(&*table, &record, &mut room) {
-            LentPush::Sample(sample) => sample.keyexpr.to_string(),
-            LentPush::Nothing => panic!("a Push the side resolves lent nothing"),
-            LentPush::Owned => panic!("a key that fits the row was owed to the projection"),
+            Ok(Some(sample)) => sample.keyexpr.to_string(),
+            Ok(None) => panic!("a Push the side resolves lent nothing"),
+            Err(OwedToProjection) => panic!("a key that fits the row was owed to the projection"),
         };
         assert_eq!(key, "mine/x");
         assert_eq!(side.in_place_fallbacks(), InPlaceFallbacks::default());
@@ -1278,7 +1269,7 @@ mod tests {
         assert!(
             matches!(
                 past.lend_in_place(&*table, &record, &mut room),
-                LentPush::Owned
+                Err(OwedToProjection)
             ),
             "a key past the row was lent"
         );

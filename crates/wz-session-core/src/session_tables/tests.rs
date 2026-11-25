@@ -3239,7 +3239,7 @@ fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
                 .map(|(_, n)| *n),
         );
     });
-    assert_eq!(fanned, vec![1, 2, 5], "CONTROL: the fan-out's rows");
+    assert_eq!(fanned, std::vec![1, 2, 5], "CONTROL: the fan-out's rows");
     let mut fan = PinnedFanOut::new("a/b");
     assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
     assert!(
@@ -3278,12 +3278,12 @@ fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_rea
                 .map(|(_, n)| *n),
         );
     });
-    assert_eq!(fanned, vec![1, 4, 5], "CONTROL: the loopback's rows");
+    assert_eq!(fanned, std::vec![1, 4, 5], "CONTROL: the loopback's rows");
     let mut fan = PinnedFanOut::local("a/b");
     assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
     assert_eq!(
         pinned_in_turn(&tables, &mut PinnedFanOut::new("a/b")),
-        vec![1, 2, 5],
+        std::vec![1, 2, 5],
         "CONTROL: a peer's message on the same key reaches the rows that hear peers"
     );
 }
