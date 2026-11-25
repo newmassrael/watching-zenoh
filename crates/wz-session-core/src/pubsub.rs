@@ -2069,6 +2069,28 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let _ = (&subs, &cx);
     }
 
+    /// The subscribers' side of `message`, one owned record of a frame, for a delivery that hands
+    /// each sample out itself, one subscriber at a time: a Push is projected into the sample its
+    /// subscribers are handed (`project_push`; `None` for one nobody is handed), and any other
+    /// record is taken as [`Self::dispatch`] takes it, which hands nothing out.
+    #[cfg(feature = "alloc")]
+    pub fn take_record<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        message: &NetworkMessage,
+        reliability: Reliability,
+    ) -> Option<crate::sample::Sample> {
+        match message {
+            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+            NetworkMessage::Push(push) => self.project_push(&*subs, push, reliability, true, 0),
+            other => {
+                self.dispatch(subs, cx, other, reliability);
+                None
+            }
+        }
+    }
+
     /// A peer's subscriber Interest, in a build that answers none (`interest-answer` off): no row
     /// is kept for it, no reply is staged and no `Final` is owed. This is zenoh-pico's answer on a
     /// unicast transport: the session hands every Interest that is not a `Final` to the interest
@@ -5082,6 +5104,63 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "matching keyexpr fires the callback exactly once"
+        );
+    }
+
+    /// A record taken alone, for a delivery that hands each sample out itself: a Push is
+    /// projected into the sample its subscribers are handed and handed to none of them by the
+    /// take, and a Push whose key names an alias the peer never declared projects nothing. The
+    /// CONTROL is the dispatch of the same Push, which hands it out. Turned red by a take that
+    /// hands the sample through its context, or projects a key that does not resolve.
+    #[test]
+    fn a_push_taken_alone_is_projected_and_handed_to_no_subscriber() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counted = counter.clone();
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        let push = NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a")));
+        let unknown = NetworkMessage::Push(Box::new(
+            Push {
+                keyexpr: Wireexpr {
+                    body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                        id: 7,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                },
+                ..Push::default()
+            }
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap(),
+        ));
+        {
+            let SubscriberRegistry { table, peer } = &mut registry;
+            let taken = peer.take_record(table, &mut (), &push, Reliability::Reliable);
+            assert_eq!(
+                taken.map(|sample| sample.keyexpr),
+                Some("topic/a".to_string()),
+                "the Push's sample, its key resolved"
+            );
+            assert!(
+                peer.take_record(table, &mut (), &unknown, Reliability::Reliable)
+                    .is_none(),
+                "a key that does not resolve projects nothing"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "the take handed the sample to a subscriber"
+        );
+        registry.dispatch(&push, Reliability::Reliable);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "CONTROL: the dispatch of the same Push hands it out"
         );
     }
 

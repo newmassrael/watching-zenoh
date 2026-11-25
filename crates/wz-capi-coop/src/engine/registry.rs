@@ -440,6 +440,17 @@ type BuildHolders = held::OneHolder;
 /// The application layer of one session, as the build holds its faces.
 pub(super) type Registry = RegistryOf<BuildHolders>;
 
+/// The planes of the application layer a dispatch of a face's event reaches.
+#[derive(Clone, Copy)]
+pub(super) enum Planes {
+    /// Every plane.
+    All,
+    /// Every plane but the subscribers', whose side of each of the event's records the caller
+    /// took itself, in their order (`RegistryOf::take_subscriber_record`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    BesideSubscribers,
+}
+
 /// The application layer of one session, its faces held as `H` holds them. See the module
 /// documentation.
 pub(super) struct RegistryOf<H: Holders> {
@@ -981,6 +992,16 @@ impl<H: Holders> RegistryOf<H> {
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
     pub(super) fn dispatch_event(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+        self.dispatch_event_to(face, event, Planes::All);
+    }
+
+    /// [`Self::dispatch_event`] to the planes `planes` names.
+    pub(super) fn dispatch_event_to(
+        &mut self,
+        face: HeldFace,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         #[cfg(all(test, feature = "std"))]
         if super::lent_push(&event) {
             self.pushes.2 += 1;
@@ -994,7 +1015,19 @@ impl<H: Holders> RegistryOf<H> {
             others,
         }) = self.split(self.place(face))
         {
-            app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others);
+            match planes {
+                Planes::All => {
+                    app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
+                }
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                ),
+            }
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(face) {
@@ -1163,6 +1196,29 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
+    /// The subscribers' side of `message`, one owned record of a frame of face `face`, taken
+    /// ahead of the frame's other planes (`Planes::BesideSubscribers`): a Push's projection, which
+    /// the caller hands out one subscriber at a time, and any other record taken as the frame's
+    /// dispatch takes it (`SubscriberPeer::take_record`). A face the session no longer holds
+    /// takes nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn take_subscriber_record(
+        &mut self,
+        face: HeldFace,
+        message: &wz_session_core::network_message::NetworkMessage,
+        reliability: wz_session_core::sample::Reliability,
+    ) -> Option<wz_session_core::sample::Sample> {
+        let Split {
+            app,
+            delivery,
+            face,
+            ..
+        } = self.split(self.place(face))?;
+        face.peer
+            .subscribers
+            .take_record(&mut app.tables, delivery, message, reliability)
+    }
+
     /// The owned projection of the Push of face `face` that `record` lends, which the lent form
     /// does not represent (`LentPush::Owned`): the sample the copying receive delivers for it.
     /// A face the session no longer holds projects nothing.
@@ -1221,7 +1277,21 @@ impl<H: Holders> RegistryOf<H> {
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        self.dispatch_event(face, event);
+        self.dispatch_to(face, event, Planes::All, actions);
+    }
+
+    /// [`Self::dispatch`] to the planes `planes` names.
+    #[cfg(not(feature = "queryable"))]
+    pub(super) fn dispatch_to<S>(
+        &mut self,
+        face: HeldFace,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+        actions: &S,
+    ) where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        self.dispatch_event_to(face, event, planes);
         #[cfg(feature = "interest-answer")]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {

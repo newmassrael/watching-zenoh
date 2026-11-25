@@ -75,6 +75,43 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let _ = reached;
     }
 
+    /// Take the subscribers' side of `messages`, the records of a frame of face `face` the copying
+    /// receive decoded, one record at a time in their order: each Push's sample is handed to each
+    /// subscriber its key reaches, one call at a time with the session let go of, and any other
+    /// record is taken under the lock as the frame's dispatch takes it. What the frame's other
+    /// planes take follows (`Planes::BesideSubscribers`). A session closed meanwhile takes no
+    /// record after the one whose callback closed it.
+    pub(super) fn hand_copied_records(
+        &self,
+        face: HeldFace,
+        messages: &[wz_session_core::network_message::NetworkMessage],
+        reliable: bool,
+    ) {
+        let reliability = wz_session_core::sample::Reliability::from_reliable_bool(reliable);
+        for message in messages {
+            let Some(mut held) = self.live() else {
+                return;
+            };
+            let Some(owned) =
+                held.0
+                    .session
+                    .registry
+                    .take_subscriber_record(face, message, reliability)
+            else {
+                continue;
+            };
+            let sample = SampleRef::of(&owned);
+            let mut fan = PinnedFanOut::new(sample.keyexpr);
+            let reached = self.hand_row_by_row(held, &sample, &mut fan);
+            #[cfg(test)]
+            if reached > 0 {
+                self.takes.pinned_samples.fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(not(test))]
+            let _ = reached;
+        }
+    }
+
     /// A publish's leg to the session's own subscribers, when its destination admits them: each
     /// subscriber whose origin admits the session's own messages is handed it here, inside the put
     /// as zenoh-pico's does (`vendor/zenoh-pico/src/session/subscription.c` @

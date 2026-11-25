@@ -25,7 +25,10 @@ use core::sync::atomic::AtomicBool;
 
 use wz_runtime_coop::faces::{Dial, LinkEnd, DIAL_LOOK_MS};
 use wz_runtime_coop::transport::{DialRow, LinkPump, OpenedAs, PlacedWire, PumpPlace};
+use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, LinkTimes, Refused, UnicastLink};
+
+use super::registry::Planes;
 
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink>>;
@@ -98,10 +101,10 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
 }
 
 impl<C: ClockSource + 'static> FaceRecords<C> {
-    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the face's
-    /// tables in `registry`, and send what it staged.
+    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
+    /// `planes` names of the face's tables in `registry`, and send what it staged.
     #[cfg(feature = "queryable")]
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>) {
+    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
         let face = self.face;
         let actions = &*self.actions;
         let (plane, generation) = (&self.plane, self.generation);
@@ -116,7 +119,7 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
             feature = "declarations-synced-event"
         ))]
         registry.hear_decl_link(|| actions.peer_session_zid());
-        registry.dispatch_event(face, event);
+        registry.dispatch_event_to(face, event, planes);
         registry.flush_pending_replies(face, actions);
         for (rid, qos) in registry.take_pending_final_rids(face) {
             if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
@@ -125,10 +128,10 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         }
     }
 
-    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the face's
-    /// tables in `registry`, and send what it staged.
+    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
+    /// `planes` names of the face's tables in `registry`, and send what it staged.
     #[cfg(not(feature = "queryable"))]
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>) {
+    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
         let actions = &*self.actions;
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
@@ -136,7 +139,7 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
             feature = "declarations-synced-event"
         ))]
         registry.hear_decl_link(|| actions.peer_session_zid());
-        registry.dispatch(self.face, event, actions);
+        registry.dispatch_to(self.face, event, planes, actions);
     }
 
     /// The drains a run of Pushes put off ([`Registry::after_pushes`]).
@@ -180,11 +183,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
                 self.engine.hand_lent_push(self.records.face, record);
                 self.records.after_pushes = true;
             }
+            // The subscribers' side of each record first, a Push's sample handed out one row at a
+            // time, then the other planes', as the dispatch of the whole frame orders them.
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages, reliable, ..
+            }) => {
+                if let Some(messages) = wz_session_core::driver_loop::owned_records(messages) {
+                    self.engine
+                        .hand_copied_records(self.records.face, messages, *reliable);
+                }
+                let Some(mut held) = self.engine.live() else {
+                    return;
+                };
+                self.records.dispatch(
+                    &mut held.0.session.registry,
+                    event,
+                    Planes::BesideSubscribers,
+                );
+            }
             event => {
                 let Some(mut held) = self.engine.live() else {
                     return;
                 };
-                self.records.dispatch(&mut held.0.session.registry, event);
+                self.records
+                    .dispatch(&mut held.0.session.registry, event, Planes::All);
             }
         }
         self.engine.deliver();

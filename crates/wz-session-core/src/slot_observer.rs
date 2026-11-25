@@ -1337,6 +1337,36 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
+        self.planes_beside_subscribers(cx, peers, requesters, event, others);
+    }
+
+    /// [`Self::dispatch_event_among`] to every plane but the subscribers', for a caller that took
+    /// the subscribers' side of each of the event's records itself, in their order, before this
+    /// (`SubscriberPeer::take_record`): the planes below then resolve through the aliases the
+    /// subscribers' side bound, as they do after it in [`Self::dispatch_event_among`].
+    #[inline(never)]
+    pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+    ) {
+        self.planes_beside_subscribers(cx, peers, requesters, event, others);
+    }
+
+    /// The planes after the subscribers' side of an event. Inlined into each of the two calls
+    /// above, so each keeps the one frame the planes' temporaries lie in.
+    #[inline(always)]
+    fn planes_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
+        &mut self,
+        cx: &mut K::Delivery,
+        peers: &mut PeerTables<T>,
+        requesters: &mut Q,
+        event: IterationEvent<'_, '_>,
+        others: &O,
+    ) {
         // A peer's query is resolved through both id spaces while the queryables are asked, so
         // the tables lend the two apart.
         #[cfg(feature = "query-queryable")]
@@ -1495,7 +1525,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             feature = "liveliness-get"
         )))]
         let _ = &requesters;
-        let _ = (&peers, event, others);
+        let _ = (&peers, &cx, event, others);
     }
 
     /// Drain what the last [`Self::dispatch_event`] staged for this session
