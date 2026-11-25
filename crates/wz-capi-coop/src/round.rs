@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The engine's round of deliveries ([`wz_session_core::round`]): the calls its records owe and
-//! the kinds of record it keeps, as the engine's build names them ([`CoopCalls`]), the room one
+//! the kinds of record it keeps, as the engine's build names them (`CoopCalls`), the room one
 //! record a session is handed can take of it, and the gates that hold each link back while the
 //! round has not that room (decision Q4).
 

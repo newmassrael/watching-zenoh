@@ -57,6 +57,8 @@ pub fn snapshots_of_rows(sink: FaceEventSink) -> FaceRowSink {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use alloc::string::String;
     use alloc::vec::Vec;

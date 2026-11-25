@@ -701,6 +701,13 @@ transport-link-unixpipe,transport-link-ws|"
     # compiled with `time-base`): a wait for the next dial ends at the word, and the word joins a
     # wait on links and makes none where there was none.
     "wz-capi-coop|hook|time-base|clock_moves_tests::"
+    # The advanced publishers' and subscribers' places in the session's arena and the ring their
+    # caches keep their samples in (`advanced`, which turns on `advanced-cache`): a plan with every
+    # row lays out their places and the ring beside the key arena (`tests::arena::`), and an open
+    # keeps a zeroed ring of its own (`tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches`).
+    # One build for the two rows.
+    "wz-capi-coop|hook|advanced|tests::arena::"
+    "wz-capi-coop|hook|advanced|tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches"
     # The declaration watch (`decl_watch`, compiled with `remote-declaration-watch` or
     # `declarations-synced-event`): the router's declarations told to the watches of their kind,
     # what it held told first to a watch that came after, the end of its initial declarations told

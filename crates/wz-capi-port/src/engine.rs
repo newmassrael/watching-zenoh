@@ -173,8 +173,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// A snapshot of every established face: the peer's identity and the negotiated booleans of
     /// its transport, and the links under it. One entry for each transport a connectivity plane
     /// lists, a joined group's members included where the engine joins groups. A face whose
-    /// handshake has not completed is not listed, as with [`Self::peer_identities`]. An engine
-    /// built without the connectivity plane lists none, which is the provided answer.
+    /// handshake has not completed is not listed, as with
+    /// [`crate::PeerLists::peer_identities`]. An engine built without the connectivity plane lists
+    /// none, which is the provided answer.
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         Vec::new()
     }

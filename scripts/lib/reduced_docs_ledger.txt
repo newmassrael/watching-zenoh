@@ -77,11 +77,7 @@ wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: public docum
 wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: unresolved link to `DataMode::FragmentChainOoo`: the enum `DataMode` has no variant or associated item named `FragmentChainOoo`
 wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: unresolved link to `DataMode::FragmentChainStalled`: the enum `DataMode` has no variant or associated item named `FragmentChainStalled`
 wz-mcu-session-acceptor	wz-session-lwip/src/session_drive.rs	1	error[E0046]: not all trait items implemented, missing: `try_recv`: missing `try_recv` in implementation
-wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: public documentation for `executor_heap` links to private item `TaskSlot`: this item is private
-wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: unresolved link to `SleepFuture::poll`: no item named `SleepFuture` in scope
-wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: unresolved link to `run_until_idle`: no item named `run_until_idle` in scope
 wz-runtime-coop	wz-runtime-coop/src/group_transport.rs	1	error: unresolved link to `crate::session_drive::SessionDatagramLink`: no item named `session_drive` in module `wz_runtime_coop`
-wz-runtime-coop	wz-runtime-coop/src/join_handle.rs	1	error: unresolved link to `crate::CoopRuntime::spawn`: the struct `CoopRuntime` has no field or associated item named `spawn`
 wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `CoopRuntime::run_until_idle`: no item named `CoopRuntime` in scope
 wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `executor`: no item named `executor` in scope
 wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `join_handle::CoopJoinHandle`: no item named `join_handle` in scope
@@ -99,7 +95,6 @@ wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: redundant explicit
 wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: unresolved link to `PoolStorage::owned`: no item named `PoolStorage` in scope
 wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	2	error: unresolved link to `Self::with_reassembly_arena`: the struct `SessionPump` has no field or associated item named `with_reassembly_arena`
 wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: unresolved link to `SessionDatagramLink::try_recv`: the trait `SessionDatagramLink` has no associated item named `try_recv`
-wz-runtime-coop	wz-runtime-coop/src/session_runtime.rs	1	error: unresolved link to `EntropySource`: no item named `EntropySource` in scope
 wz-runtime-coop	wz-runtime-coop/src/udp_link.rs	1	error: unresolved link to `UdpStack`: no item named `UdpStack` in scope
 wz-runtime-posix	wz-runtime-posix/src/lib.rs	1	error: unresolved link to `slot`: no item named `slot` in scope
 wz-runtime-tokio	-	1	error: unresolved link to `crate::extauth_usrpwd_store`

@@ -815,13 +815,19 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use crate::arena::{AllocatorMemory, SessionArena};
+    #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::decl_sink::BorrowedDecl;
     #[cfg(any(feature = "query", feature = "queryable"))]
     use wz_session_core::slot_observer::ObserverRows;
-    use wz_session_core::slot_observer::SlotObserver;
+
+    use super::super::registry::CoopSinks;
 
     #[cfg(any(feature = "query", feature = "queryable"))]
     use super::super::registry::App;
+
+    /// The application's tables as this engine binds them, in the heap profile's storage: its
+    /// observers are the watches' own ([`WatchObserver`]), as the registry's are.
+    type SlotObserver = SlotObserverOf<CoopSinks>;
 
     #[cfg(any(feature = "query", feature = "queryable"))]
     const PEER: [u8; 4] = [0xc3; 4];
