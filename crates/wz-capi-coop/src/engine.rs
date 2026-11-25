@@ -2848,18 +2848,9 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         }
         let face = self.face;
         let actions = &*self.actions;
-        #[cfg(feature = "queryable")]
-        let (plane, generation) = (&self.plane, self.generation);
-        let dispatched = self.registry.with(|registry| {
-            #[cfg(feature = "queryable")]
-            registry.after_pushes(face, actions, |rid, qos| {
-                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                    actions.send_response_final(rid, qos);
-                }
-            });
-            #[cfg(not(feature = "queryable"))]
-            registry.after_pushes(face, actions);
-        });
+        let dispatched = self
+            .registry
+            .with(|registry| registry.after_pushes(face, actions));
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
@@ -6954,13 +6945,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "group"))]
         let _ = core;
         false
-    }
-
-    /// Owe each of `rids` a `Final` on every face the session holds, as the dispatch of a query
-    /// owes one: how many faces owe them.
-    #[cfg(all(test, feature = "queryable"))]
-    pub(crate) fn owe_finals(&self, rids: &[wz_session_core::wire_id::RequestId]) -> usize {
-        self.core.lock().0.session.registry.owe_finals(rids)
     }
 
     /// How often what the peers declared was searched since the open: what a test of the cost of

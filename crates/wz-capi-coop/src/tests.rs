@@ -123,6 +123,14 @@ enum Command {
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
+    /// In one batch window, so that one frame carries all three: push on the key `.0`, ask a
+    /// query of request id `.1` on the key `.2`, and push on `.0` again.
+    #[cfg(feature = "queryable")]
+    QueryBetweenPushes(
+        &'static str,
+        wz_session_core::wire_id::RequestId,
+        &'static str,
+    ),
     /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
     /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
@@ -183,9 +191,6 @@ struct Seen {
     /// `final` for a ResponseFinal.
     #[cfg(feature = "queryable")]
     answers: Vec<&'static str>,
-    /// The request id of each ResponseFinal, in the order they arrived.
-    #[cfg(feature = "queryable")]
-    final_rids: Vec<u32>,
     /// How each Response named its key on the wire: its id, the rest after it and the mapping bit
     /// (`true` is the sender's space).
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
@@ -503,10 +508,7 @@ fn run_router(
                             seen.reply_keys.push(reply_key_of(_response));
                         }
                         #[cfg(feature = "queryable")]
-                        NetworkMessage::ResponseFinal(done) => {
-                            seen.answers.push("final");
-                            seen.final_rids.push(done.request_id);
-                        }
+                        NetworkMessage::ResponseFinal(_) => seen.answers.push("final"),
                         #[cfg(feature = "query")]
                         NetworkMessage::Request(_) => seen.queries += 1,
                         _ => {}
@@ -575,9 +577,8 @@ fn run_router(
                     }
                 }
                 #[cfg(feature = "queryable")]
-                if let Some(done) = record.response_final() {
+                if record.response_final().is_some() {
                     seen.answers.push("final");
-                    seen.final_rids.push(done.request_id);
                 }
                 #[cfg(feature = "query")]
                 if record.request().is_some() {
@@ -732,6 +733,14 @@ fn run_router(
             #[cfg(feature = "queryable")]
             Ok(Command::Query(rid, key)) => {
                 let _ = actions.send_request_query(rid, 0, Some(key));
+            }
+            #[cfg(feature = "queryable")]
+            Ok(Command::QueryBetweenPushes(pushed, rid, asked)) => {
+                let _ = actions.batch_start();
+                let _ = actions.send_push_literal(pushed, b"before", true);
+                let _ = actions.send_request_query(rid, 0, Some(asked));
+                let _ = actions.send_push_literal(pushed, b"after", true);
+                let _ = actions.batch_stop();
             }
             #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
             Ok(Command::QueryById(rid, id, rest)) => {

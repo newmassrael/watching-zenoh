@@ -59,44 +59,37 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
-/// The `Final`s a face owes when a run of Pushes arrives on it go out in the drain after that run,
-/// each once, in the order they were owed, and the session stepped past it sends none again. The
-/// CONTROL is the wait before the run: owed, they go out with no frame of the router's. Turned red
-/// by a drain after a run of Pushes that hands its Finals to nobody, or one that leaves them owed.
+/// A query asked in one frame between two Pushes is answered as one asked alone is: its reply,
+/// then its Final, each once. Its Final is owed by its own record's dispatch and taken there, so the
+/// drain after the Push that follows it in the frame finds none owed, which a debug build asserts
+/// (`RegistryOf::after_pushes`). Turned red by a Final left owed past its Request's record, or by
+/// a drain after a run of Pushes that sends one again.
 #[cfg(feature = "std")]
 #[test]
-fn the_finals_a_face_owes_go_out_after_a_run_of_pushes_once_in_order() {
+fn a_query_between_pushes_is_answered_then_finalled_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let step_for = |span: Duration| {
-        let end = std::time::Instant::now() + span;
-        while std::time::Instant::now() < end {
-            let _ = SessionDrive::read(&*engine, false);
-        }
-    };
-    // What the router sends as the link comes up is read before anything is owed.
-    step_for(Duration::from_millis(400));
-    // Owed once, on the router's face as soon as the session holds it.
-    until(&engine, "the router's face to owe the Finals", || {
-        engine.owe_finals(&[3, 5]) == 1
+    declare(&engine, "demo/between/**", move |_, query, out| {
+        out.reply_keyed(query.keyexpr(), b"one")
+            .expect("a reply on the query's own key");
     });
-    step_for(Duration::from_millis(400));
-    assert!(
-        router.seen(|s| s.final_rids.is_empty()),
-        "CONTROL: owed, they wait for a frame of the router's"
-    );
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
     let (alone, ..) = engine.push_dispatches();
-    router.send(Command::Push("demo/finals", b"x"));
-    until(&engine, "the Finals the run owed", || {
-        router.seen(|s| s.final_rids.len()) >= 2
+    router.send(Command::QueryBetweenPushes(
+        "demo/pushed",
+        11,
+        "demo/between/a",
+    ));
+    until(&engine, "both Pushes, the reply and the final", || {
+        engine.push_dispatches().0 >= alone + 2 && router.seen(|s| s.answers.len()) >= 2
     });
-    assert!(
-        engine.push_dispatches().0 > alone,
-        "the run was a Push handed to the subscribers' plane alone"
-    );
-    router.send(Command::Push("demo/finals", b"y"));
-    step_for(Duration::from_millis(400));
-    assert_eq!(router.seen(|s| s.final_rids.clone()), vec![3, 5]);
+    let quiet = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
 /// A query the callback keeps holds its Final until the C program lets go of it, and a reply made

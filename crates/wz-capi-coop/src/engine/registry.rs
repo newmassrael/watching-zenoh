@@ -1109,51 +1109,24 @@ impl<H: Holders> RegistryOf<H> {
         self.counted_push(written);
     }
 
-    /// Owe each of `rids` a `Final` on every face the session holds, as the dispatch of a query
-    /// owes one: how a test sees what the drain after a run of Pushes hands out. How many faces
-    /// owe them.
-    #[cfg(all(test, feature = "queryable"))]
-    pub(super) fn owe_finals(&mut self, rids: &[wz_session_core::wire_id::RequestId]) -> usize {
-        use wz_session_core::reply_stage::FinalStaging;
-        let ids: Vec<FaceId> = self.held_ids().collect();
-        let mut owing = 0;
-        for id in ids {
-            if let Some(set) = self.held_mut(id) {
-                for &rid in rids {
-                    set.peer
-                        .finals
-                        .owe(rid, wz_session_core::sample::QosLevel::DEFAULT);
-                }
-                owing += 1;
-            }
-        }
-        owing
-    }
-
     /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
     /// under one lookup of the face: the subscribers' tables reconciled with what the application
     /// registered since, what anything staged drained through `actions`
-    /// ([`Self::flush_pending_replies`]), and each `Final` owed handed to `owe` where the face's
-    /// table holds it, the table left empty after: a run of Pushes almost never owes one, so no
-    /// table of them is made and moved out for each run, as [`Self::take_pending_final_rids`]
-    /// makes one. A face the session no longer holds owes nothing.
+    /// ([`Self::flush_pending_replies`]). A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
-    pub(super) fn after_pushes<S>(
-        &mut self,
-        face: HeldFace,
-        actions: &S,
-        mut owe: impl FnMut(wz_session_core::wire_id::RequestId, wz_session_core::sample::QosLevel),
-    ) where
+    pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
+    where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             #[cfg(feature = "interest-answer")]
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
-            for &(rid, qos) in face.peer.finals.iter() {
-                owe(rid, qos);
-            }
-            face.peer.finals.clear();
+            // No `Final` is owed here: only a Request's dispatch owes one
+            // (wz-session-core/src/query/in_place.rs:195, :214; wz-session-core/src/query.rs:3736),
+            // and the dispatch of a record that is not a Push takes every one it owed before the
+            // next record is read (`FaceDispatch::event`, wz-capi-coop/src/engine.rs:2802).
+            debug_assert!(face.peer.finals.is_empty(), "a run of Pushes owes no Final");
         }
     }
 
