@@ -35,6 +35,9 @@ pub enum Refusal {
     NotHonoured(StatementNotHonoured),
     /// What the request carries is past what the session's codec can put in one message.
     ExceedsCapacity,
+    /// A key expression declaration the entity's key names has as many holders as its count
+    /// holds, so the entity could not hold it.
+    KeyHoldsFull,
 }
 
 impl From<StatementNotHonoured> for Refusal {
@@ -61,6 +64,7 @@ impl From<RegisterError> for Refusal {
             // A listener's publisher or querier was undeclared: what it is declared on is gone, as
             // everything of a closed session is.
             RegisterError::OwnerGone => Self::Closed,
+            RegisterError::KeyexprHoldsFull => Self::KeyHoldsFull,
         }
     }
 }
@@ -75,6 +79,7 @@ impl core::fmt::Display for Refusal {
             Self::NotBuilt => "this build does not hold the plane the declaration needs",
             Self::NotHonoured(statement) => return core::fmt::Display::fmt(statement, f),
             Self::ExceedsCapacity => "the request is larger than the session's codec carries",
+            Self::KeyHoldsFull => "a declaration the key names has no room for one more holder",
         })
     }
 }
@@ -98,6 +103,7 @@ mod tests {
             Refusal::NotBuilt,
             Refusal::NotHonoured(StatementNotHonoured::TargetPeer),
             Refusal::ExceedsCapacity,
+            Refusal::KeyHoldsFull,
         ];
         let texts: Vec<_> = all.iter().map(ToString::to_string).collect();
         for (at, text) in texts.iter().enumerate() {
@@ -121,6 +127,10 @@ mod tests {
         assert_eq!(
             Refusal::from(RegisterError::IdsExhausted),
             Refusal::NoEntityId
+        );
+        assert_eq!(
+            Refusal::from(RegisterError::KeyexprHoldsFull),
+            Refusal::KeyHoldsFull
         );
     }
 

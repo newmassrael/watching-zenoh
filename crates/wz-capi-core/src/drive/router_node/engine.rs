@@ -180,8 +180,11 @@ impl wz_capi_port::KeyHolds for RouterState {
 
     /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
     /// here and there is nothing to count.
-    fn retain_keyexpr(&self, _row: wz_session_core::session_tables::KeyexprHandle) -> bool {
-        false
+    fn retain_keyexpr(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Result<(), wz_capi_port::HoldRefused> {
+        Err(wz_capi_port::HoldRefused::Gone)
     }
 }
 

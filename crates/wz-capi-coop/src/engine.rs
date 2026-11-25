@@ -82,8 +82,8 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender,
-    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
+    HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity,
+    PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
     StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
@@ -6392,17 +6392,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::
     }
 
     #[inline(never)]
-    fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
-        // One more hold of the row in the session's one table set; nothing goes on the wire.
-        let taken = match self.live() {
-            Some(mut core) => tables_mut(&mut core.0.session.registry).retain_keyexpr(row),
-            None => false,
+    fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused> {
+        let Some(mut core) = self.live() else {
+            return Err(HoldRefused::Gone);
         };
-        #[cfg(test)]
-        if taken {
+        // One more hold of the row in the session's one table set; nothing goes on the wire.
+        let tables = tables_mut(&mut core.0.session.registry);
+        if tables.retain_keyexpr(row) {
+            #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else if tables.keyexprs().get(row).is_some() {
+            Err(HoldRefused::Full)
+        } else {
+            Err(HoldRefused::Gone)
         }
-        taken
     }
 }
 

@@ -228,7 +228,7 @@ impl PicoSubscriberForms {
         // an append, or `z_keyexpr_join`), which keep the caller's declaration
         // while they still begin with it.
         let carrier = match entity {
-            Entity::Subscriber => self.base.share(),
+            Entity::Subscriber => self.base.share().ok()?,
             Entity::LatePublishers | Entity::Heartbeat | Entity::Token => {
                 self.base.extended(keyexpr).ok()?
             }
@@ -241,7 +241,7 @@ impl PicoSubscriberForms {
             }
             Entity::LatePublishers | Entity::Token => {
                 let key = DeclaredKeyexpr::declare(shared, keyexpr, Some(&carrier)).ok()?;
-                let announced = key.share();
+                let announced = key.share().ok()?;
                 (key, announced)
             }
         };
