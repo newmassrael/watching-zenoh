@@ -809,7 +809,8 @@ fn an_undeclaration_inside_the_reads_step_is_told_once() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     *own.lock().unwrap() = Some(id);
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
