@@ -413,10 +413,19 @@ where
         self.write_vle_u64(u64::from(v))
     }
 
-    // Out of line, so the u32 form is a call to this body and not a second copy of its loop.
+    /// The u64 form's bytes, as for the u32 form: a u16 runs out of bits before its cap too.
+    fn write_vle_u16(&mut self, v: u16) -> Result<(), CodecError> {
+        self.write_vle_u64(u64::from(v))
+    }
+
+    // Out of line, so the narrower forms are a call to this body and not a copy of it. The trait's
+    // own writer appends a byte at a time, each a call through the buffer's trait object; the codec
+    // crate's encoder writes the same bytes on the stack, appended in one call, or refused whole.
     #[inline(never)]
     fn write_vle_u64(&mut self, v: u64) -> Result<(), CodecError> {
-        self.write_vle_inner(v, 64)
+        let mut bytes = [0u8; wz_codecs::vle::VLE_LEN];
+        let n = wz_codecs::vle::encode_zint(&mut bytes, v);
+        self.write_bytes(bytes.get(..n).unwrap_or(&bytes))
     }
 }
 
@@ -537,6 +546,122 @@ mod tests {
         let mut buf = SliceTxBuf::new(&mut storage);
         TxSink::new(&mut buf).write_vle_u32(u32::MAX).unwrap();
         assert_eq!(buf.as_slice(), &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+    }
+
+    /// A sink with the trait's own writers, over a fixed array: the bytes a VLE is held to.
+    struct TraitWriter {
+        bytes: [u8; 16],
+        len: usize,
+    }
+
+    impl SceSink for TraitWriter {
+        type Error = CodecError;
+
+        fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+            let end = self.len + bytes.len();
+            self.bytes[self.len..end].copy_from_slice(bytes);
+            self.len = end;
+            Ok(())
+        }
+
+        fn position(&self) -> usize {
+            self.len
+        }
+    }
+
+    /// A slice buffer that counts the calls that write it.
+    struct Appends<'a> {
+        buf: SliceTxBuf<'a>,
+        calls: usize,
+    }
+
+    impl TxBuf for Appends<'_> {
+        type Error = CodecError;
+
+        fn len(&self) -> usize {
+            self.buf.len()
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            self.buf.as_slice()
+        }
+
+        fn truncate(&mut self, len: usize) {
+            self.buf.truncate(len);
+        }
+
+        fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+            self.calls += 1;
+            self.buf.append(bytes)
+        }
+
+        fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+            self.calls += 1;
+            self.buf.append_byte(byte)
+        }
+    }
+
+    /// The sink writes a VLE of each width in the bytes of the codec's own writer, at both ends of
+    /// every width the form takes, and in one call of its buffer. Turned red by an encoding that
+    /// differs from the trait's writer in a byte, and by a writer that appends a byte at a time.
+    #[test]
+    fn a_vle_is_the_codecs_bytes_in_one_append() {
+        let mut edges = std::vec![0u64, 1, u64::MAX];
+        for bits in (7..64).step_by(7) {
+            edges.push((1u64 << bits) - 1);
+            edges.push(1u64 << bits);
+        }
+        for value in edges {
+            for width in [16u32, 32, 64] {
+                if width < 64 && value >> width != 0 {
+                    continue;
+                }
+                let mut want = TraitWriter {
+                    bytes: [0; 16],
+                    len: 0,
+                };
+                let mut storage = [0u8; 16];
+                let mut got = Appends {
+                    buf: SliceTxBuf::new(&mut storage),
+                    calls: 0,
+                };
+                let mut sink = TxSink::over(&mut got);
+                match width {
+                    16 => {
+                        want.write_vle_u16(value as u16).unwrap();
+                        sink.write_vle_u16(value as u16).unwrap();
+                    }
+                    32 => {
+                        want.write_vle_u32(value as u32).unwrap();
+                        sink.write_vle_u32(value as u32).unwrap();
+                    }
+                    _ => {
+                        want.write_vle_u64(value).unwrap();
+                        sink.write_vle_u64(value).unwrap();
+                    }
+                }
+                assert_eq!(
+                    got.as_slice(),
+                    &want.bytes[..want.len],
+                    "the u{width} VLE of {value:#x}"
+                );
+                assert_eq!(got.calls, 1, "the u{width} VLE of {value:#x}");
+            }
+        }
+    }
+
+    /// A VLE past the room is refused whole: the buffer keeps the length it had. Turned red by a
+    /// writer that appends what fits before it refuses.
+    #[test]
+    fn a_vle_past_the_room_is_refused_whole() {
+        let mut storage = [0u8; 3];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.append(&[9]).unwrap();
+        assert_eq!(
+            TxSink::over(&mut buf).write_vle_u64(0x4000),
+            Err(CodecError::BufferOverflow)
+        );
+        assert_eq!(buf.as_slice(), &[9]);
     }
 
     #[test]
