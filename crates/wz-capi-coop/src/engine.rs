@@ -1999,7 +1999,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// tests count.
     #[cfg(test)]
     clock_reads: core::cell::Cell<usize>,
-    /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
+    /// How often the links were moved on, which the tests count: each pass over the faces
+    /// (`poll_links`), or each look at the life of the one link a read steps itself (`direct`).
     #[cfg(test)]
     link_polls: core::cell::Cell<usize>,
     /// How often the session's links were let go of ([`Self::end_links`]), which the tests count:
@@ -3759,9 +3760,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .map_or(u64::MAX, |settled| settled.due_us),
             self.links_settled.is_none(),
         );
-        // The one link is due by its own deadlines, which the read reads (`direct`).
+        // The one link is due by its own deadlines, which the read reads, and by the next turn of
+        // the replay it owes its peer, which only the bookkeeping takes (`direct`).
         #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-        let (links_due_us, unsettled) = (self.link_due_us, false);
+        let (links_due_us, unsettled) = (
+            self.transport
+                .links
+                .faces()
+                .filter_map(|face| face.replay.next_turn_ms())
+                .min()
+                .map_or(self.link_due_us, |turn_ms| {
+                    self.link_due_us.min(turn_ms.saturating_mul(1000))
+                }),
+            false,
+        );
         let seen = self.seen();
         self.ledger.settle(links_due_us.min(gets_due_us), seen);
         if unsettled || snapshots {
@@ -5398,7 +5410,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
-    /// How often the session moved its links on since the open ([`Core::poll_links`]): what a
+    /// How often the session moved its links on since the open (`Core::link_polls`): what a
     /// test of the cost of a batch counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_polls(&self) -> usize {
