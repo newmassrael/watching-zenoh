@@ -2795,7 +2795,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(all(test, feature = "std", feature = "queryable"))]
         if self.after_pushes {
             let _ = self
                 .registry
@@ -2848,7 +2848,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(all(test, feature = "std", feature = "queryable"))]
         if self.after_pushes {
             let _ = self
                 .registry
@@ -3400,6 +3400,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// When a handshake begun now is given up, in microseconds on the session's clock.
+    #[cfg(feature = "listen")]
     fn open_deadline_us(&self) -> u64 {
         open_deadline_on(&self.clock, self.config.open_timeout_ms)
     }
@@ -5376,7 +5377,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How often the session's links drained a run of Pushes before a later record of its own
     /// frame: what tells a test that a Push and the record after it came in one frame.
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(all(test, feature = "std", feature = "queryable"))]
     pub(crate) fn drains_within_frames(&self) -> usize {
         self.core.lock().0.session.registry.drains_within_frames()
     }
