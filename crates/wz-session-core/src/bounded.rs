@@ -440,6 +440,14 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// How many more pushes are guaranteed to succeed.
     fn free_slots(&self) -> usize;
 
+    /// Make room now for `rows` elements in all, so that no push up to them moves an element:
+    /// `false` when the policy's allocator has no room for them. A sequence that never moves an
+    /// element it holds to make room for a push answers `true`, the provided answer.
+    fn hold_in_place(&mut self, rows: usize) -> bool {
+        let _ = rows;
+        true
+    }
+
     /// Append `value`, or hand it back when the policy's capacity is full.
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
 
@@ -723,6 +731,10 @@ impl<T> SeqBacking<T> for Vec<T> {
 
     fn free_slots(&self) -> usize {
         usize::MAX
+    }
+
+    fn hold_in_place(&mut self, rows: usize) -> bool {
+        Vec::try_reserve_exact(self, rows.saturating_sub(self.len())).is_ok()
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1099,6 +1111,13 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// staging half of it.
     pub fn free_slots(&self) -> usize {
         self.inner.free_slots()
+    }
+
+    /// Make room now for `rows` elements in all, so that no push up to them moves an element
+    /// another holds by its address: `false` when the policy's allocator has no room for them.
+    /// Only [`Heap`] moves its elements to make room; the others answer `true`.
+    pub fn hold_in_place(&mut self, rows: usize) -> bool {
+        self.inner.hold_in_place(rows)
     }
 
     /// Append `value`. On [`Heap`] this always returns `Ok(())`. On [`Static`]

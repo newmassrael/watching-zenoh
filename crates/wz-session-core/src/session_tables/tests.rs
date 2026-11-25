@@ -3398,3 +3398,81 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
         std::alloc::dealloc(block, layout);
     }
 }
+
+/// A declaration's row is counted at its own address by the id its holder holds: one more hold
+/// there up to the count's bound, the holds given back there down to the last, which only the
+/// table lets go of; a hold for another id is neither taken nor given back there, and the row names
+/// its own tables and no other.
+///
+/// # Control
+///
+/// A `retain` that does not stop at the bound reds the `Full` assertion; a `release_shared` that
+/// lets go of the last reds the assertion that the row stands until `undeclare_keyexpr`; a count
+/// that does not carry the id reds the assertions on the other id.
+#[test]
+fn a_rows_count_is_taken_at_its_address_by_its_id_and_its_last_hold_by_the_table() {
+    let mut tables = Tables::new();
+    let other = Tables::new();
+    let declared = tables.declare_keyexpr("demo/row").unwrap();
+    let at: *const KeyexprHead = tables.keyexprs().get(declared.handle).unwrap().head();
+    // SAFETY: the row stands where it was put until its last hold goes, at the end; the table's
+    // calls in between take no `&mut` of it.
+    let head = unsafe { &*at };
+    assert!(tables.is_own_row(head));
+    assert!(
+        !other.is_own_row(head),
+        "another table's row is not its own"
+    );
+    assert_eq!(
+        (head.id(), head.key_len(), head.holds()),
+        (declared.id, "demo/row".len(), 1)
+    );
+    let stranger = declared.id.wrapping_add(1);
+    assert_eq!(head.retain(stranger), Err(RowHoldRefused::Released));
+    assert_eq!(head.retain(declared.id), Ok(()));
+    assert!(!head.release_shared(stranger));
+    assert_eq!(head.holds(), 2);
+    while head.holds() < KeyexprHolds::MAX {
+        head.retain(declared.id).unwrap();
+    }
+    assert_eq!(head.retain(declared.id), Err(RowHoldRefused::Full));
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "the table's own hold meets the same bound"
+    );
+    while head.release_shared(declared.id) {}
+    assert_eq!(
+        head.holds(),
+        1,
+        "the last hold is not let go of at the address"
+    );
+    assert_eq!(tables.keyexprs().len(), 1);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(tables.keyexprs().is_empty());
+}
+
+/// Rows of a growable table held in place stay where they were put as the table fills to the
+/// build's bound, and a declaration past it is refused: a holder that reaches a row by its address
+/// does not read where the row was. Turned red by a `hold_in_place` that reserves nothing (the
+/// first row moves as the table grows) or a table not held to the bound (the declaration past it
+/// is taken).
+#[cfg(feature = "alloc")]
+#[test]
+fn growable_rows_held_in_place_stay_put_to_the_bound_and_refuse_past_it() {
+    type Growable = SessionTables<Calls, crate::bounded::Heap>;
+    let mut tables = Growable::new();
+    assert!(tables.hold_keyexpr_rows_in_place());
+    let first = tables.declare_keyexpr("k/0").unwrap();
+    let at = |tables: &Growable| -> *const KeyexprHead {
+        tables.keyexprs().get(first.handle).unwrap().head()
+    };
+    let before = at(&tables);
+    for n in 1..caps::MAX_DECLARED_KEYEXPRS {
+        tables.declare_keyexpr(&std::format!("k/{n}")).unwrap();
+    }
+    assert_eq!(at(&tables), before, "the first row is where it was put");
+    assert_eq!(
+        tables.declare_keyexpr("k/past").unwrap_err(),
+        RegisterError::TableFull
+    );
+}

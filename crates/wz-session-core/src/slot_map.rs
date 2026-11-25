@@ -527,6 +527,20 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         self.core.limit_to(rows.min(Self::ceiling()));
     }
 
+    /// Keep every row the table holds where it was put: room made now for `rows` rows, under the
+    /// build's `N` where the policy enforces it, and the table held to them from here on
+    /// ([`Self::limit_to`]), so that no insert moves a row another holds by its address. `false`,
+    /// changing nothing, when the policy's allocator has no room for them. A later `limit_to` past
+    /// `rows` lets an insert move the rows again on the growable policy.
+    pub fn hold_rows_in_place(&mut self, rows: usize) -> bool {
+        let rows = rows.min(Self::ceiling());
+        if !self.rows.hold_in_place(rows) {
+            return false;
+        }
+        self.core.limit_to(rows);
+        true
+    }
+
     /// The most rows the table holds at once.
     pub fn capacity(&self) -> usize {
         usize::from(self.core.limit()).min(Self::ceiling())
