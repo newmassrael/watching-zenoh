@@ -2706,6 +2706,7 @@ pub(crate) fn ingest_multicast_fragment_in_place<
                     }
                 },
             );
+            records.end_records();
         },
     );
     // The chain this fragment ended besides its own, which the records lent
@@ -2886,6 +2887,12 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
 
     fn takes_another(&mut self) -> bool {
         self.inner.takes_another()
+    }
+
+    // A host that puts off what follows each record of a run does it here; a wrapper that kept it
+    // would leave a group's records owed until a record of another kind came.
+    fn end_records(&mut self) {
+        self.inner.end_records();
     }
 
     fn holds_datagram(&self) -> bool {
