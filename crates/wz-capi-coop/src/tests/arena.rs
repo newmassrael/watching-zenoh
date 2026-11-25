@@ -3176,17 +3176,18 @@ fn preset_client(dials: usize) -> CoopConfig {
     }
 }
 
-/// The pico preset with one limit lowered: limits a region of the preset was not laid out for.
+/// The pico preset with one limit moved off its value: limits a region of the preset was not laid
+/// out for.
 fn other_than_preset() -> SessionLimits {
     let preset = SessionLimits::PICO_PRESET;
-    let fewer = if preset.max_subscriptions() == Quota::at_most(2) {
+    let moved = if preset.max_subscriptions() == Quota::at_most(2) {
         1
     } else {
         2
     };
     let mut other = preset;
     other
-        .select_max_subscriptions(Quota::at_most(fewer))
+        .select_max_subscriptions(Quota::at_most(moved))
         .expect("the build admits a few subscribers");
     assert_ne!(other, preset, "CONTROL: the limits differ from the preset");
     other

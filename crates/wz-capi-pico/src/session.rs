@@ -356,9 +356,11 @@ pub(crate) fn resolve_snapshots(
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
 /// each ABI opens under its upstream's (`SessionLimits::PICO_PRESET`, each value with its reason in
 /// the declaration's `[limit.pico_preset]`, `deploy/wz-config.toml`), so a listener holds the ten
-/// peers zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB` admits and not a router's thousand. A config
-/// states more, or less, over them. The process pools are sized by the same
-/// (`crate::process_pool`).
+/// peers zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB` admits and not a router's thousand. An entity
+/// table opens at what zenoh-pico's parity programs declare (`[limit.pico_open]`), and the preset
+/// is the bound a config raises it to: zenoh-pico grows its lists on the heap, which an open that
+/// takes no memory after it cannot. A config states more, or less, over them. The process pools
+/// are sized by the same (`crate::process_pool`).
 pub(crate) const fn opening_limits() -> SessionLimits {
     SessionLimits::PICO_PRESET
 }
@@ -378,6 +380,34 @@ mod opening_limits_tests {
         let mut probe = SessionLimits::defaults();
         if probe.select_max_faces(Quota::at_most(10)).is_ok() {
             assert_eq!(opening_limits().max_faces(), Quota::at_most(10));
+        }
+    }
+
+    /// A session's entity tables open at what zenoh-pico's parity programs declare on one session
+    /// (`[limit.pico_open]`), where the build's domain holds those counts: one subscriber, two
+    /// queryables with the admin space's, one publisher, two declared keys and one get. Turned red
+    /// by a preset that opens them at the bound the Kconfig keeps.
+    #[test]
+    fn a_session_opens_its_entity_tables_at_the_parity_programs_counts() {
+        let opening = opening_limits();
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_subscriptions(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_subscriptions(), Quota::at_most(1));
+        }
+        if probe.select_max_queryables(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_queryables(), Quota::at_most(2));
+        }
+        if probe.select_max_publishers(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_publishers(), Quota::at_most(1));
+        }
+        if probe
+            .select_max_declared_keyexprs(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_declared_keyexprs(), Quota::at_most(2));
+        }
+        if probe.select_max_pending_queries(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_pending_queries(), Quota::at_most(1));
         }
     }
 }
