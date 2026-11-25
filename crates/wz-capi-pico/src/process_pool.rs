@@ -183,49 +183,6 @@ pub(crate) struct Counts {
     pub(crate) link_events_listeners: usize,
 }
 
-impl Counts {
-    /// No object at all.
-    const NONE: Self = Self {
-        sessions: 0,
-        publishers: 0,
-        subscribers: 0,
-        queryables: 0,
-        liveliness_tokens: 0,
-        liveliness_subscribers: 0,
-        samples: 0,
-        replies: 0,
-        queries: 0,
-        configs: 0,
-        hellos: 0,
-        queriers: 0,
-        keyexprs: 0,
-        payload_blocks: [0; PAYLOAD_CLASSES],
-        encodings: 0,
-        gets: 0,
-        liveliness_gets: 0,
-        matching_listeners: 0,
-        decl_watches: 0,
-        transport_events_listeners: 0,
-        advanced_publishers: 0,
-        advanced_subscribers: 0,
-        link_events_listeners: 0,
-    };
-
-    /// The values of these a program holds apart from any session, which an open after the first
-    /// is judged by.
-    const fn held_values(&self) -> Self {
-        Self {
-            samples: self.samples,
-            replies: self.replies,
-            queries: self.queries,
-            encodings: self.encodings,
-            hellos: self.hellos,
-            payload_blocks: self.payload_blocks,
-            ..Self::NONE
-        }
-    }
-}
-
 /// A value a program holds apart from any session: the `HELD_*` limit the first open's config
 /// states its count by, as its declaration spells it (`crate::config_limits`), and the build's
 /// value of it, the most a statement may ask, the build reserving memory for no more.
@@ -233,6 +190,8 @@ impl Counts {
 struct HeldRow {
     id: &'static str,
     build: usize,
+    /// The pool that holds the value among a plan's, or [`POOLS`] where the build has none.
+    pool: usize,
 }
 
 /// How many values a program holds apart from any session.
@@ -246,36 +205,98 @@ const HELD_ROWS: [HeldRow; HELD] = [
     HeldRow {
         id: "HELD_SAMPLES",
         build: caps::HELD_SAMPLES,
+        pool: Kind::Sample as usize,
     },
     HeldRow {
         id: "HELD_REPLIES",
         build: caps::HELD_REPLIES,
+        pool: REPLY_POOL,
     },
     HeldRow {
         id: "HELD_QUERIES",
         build: caps::HELD_QUERIES,
+        pool: QUERY_POOL,
     },
     HeldRow {
         id: "HELD_ENCODINGS",
         build: caps::HELD_ENCODINGS,
+        pool: Kind::Encoding as usize,
     },
     HeldRow {
         id: "HELD_HELLOS",
         build: caps::HELD_HELLOS,
+        pool: HELLO_POOL,
     },
     HeldRow {
         id: "HELD_SMALL_PAYLOAD_BLOCKS",
         build: caps::HELD_SMALL_PAYLOAD_BLOCKS,
+        pool: payload_pool(0),
     },
     HeldRow {
         id: "HELD_MEDIUM_PAYLOAD_BLOCKS",
         build: caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
+        pool: payload_pool(1),
     },
     HeldRow {
         id: "HELD_LARGE_PAYLOAD_BLOCKS",
         build: caps::HELD_LARGE_PAYLOAD_BLOCKS,
+        pool: payload_pool(2),
     },
 ];
+
+/// The pool of the replies a program holds ([`Plan::of`]), or none in a build without them.
+const REPLY_POOL: usize = {
+    #[cfg(feature = "query")]
+    let pool = Kind::Reply as usize;
+    #[cfg(not(feature = "query"))]
+    let pool = POOLS;
+    pool
+};
+
+/// The pool of the queries a program holds ([`Plan::of`]), or none in a build without them.
+const QUERY_POOL: usize = {
+    #[cfg(feature = "queryable")]
+    let pool = Kind::Query as usize;
+    #[cfg(not(feature = "queryable"))]
+    let pool = POOLS;
+    pool
+};
+
+/// The pool of the hellos a program keeps ([`Plan::of`]), or none in a build without them.
+const HELLO_POOL: usize = {
+    #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
+    let pool = Kind::Hello as usize;
+    #[cfg(not(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu"))))]
+    let pool = POOLS;
+    pool
+};
+
+/// The pool of the payload blocks of `class` (small, middle, largest), after the kinds' and in
+/// the order of the blocks' bytes, as [`Plan::with_payloads`] lays them: its rank among the
+/// classes, a class of the same bytes as an earlier one after it.
+const fn payload_pool(class: usize) -> usize {
+    let mut own = 0;
+    let mut rest: &[usize] = &PAYLOAD_BLOCKS;
+    let mut at: usize = 0;
+    while let [bytes, tail @ ..] = rest {
+        if at == class {
+            own = *bytes;
+        }
+        at = at.saturating_add(1);
+        rest = tail;
+    }
+    let mut rank: usize = 0;
+    rest = &PAYLOAD_BLOCKS;
+    at = 0;
+    while let [bytes, tail @ ..] = rest {
+        if *bytes < own || (*bytes == own && at < class) {
+            rank = rank.saturating_add(1);
+        }
+        at = at.saturating_add(1);
+        rest = tail;
+    }
+    KINDS.saturating_add(rank)
+}
 
 /// The counts of the values a program holds apart from any session, one for each row of
 /// [`HELD_ROWS`] and in its order: samples, replies, queries, encodings, hellos, and the small,
@@ -339,23 +360,19 @@ impl Stage {
         }
     }
 
-    /// The objects of `objects` this stage's pools hold.
-    const fn part(self, objects: &Counts) -> Counts {
-        match self {
-            Stage::Config => Counts {
-                configs: objects.configs,
-                ..Counts::NONE
-            },
-            Stage::Hello => Counts {
-                hellos: objects.hellos,
-                ..Counts::NONE
-            },
-            Stage::Open => Counts {
-                configs: 0,
-                hellos: 0,
-                ..*objects
-            },
+    /// The stage whose pools hold the pool at `pool` among a plan's: the configs' and the kept
+    /// hellos' each their own, every other the open's.
+    const fn holding(pool: usize) -> Self {
+        if pool == Kind::Config as usize {
+            return Stage::Config;
         }
+        #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
+        {
+            if pool == Kind::Hello as usize {
+                return Stage::Hello;
+            }
+        }
+        Stage::Open
     }
 }
 
@@ -648,6 +665,24 @@ pub(crate) struct Plan {
 impl Plan {
     /// The pools `objects` make: one per kind, each slot of the size of that kind's object.
     pub(crate) const fn of(objects: &Counts) -> Result<Self, Unplanned> {
+        let plan = Self::laid(objects);
+        let mut holds = false;
+        let mut rest: &[usize] = &plan.slots;
+        while let [slots, tail @ ..] = rest {
+            holds |= *slots != 0;
+            rest = tail;
+        }
+        if !holds {
+            return Err(Unplanned::Empty);
+        }
+        planned!(plan.bytes());
+        Ok(plan)
+    }
+
+    /// The pools `objects` make, unchecked: a plan of no slot, or of more bytes than the address
+    /// space holds, is laid out all the same, and refused where its pools are laid
+    /// ([`lay_stage`]).
+    const fn laid(objects: &Counts) -> Self {
         let mut plan = Self {
             slots: [0; POOLS],
             sizes: [0; POOLS],
@@ -757,17 +792,7 @@ impl Plan {
                 objects.link_events_listeners,
             );
         }
-        let mut holds = false;
-        let mut rest: &[usize] = &plan.slots;
-        while let [slots, tail @ ..] = rest {
-            holds |= *slots != 0;
-            rest = tail;
-        }
-        if !holds {
-            return Err(Unplanned::Empty);
-        }
-        planned!(plan.bytes());
-        Ok(plan)
+        plan
     }
 
     /// This plan with the pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
@@ -839,6 +864,9 @@ enum Origin {
     /// The program's, handed back untouched when the pools are given up.
     #[cfg(any(test, feature = "object-pool-region"))]
     Program,
+    /// None yet: pools laid out before their memory is found hold nothing to give up
+    /// ([`lay_stage`]).
+    Unfound,
 }
 
 impl Origin {
@@ -851,6 +879,7 @@ impl Origin {
             Origin::Heap(layout) => alloc::alloc::dealloc(base.as_ptr(), layout),
             #[cfg(any(test, feature = "object-pool-region"))]
             Origin::Program => {}
+            Origin::Unfound => {}
         }
     }
 }
@@ -959,22 +988,27 @@ impl Pools {
         }
     }
 
-    /// Lay `plan` out over the pools' memory, every slot free and none of them written.
+    /// Lay `plan` out over the pools' memory, every slot free and none of them written: the
+    /// pools of `stage` alone where it is one, every pool where it is none. The bytes they take
+    /// together are counted here, held at `usize::MAX`, which no layout admits, where they
+    /// would pass it: the one pass over the pools that lays them also sizes their memory.
     ///
     /// # Safety
-    /// The pools are [`Self::unlaid`]. Their `base` is aligned to `SLOT_ALIGN`, the
-    /// `plan.bytes()` bytes from it are writable and used by nothing else while the pools live, and
-    /// their `origin` says where they came from.
-    unsafe fn lay(&mut self, plan: &Plan) {
+    /// The pools are [`Self::unlaid`] and hold no object. Before a slot is taken their `base` is
+    /// aligned to `SLOT_ALIGN`, the `self.bytes` bytes from it are writable and used by nothing
+    /// else while the pools live, and their `origin` says where they came from.
+    unsafe fn lay(&mut self, plan: &Plan, stage: Option<Stage>) {
         let mut at: usize = 0;
         let planned = plan.slots.iter().zip(plan.sizes.iter());
         let laid = self.pools.iter_mut().zip(self.ends.iter_mut());
-        for ((pool, end), (&slots, &size)) in laid.zip(planned) {
+        for (index, ((pool, end), (&slots, &size))) in laid.zip(planned).enumerate() {
+            let slots = match stage {
+                Some(stage) if Stage::holding(index) != stage => 0,
+                _ => slots,
+            };
             pool.size = size;
             pool.start = at;
             pool.slots = slots;
-            // The plan counted these bytes with checked arithmetic (`Plan::bytes`): none of
-            // these sums reaches past its count.
             at = at.saturating_add(slots.saturating_mul(size));
             *end = at;
         }
@@ -988,7 +1022,7 @@ impl Pools {
     #[cfg(test)]
     unsafe fn over(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Self {
         let mut pools = Self::unlaid(base, origin);
-        pools.lay(plan);
+        pools.lay(plan, None);
         pools
     }
 
@@ -1054,7 +1088,6 @@ impl Pools {
     }
 
     /// Whether `place` lies in the memory of the pools.
-    #[cfg(test)]
     fn lies_in(&self, place: NonNull<u8>) -> bool {
         (place.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize) < self.bytes
     }
@@ -1165,69 +1198,103 @@ impl Reserved {
         let fixed = self.fixed;
         let held = self.stages.get_mut(at as usize)?;
         if held.is_none() && !fixed {
-            return lay_stage(held, &first_plan(at)?);
+            return lay_stage(held, &first_plan()?, at).ok();
         }
         held.as_mut()
     }
 
-    /// The first open's reservation: each stage not reserved yet, from the counts `reserve`
-    /// makes, after which the pools are fixed. `false`, and the pools not fixed, when the heap
-    /// has not the memory for a stage; `false` too when the pools hold fewer of a held value than
-    /// `asked` states, which an open fixed before or an object taken before it reserved.
-    fn at_open(&mut self, reserve: &Counts, asked: &Counts) -> bool {
+    /// The first open's reservation: each stage not reserved yet, its pools of `reserve`, after
+    /// which the pools are fixed. `false`, and the pools not fixed, when the heap has not the
+    /// memory for a stage; `false` too when the pools hold fewer of a held value than `asked`
+    /// states, which an open fixed before or an object taken before it reserved.
+    fn at_open(&mut self, reserve: &Plan, asked: &Held) -> bool {
         if !self.whole {
             for (stage, held) in Stage::ALL.iter().zip(self.stages.iter_mut()) {
-                if held.is_some() {
-                    continue;
-                }
-                match Plan::of(&stage.part(reserve)) {
-                    Ok(plan) => {
-                        if lay_stage(held, &plan).is_none() {
-                            return false;
-                        }
-                    }
-                    // A stage of no object in this build holds no pool.
-                    Err(Unplanned::Empty) => {}
-                    Err(_) => return false,
+                // A stage of no object in this build holds no pool.
+                if held.is_none()
+                    && matches!(lay_stage(held, reserve, *stage), Err(Unlaid::NoMemory))
+                {
+                    return false;
                 }
             }
         }
-        if !self.holds(&asked.held_values()) {
+        if !self.holds(asked) {
             return false;
         }
         self.fixed = true;
         true
     }
 
-    /// Whether every pool `objects` make has at least as many slots in the pools reserved now.
-    fn holds(&self, objects: &Counts) -> bool {
-        let plan = match Plan::of(objects) {
-            Ok(plan) => plan,
-            Err(Unplanned::Empty) => return true,
-            Err(_) => return false,
-        };
-        let mut slots = [0usize; POOLS];
-        for pools in self.stages.iter().flatten() {
-            for (count, pool) in slots.iter_mut().zip(pools.pools.iter()) {
-                *count = count.saturating_add(pool.slots);
-            }
-        }
-        plan.slots
-            .iter()
-            .zip(slots.iter())
-            .all(|(asked, held)| asked <= held)
+    /// Whether the pools reserved now hold at least as many of each held value as `asked`
+    /// states: each value read in the one pool that holds it, of the stage that holds that pool,
+    /// and a value the build has no pool for held by none.
+    fn holds(&self, asked: &Held) -> bool {
+        HELD_ROWS.iter().zip(asked.0).all(|(row, count)| {
+            let stage = if self.whole {
+                Stage::Open
+            } else {
+                Stage::holding(row.pool)
+            };
+            let held = self
+                .stages
+                .get(stage as usize)
+                .and_then(Option::as_ref)
+                .and_then(|pools| pools.pools.get(row.pool))
+                .map_or(0, |pool| pool.slots);
+            row.pool >= POOLS || count <= held
+        })
     }
 }
 
-/// Reserve the pools of `plan` from the heap in `held`, laid where they are held rather than
-/// returned and copied in; `None`, and `held` left empty, when the heap has not the memory.
-fn lay_stage<'a>(held: &'a mut Option<Pools>, plan: &Plan) -> Option<&'a mut Pools> {
-    let (base, layout) = heap_memory(plan)?;
-    let pools = held.insert(Pools::unlaid(base, Origin::Heap(layout)));
-    // SAFETY: the pools are unlaid, over an allocation of this layout's, aligned to the slot, as
-    // long as the plan and no one else's.
-    unsafe { pools.lay(plan) };
-    Some(pools)
+impl Reserved {
+    /// Give `place` back to the pool of the stage it lies in; `false` when it lies in none.
+    fn give_back(&mut self, place: NonNull<u8>) -> bool {
+        self.stages
+            .iter_mut()
+            .flatten()
+            .find(|pools| pools.lies_in(place))
+            .is_some_and(|pools| pools.give_back(place))
+    }
+}
+
+/// Why a stage's pools were not reserved ([`lay_stage`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unlaid {
+    /// The plan holds no slot of the stage, which then has no pools.
+    Empty,
+    /// The heap has not the memory, or the pools' bytes pass what a layout admits.
+    NoMemory,
+}
+
+/// Reserve the pools `plan` makes for `stage` from the heap in `held`, laid where they are held
+/// rather than returned and copied in, and sized by the same pass; `held` is left empty when
+/// the stage holds no slot or the heap has not the memory. One body for the first object of a
+/// stage and the first open.
+#[inline(never)]
+fn lay_stage<'a>(
+    held: &'a mut Option<Pools>,
+    plan: &Plan,
+    stage: Stage,
+) -> Result<&'a mut Pools, Unlaid> {
+    let pools = held.insert(Pools::unlaid(NonNull::dangling(), Origin::Unfound));
+    // SAFETY: the pools are unlaid and hold no object; their memory is set below before anything
+    // is taken from them, or they are dropped, giving up nothing.
+    unsafe { pools.lay(plan, Some(stage)) };
+    let found = match pools.bytes {
+        0 => Err(Unlaid::Empty),
+        bytes => heap_memory(bytes).ok_or(Unlaid::NoMemory),
+    };
+    match found {
+        Ok((base, layout)) => {
+            pools.base = base;
+            pools.origin = Origin::Heap(layout);
+        }
+        Err(why) => {
+            *held = None;
+            return Err(why);
+        }
+    }
+    held.as_mut().ok_or(Unlaid::NoMemory)
 }
 
 // SAFETY: the memory of the pools is reached only through the lock this is held behind, by one
@@ -1257,25 +1324,27 @@ fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
 /// memory, or when the pools, fixed by an earlier open or reserved by an object taken before
 /// this one, hold fewer of a held value than `held` states.
 pub(crate) fn reserve_at_open(limits: &SessionLimits, held: &Held) -> bool {
-    let Ok(asked) = counts_of(limits, held) else {
+    let Some(reserve) = open_reservation(limits, held) else {
         return false;
     };
-    let reserve = open_reservation(&asked);
-    RESERVED.with(|reserved| reserved.at_open(&reserve, &asked))
+    RESERVED.with(|reserved| reserved.at_open(&reserve, held))
 }
 
-/// The counts the first open reserves its stages from: its own.
+/// The pools the first open reserves its stages from: its own counts', laid out without the
+/// checks of [`Plan::of`], which the reservation makes as it lays each stage ([`lay_stage`]).
 #[cfg(not(test))]
-fn open_reservation(asked: &Counts) -> Counts {
-    *asked
+fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
+    Some(Plan::laid(&counts_of(limits, held).ok()?))
 }
 
-/// The counts the first open of this crate's unit-test binary reserves its stages from: the
+/// The pools the first open of this crate's unit-test binary reserves its stages from: the
 /// build's once for each test the runner runs at once ([`first_plan`]), whichever test opens
-/// first, as each test is a program of its own and the binary one process.
+/// first, as each test is a program of its own and the binary one process; none for counts the
+/// open itself refuses.
 #[cfg(test)]
-fn open_reservation(_asked: &Counts) -> Counts {
-    test_counts().unwrap_or(Counts::NONE)
+fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
+    counts_of(limits, held).ok()?;
+    first_plan()
 }
 
 /// The counts of the build's pools: [`counts_of`] the limits the library opens a session under
@@ -1362,11 +1431,11 @@ const fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
     }
 }
 
-/// The memory of the pools of `plan` from the heap, in one allocation, and its layout; `None`
-/// when the heap has not the memory.
-fn heap_memory(plan: &Plan) -> Option<(NonNull<u8>, Layout)> {
-    let layout = Layout::from_size_align(plan.bytes().ok()?, SLOT_ALIGN).ok()?;
-    // SAFETY: the layout is not of zero bytes: a plan has a slot.
+/// The memory of pools of `bytes` bytes from the heap, in one allocation, and its layout; `None`
+/// when the heap has not the memory or no layout admits the bytes. `bytes` is not zero.
+fn heap_memory(bytes: usize) -> Option<(NonNull<u8>, Layout)> {
+    let layout = Layout::from_size_align(bytes, SLOT_ALIGN).ok()?;
+    // SAFETY: the layout is not of zero bytes: its caller's pools have a slot.
     let base = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
     Some((base, layout))
 }
@@ -1375,49 +1444,32 @@ fn heap_memory(plan: &Plan) -> Option<(NonNull<u8>, Layout)> {
 /// memory.
 #[cfg(test)]
 fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
-    let (base, layout) = heap_memory(plan)?;
+    let (base, layout) = heap_memory(plan.bytes().ok()?)?;
     // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
     // one else's.
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
 }
 
 /// The plan of the build's pools ([`built_counts`]), every stage together, worked out when the
-/// library is compiled.
-#[cfg(test)]
+/// library is compiled: the counts are the build's constants and the limits it opens sessions
+/// under, so nothing of it is left to the first object a program makes, which lays its own
+/// stage's pools of it ([`lay_stage`]).
 const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
     Ok(objects) => Plan::of(&objects),
     Err(unplanned) => Err(unplanned),
 };
 
-/// The plan of `stage`'s pools at the build's counts.
-const fn built_stage(stage: Stage) -> Result<Plan, Unplanned> {
-    match built_counts() {
-        Ok(objects) => Plan::of(&stage.part(&objects)),
-        Err(unplanned) => Err(unplanned),
-    }
+/// The plan an object taken before any open reserves its stage's pools from: the build's
+/// ([`BUILT_PLAN`]).
+#[cfg(not(test))]
+fn first_plan() -> Option<Plan> {
+    BUILT_PLAN.ok()
 }
 
-/// The plan of each stage's pools at the build's counts, in [`Stage::ALL`]'s order, worked out
-/// when the library is compiled: the counts are the build's constants and the limits it opens
-/// sessions under, so nothing of it is left to the first object a program makes.
-#[cfg(not(test))]
-const BUILT_STAGES: [Result<Plan, Unplanned>; STAGES] = [
-    built_stage(Stage::Config),
-    built_stage(Stage::Hello),
-    built_stage(Stage::Open),
-];
-
-/// The plan an object of `stage` taken before any open reserves the stage's pools from: the
-/// build's ([`BUILT_STAGES`]).
-#[cfg(not(test))]
-fn first_plan(stage: Stage) -> Option<Plan> {
-    BUILT_STAGES.get(stage as usize).copied()?.ok()
-}
-
-/// The plan a stage of this crate's unit-test binary reserves ([`test_counts`]).
+/// The plan this crate's unit-test binary reserves its stages from ([`test_counts`]).
 #[cfg(test)]
-fn first_plan(stage: Stage) -> Option<Plan> {
-    Plan::of(&stage.part(&test_counts()?)).ok()
+fn first_plan() -> Option<Plan> {
+    Plan::of(&test_counts()?).ok()
 }
 
 /// The counts of this crate's unit-test binary: the build's once for each test the runner runs
@@ -1551,14 +1603,9 @@ pub(crate) fn lies_in_payloads(place: NonNull<u8>) -> bool {
 }
 
 /// Give `place` back to the pool it lies in; `false` when it lies in none, and is the heap's.
+/// The stage it lies in is found first, so one give-back body serves every stage.
 pub(crate) fn give_back(place: NonNull<u8>) -> bool {
-    RESERVED.with(|reserved| {
-        reserved
-            .stages
-            .iter_mut()
-            .flatten()
-            .any(|pools| pools.give_back(place))
-    })
+    RESERVED.with(|reserved| reserved.give_back(place))
 }
 
 /// A payload block of at least `bytes` bytes, aligned to 16, and the bytes it has: one of the
@@ -1608,7 +1655,7 @@ unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), 
         let Some(held) = reserved.stages.get_mut(Stage::Open as usize) else {
             return true;
         };
-        held.insert(Pools::unlaid(base, origin)).lay(plan);
+        held.insert(Pools::unlaid(base, origin)).lay(plan, None);
         // The program stated every count at once: nothing is reserved after it, the first open
         // included, which is judged against what it holds.
         reserved.whole = true;
@@ -1626,7 +1673,11 @@ unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), 
 /// was.
 #[cfg(feature = "object-pool")]
 pub(crate) fn reserve(plan: &Plan) -> Result<(), Refused> {
-    let (base, layout) = heap_memory(plan).ok_or(Refused::NoMemory)?;
+    let (base, layout) = plan
+        .bytes()
+        .ok()
+        .and_then(heap_memory)
+        .ok_or(Refused::NoMemory)?;
     // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
     // one else's.
     unsafe { install(base, plan, Origin::Heap(layout)) }
@@ -1714,7 +1765,7 @@ mod tests {
         assert!(programs >= 1, "a runner runs one test at least");
         let built = BUILT_PLAN.expect("the build's counts make pools");
         for kind in [Kind::Config, Kind::Sample, Kind::Keyexpr, Kind::Encoding] {
-            let first = first_plan(Stage::of(kind)).expect("the test binary's counts make pools");
+            let first = first_plan().expect("the test binary's counts make pools");
             assert_eq!(
                 first.slots[kind as usize],
                 built.slots[kind as usize].saturating_mul(programs),
@@ -2510,8 +2561,10 @@ mod tests {
     /// lays a plan other than the one the first object reserves.
     #[test]
     fn the_builds_pools_are_laid_where_they_are_held_and_once() {
-        let plan = first_plan(Stage::Open).expect("the test binary's counts make pools");
-        let aside = reserve_from_heap(&plan).expect("the test's heap has the memory");
+        let plan = first_plan().expect("the test binary's counts make pools");
+        let mut aside = Pools::unlaid(NonNull::dangling(), Origin::Unfound);
+        // SAFETY: laid out for its table alone; nothing is taken from it.
+        unsafe { aside.lay(&plan, Some(Stage::Open)) };
         let mut reserved = Reserved::NONE;
         let pools = reserved
             .stage(Stage::Open)
@@ -2913,12 +2966,12 @@ mod tests {
         let built = BUILT_PLAN.expect("the build's counts make pools");
         let mut parted = [0usize; POOLS];
         for stage in Stage::ALL {
-            let Ok(plan) = built_stage(stage) else {
-                continue;
-            };
-            for (at, slots) in plan.slots.iter().enumerate() {
-                parted[at] += slots;
-                if *slots > 0 {
+            let mut pools = Pools::unlaid(NonNull::dangling(), Origin::Unfound);
+            // SAFETY: laid out for its table alone; nothing is taken from it.
+            unsafe { pools.lay(&built, Some(stage)) };
+            for (at, pool) in pools.pools.iter().enumerate() {
+                parted[at] += pool.slots;
+                if pool.slots > 0 {
                     match stage {
                         Stage::Config => assert_eq!(at, Kind::Config as usize),
                         Stage::Hello => assert!(at != Kind::Config as usize && at < KINDS),
@@ -2960,7 +3013,7 @@ mod tests {
         let asked = opened_with(&held);
         assert_eq!(asked.samples, stated);
         let mut reserved = Reserved::NONE;
-        assert!(reserved.at_open(&asked, &asked));
+        assert!(reserved.at_open(&Plan::laid(&asked), &held));
         let size = slot_of(&asked, Kind::Sample);
         let pools = reserved
             .stage(Stage::Open)
@@ -2994,12 +3047,15 @@ mod tests {
         );
         let first = opened_with(&fewer);
         let mut reserved = Reserved::NONE;
-        assert!(reserved.at_open(&first, &first));
+        assert!(reserved.at_open(&Plan::laid(&first), &fewer));
         assert!(reserved.fixed);
-        assert!(reserved.at_open(&first, &first), "as much again opens");
+        assert!(
+            reserved.at_open(&Plan::laid(&first), &fewer),
+            "as much again opens"
+        );
         let more = opened_with(&Held::BUILD);
         assert!(
-            !reserved.at_open(&more, &more),
+            !reserved.at_open(&Plan::laid(&more), &Held::BUILD),
             "one more sample than the first open reserved is refused"
         );
 
@@ -3026,10 +3082,10 @@ mod tests {
         let Held([samples, ..]) = &mut more;
         *samples = built.samples.saturating_add(1);
         let asked = opened_with(&more);
-        assert!(!reserved.at_open(&asked, &asked));
+        assert!(!reserved.at_open(&Plan::laid(&asked), &more));
         assert!(!reserved.fixed, "a refused open fixes nothing");
         let as_built = opened_with(&Held::BUILD);
-        assert!(reserved.at_open(&as_built, &as_built));
+        assert!(reserved.at_open(&Plan::laid(&as_built), &Held::BUILD));
     }
 
     /// Once the first open reserved its stages, a take of every stage and a payload block take
@@ -3039,7 +3095,7 @@ mod tests {
     fn nothing_is_allocated_after_the_first_open() {
         let built = built_counts().expect("the build's counts make pools");
         let mut reserved = Reserved::NONE;
-        assert!(reserved.at_open(&built, &built));
+        assert!(reserved.at_open(&Plan::laid(&built), &Held::BUILD));
         crate::test_heap::refused(|| {
             if built.configs > 0 {
                 let size = slot_of(&built, Kind::Config);
@@ -3119,6 +3175,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Each held value lies in the one pool its row names, and a value the build has no pool for
+    /// names none: one of it stated makes one slot there and nowhere else. Turned red by a row
+    /// that names another kind's pool, or a payload class out of the order the blocks are laid in.
+    #[test]
+    fn each_held_row_names_the_pool_that_holds_it() {
+        let plan_of = |held: &Held| {
+            Plan::laid(&counts_of(&session_limits(), held).expect("the counts make pools"))
+        };
+        let none = plan_of(&Held([0; HELD]));
+        for (at, row) in HELD_ROWS.iter().enumerate() {
+            let mut held = Held([0; HELD]);
+            held.0[at] = 1;
+            let plan = plan_of(&held);
+            let changed: alloc::vec::Vec<usize> = (0..POOLS)
+                .filter(|pool| plan.slots[*pool] != none.slots[*pool])
+                .collect();
+            if row.pool >= POOLS {
+                assert!(changed.is_empty(), "{}: {changed:?}", row.id);
+            } else {
+                assert_eq!(changed, [row.pool], "{}", row.id);
+                assert_eq!(plan.slots[row.pool], 1, "{}", row.id);
+                assert!(plan.sizes[row.pool] > 0, "{}", row.id);
+            }
+        }
+    }
+
+    /// A stage the plan holds no slot of is not reserved, and pools whose bytes pass what a
+    /// layout admits are refused as the heap's want of memory; neither leaves the stage held.
+    /// Turned red by a stage reserved over no slot, or bytes that wrap past the address space.
+    #[test]
+    fn a_stage_of_no_slot_or_too_many_bytes_is_not_reserved() {
+        let mut configs_only = Counts::default();
+        configs_only.configs = 1;
+        let plan = Plan::laid(&configs_only);
+        let mut held = None;
+        assert_eq!(
+            lay_stage(&mut held, &plan, Stage::Open).map(|_| ()),
+            Err(Unlaid::Empty)
+        );
+        assert!(held.is_none());
+        assert!(lay_stage(&mut held, &plan, Stage::Config).is_ok());
+        assert!(held.is_some());
+
+        let mut too_many = Counts::default();
+        too_many.samples = usize::MAX / 2;
+        let plan = Plan::laid(&too_many);
+        let mut held = None;
+        assert_eq!(
+            lay_stage(&mut held, &plan, Stage::Open).map(|_| ()),
+            Err(Unlaid::NoMemory)
+        );
+        assert!(held.is_none());
+    }
+
+    /// A place is given back to the pool of the stage it lies in, whichever stage that is, and a
+    /// place that lies in none is not taken. Turned red by a give-back that asks only the first
+    /// stage it finds reserved.
+    #[test]
+    fn a_place_goes_back_to_the_stage_it_lies_in() {
+        let built = built_counts().expect("the build's counts make pools");
+        let mut reserved = Reserved::NONE;
+        assert!(reserved.at_open(&Plan::laid(&built), &Held::BUILD));
+        let config_size = slot_of(&built, Kind::Config);
+        let sample_size = slot_of(&built, Kind::Sample);
+        let config = reserved
+            .stage(Stage::Config)
+            .and_then(|pools| pools.take(Kind::Config, config_size));
+        let sample = reserved
+            .stage(Stage::Open)
+            .and_then(|pools| pools.take(Kind::Sample, sample_size));
+        for place in [config, sample].into_iter().flatten() {
+            assert!(reserved.give_back(place));
+        }
+        let mut elsewhere = 0u64;
+        assert!(!reserved.give_back(NonNull::from(&mut elsewhere).cast::<u8>()));
     }
 
     /// The held values are the capacities the declaration classes as counts the first open
