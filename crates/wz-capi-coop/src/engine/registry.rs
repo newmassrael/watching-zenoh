@@ -477,10 +477,16 @@ pub(super) struct RegistryOf<H: Holders> {
         feature = "declarations-synced-event"
     ))]
     pub(super) decl_watches: DeclWatches,
-    /// Moves each time a face's peer tables are handed out to be written and each time a face
-    /// comes or goes: an answer read off what the peers declared ([`Self::peers_declare`]) holds
-    /// for as long as this reads what it read when the answer was taken.
+    /// Moves each time a face's peer tables are handed out to a write that may change what its
+    /// peer declared, and each time a face comes or goes: an answer read off what the peers
+    /// declared ([`Self::peers_declare`]) holds for as long as this reads what it read when the
+    /// answer was taken. A Push and the drains after a run of them write no declaration and move
+    /// it not ([`Self::split_unwritten`]), so a stream of samples owes the step no bookkeeping.
     faces_written: u64,
+    /// How often a face's tables were looked up to be handed out, written or not: what a test of
+    /// the cost of one received sample counts.
+    #[cfg(all(test, feature = "std"))]
+    face_lookups: u64,
     /// How often what the peers declared was searched ([`Self::peers_declare`]): what a test of
     /// the cost of a filtered put counts.
     #[cfg(test)]
@@ -616,6 +622,8 @@ impl<H: Holders> RegistryOf<H> {
             ))]
             decl_watches,
             faces_written: 0,
+            #[cfg(all(test, feature = "std"))]
+            face_lookups: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
             #[cfg(test)]
@@ -658,11 +666,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// One more lent Push handed to the subscribers' plane alone, the face lookups since
-    /// `written` its own.
+    /// `looked` its own.
     #[cfg(all(test, feature = "std"))]
-    fn counted_push(&mut self, written: u64) {
-        let lookups =
-            usize::try_from(self.faces_written.wrapping_sub(written)).unwrap_or(usize::MAX);
+    fn counted_push(&mut self, looked: u64) {
+        let lookups = usize::try_from(self.face_lookups.wrapping_sub(looked)).unwrap_or(usize::MAX);
         self.pushes.0 += 1;
         self.pushes.1 += lookups;
     }
@@ -933,6 +940,18 @@ impl<H: Holders> RegistryOf<H> {
     /// be used as its call needs: what every dispatch and drain takes.
     fn split(&mut self, at: Option<usize>) -> Option<Split<'_, H>> {
         self.writing();
+        self.split_unwritten(at)
+    }
+
+    /// [`Self::split`] for a call that writes nothing a face's peer declared: a Push read into the
+    /// subscribers' plane, and the drains after a run of them, which send what the session staged
+    /// and take the `Final`s owed. Not counted as a write, so every answer read off the peers'
+    /// declarations stands across a stream of samples.
+    fn split_unwritten(&mut self, at: Option<usize>) -> Option<Split<'_, H>> {
+        #[cfg(all(test, feature = "std"))]
+        {
+            self.face_lookups += 1;
+        }
         let at = at?;
         let Self {
             app,
@@ -1093,20 +1112,20 @@ impl<H: Holders> RegistryOf<H> {
     /// nothing.
     pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         #[cfg(all(test, feature = "std"))]
-        let written = self.faces_written;
+        let looked = self.face_lookups;
         if let Some(Split {
             app,
             delivery,
             face,
             ..
-        }) = self.split(self.place(face))
+        }) = self.split_unwritten(self.place(face))
         {
             face.peer
                 .subscribers
                 .dispatch_iteration_event(&mut app.tables, delivery, event);
         }
         #[cfg(all(test, feature = "std"))]
-        self.counted_push(written);
+        self.counted_push(looked);
     }
 
     /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
@@ -1125,7 +1144,7 @@ impl<H: Holders> RegistryOf<H> {
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
+        if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
             #[cfg(feature = "interest-answer")]
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
@@ -1158,7 +1177,7 @@ impl<H: Holders> RegistryOf<H> {
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
+        if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
             #[cfg(feature = "interest-answer")]
             reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);

@@ -223,6 +223,20 @@ fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
     held_plan(config, &crate::arena::HeldPlaces::NONE)
 }
 
+/// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
+/// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
+    crate::engine::RuntimeTables::of::<PosixClock>(config)
+}
+
+/// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
+/// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
+    crate::engine::RuntimeTables::of(config)
+}
+
 /// `host_plan` with the ABI's places `held` laid out after every other row.
 fn held_plan(
     config: &CoopConfig,
@@ -231,7 +245,7 @@ fn held_plan(
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
     let links = PosixLinks::new(super::LOOPBACK, PosixTcpDial);
-    let runtime = crate::engine::RuntimeTables::of::<PosixClock>(config)
+    let runtime = runtime_tables(config)
         .placed_bytes::<PosixClock>()
         .ok_or(ArenaRefused::TooLarge)?;
     crate::engine::lay_out_open(
@@ -692,7 +706,9 @@ fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
 /// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
 /// `DELIVERY_LANE_CALLBACKS` state and its longest key, two of it for a round of threads and one for
 /// a round of one thread, each lowered with its limit, and are laid out right after the lane's area,
-/// the order the open lends them in. Turned red by a round of one thread lent two keys.
+/// the order the open lends them in. A round of one thread keeps its records in itself and is laid
+/// out no row of them. Turned red by a round of one thread lent two keys, or a row of records laid
+/// out where the arena lends none.
 #[test]
 fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
     let built =
@@ -705,10 +721,13 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
             longest_key: caps::MAX_KEYEXPR_BYTES,
         }
     );
-    assert_eq!(
-        row(&built, "delivery records").count,
-        caps::DELIVERY_LANE_EVENTS
-    );
+    let records = |plan: &ArenaPlan| {
+        plan.rows()
+            .find(|row| row.part() == "delivery records")
+            .map(|row| row.count)
+    };
+    let lent = |count: usize| (crate::round::RECORD_BYTES != 0).then_some(count);
+    assert_eq!(records(&built), lent(caps::DELIVERY_LANE_EVENTS));
     assert_eq!(
         row(&built, "delivery callbacks").count,
         caps::DELIVERY_LANE_CALLBACKS
@@ -718,7 +737,7 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
         l.select_max_keyexpr_bytes(Quota::at_most(32))
     });
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(row(&plan, "delivery records").count, 4);
+    assert_eq!(records(&plan), lent(4));
     assert_eq!(row(&plan, "delivery keys").count, 1);
     let keys = if <CoopForm as ThreadForm>::OTHER_THREADS {
         2
@@ -743,19 +762,21 @@ fn the_plan_lays_out_no_delivery_lane() {
     let parts: Vec<&str> = built.rows().map(|row| row.part()).collect();
     assert!(!parts.contains(&"delivery lane"));
     assert!(!parts.contains(&"delivery lane flag"));
-    let records = parts
+    // A round of one thread keeps its records in itself, and is laid out no row of them.
+    let tables: Vec<&str> = [
+        "delivery records",
+        "delivery callbacks",
+        "delivery keys",
+        "delivery round",
+    ]
+    .into_iter()
+    .filter(|part| crate::round::RECORD_BYTES != 0 || *part != "delivery records")
+    .collect();
+    let first = parts
         .iter()
-        .position(|part| *part == "delivery records")
+        .position(|part| *part == tables[0])
         .expect("CONTROL: the round's tables are laid out");
-    assert_eq!(
-        parts[records..records + 4],
-        [
-            "delivery records",
-            "delivery callbacks",
-            "delivery keys",
-            "delivery round"
-        ]
-    );
+    assert_eq!(parts[first..first + tables.len()], tables[..]);
     let round = row(&built, "delivery round");
     assert_eq!(
         (round.count, round.entry_bytes),
@@ -764,16 +785,25 @@ fn the_plan_lays_out_no_delivery_lane() {
 }
 
 /// The plan lays out one place for each step lend the open places in the arena
-/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each. Turned
-/// red by a plan that leaves either out, whose open would place it past what the arena has.
+/// (`crate::engine::StepPlaces`): the registry's and the reassembly Router's, a cell each, and no
+/// registry's where the read steps its one link itself and dispatches under the session's lock.
+/// Turned red by a plan that leaves a lend out, whose open would place it past what the arena has,
+/// or that reserves one the open never places, which lending every row would leave empty.
 #[test]
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    for (part, bytes) in [
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    assert!(
+        built.rows().all(|row| row.part() != "registry lend"),
+        "a read that steps its one link lends no registry"
+    );
+    let lends: &[(&str, usize)] = &[
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
-    ] {
+    ];
+    for &(part, bytes) in lends {
         let laid = row(&built, part);
         assert_eq!((laid.count, laid.entry_bytes), (1, bytes), "{part}");
     }
