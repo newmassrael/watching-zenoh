@@ -1493,7 +1493,9 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     Owned(&'r mut RecordBuf),
     /// A Push read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries, so it is a few words however long a
-    /// chain the protocol lets a peer send.
+    /// chain the protocol lets a peer send. A chain longer than the node stores inline is lent
+    /// like any other, on a build with no allocator too (the slot profile): the protocol bounds a
+    /// chain by nothing and upstream reads it whole, as a lent Request's is read.
     #[cfg(all(
         feature = "codec-push",
         any(
