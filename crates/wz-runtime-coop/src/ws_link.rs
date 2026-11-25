@@ -107,7 +107,7 @@ impl WsFraming {
         let mask = self.next_mask();
         let mut head = [0u8; MAX_HEAD_LEN];
         let head_len = write_head(&mut head, opcode, payload.len(), mask);
-        let end = head_len + payload.len();
+        let end = head_len.saturating_add(payload.len());
         let Control { bytes, len, from } = &mut *control;
         if let (Some(to), Some(written)) = (bytes.get_mut(..head_len), head.get(..head_len)) {
             to.copy_from_slice(written);
@@ -150,8 +150,14 @@ impl WsFraming {
             let HeadRead::Frame(head) = read_head(held.get(read..end).unwrap_or_default()) else {
                 return Front::Closed;
             };
-            let start = read + head.head_len;
-            let stop = start + head.payload_len as usize;
+            let start = read.saturating_add(head.head_len);
+            let stop =
+                start.saturating_add(usize::try_from(head.payload_len).unwrap_or(usize::MAX));
+            // The receive read these frames whole inside `..end` before it asked for the join; a
+            // frame that says otherwise is no stream this framing reads.
+            if stop > end {
+                return Front::Closed;
+            }
             if let (Some(key), Some(payload)) = (head.mask, held.get_mut(start..stop)) {
                 apply_mask(payload, key);
             }
@@ -163,7 +169,7 @@ impl WsFraming {
                 let at = *first_head.get_or_insert(start);
                 write = write.max(at);
                 held.copy_within(start..stop, write);
-                write += stop - start;
+                write = write.saturating_add(stop.saturating_sub(start));
             }
             read = stop;
         }
@@ -228,7 +234,9 @@ impl StreamFraming for WsFraming {
                             Front::Skip(end)
                         };
                     }
-                    let body = held.get_mut(at + head.head_len..end).unwrap_or_default();
+                    let body = held
+                        .get_mut(at.saturating_add(head.head_len)..end)
+                        .unwrap_or_default();
                     if let Some(key) = head.mask {
                         apply_mask(body, key);
                     }
