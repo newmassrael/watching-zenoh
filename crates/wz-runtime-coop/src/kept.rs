@@ -434,10 +434,14 @@ mod tests {
         let handed = Cell::new(None);
         // SAFETY: as in `a_placed_value_keeps_its_memory_until_its_last_holder`.
         let made = unsafe {
-            Shared::placed_with(NonNull::from(&mut room).cast(), memory, |at| {
-                handed.set(Some(at));
-                at.as_ptr().write(Counted(&drops));
-            })
+            Shared::placed_with(
+                NonNull::from(&mut room).cast(),
+                memory,
+                |at: NonNull<Counted<'_>>| {
+                    handed.set(Some(at));
+                    at.as_ptr().write(Counted(&drops));
+                },
+            )
         };
         assert_eq!(
             handed.get(),
