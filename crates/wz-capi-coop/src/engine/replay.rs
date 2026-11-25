@@ -110,6 +110,11 @@ pub(super) struct Replay {
     /// When the replay last told the peer a declaration, or began, in milliseconds on the
     /// session's clock: what a pace's no-progress bound on retrying refused turns counts from.
     last_progress_ms: u64,
+    /// Whether the link that came up is still owed the one lap of a build that reaches no pace
+    /// (`Core::tell_in_one_lap`): a declaration or a retraction made meanwhile is not told to
+    /// it, as the lap reads the tables as they stand when it runs. A build that reaches a pace
+    /// keeps the same in its cursor and never sets it.
+    lap_owed: bool,
 }
 
 impl Replay {
@@ -119,6 +124,7 @@ impl Replay {
             cursor: ReplayCursor::idle(),
             next_turn_ms: 0,
             last_progress_ms: 0,
+            lap_owed: false,
         }
     }
 
@@ -176,6 +182,7 @@ impl Replay {
     /// The link is gone: what the peer was told went with it.
     pub(super) fn discard(&mut self) {
         self.cursor = ReplayCursor::idle();
+        self.lap_owed = false;
     }
 
     /// Whether the peer has been told everything the session owes it: always, in a build that
@@ -269,10 +276,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Set the replay of the face at `at` to tell its peer, from `now_ms` on, everything the
-    /// session holds, its first turn due at once; nothing in a build that reaches no pace, whose
-    /// replay is one lap and keeps no cursor.
+    /// session holds, its first turn due at once. A build that reaches no pace, whose replay is
+    /// one lap and keeps no cursor, marks the lap owed: what is declared or retracted before it
+    /// runs is the lap's to tell, not the operation's.
     pub(super) fn start_replay(&mut self, at: usize, now_ms: u64) {
         if !ReplayPacing::REACHABLE {
+            if let Some(face) = self.transport.links.face_mut(at) {
+                face.replay.lap_owed = true;
+            }
             return;
         }
         let owed = self.sequence_len();
@@ -288,7 +299,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// it could not send one over. The replay of a build that reaches no pace, which keeps no
     /// cursor: the lap ends before the session does anything else, so nothing is owed past it. A
     /// lap with no wire to tell it through stops at its first place.
-    pub(super) fn tell_in_one_lap(&self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+    pub(super) fn tell_in_one_lap(&mut self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+        if let Some(face) = self.transport.links.face_mut(at) {
+            face.replay.lap_owed = false;
+        }
         for place in 0..self.sequence_len() {
             match self.emit(at, place, tx) {
                 Some(true) => {}
@@ -452,9 +466,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let Some(wire) = face.link.wire() else {
                 continue;
             };
-            // A build that reaches no pace told the peer everything when its link came up.
-            let told = !ReplayPacing::REACHABLE
-                || matches!(face.replay.cursor.removed(place), Removal::Retract);
+            // A build that reaches no pace told the peer everything with the lap its link came up
+            // with, once that lap ran.
+            let told = if ReplayPacing::REACHABLE {
+                matches!(face.replay.cursor.removed(place), Removal::Retract)
+            } else {
+                !face.replay.lap_owed
+            };
             if let Some(retract) = retract.filter(|_| told) {
                 tell_on(wire, tx, retract);
             }
@@ -688,11 +706,11 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     undo: Option<Retract<'_>>,
     tx: super::LinkTx<'_, C>,
 ) -> bool {
-    // Whether the replay of `face` is past the declaration, so its link is told it now: always,
-    // in a build that reaches no pace, whose replay ended with the lap its link came up with.
+    // Whether the replay of `face` is past the declaration, so its link is told it now: in a
+    // build that reaches no pace, once the lap its link came up with ran.
     let emits_now = |face: &Face<C, L>| {
         if !ReplayPacing::REACHABLE {
-            return true;
+            return !face.replay.lap_owed;
         }
         let mut cursor = face.replay.cursor;
         cursor.inserted(place) == Insertion::EmitNow

@@ -1433,10 +1433,43 @@ pub(crate) struct Takes {
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
     pub(crate) holds: core::sync::atomic::AtomicIsize,
+    /// What a test runs once, on the read's thread, after a look that brought the one link up and
+    /// before the replay's first lap: where an operation of another thread falls once the look
+    /// lets go of the session's lock (`direct`).
+    #[cfg(all(
+        feature = "std",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) after_bring_up: AfterBringUp,
 }
+
+/// A test's operation run between a link brought up and its first lap (`Takes::brought_up`).
+#[cfg(all(
+    test,
+    feature = "std",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+pub(crate) type AfterBringUp = std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>;
 
 #[cfg(test)]
 impl Takes {
+    /// Run, once, what a test set to run after a look that brought the one link up
+    /// (`after_bring_up`); the hook is taken out before it runs, so nothing is held while it does.
+    #[cfg(all(
+        feature = "std",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    fn brought_up(&self) {
+        let hook = self
+            .after_bring_up
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Count the wait a read is about to make.
     fn wait(&self, wait: &IdleWait) {
         let counter = match wait {

@@ -643,6 +643,9 @@ struct LinkTurn {
     jobs_due_ms: Option<u64>,
     /// Whether the look owes the link that is up a turn of its replay (`CoopEngine::turn_replay`).
     replays: bool,
+    /// Whether the look brought the link up (`Takes::brought_up`).
+    #[cfg(all(test, feature = "std"))]
+    brought_up: bool,
     /// Why the session ended at this look, when it did.
     ended: Option<OpenError>,
 }
@@ -739,6 +742,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
         let turn = self.life_turn(slot, wait)?;
+        #[cfg(all(test, feature = "std"))]
+        if turn.brought_up {
+            self.takes.brought_up();
+        }
         // A lost link's tokens go before anything a link brings after the loss, and with a loss
         // that ended the session too.
         #[cfg(feature = "liveliness")]
@@ -791,6 +798,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let moves_link = input != LinkInput::Tick || now_us >= slot.life_due_us;
         let mut ended = None;
         let mut replays = false;
+        #[cfg(all(test, feature = "std"))]
+        let mut brought_up = false;
         if moves_link || chains_due || core.ledger.owes(now_us, core.seen()) {
             #[cfg(test)]
             core.services.set(core.services.get() + 1);
@@ -810,6 +819,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 // replay the turn that may be due.
                 Ok(()) => {
                     replays = slot.brought_up || ReplayPacing::REACHABLE;
+                    #[cfg(all(test, feature = "std"))]
+                    {
+                        brought_up = slot.brought_up;
+                    }
                     slot.brought_up = false;
                 }
                 Err(last) => {
@@ -843,6 +856,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             now_ms,
             jobs_due_ms,
             replays,
+            #[cfg(all(test, feature = "std"))]
+            brought_up,
             ended,
         })
     }
