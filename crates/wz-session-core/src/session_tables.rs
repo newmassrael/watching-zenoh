@@ -3167,13 +3167,13 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             held_arena_bytes(rows.held_replies),
         ];
         let mut sum = Some(0_usize);
-        let mut at = 0;
-        while at < parts.len() {
-            sum = match (sum, parts[at]) {
+        let mut rest: &[Option<usize>] = &parts;
+        while let [part, tail @ ..] = rest {
+            sum = match (sum, *part) {
                 (Some(sum), Some(part)) => sum.checked_add(part),
                 _ => None,
             };
-            at += 1;
+            rest = tail;
         }
         sum
     }
