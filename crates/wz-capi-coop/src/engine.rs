@@ -2777,6 +2777,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -2824,6 +2830,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -5190,6 +5202,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.core.lock().0.session.registry.push_dispatches()
+    }
+
+    /// How often the session's links drained a run of Pushes before a later record of its own
+    /// frame: what tells a test that a Push and the record after it came in one frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn drains_within_frames(&self) -> usize {
+        self.core.lock().0.session.registry.drains_within_frames()
     }
 
     /// Whether the peer of every established link has been told every declaration the session

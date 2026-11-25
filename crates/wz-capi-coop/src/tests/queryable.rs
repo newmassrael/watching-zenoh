@@ -77,6 +77,7 @@ fn a_query_between_pushes_is_answered_then_finalled_once() {
         router.seen(|s| s.declares) >= 1
     });
     let (alone, ..) = engine.push_dispatches();
+    let within = engine.drains_within_frames();
     router.send(Command::QueryBetweenPushes(
         "demo/pushed",
         11,
@@ -90,6 +91,10 @@ fn a_query_between_pushes_is_answered_then_finalled_once() {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
+    assert!(
+        engine.drains_within_frames() > within,
+        "the Request came in the frame of the Push before it"
+    );
 }
 
 /// A query the callback keeps holds its Final until the C program lets go of it, and a reply made

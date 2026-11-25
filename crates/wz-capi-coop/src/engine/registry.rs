@@ -494,6 +494,11 @@ pub(super) struct RegistryOf<H: Holders> {
     /// cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+    /// How often a run of Pushes was drained before a later record of its own frame
+    /// ([`Self::count_drain_within_frame`]): what tells a test that a Push and the record after
+    /// it came in one frame.
+    #[cfg(all(test, feature = "std"))]
+    drains_within_frames: usize,
 }
 
 /// The faces as the session's state reaches them (`SessionState`): a
@@ -622,6 +627,8 @@ impl<H: Holders> RegistryOf<H> {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
+            #[cfg(all(test, feature = "std"))]
+            drains_within_frames: 0,
         })
     }
 
@@ -655,6 +662,18 @@ impl<H: Holders> RegistryOf<H> {
     #[cfg(all(test, feature = "std"))]
     pub(super) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.pushes
+    }
+
+    /// One more run of Pushes drained before a later record of its own frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(super) fn count_drain_within_frame(&mut self) {
+        self.drains_within_frames += 1;
+    }
+
+    /// How often a run of Pushes was drained before a later record of its own frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(super) fn drains_within_frames(&self) -> usize {
+        self.drains_within_frames
     }
 
     /// One more lent Push handed to the subscribers' plane alone, the face lookups since
@@ -1123,9 +1142,9 @@ impl<H: Holders> RegistryOf<H> {
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
             // No `Final` is owed here: only a Request's dispatch owes one
-            // (wz-session-core/src/query/in_place.rs:195, :214; wz-session-core/src/query.rs:3736),
-            // and the dispatch of a record that is not a Push takes every one it owed before the
-            // next record is read (`FaceDispatch::event`, wz-capi-coop/src/engine.rs:2802).
+            // (`wz_session_core::query::QueryPeer::dispatch_request_in_place` and
+            // `QueryPeer::dispatch_messages_with`), and the dispatch of a record that is not a Push
+            // takes every one it owed before the next record is read (`FaceDispatch::event`).
             debug_assert!(face.peer.finals.is_empty(), "a run of Pushes owes no Final");
         }
     }
