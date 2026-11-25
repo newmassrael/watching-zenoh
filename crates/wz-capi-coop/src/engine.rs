@@ -6650,8 +6650,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // A liveliness snapshot that expired ends the same way. Its terminated ids are
                 // staged for a reconnect cache this engine does not keep (it declares again from
                 // its own entries), so they are drained and dropped: staged ones would pile up.
+                // A table with no get pending and none ended has nothing to sweep or drain, and the
+                // drain makes a buffer of the table's whole ceiling: neither is done at every step.
                 #[cfg(feature = "liveliness-get")]
-                {
+                if !gets.liveliness_gets.is_empty() || gets.liveliness_gets.has_finalized() {
                     gets.liveliness_gets.sweep_timed_out(now_ms);
                     drop(gets.liveliness_gets.take_finalized());
                 }
