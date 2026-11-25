@@ -454,12 +454,14 @@ pub(crate) struct AdvPubState {
     /// `z_publisher_keyexpr(&pub->_publisher)` is: a put made on the loan
     /// aliases.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
+    /// What the loan names besides the key's text, in the state with the session it names.
+    record: crate::keyexpr::RecordKey,
 }
 
 impl AdvPubState {
     /// Point the cached view at the wrapped publisher's own key, after boxing.
     fn bind(&mut self) {
-        self.loaned_keyexpr = self.publisher.publisher().loan();
+        self.loaned_keyexpr = self.publisher.publisher().lend(&mut self.record);
     }
 }
 
@@ -617,6 +619,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             engine,
             publisher,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            record: crate::keyexpr::RecordKey::UNLENT,
         });
         // Bound where it lies: the place does not move until the undeclare gives it back.
         (*state).bind();

@@ -1604,11 +1604,11 @@ impl PlainPublisher {
         DeclaredKeyexpr::of_record(session, own, key, key)
     }
 
-    /// The loan of the publisher's key, from the session's record of it ([`FilteredKey::loan`]),
-    /// valid while the publisher stays at its address.
+    /// The loan of the publisher's key, from the session's record of it, naming it by `record`
+    /// ([`FilteredKey::lend`]): valid while the publisher and `record` stay at their address.
     #[cfg(feature = "advanced")]
-    pub(crate) fn loan(&self) -> z_loaned_keyexpr_t {
-        self.entity.loan()
+    pub(crate) fn lend(&self, record: &mut crate::keyexpr::RecordKey) -> z_loaned_keyexpr_t {
+        self.entity.lend(record)
     }
 
     /// pico's matching status of the publisher: whether its write filter has a match
@@ -1631,16 +1631,18 @@ pub(crate) struct PublisherState {
     core: PlainPublisher,
     /// The loan `z_publisher_keyexpr` hands back: the key as the session's record of the
     /// publisher's filter keeps it, with the declaration the record holds, so a put on it aliases
-    /// as one on pico's loan of `&pub->_key` does ([`FilteredKey::loan`]). Bound by
+    /// as one on pico's loan of `&pub->_key` does ([`FilteredKey::lend`]). Bound by
     /// [`PublisherState::bind`] once the state sits at its final address.
     loaned_keyexpr: z_loaned_keyexpr_t,
+    /// What the loan names besides the key's text, in the state with the session it names.
+    record: crate::keyexpr::RecordKey,
 }
 
 impl PublisherState {
     /// Point the cached loan at the key the session's record keeps. MUST run only once the state
     /// sits at its FINAL address, which the loan names.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.core.entity.loan();
+        self.loaned_keyexpr = self.core.entity.lend(&mut self.record);
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
@@ -1737,16 +1739,19 @@ pub(crate) struct SubscriberState {
 /// which is upstream's order; the door keeps no copy of the key.
 pub(crate) struct DeclaredSubscriber {
     id: SubId,
-    /// The declaration the record holds that the key begins with, as the record lent it
-    /// ([`wz_capi_port::SessionEngine::subscriber_keyexpr`]): what the loan of the key names, and
-    /// what a key made of the loan holds.
-    own: Option<wz_capi_port::OwnKey>,
+    /// The session and the declaration the record holds that the key begins with, as the record
+    /// lent it ([`wz_capi_port::SessionEngine::subscriber_keyexpr`]): what the loan of the key
+    /// names, and what a key made of the loan holds.
+    record: crate::keyexpr::RecordKey,
 }
 
 impl DeclaredSubscriber {
     /// Subscription `id`, its key not lent yet ([`SubscriberState::bind`]).
     pub(crate) fn new(id: SubId) -> Self {
-        Self { id, own: None }
+        Self {
+            id,
+            record: crate::keyexpr::RecordKey::UNLENT,
+        }
     }
 }
 
@@ -1754,21 +1759,14 @@ impl SubscriberState {
     /// Point the cached loan at the key the session's record of the subscription keeps, once
     /// declared and placed.
     pub(crate) fn bind(&mut self) {
-        let at: *const Self = self;
         let Some(declared) = self.declared.as_mut() else {
             return;
         };
         let lent = crate::session::EngineHold::as_ref(&self.shared).subscriber_keyexpr(declared.id);
         if let Some(view) = lent {
-            declared.own = view.own;
-            self.loaned_keyexpr = crate::keyexpr::record_loan(view, at);
+            declared.record = crate::keyexpr::RecordKey::lent(&self.shared, view.own);
+            self.loaned_keyexpr = crate::keyexpr::record_loan(view, &declared.record);
         }
-    }
-
-    /// The session the subscription is on and the declaration its key is lent with: what a key
-    /// made of the loan holds, and names on the wire.
-    pub(crate) fn record_key(&self) -> (&crate::session::EngineHold, Option<wz_capi_port::OwnKey>) {
-        (&self.shared, self.declared.as_ref().and_then(|d| d.own))
     }
 
     /// The subscription's id, once declared.
@@ -3218,6 +3216,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             core::ptr::addr_of_mut!((*plain).declared).write(declared);
             core::ptr::addr_of_mut!((*at).loaned_keyexpr)
                 .write(z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0));
+            core::ptr::addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);
             Ok(())
         };
         let state = match slot.try_fill_in_place(declare) {

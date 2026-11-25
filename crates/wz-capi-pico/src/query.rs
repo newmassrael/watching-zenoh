@@ -1341,17 +1341,16 @@ pub(crate) struct QueryableState {
 /// the queryable is retracted; the door keeps no copy of the key.
 struct DeclaredQueryable {
     id: QblId,
-    /// The declaration the record holds that the key begins with, as the record lent it
-    /// ([`wz_capi_port::SessionEngine::queryable_keyexpr`]): what the loan of the key names, and
-    /// what a key made of the loan holds.
-    own: Option<wz_capi_port::OwnKey>,
+    /// The session and the declaration the record holds that the key begins with, as the record
+    /// lent it ([`wz_capi_port::SessionEngine::queryable_keyexpr`]): what the loan of the key
+    /// names, and what a key made of the loan holds.
+    record: crate::keyexpr::RecordKey,
 }
 
 impl QueryableState {
     /// Point the cached loan at the key the session's record of the queryable keeps, once declared
     /// and placed.
     fn bind(&mut self) {
-        let at: *const Self = self;
         let Some(declared) = self.declared.as_mut() else {
             return;
         };
@@ -1360,15 +1359,9 @@ impl QueryableState {
             declared.id,
         );
         if let Some(view) = lent {
-            declared.own = view.own;
-            self.loaned_keyexpr = crate::keyexpr::record_loan(view, at);
+            declared.record = crate::keyexpr::RecordKey::lent(&self.engine, view.own);
+            self.loaned_keyexpr = crate::keyexpr::record_loan(view, &declared.record);
         }
-    }
-
-    /// The session the queryable is on and the declaration its key is lent with: what a key made
-    /// of the loan holds, and names on the wire.
-    pub(crate) fn record_key(&self) -> (&crate::session::EngineHold, Option<wz_capi_port::OwnKey>) {
-        (&self.engine, self.declared.as_ref().and_then(|d| d.own))
     }
 }
 
@@ -1520,7 +1513,10 @@ unsafe fn declare_queryable_in(
         queryable_sink_at(state),
     ) {
         Ok(id) => {
-            (*state).declared = Some(DeclaredQueryable { id, own: None });
+            (*state).declared = Some(DeclaredQueryable {
+                id,
+                record: crate::keyexpr::RecordKey::UNLENT,
+            });
             Ok(state)
         }
         Err(code) => {

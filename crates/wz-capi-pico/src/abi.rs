@@ -251,7 +251,7 @@ impl z_owned_slice_t {
 /// |------|-------------------------|--------------------|
 /// | 0/1  | `{ start, len }` into the caller's storage | `{ start, len }` into the OWNED copy |
 /// | 2    | 0                       | the address of the declaration's count in the session's tables (`KeyexprCount`), 0 for none |
-/// | 3    | null                    | the `DeclaredKeyexpr` for an owned key; for an entity's, its state tagged with its kind (`crate::keyexpr::record_loan`) |
+/// | 3    | null                    | the `DeclaredKeyexpr` for an owned key; for an entity's, its record's key, tagged (`crate::keyexpr::record_loan`) |
 ///
 /// Slot 2 is where the declaration's count and id lie: a copy of the key takes its hold of the
 /// declaration there, and a publish reads the id there, neither with a lock of the session. Slot 3

@@ -26,13 +26,11 @@ use crate::abi::{
     z_owned_keyexpr_t, z_view_keyexpr_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::pubsub::SubscriberState;
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION,
     Z_ERR_NULL, Z_OK,
 };
 use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
-use crate::write_filter::FilteredKey;
 
 /// Whether `key` is no longer than the longest key a row of a session's tables stores: the
 /// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
@@ -136,51 +134,38 @@ enum LentKey<'a> {
     Record(&'a crate::session::EngineHold, Option<OwnKey>),
 }
 
-/// The state of an entity whose key is lent from the session's record of it ([`record_loan`]),
-/// by the kind it is named by in slot 3 of the loan.
-pub(crate) trait LentRecord {
-    /// The kind, carried in the bits of slot 3 ([`RECORD_TAGS`]) beside the state's address.
-    const TAG: usize;
+/// What a key lent from the session's record of an entity names besides its text, in slot 3 of
+/// its loan ([`record_loan`]): the session the entity is on and the declaration the record holds
+/// that the key begins with. Every kind of entity lends its key in this one shape, so a loan is
+/// read the same whatever lent it. It lies in the entity's state, beside the session handle it
+/// names, both at their address while the state stands.
+pub(crate) struct RecordKey {
+    session: *const crate::session::EngineHold,
+    own: Option<OwnKey>,
 }
 
-/// The kind of a subscription's or a liveliness subscription's state.
-const SUBSCRIBER_TAG: usize = 1;
-/// The kind of a publisher's or a querier's key, filter and all.
-const FILTERED_TAG: usize = 2;
-/// The kind of a queryable's state.
-#[cfg(feature = "queryable")]
-const QUERYABLE_TAG: usize = 3;
+impl RecordKey {
+    /// No key lent yet.
+    pub(crate) const UNLENT: Self = Self {
+        session: core::ptr::null(),
+        own: None,
+    };
 
-impl LentRecord for SubscriberState {
-    const TAG: usize = SUBSCRIBER_TAG;
+    /// The key `session`'s record lends with `own`, `session` named where it lies in the
+    /// entity's state.
+    pub(crate) fn lent(session: &crate::session::EngineHold, own: Option<OwnKey>) -> Self {
+        Self { session, own }
+    }
 }
 
-impl LentRecord for FilteredKey {
-    const TAG: usize = FILTERED_TAG;
-}
-
-#[cfg(feature = "queryable")]
-impl LentRecord for crate::query::QueryableState {
-    const TAG: usize = QUERYABLE_TAG;
-}
-
-/// The bits slot 3 of a key lent from the session's record of an entity carries
-/// ([`record_loan`]): the kind of the entity's state, lying at the address without them. A kept
-/// key's address never carries them: every such state is aligned past them.
-const RECORD_TAGS: usize = 0b11;
+/// The bit slot 3 of a key lent from the session's record carries ([`record_loan`]), the
+/// [`RecordKey`] lying at the address without it. A kept key's address never carries it: both
+/// are aligned past it.
+const RECORD_TAG: usize = 1;
 
 const _: () = assert!(
-    core::mem::align_of::<DeclaredKeyexpr>() > RECORD_TAGS
-        && core::mem::align_of::<SubscriberState>() > RECORD_TAGS
-        && core::mem::align_of::<FilteredKey>() > RECORD_TAGS
-        && SUBSCRIBER_TAG & !RECORD_TAGS == 0
-        && FILTERED_TAG & !RECORD_TAGS == 0
-);
-
-#[cfg(feature = "queryable")]
-const _: () = assert!(
-    core::mem::align_of::<crate::query::QueryableState>() > RECORD_TAGS
-        && QUERYABLE_TAG & !RECORD_TAGS == 0
+    core::mem::align_of::<DeclaredKeyexpr>() > RECORD_TAG
+        && core::mem::align_of::<RecordKey>() > RECORD_TAG
 );
 
 /// What slot 3 of `ke` names.
@@ -192,39 +177,35 @@ unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
         return LentKey::View;
     }
     let state = (*ke)._state;
-    let tag = (state as usize) & RECORD_TAGS;
-    let at = state.cast::<u8>().wrapping_sub(tag);
-    let (session, own) = match tag {
+    if (state as usize) & RECORD_TAG == 0 {
         // SAFETY: an untagged slot 3 is a kept key, live while the loan is (the caller's).
-        0 => return LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) }),
-        // SAFETY: slot 3 tagged so is the state of that kind the tag was added to
-        // (`record_loan`), which stands while its loan does (the caller's).
-        SUBSCRIBER_TAG => unsafe { &*at.cast::<SubscriberState>() }.record_key(),
-        // SAFETY: as above.
-        FILTERED_TAG => unsafe { &*at.cast::<FilteredKey>() }.record_key(),
-        // SAFETY: as above.
-        #[cfg(feature = "queryable")]
-        QUERYABLE_TAG => unsafe { &*at.cast::<crate::query::QueryableState>() }.record_key(),
-        // No loan carries another tag.
-        _ => return LentKey::View,
+        return LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) });
+    }
+    // SAFETY: a tagged slot 3 is the record's key the tag was added to (`record_loan`), which
+    // stands in its entity's state while the loan does (the caller's).
+    let record = unsafe {
+        &*state
+            .cast::<u8>()
+            .wrapping_sub(RECORD_TAG)
+            .cast::<RecordKey>()
     };
-    LentKey::Record(session, own)
+    // SAFETY: a lent record names the session handle beside it in the same state
+    // ([`RecordKey::lent`]), which stands as long.
+    LentKey::Record(unsafe { &*record.session }, record.own)
 }
 
-/// The loan of `view`, the key the session's record of the entity whose state lies at `state`
-/// keeps: its text where the record keeps it, the address of the count of the declaration it names
-/// in slot 2, and the state, tagged with its kind, in slot 3, which names the session and the
-/// declaration a key made of the loan holds ([`SubscriberState::record_key`],
-/// [`FilteredKey::record_key`]). Valid while the state stays at its address and the entity
-/// stands.
-pub(crate) fn record_loan<T: LentRecord>(view: KeyView, state: *const T) -> z_loaned_keyexpr_t {
+/// The loan of `view`, the key the session's record of an entity keeps: its text where the record
+/// keeps it, the address of the count of the declaration it names in slot 2, and `record`,
+/// tagged, in slot 3, which names the session and the declaration a key made of the loan holds.
+/// Valid while `record` stays at its address and the entity stands.
+pub(crate) fn record_loan(view: KeyView, record: &RecordKey) -> z_loaned_keyexpr_t {
     z_loaned_keyexpr_t {
         _start: view.start,
         _len: view.len,
-        _handle: view.own.map_or(0, |own| own.row_address()),
-        _state: state
+        _handle: record.own.map_or(0, |own| own.row_address()),
+        _state: (record as *const RecordKey)
             .cast::<u8>()
-            .wrapping_add(T::TAG)
+            .wrapping_add(RECORD_TAG)
             .cast_mut()
             .cast::<c_void>(),
     }

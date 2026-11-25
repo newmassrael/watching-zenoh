@@ -46,7 +46,7 @@
 //! (`EntityKey::retraction_naming_in`).
 
 use wz_capi_port::{
-    FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, OwnKey, Refusal, WireKey,
+    FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, Refusal, WireKey,
 };
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
@@ -345,15 +345,22 @@ impl FilteredKey {
     }
 
     /// The session the entity is on and the declaration its key is lent with: what a key made of
-    /// its loan holds, and names on the wire.
-    pub(crate) fn record_key(&self) -> (&EngineHold, Option<OwnKey>) {
+    /// its loan holds.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn record_key(&self) -> (&EngineHold, Option<wz_capi_port::OwnKey>) {
         (self.filter.engine(), self.key.own)
     }
 
-    /// The loan of the entity's key: the record's text and declaration, named from `self`, which
-    /// must stay at its address while the loan is read ([`crate::keyexpr::record_loan`]).
-    pub(crate) fn loan(&self) -> crate::abi::z_loaned_keyexpr_t {
-        crate::keyexpr::record_loan(self.key, self)
+    /// The loan of the entity's key: the record's text, and `record`, written here, naming the
+    /// session and the declaration ([`crate::keyexpr::record_loan`]). `self` and `record` must
+    /// stay at their address while the loan is read: `record` lies in the entity's state beside
+    /// `self`.
+    pub(crate) fn lend(
+        &self,
+        record: &mut crate::keyexpr::RecordKey,
+    ) -> crate::abi::z_loaned_keyexpr_t {
+        *record = crate::keyexpr::RecordKey::lent(self.filter.engine(), self.key.own);
+        crate::keyexpr::record_loan(self.key, record)
     }
 
     /// The key as a message sent once names it: the record's declaration and the rest of the key.

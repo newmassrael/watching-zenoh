@@ -251,9 +251,11 @@ pub(crate) struct QuerierState {
     /// whole-key declaration pico makes for it, retracted after the filter's Interest, as the
     /// publisher's is; and the `eid` half of the global id `z_querier_id` reports.
     entity: FilteredKey,
-    /// The loan `z_querier_keyexpr` hands back, from the record ([`FilteredKey::loan`]); bound
+    /// The loan `z_querier_keyexpr` hands back, from the record ([`FilteredKey::lend`]); bound
     /// once the state sits at its final address.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
+    /// What the loan names besides the key's text, in the state with the session it names.
+    record: crate::keyexpr::RecordKey,
     /// How every get through it asks, its request QoS included: pico's
     /// `z_querier_get_options_t` carries no QoS fields, so the per-get call has nothing to
     /// override them with, and this is where they live.
@@ -276,7 +278,7 @@ pub(crate) struct QuerierState {
 impl QuerierState {
     /// Point the cached loan at the key the session's record keeps, once placed.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.entity.loan();
+        self.loaned_keyexpr = self.entity.lend(&mut self.record);
     }
 
     /// The `eid` half of the global id `z_querier_id` reports.
@@ -426,6 +428,7 @@ pub unsafe extern "C" fn z_declare_querier(
         let state = slot.fill(crate::object_slot::Answering::new(QuerierState {
             entity: filtered,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            record: crate::keyexpr::RecordKey::UNLENT,
             shape,
             encoding,
             cancel: CancellationToken::default(),
