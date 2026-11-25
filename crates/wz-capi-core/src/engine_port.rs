@@ -174,6 +174,14 @@ impl wz_capi_port::KeyHolds for SharedSession {
     ) -> Result<(), wz_capi_port::HoldRefused> {
         SharedSession::retain_keyexpr(self, row)
     }
+
+    fn declared_prefix(
+        &self,
+        row: wz_session_core::session_tables::KeyexprHandle,
+        key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        SharedSession::declared_prefix(self, row, key)
+    }
 }
 
 impl wz_capi_port::Tickers for SharedSession {
@@ -351,9 +359,9 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
-        let (sink, release) = crate::faces::face_sink(sink);
-        let id = self.declared_on_wire(wire, |wire| {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+        let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -364,8 +372,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -446,14 +454,12 @@ impl SessionEngine for SharedSession {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Result<FilterId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
         // A closed session declares nothing: a filter on it would hold every write back for good.
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);
         }
-        // The registry refuses a filter for want of an entity id alone.
         SharedSession::declare_write_filter(self, plane, keyexpr.to_owned(), wire, ask, count_local)
-            .ok_or(Refusal::NoEntityId)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {
@@ -545,7 +551,7 @@ impl SessionEngine for SharedSession {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         self.declared_on_wire(wire, |wire| {
             self.declare_port_queryable_on_links(
                 keyexpr.to_owned(),
@@ -633,12 +639,12 @@ impl SessionEngine for SharedSession {
         wire: WireKey,
         history: bool,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        let (sink, release) = crate::faces::face_liveliness_sink(sink);
-        let id = self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -648,8 +654,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "query")]
@@ -678,7 +684,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_on_wire(keyexpr, wire, opts.clone(), crate::faces::face_reply(leg()))
+                    .query_on_wire(keyexpr, wire, opts.clone(), self.face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -714,12 +720,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_shm(
-                        keyexpr,
-                        opts.clone(),
-                        &value,
-                        crate::faces::face_reply(leg()),
-                    )
+                    .query_shm(keyexpr, opts.clone(), &value, self.face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -740,9 +741,9 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
-        let (sink, release) = crate::faces::face_sink(sink);
-        let id = self.declared_on_wire(wire, |wire| {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+        let (sink, release) = crate::faces::face_sink(sink, self.deliveries());
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -753,8 +754,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "queryable")]
@@ -766,7 +767,7 @@ impl SessionEngine for SharedSession {
         reach: wz_capi_port::DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         let wz_capi_port::DeclarationReach {
             allowed_origin,
             links,
@@ -812,12 +813,12 @@ impl SessionEngine for SharedSession {
         history: bool,
         links: LinkRestriction,
         sink: wz_capi_port::LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        let (sink, release) = crate::faces::face_liveliness_sink(sink);
-        let id = self.declared_on_wire(wire, |wire| {
+        let (sink, release) = crate::faces::face_liveliness_sink(sink, self.deliveries());
+        let declared = self.declared_on_wire(wire, |wire| {
             SharedSession::declare_liveliness_subscriber_on_links(
                 self,
                 keyexpr.to_owned(),
@@ -827,8 +828,8 @@ impl SessionEngine for SharedSession {
                 sink,
             )
         })?;
-        self.keep_sink_release(id, release);
-        Ok(id)
+        self.keep_sink_release(declared.id, release);
+        Ok(declared)
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -887,7 +888,7 @@ impl SharedSession {
         if self.is_closed() {
             return Err(Refusal::Closed);
         }
-        let mut leg = || crate::faces::face_reply(leg());
+        let mut leg = || self.face_reply(leg());
         Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, &mut leg))
     }
 }
@@ -951,12 +952,13 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<wz_capi_port::QblId>, Refusal> {
         // The registry mints a callback per face with the face's own session; each calls the one
         // sink the port was handed with that session as a `QueryHolder`, beside the node's closed
         // latch, which is what a reply on a kept query checks first.
         let closed = self.closed_latch();
         let kept = Arc::downgrade(&self.kept_queries);
+        let deliveries = self.deliveries();
         let sink = Arc::new(sink);
         self.declare_queryable_on_links(
             keyexpr,
@@ -975,7 +977,7 @@ impl SharedSession {
                 Box::new(
                     move |query: &dyn wz_session_core::query_sink::QueryView,
                           out: &mut dyn wz_session_core::query_sink::ReplyOut| {
-                        sink.call(query, out, &holder);
+                        deliveries.within(|| sink.call(query, out, &holder));
                     },
                 ) as Box<_>
             }),

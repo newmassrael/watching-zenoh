@@ -279,7 +279,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go. A key whose declaration's
         // count has no room keeps nothing, as a plane whose key is not a declaration does.
-        Some(Retained::new(Arc::new(publisher.key().share().ok()?)))
+        Some(Retained::new(Arc::new(publisher.key_copy().ok()?)))
     }
 }
 

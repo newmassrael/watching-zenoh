@@ -312,7 +312,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         )),
         Kind::Subscriber => Some((
             EntityKind::Subscriber,
-            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
         )),
         #[cfg(feature = "queryable")]
         Kind::Queryable => Some((
@@ -327,7 +327,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "liveliness")]
         Kind::LivelinessSubscriber => Some((
             EntityKind::LivelinessSubscriber,
-            InSession::<crate::pubsub::SubscriberPlace>::LAYOUT,
+            InSession::<crate::pubsub::SubscriberState>::LAYOUT,
         )),
         #[cfg(feature = "query")]
         Kind::Querier => Some((
@@ -483,8 +483,8 @@ pub(crate) const fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::ar
 }
 
 /// An entity's object, the count of the program's closures it answers for (a querier's gets, a
-/// queryable's or a subscriber's closure), and what those closures keep in the place past the
-/// object (`K`: the C closure a queryable's or a subscriber's row calls), inline in the entity's
+/// queryable's closure), and what those closures keep in the place past the object (`K`: the C
+/// closure a queryable's row calls), inline in the entity's
 /// place. The handle of the
 /// object is the place itself, the object first, so a handle read as a `T` reads the object. The
 /// owner's release lets go of the object and leaves the place, with the count and what is kept in

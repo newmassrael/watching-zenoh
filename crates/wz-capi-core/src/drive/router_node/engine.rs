@@ -37,6 +37,8 @@ use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId};
 
 use super::{RouterKept, RouterState};
 use crate::caller_span::CallerSpan;
+use crate::deliveries::Deliveries;
+use crate::faces::{Released, SinkRelease};
 
 /// A job that runs `tick` every period on a thread of its own, until `tick` answers `false` or this
 /// is dropped. Dropping tells the thread, which ends at its next wake and is not waited for: the
@@ -87,10 +89,28 @@ impl Drop for PeriodicJob {
 /// What a subscription the engine holds is, in the one id space the port gives subscribers and
 /// liveliness subscribers together.
 enum Held {
-    /// A subscriber hosted on the node's data plane, by its id there.
-    Plain(u64),
-    /// A liveliness subscriber of the node's own face, by its id there.
-    Liveliness(u64),
+    /// A subscriber hosted on the node's data plane, by its id there, with what tells when its
+    /// callback has been let go of.
+    Plain(u64, SinkRelease),
+    /// A liveliness subscriber of the node's own face, by its id there, with what tells when its
+    /// callback has been let go of.
+    Liveliness(u64, SinkRelease),
+}
+
+/// A subscription of the program's: what the node holds for it, and the key it was declared on,
+/// which the program is lent back ([`SessionEngine::declare_subscriber_on_wire`]). The key is a buffer of
+/// its own, so it stays where it is when the map moves the entry.
+struct Subscribed {
+    held: Held,
+    key: Box<str>,
+}
+
+/// A queryable of the program's: the id the node's data plane holds it under, and the key it was
+/// declared on, which the program is lent back ([`SessionEngine::declare_queryable_on_wire`]). The key is
+/// a buffer of its own, so it stays where it is when the map moves the entry.
+struct Hosted {
+    host: u64,
+    key: Box<str>,
 }
 
 /// What the node keeps to be an engine: the clock, the ids, the subscriptions and the periodic
@@ -104,12 +124,18 @@ pub(super) struct EngineState {
     /// filters and its periodic jobs. A space of their own, so they are not refused when the
     /// entity ids are spent.
     next_local_id: AtomicU64,
-    subscriptions: Mutex<HashMap<SubId, Held>>,
-    /// The program's queryables, each by the id the node's data plane holds it under. That id is
+    subscriptions: Mutex<HashMap<SubId, Subscribed>>,
+    /// The key each write filter of the program's was declared on, the node's record of the
+    /// filter, which a publisher or a querier is lent its key from
+    /// ([`SessionEngine::declare_write_filter`]). Each key is a buffer of its own, so it stays where it
+    /// is when the map moves the entry.
+    filters: Mutex<HashMap<FilterId, Box<str>>>,
+    /// The program's queryables, each with the id the node's data plane holds it under. That id is
     /// the data plane's key for its own face's declaration, which no peer reads; the program is
     /// given an entity id, as every other declaration of its session.
-    queryables: Mutex<HashMap<QblId, u64>>,
-    /// The program's liveliness tokens, as `queryables` holds its queryables.
+    queryables: Mutex<HashMap<QblId, Hosted>>,
+    /// The program's liveliness tokens, each by the id the node's data plane holds it under, as
+    /// `queryables` names its queryables.
     tokens: Mutex<HashMap<TokenId, u64>>,
     jobs: Mutex<HashMap<u64, PeriodicJob>>,
     /// What each connectivity listener whose history is being replayed was told of the node's
@@ -118,6 +144,9 @@ pub(super) struct EngineState {
     /// The queries the program keeps past the handlers of the node's queryables, each under the
     /// id its keep answers ([`wz_capi_port::QueryHolder::keep_query`]).
     kept: Arc<HeldSlab<RouterKept>>,
+    /// The deliveries of the node's own session: every callback the node calls for the program
+    /// runs as one, so an undeclare made inside one does not wait for a call it may be under.
+    deliveries: Deliveries,
 }
 
 impl EngineState {
@@ -127,11 +156,13 @@ impl EngineState {
             next_entity_id: AtomicU64::new(1),
             next_local_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
+            filters: Mutex::new(HashMap::new()),
             queryables: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             told: wz_capi_port::os::Mutex::new(wz_capi_port::told::ToldLedger::new()),
             kept: Arc::new(HeldSlab::new()),
+            deliveries: Deliveries::new(),
         }
     }
 
@@ -152,6 +183,31 @@ impl EngineState {
 
     fn local_id(&self) -> u64 {
         self.next_local_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A write filter on `keyexpr`: its id, the key kept as the filter's record. The node holds
+    /// no write back, so the record is all there is of the filter.
+    fn filter_declared(&self, keyexpr: &str) -> wz_capi_port::Declared<FilterId> {
+        let id = self.local_id();
+        // Named whole, as the node names every key: the text its record keeps, at one address
+        // until the filter is undeclared.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
+        self.filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, key);
+        wz_capi_port::Declared { id, key: lent }
+    }
+
+    /// Filter `id` undeclared: its record goes, the key with it.
+    fn filter_retracted(&self, id: FilterId) {
+        let gone = self
+            .filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        drop(gone);
     }
 }
 
@@ -185,6 +241,15 @@ impl wz_capi_port::KeyHolds for RouterState {
         _row: wz_session_core::session_tables::KeyexprHandle,
     ) -> Result<(), wz_capi_port::HoldRefused> {
         Err(wz_capi_port::HoldRefused::Gone)
+    }
+
+    // No row is the node's: every key is named whole.
+    fn declared_prefix(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+        _key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        None
     }
 }
 
@@ -325,37 +390,61 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        let deliveries = self.engine.deliveries;
+        let (sink, release) = Released::new(sink, deliveries);
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self.forwarder.host_subscriber_from(
             keyexpr,
             allowed_origin,
-            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample)),
+            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| {
+                deliveries.within(|| sink.call(sample));
+            }),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Plain(host));
-        Ok(id)
+            .insert(
+                id,
+                Subscribed {
+                    held: Held::Plain(host, release),
+                    key,
+                },
+            );
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
+    // Returns once the callback has been let go of after its last call, unless this thread
+    // delivers for the node now (`SinkRelease::wait`).
     fn undeclare_subscriber(&self, id: SubId) {
-        let held = self
+        let gone = self
             .engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
+        let Some(Subscribed { held, key }) = gone else {
+            return;
+        };
         match held {
-            Some(Held::Plain(host)) => {
+            Held::Plain(host, release) => {
                 self.forwarder.unhost_subscriber(host);
+                release.wait();
             }
-            Some(Held::Liveliness(face)) => self.liveliness.unsubscribe(face),
-            None => {}
+            Held::Liveliness(face, release) => {
+                self.liveliness.unsubscribe(face);
+                release.wait();
+            }
         }
+        // The key the program was lent goes once the subscription is let go of.
+        drop(key);
     }
 
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
@@ -375,11 +464,12 @@ impl SessionEngine for RouterState {
         } else {
             Locality::Remote
         };
+        let deliveries = self.engine.deliveries;
         Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             origin,
-            Box::new(move |matching| sink.call(matching)),
+            Box::new(move |matching| deliveries.within(|| sink.call(matching))),
         ))
     }
 
@@ -390,11 +480,12 @@ impl SessionEngine for RouterState {
         sink: MatchingSink,
         locality: Locality,
     ) -> Result<MatchId, Refusal> {
+        let deliveries = self.engine.deliveries;
         Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             locality,
-            Box::new(move |matching| sink.call(matching)),
+            Box::new(move |matching| deliveries.within(|| sink.call(matching))),
         ))
     }
 
@@ -429,14 +520,14 @@ impl SessionEngine for RouterState {
     fn declare_write_filter(
         &self,
         _plane: FilterPlane,
-        _keyexpr: &str,
+        keyexpr: &str,
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
-    ) -> Result<FilterId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
-        // nothing, so the filter takes no entity id.
-        Ok(self.engine.local_id())
+        // nothing, so the filter takes no entity id. It keeps the key, which its entity is lent.
+        Ok(self.engine.filter_declared(keyexpr))
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {
@@ -447,7 +538,9 @@ impl SessionEngine for RouterState {
         false
     }
 
-    fn undeclare_write_filter(&self, _id: FilterId) {}
+    fn undeclare_write_filter(&self, id: FilterId) {
+        self.engine.filter_retracted(id);
+    }
 
     fn put_plain_filtered(
         &self,
@@ -497,11 +590,12 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // The node's queries are held through the node itself, which the one sink is called with.
         let holder = self.query_holder();
+        let deliveries = self.engine.deliveries;
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
@@ -509,27 +603,33 @@ impl SessionEngine for RouterState {
             Box::new(
                 move |query: &dyn wz_session_core::query_sink::QueryView,
                       out: &mut dyn wz_session_core::query_sink::ReplyOut| {
-                    sink.call(query, out, &*holder);
+                    deliveries.within(|| sink.call(query, out, &*holder));
                 },
             ),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, host);
-        Ok(id)
+            .insert(id, Hosted { host, key });
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     fn undeclare_queryable(&self, id: QblId) {
-        let host = self
+        let hosted = self
             .engine
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
-        if let Some(host) = host {
+        if let Some(Hosted { host, key }) = hosted {
             self.forwarder.unhost_queryable(host);
+            // The key the program was lent goes once the queryable is let go of.
+            drop(key);
         }
     }
 
@@ -588,24 +688,36 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        let deliveries = self.engine.deliveries;
+        let (sink, release) = Released::new(sink, deliveries);
         let face = self.liveliness.subscribe(
             keyexpr,
             history,
             Box::new(
                 move |sample: wz_session_core::declare::liveliness_sample::LivelinessSample<'_>| {
-                    sink.call(sample)
+                    deliveries.within(|| sink.call(sample));
                 },
             ),
         );
+        // Named whole, as the node names every key: the text its record keeps, a buffer of its own
+        // that stays where it is when the map moves the entry.
+        let key: Box<str> = keyexpr.into();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Held::Liveliness(face));
-        Ok(id)
+            .insert(
+                id,
+                Subscribed {
+                    held: Held::Liveliness(face, release),
+                    key,
+                },
+            );
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     fn get_on_wire(
@@ -625,12 +737,13 @@ impl SessionEngine for RouterState {
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
         let callback = leg();
+        let deliveries = self.engine.deliveries;
         let id = self
             .get_numbered(
                 keyexpr,
                 opts,
                 None,
-                Box::new(move |view| callback.call(view)),
+                Box::new(move |view| deliveries.within(|| callback.call(view))),
                 Box::new(|| {}),
             )
             // The one way the node fails to ask: a query its codec cannot build.
@@ -660,13 +773,14 @@ impl SessionEngine for RouterState {
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
         let callback = leg();
+        let deliveries = self.engine.deliveries;
         let id = self
             .get_numbered_shm(
                 keyexpr,
                 opts,
                 value,
                 None,
-                Box::new(move |view| callback.call(view)),
+                Box::new(move |view| deliveries.within(|| callback.call(view))),
                 Box::new(|| {}),
             )
             // The node fails to ask a query its codec cannot build, or a chunk it cannot send.
@@ -699,17 +813,20 @@ impl SessionEngine for RouterState {
         let told = Arc::clone(&callback);
         let ended = Arc::clone(&callback);
         let face = Arc::clone(&self.liveliness);
+        let deliveries = self.engine.deliveries;
         let on_key: KeyHandler = Box::new(move |key: &str| {
             let held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(callback) = held.as_ref() {
-                callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
-                    rid: 0,
-                    keyexpr: key,
-                    kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
-                    payload: &[],
-                    err_encoding: None,
-                    attachment: None,
-                    put_encoding: None,
+                deliveries.within(|| {
+                    callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
+                        rid: 0,
+                        keyexpr: key,
+                        kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+                        payload: &[],
+                        err_encoding: None,
+                        attachment: None,
+                        put_encoding: None,
+                    });
                 });
             }
         });
@@ -765,6 +882,52 @@ mod tests {
             state.local_id(),
             local + 1,
             "a write filter or a job takes no entity id"
+        );
+    }
+
+    /// A write filter's record keeps the key it was declared on, which its publisher or querier is
+    /// lent named whole: the text lies where the record keeps it, stays there while other filters
+    /// come and go, and goes with the filter's undeclaration. Turned red by a record that keeps no
+    /// key, lends a copy, moves the text when the map grows, names a declaration, or outlives the
+    /// undeclaration.
+    #[test]
+    fn a_write_filters_record_lends_its_key_until_it_is_undeclared() {
+        let state = EngineState::new();
+        let key = "demo/node/pub";
+        let wz_capi_port::Declared {
+            id: filter,
+            key: lent,
+        } = state.filter_declared(key);
+        assert_eq!(lent.own, None, "a node names every key whole");
+        assert_ne!(
+            lent.start,
+            key.as_ptr(),
+            "the record's own text, not the caller's"
+        );
+        let others: Vec<FilterId> = (0..64)
+            .map(|at| state.filter_declared(&format!("demo/node/other/{at}")).id)
+            .collect();
+        let record = |id: FilterId| {
+            state
+                .filters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&id)
+                .map(|kept| (kept.as_ptr(), kept.len()))
+        };
+        assert_eq!(
+            record(filter),
+            Some((lent.start, lent.len)),
+            "the text stays where it was lent while the records move"
+        );
+        // SAFETY: the record keeps the text where it lent it until the filter is undeclared below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        state.filter_retracted(filter);
+        assert_eq!(record(filter), None, "gone with the filter");
+        assert!(
+            others.iter().all(|&other| record(other).is_some()),
+            "CONTROL: the other filters stand"
         );
     }
 

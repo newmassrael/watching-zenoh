@@ -239,7 +239,8 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
                 },
             ),
         )
-        .expect("a node has queryables");
+        .expect("a node has queryables")
+        .id;
 
     // The peer asks, over the link: the reply is the router's.
     let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
@@ -427,7 +428,8 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
                         .push((sample.kind, sample.keyexpr.to_owned()));
                 }),
             )
-            .expect("a node has liveliness subscriptions");
+            .expect("a node has liveliness subscriptions")
+            .id;
         (seen, id)
     };
     // With its history: the client's interest may reach the node after the token is declared, and
@@ -592,7 +594,8 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             None,
             wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
-        .expect("a node with ids left declares");
+        .expect("a node with ids left declares")
+        .id;
     assert!(
         eventually(|| told.lock().unwrap().last() == Some(&true)),
         "the listener was not told a subscriber matched"
@@ -640,7 +643,8 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             None,
             wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
-        .expect("a node with ids left declares");
+        .expect("a node with ids left declares")
+        .id;
     assert!(eventually(|| {
         engine.matching_status(
             FilterPlane::Subscribers,
@@ -875,7 +879,8 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink(),
         )
-        .expect("no set is never refused, and a node has an id for a subscriber");
+        .expect("no set is never refused, and a node has an id for a subscriber")
+        .id;
     engine.undeclare_subscriber(taken);
 
     assert_eq!(
@@ -961,7 +966,8 @@ fn a_kept_query_answers_and_ends_through_the_port(
                 },
             ),
         )
-        .expect("a session has queryables");
+        .expect("a session has queryables")
+        .id;
 
     // Each ask names a key of its own, so the keep of the last one is told from a keep of an
     // earlier ask that arrived late.
@@ -1165,7 +1171,7 @@ mod shared_memory {
                     .push((sample.payload().to_vec(), shared));
             }),
         );
-        (got, id.expect("a node with ids left declares"))
+        (got, id.expect("a node with ids left declares").id)
     }
 
     /// A chunk published through the port goes to a client that negotiated shared memory as the
@@ -1269,7 +1275,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a session has queryables");
+            .expect("a session has queryables")
+            .id;
         (got, id)
     }
 
@@ -1440,7 +1447,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a session has queryables");
+            .expect("a session has queryables")
+            .id;
 
         let got: Got = Arc::default();
         until_each_is_told(&[&got], || {
@@ -1542,7 +1550,8 @@ mod shared_memory {
                     },
                 ),
             )
-            .expect("a node has queryables");
+            .expect("a node has queryables")
+            .id;
 
         let (on_shared, on_plain, on_node): (Got, Got, Got) = Default::default();
         let (shared_engine, plain_engine) = (shared.as_engine(), plain.as_engine());
@@ -1577,4 +1586,254 @@ mod shared_memory {
         plain.close();
         node.close();
     }
+}
+
+/// Sets its flag when dropped: what a C closure's `drop(context)` stands for.
+struct LetGoFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for LetGoFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// What a subscriber [`subscribe_holding`] declared tells: whether its call began, and in it
+/// whether it ran as a delivery of the node; whether its callback was let go of; and what lets
+/// its call end.
+#[derive(Default)]
+struct Holding {
+    entered: std::sync::atomic::AtomicBool,
+    inside: std::sync::atomic::AtomicBool,
+    go: std::sync::atomic::AtomicBool,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A subscriber of `node` on `key` whose call holds until `holding.go` is set, five seconds at
+/// most, so a wait that should not happen ends rather than hangs.
+fn subscribe_holding(node: &Arc<RouterState>, key: &str, holding: &Arc<Holding>) -> SubId {
+    use wz_capi_port::EngineDeliveries;
+    use wz_session_core::sink::SampleView;
+
+    let held = LetGoFlag(Arc::clone(&holding.dropped));
+    let told = Arc::clone(holding);
+    let deliveries = node.engine.deliveries;
+    node.as_engine()
+        .declare_subscriber_on_wire(
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                let _ = &held;
+                told.inside
+                    .store(deliveries.delivers_here(), Ordering::SeqCst);
+                told.entered.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !told.go.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }),
+        )
+        .expect("an open node declares")
+        .id
+}
+
+/// Put on `key` of `node` from a thread of its own.
+fn put_elsewhere(node: &Arc<RouterState>, key: &'static str) -> std::thread::JoinHandle<()> {
+    let engine = node.as_engine();
+    std::thread::spawn(move || {
+        engine
+            .publish_on_wire_all(
+                key,
+                &WireKey::literal(),
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("the node takes its own put");
+    })
+}
+
+/// The node's undeclare of a subscriber returns with its callback let go of. Turned red by an
+/// undeclare that returns while the callback is held.
+#[test]
+fn a_nodes_undeclare_returns_with_the_callback_let_go_of() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    holding.go.store(true, Ordering::SeqCst);
+    let id = subscribe_holding(&node, "wz/node/release", &holding);
+    assert!(
+        !holding.dropped.load(Ordering::SeqCst),
+        "held while declared"
+    );
+    node.as_engine().undeclare_subscriber(id);
+    assert!(
+        holding.dropped.load(Ordering::SeqCst),
+        "let go of when the undeclare returns"
+    );
+    node.close();
+}
+
+/// An undeclare made inside a delivery of the node returns at once while the subscriber's call
+/// runs on another thread, the callback still held, and the call is itself a delivery of the
+/// node. Turned red by a sample callback that does not enter the node's delivery, or an
+/// undeclare that waits there (five seconds, and returns with the callback let go of).
+#[test]
+fn an_undeclare_inside_a_delivery_of_the_node_returns_at_once() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    let id = subscribe_holding(&node, "wz/node/inside", &holding);
+    let putter = put_elsewhere(&node, "wz/node/inside");
+    assert!(
+        eventually(|| holding.entered.load(Ordering::SeqCst)),
+        "the subscriber's call began"
+    );
+    assert!(
+        holding.inside.load(Ordering::SeqCst),
+        "the call is a delivery of the node"
+    );
+    let engine = node.as_engine();
+    node.engine
+        .deliveries
+        .within(|| engine.undeclare_subscriber(id));
+    assert!(
+        !holding.dropped.load(Ordering::SeqCst),
+        "the undeclare returned while the call held the callback"
+    );
+    holding.go.store(true, Ordering::SeqCst);
+    putter.join().expect("the putting thread");
+    assert!(
+        eventually(|| holding.dropped.load(Ordering::SeqCst)),
+        "let go of as the call ended"
+    );
+    node.close();
+}
+
+/// An undeclare made inside another session's callback waits for the subscriber's call on
+/// another thread, and returns with the callback let go of. Turned red by an undeclare that
+/// does not wait outside the node's own deliveries.
+#[test]
+fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
+    let node = open_node();
+    let holding = Arc::new(Holding::default());
+    let id = subscribe_holding(&node, "wz/node/other", &holding);
+    let putter = put_elsewhere(&node, "wz/node/other");
+    assert!(
+        eventually(|| holding.entered.load(Ordering::SeqCst)),
+        "the subscriber's call began"
+    );
+    let releaser = {
+        let holding = Arc::clone(&holding);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            holding.go.store(true, Ordering::SeqCst);
+        })
+    };
+    let engine = node.as_engine();
+    crate::deliveries::Deliveries::new().within(|| engine.undeclare_subscriber(id));
+    assert!(
+        holding.go.load(Ordering::SeqCst),
+        "the undeclare returned before the call could end"
+    );
+    assert!(
+        holding.dropped.load(Ordering::SeqCst),
+        "let go of when the undeclare returns"
+    );
+    releaser.join().expect("the releasing thread");
+    putter.join().expect("the putting thread");
+    node.close();
+}
+
+/// The node's declaration of a subscription answers its key as the text it keeps for it, naming no
+/// declaration as it declares none, and its record keeps that text until the subscription is
+/// retracted.
+///
+/// # Control
+///
+/// Lending the program's own buffer in place of the node's copy reds the address assertion (that
+/// buffer is let go of before the key is read); a record left after the retraction reds the last.
+#[test]
+fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted() {
+    let (router, _peer) = pair();
+    let engine = router.as_engine();
+    let asked = String::from("wz/port/lent/**");
+    let wz_capi_port::Declared { id, key: view } = engine
+        .declare_subscriber_on_wire(
+            &asked,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
+        )
+        .expect("a node with ids left declares");
+    let asked_at = asked.as_ptr();
+    drop(asked);
+    assert_ne!(view.start, asked_at, "the node keeps a copy of its own");
+    // SAFETY: the node keeps the text until the subscription is retracted, which it is not yet.
+    let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
+    assert_eq!(text, b"wz/port/lent/**");
+    assert_eq!(view.own, None, "the node declares no key");
+    let kept = |id: SubId| {
+        router
+            .engine
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|subscribed| (subscribed.key.as_ptr(), subscribed.key.len()))
+    };
+    assert_eq!(
+        kept(id),
+        Some((view.start, view.len)),
+        "CONTROL: the record keeps the text the declaration lent"
+    );
+    engine.undeclare_subscriber(id);
+    assert_eq!(kept(id), None, "retracted, the record and its key are gone");
+}
+
+/// The node's declaration of a queryable answers its key as the text it keeps for it, naming no
+/// declaration as it declares none, and its record keeps that text until the queryable is
+/// retracted.
+///
+/// # Control
+///
+/// Lending the program's own buffer in place of the node's copy reds the address assertion (that
+/// buffer is let go of before the key is read); a record left after the retraction reds the last.
+#[test]
+fn the_node_lends_a_queryables_key_as_its_own_literal_until_it_is_retracted() {
+    let (router, _peer) = pair();
+    let engine = router.as_engine();
+    let asked = String::from("wz/port/lent/qbl/**");
+    let wz_capi_port::Declared { id, key: view } = engine
+        .declare_queryable_on_wire(
+            &asked,
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            QueryableSink::shared(|_, _, _| {}),
+        )
+        .expect("a node with ids left declares");
+    let asked_at = asked.as_ptr();
+    drop(asked);
+    assert_ne!(view.start, asked_at, "the node keeps a copy of its own");
+    // SAFETY: the node keeps the text until the queryable is retracted, which it is not yet.
+    let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
+    assert_eq!(text, b"wz/port/lent/qbl/**");
+    assert_eq!(view.own, None, "the node declares no key");
+    let kept = |id: QblId| {
+        router
+            .engine
+            .queryables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|hosted| (hosted.key.as_ptr(), hosted.key.len()))
+    };
+    assert_eq!(
+        kept(id),
+        Some((view.start, view.len)),
+        "CONTROL: the record keeps the text the declaration lent"
+    );
+    engine.undeclare_queryable(id);
+    assert_eq!(kept(id), None, "retracted, the record and its key are gone");
 }

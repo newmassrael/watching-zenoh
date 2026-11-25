@@ -181,6 +181,26 @@ impl KeptIn {
 /// last one let go of after the owner let go of its place gives the place back.
 pub(crate) struct HeldIn(CountIn);
 
+impl HeldIn {
+    /// The place this hold is counted in, the hold left counted: what lets it go is kept apart
+    /// from this value, by one pointer ([`Self::adopt`] takes it back).
+    pub(crate) fn into_place(self) -> core::ptr::NonNull<core::ffi::c_void> {
+        let place = self.0.place;
+        core::mem::forget(self);
+        place
+    }
+
+    /// A hold of `count` parted from its value by [`Self::into_place`], taken back to be let go
+    /// of.
+    ///
+    /// # Safety
+    /// `count` is the count a hold parted by [`Self::into_place`] was counted in, and that hold
+    /// is taken back once, here.
+    pub(crate) unsafe fn adopt(count: CountIn) -> Self {
+        Self(count)
+    }
+}
+
 impl Drop for HeldIn {
     fn drop(&mut self) {
         self.0.let_go(false);
@@ -204,6 +224,27 @@ impl<C> CClosure<C> {
             drop,
             released: None,
         }
+    }
+
+    /// The closure's context, C function and C drop, for a holder that runs the drop itself (an
+    /// engine's row, `wz_capi_port::SubscriberSink::c`): this value no longer drops it. Taken
+    /// from a closure counted in no owner, as that holder tells none.
+    pub(crate) fn into_c_parts(
+        self,
+    ) -> (
+        *mut core::ffi::c_void,
+        C,
+        Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+    )
+    where
+        C: Copy,
+    {
+        let mut this = core::mem::ManuallyDrop::new(self);
+        debug_assert!(
+            this.released.is_none(),
+            "a closure handed to a row is counted in no owner"
+        );
+        (this.context.0, this.call, this.drop.take())
     }
 
     /// Count this closure in `owner` until its `drop(context)` has run, so the owner waits for it

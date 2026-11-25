@@ -204,7 +204,8 @@ fn the_second_record_of_a_frame_sees_what_the_first_callback_did() {
                 }
             })
         })
-        .expect("the session declares the subscriber");
+        .expect("the session declares the subscriber")
+        .id;
     *own.lock().unwrap() = Some(id);
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
@@ -520,7 +521,8 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
                 seen.lock().unwrap().push((2, true));
             })
         })
-        .expect("the session declares the second subscriber");
+        .expect("the session declares the second subscriber")
+        .id;
     *later.lock().unwrap() = Some(id);
     let own = PublishOptions::put().with_locality(Locality::SessionLocal);
     assert_eq!(

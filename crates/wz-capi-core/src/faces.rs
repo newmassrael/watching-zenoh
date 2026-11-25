@@ -69,8 +69,10 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::cancellation::CancellableFan;
+use crate::deliveries::Deliveries;
 #[cfg(feature = "group")]
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
+use wz_capi_port::EngineDeliveries;
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
 use wz_runtime_tokio::declaration_aggregation::DeclarationAggregation;
@@ -170,29 +172,27 @@ pub use wz_capi_port::{
 
 /// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
 /// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
-/// [`face_liveliness_sink`].
+/// `face_liveliness_sink`.
 pub type LivelinessSink =
     Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
 /// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
-/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`SharedSession::face_reply`].
 pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
 
-/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
-pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
-    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
-}
-
 /// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's, and
-/// what tells when it is let go of.
-pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> (LivelinessSink, SinkRelease) {
-    let (sink, release) = Released::new(sink);
+/// what tells when it is let go of. Each call is a delivery of the session of `deliveries`.
+#[cfg(feature = "liveliness")]
+pub(crate) fn face_liveliness_sink(
+    sink: wz_capi_port::LivelinessSink,
+    deliveries: Deliveries,
+) -> (LivelinessSink, SinkRelease) {
+    let (sink, release) = Released::new(sink, deliveries);
     let sink = Arc::new(sink);
     let factory: LivelinessSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
         Box::new(move |sample: LivelinessSample<'_>| {
-            let _in_call = SampleCallGuard::enter();
-            sink.call(sample);
+            deliveries.within(|| sink.call(sample));
         })
     });
     (factory, release)
@@ -200,21 +200,24 @@ pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> (LivelinessSi
 
 /// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
 /// each face's session registers a callback of its own. A port's callback
-/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by `face_sink`.
 pub type SubscriberSink =
     Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
 
 /// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
-/// through a shared borrow, and the sink is let go of with the last of them, after its last call;
-/// with it, what tells when that has happened ([`SinkRelease`]).
-pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> (SubscriberSink, SinkRelease) {
-    let (sink, release) = Released::new(sink);
+/// through a shared borrow, as a delivery of the session of `deliveries`, and the sink is let go
+/// of with the last of them, after its last call; with it, what tells when that has happened
+/// ([`SinkRelease`]).
+pub(crate) fn face_sink(
+    sink: wz_capi_port::SubscriberSink,
+    deliveries: Deliveries,
+) -> (SubscriberSink, SinkRelease) {
+    let (sink, release) = Released::new(sink, deliveries);
     let sink = Arc::new(sink);
     let factory: SubscriberSink = Arc::new(move || {
         let sink = Arc::clone(&sink);
         Box::new(move |sample: &dyn SampleView| {
-            let _in_call = SampleCallGuard::enter();
-            sink.call(sample);
+            deliveries.within(|| sink.call(sample));
         })
     });
     (factory, release)
@@ -222,15 +225,20 @@ pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> (SubscriberSink, SinkRel
 
 /// A port's callback that says when it has been let go of: set after its drop has run, so a
 /// [`SinkRelease`] that reads it set reads a drop that is over, not one under way.
-struct Released<S> {
+pub(crate) struct Released<S> {
     sink: core::mem::ManuallyDrop<S>,
     done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<S> Released<S> {
-    fn new(sink: S) -> (Self, SinkRelease) {
+    /// `sink`, and what tells when it has been let go of, waited for outside a delivery of the
+    /// session of `deliveries`.
+    pub(crate) fn new(sink: S, deliveries: Deliveries) -> (Self, SinkRelease) {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release = SinkRelease(Arc::clone(&done));
+        let release = SinkRelease {
+            done: Arc::clone(&done),
+            deliveries,
+        };
         (
             Self {
                 sink: core::mem::ManuallyDrop::new(sink),
@@ -260,47 +268,23 @@ impl<S> Drop for Released<S> {
 /// What tells when a subscriber's callback has been let go of, its drop run: the engine's half of
 /// the port's contract that an undeclare returns after it
 /// ([`wz_capi_port::SessionEngine::undeclare_subscriber`]).
-pub struct SinkRelease(Arc<std::sync::atomic::AtomicBool>);
+pub struct SinkRelease {
+    done: Arc<std::sync::atomic::AtomicBool>,
+    /// The deliveries of the session the callback was declared on.
+    deliveries: Deliveries,
+}
 
 impl SinkRelease {
-    /// Wait until the callback has been let go of, unless this thread is inside a subscriber
-    /// callback: there the call that runs holds the callback, or may be what another thread's
-    /// wait waits for, and the callback is let go of as the last call ends.
+    /// Wait until the callback has been let go of, unless this thread delivers for the session
+    /// now: there the call that runs may be below on this stack, or may be waiting for this
+    /// thread, and the callback is let go of as the last call ends.
     pub fn wait(self) {
-        if SampleCallGuard::active() {
+        if self.deliveries.delivers_here() {
             return;
         }
-        while !self.0.load(std::sync::atomic::Ordering::Acquire) {
+        while !self.done.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    }
-}
-
-thread_local! {
-    /// Depth of subscriber callback calls on THIS thread ([`SampleCallGuard`]).
-    static IN_SAMPLE_CALL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Marks this thread inside a subscriber callback while held. A counter rather than a bool, as a
-/// callback may reach another subscriber's through the session, and the inner end must not clear
-/// the outer mark.
-struct SampleCallGuard;
-
-impl SampleCallGuard {
-    fn enter() -> Self {
-        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_add(1)));
-        Self
-    }
-
-    /// Whether this thread is inside a subscriber callback now.
-    fn active() -> bool {
-        IN_SAMPLE_CALL.with(|depth| depth.get()) > 0
-    }
-}
-
-impl Drop for SampleCallGuard {
-    fn drop(&mut self) {
-        IN_SAMPLE_CALL.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
@@ -415,6 +399,10 @@ struct FilterEntry {
     /// the facts it is sent from and the declaration naming its whole key. `None` sends it the
     /// general way.
     plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    /// The declaration the entity's key is named by, held by the entry until the filter is
+    /// undeclared ([`SharedSession::admit_entry`]): the entity keeps no hold of its key and lends
+    /// it from the entry, as the filter's declaration answers it.
+    held: Option<KeyexprHandle>,
 }
 
 /// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
@@ -1503,6 +1491,28 @@ fn declarations_named(wire: &WireKey, retraction: Option<RetractionKey>) -> [Key
     ]
 }
 
+/// `key`, the text an entry of the registry keeps, lent with the declaration the entry holds that
+/// the key begins with: that of the entity's own key, or else the one its key is named by, as
+/// `declarations_named` puts the own one second when it is another.
+fn lent_entry_key(
+    tables: &SessionTables<CoreRows, Heap>,
+    key: &str,
+    held: [Option<KeyexprHandle>; 2],
+) -> wz_capi_port::KeyView {
+    let lent = held[1]
+        .or(held[0])
+        .and_then(|handle| Some((handle, tables.keyexprs().get(handle)?)));
+    match lent {
+        // SAFETY: the growable table keeps its rows in chunks that are only ever added
+        // (`Chunked`), so a row stays where it was put while it stands; and the entry holds the
+        // declaration until the entity is retracted.
+        Some((handle, row)) => unsafe {
+            wz_capi_port::KeyView::holding(key, handle, row.key(), row.id(), row.head().count())
+        },
+        None => wz_capi_port::KeyView::literal(key),
+    }
+}
+
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
 /// exactly as the others are, which is what makes a token declared before any
 /// peer connected visible to that peer when it arrives. Upstream's
@@ -1617,14 +1627,17 @@ struct MatchAggregate {
     last: bool,
     /// `None` once retired by `undeclare_matching_listener`.
     sink: Option<MatchingSink>,
+    /// The deliveries of the listener's session, which each call of `sink` is one of.
+    deliveries: Deliveries,
 }
 
 impl MatchAggregate {
-    fn new(sink: MatchingSink) -> Self {
+    fn new(sink: MatchingSink, deliveries: Deliveries) -> Self {
         Self {
             faces: BTreeSet::new(),
             last: false,
             sink: Some(sink),
+            deliveries,
         }
     }
 }
@@ -1909,10 +1922,10 @@ fn querier_watching_remote(complete_required: bool, upstream_rule: bool) -> Quer
 /// so a flip delivers through `agg.sink` under the acquisition it already held.
 /// A retired listener has `None` there and delivers nothing.
 ///
-/// [`IN_MATCHING_DELIVERY`] is set around the C call because
+/// The C call is a delivery of the listener's session (the aggregate's mark) because
 /// `undeclare_matching_listener` now WAITS on this mutex to retire the sink, and
 /// a C callback that undeclares its own listener from inside the call would
-/// otherwise wait on the mutex its own frame holds. The flag lets that one case
+/// otherwise wait on the mutex its own frame holds. The mark lets that case
 /// fall back to the pre-R311y535 behaviour — release by `Arc` drop, whenever the
 /// frame unwinds — which is the only thing a caller inside its own context can
 /// safely be given.
@@ -1925,8 +1938,7 @@ fn deliver_matching_flip(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(now) = update(&mut agg) {
         if let Some(sink) = agg.sink.as_ref() {
-            let _guard = MatchingDeliveryGuard::enter();
-            sink.call(now);
+            agg.deliveries.within(|| sink.call(now));
         }
     }
     // `agg` is dropped HERE, after the C call — see the doc comment.
@@ -1947,48 +1959,29 @@ fn deliver_matching_flip(
 /// discipline is that no C code runs holding a lock it might need.
 ///
 /// `None` means there is nothing for the caller to free — either the listener
-/// was already retired, or THIS THREAD is inside a matching callback, where
-/// waiting on the mutex would be waiting on its own frame. In that one case the
-/// sink stays put and falls with the entry's last `Arc`, which is all a caller
-/// undeclaring from inside its own context can be given.
-fn retire_matching_sink(state: &StdMutex<MatchAggregate>) -> Option<MatchingSink> {
-    if MatchingDeliveryGuard::active() {
-        return None;
-    }
-    let mut agg = state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// was already retired, or a delivery holds the aggregate while THIS THREAD
+/// delivers for the listener's session (`deliveries`, the aggregate's own mark),
+/// where the holder may be this thread's own frame, or a call that waits for
+/// this thread. There the sink stays put and falls with the entry's last `Arc`,
+/// which is all a caller undeclaring from inside its own session's callback can be
+/// given. An aggregate no delivery holds is retired at once on any thread.
+fn retire_matching_sink(
+    state: &StdMutex<MatchAggregate>,
+    deliveries: Deliveries,
+) -> Option<MatchingSink> {
+    let mut agg = match state.try_lock() {
+        Ok(agg) => agg,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            if deliveries.delivers_here() {
+                return None;
+            }
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    };
     agg.sink.take()
-}
-
-thread_local! {
-    /// Depth of [`deliver_matching_flip`] C calls on THIS thread — see that
-    /// function's doc for why `undeclare_matching_listener` consults it.
-    static IN_MATCHING_DELIVERY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// RAII depth counter for [`IN_MATCHING_DELIVERY`]. A counter rather than a bool
-/// because a C callback may re-enter the session and reach a SECOND delivery
-/// (a different listener's aggregate), and a bool would clear the outer frame's
-/// mark when the inner one returned.
-struct MatchingDeliveryGuard;
-
-impl MatchingDeliveryGuard {
-    fn enter() -> Self {
-        IN_MATCHING_DELIVERY.with(|d| d.set(d.get() + 1));
-        Self
-    }
-
-    /// Whether this thread is inside a C matching callback right now.
-    fn active() -> bool {
-        IN_MATCHING_DELIVERY.with(|d| d.get()) > 0
-    }
-}
-
-impl Drop for MatchingDeliveryGuard {
-    fn drop(&mut self) {
-        IN_MATCHING_DELIVERY.with(|d| d.set(d.get().saturating_sub(1)));
-    }
 }
 
 /// The per-face callback one [`MatchEntry`] installs on face `face_id`: fold
@@ -2442,6 +2435,9 @@ impl From<wz_session_core::link::HeapRefused> for PlaneRefused {
 /// and dispatches inbound samples).
 pub struct SharedSession {
     inner: StdMutex<Inner>,
+    /// The mark of this session's deliveries, entered around every callback it mints, which its
+    /// undeclarations read so as not to wait inside one ([`wz_capi_port::EngineDeliveries`]).
+    deliveries: Deliveries,
     clock: TokioTime,
     /// This session's zid — see [`SharedSession::zid`].
     zid: [u8; 16],
@@ -3078,6 +3074,7 @@ impl SharedSession {
                 wz_session_core::link_admission::admitted_links(&session_limits),
             )),
             inner: StdMutex::new(inner),
+            deliveries: Deliveries::new(),
             clock,
             local,
             local_wake,
@@ -3358,6 +3355,18 @@ impl SharedSession {
     /// reach it for what else is session-scope (a held query, the clock).
     pub fn local_session(&self) -> &TokioSession {
         &self.local
+    }
+
+    /// The port's leg `callback` as one this registry calls, each call a delivery of this
+    /// session; its end is the port's, as it holds it.
+    pub fn face_reply(&self, callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+        let deliveries = self.deliveries;
+        Box::new(move |reply: &dyn ReplyView| deliveries.within(|| callback.call(reply)))
+    }
+
+    /// The mark of this session's deliveries, which each callback it mints enters.
+    pub(crate) fn deliveries(&self) -> Deliveries {
+        self.deliveries
     }
 
     /// Wake the local plane's drain. Call after staging anything on it.
@@ -5286,7 +5295,9 @@ impl SharedSession {
             .declare_keyexpr_where(&keyexpr, false, |id| self.mapping_id_free(id))
             .ok()?;
         self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
-        Some(KeyHold::taken(declared.id, declared.handle))
+        // SAFETY: the hold just taken keeps the row standing, and the growable table keeps its rows
+        // in chunks that are only ever added (`Chunked`), so a row stays where it was put.
+        Some(unsafe { KeyHold::taken(declared.id, declared.handle).placed_at(declared.count()) })
     }
 
     /// Let go of one holder of the declaration in row `row` ([`Self::acquire_keyexpr`]),
@@ -5312,7 +5323,7 @@ impl SharedSession {
     /// the wire. Refused, taking none, for a count that holds as many as it can
     /// ([`HoldRefused::Full`]) or a row that went ([`HoldRefused::Gone`]).
     pub fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused> {
-        let mut guard = self.lock();
+        let guard = self.lock();
         if guard.tables.retain_keyexpr(row) {
             Ok(())
         } else if guard.tables.keyexprs().get(row).is_some() {
@@ -5320,6 +5331,12 @@ impl SharedSession {
         } else {
             Err(HoldRefused::Gone)
         }
+    }
+
+    /// The declaration in row `row` when it declares the first bytes of `key`: its id and how
+    /// many bytes of `key` it covers ([`SessionTables::declared_prefix`]).
+    pub fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        self.lock().tables.declared_prefix(row, key)
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
@@ -5545,6 +5562,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_liveliness_subscriber_on_wire`] for a subscription limited to the links
@@ -5560,7 +5578,7 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Result<SubId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, None)) {
             Ok(admitted) => admitted,
@@ -5604,6 +5622,9 @@ impl SharedSession {
             Vec::new()
         };
         let leg = (!history.is_empty()).then(|| sink());
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let key = lent_entry_key(&guard.tables, &keyexpr, held);
         guard.live_subs.push(LiveSubEntry {
             held,
             id,
@@ -5629,7 +5650,7 @@ impl SharedSession {
                 });
             }
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key })
     }
 
     /// The legs of the liveliness subscriptions that the token on `keyexpr` is told to, one per
@@ -6466,6 +6487,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_subscriber_on_wire`] for a subscriber limited to the links of `links`
@@ -6484,7 +6506,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
         {
@@ -6548,6 +6570,9 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::subscribe_on_groups(&mut guard, &entry);
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let lent = lent_entry_key(&guard.tables, &entry.keyexpr, entry.held);
         guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
@@ -6555,7 +6580,7 @@ impl SharedSession {
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     /// Record a C matching listener in the SSOT and install it on every live
@@ -6654,7 +6679,7 @@ impl SharedSession {
         let (count_local, count_remote) = (locality.allows_local(), locality.allows_remote());
         // R311y535 — the sink moves INTO the aggregate, which is now its ONE
         // owner. The `MatchEntry` keeps only the shared handle.
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, self.deliveries)));
         // Phase 1 — allocate the id, publish the SSOT entry, snapshot the faces.
         let (id, faces) = {
             let mut guard = self.lock();
@@ -6936,7 +6961,9 @@ impl SharedSession {
     /// asked by that id for its members' declarations on `wire`, the key as the peers were
     /// told it. A group that comes up later is not asked: zenoh-pico opens its one transport
     /// before any entity, so it has no such moment. With no entity id left the filter is
-    /// refused (`None`) and nothing is asked.
+    /// refused (`NoEntityId`) and nothing is asked; so it is (`KeyHoldsFull`) when the count of
+    /// the declaration `wire` names, which the entry holds until the filter is undeclared, has no
+    /// room.
     ///
     /// The subscribers a publisher's filter asks for are asked under the
     /// `aggregation/publishers` aggregate that includes its key, when one does, the key the
@@ -6948,10 +6975,13 @@ impl SharedSession {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<wz_capi_port::Declared<FilterId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        // Taken first, so a filter refused for want of an id leaves no filter id spent either.
-        let interest_id = guard.take_entity_id()?;
+        // The Interest's id is taken first, so a filter refused for want of an id leaves no filter
+        // id spent either; with it the entry's hold of the declaration its key is named by, a
+        // count with no room refusing the filter.
+        let (interest_id, [held, _]) =
+            Self::admit_entry(&mut guard, [wire.declared(), KeyexprRef::default()])?;
         guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
         let id = guard.next_filter_id;
         #[cfg(feature = "multicast-transport")]
@@ -6972,6 +7002,9 @@ impl SharedSession {
                 face.filters.insert(id, hold);
             }
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let key = lent_entry_key(&guard.tables, &keyexpr, [held, None]);
         guard.filters.push(FilterEntry {
             id,
             plane,
@@ -6981,8 +7014,9 @@ impl SharedSession {
             #[cfg(target_has_atomic = "64")]
             cache: None,
             plain: None,
+            held,
         });
-        Some(id)
+        Ok(wz_capi_port::Declared { id, key })
     }
 
     /// What write filter `id` counts, the literal it is matched on and whether the session's own
@@ -7001,10 +7035,11 @@ impl SharedSession {
     /// drop reaches the face's session and its link.
     pub fn undeclare_write_filter(&self, id: FilterId) {
         let mut dropped = Vec::new();
+        let mut held = None;
         {
             let mut guard = self.lock();
             if let Some(pos) = guard.filters.iter().position(|e| e.id == id) {
-                guard.filters.remove(pos);
+                held = guard.filters.remove(pos).held;
             }
             for face in guard.faces.values_mut() {
                 if let Some(hold) = face.filters.remove(&id) {
@@ -7015,6 +7050,8 @@ impl SharedSession {
             Self::end_filter_on_groups(&mut guard, id);
         }
         drop(dropped);
+        // After the Interest's holds, as zenoh-pico clears the filter before the key.
+        self.release_named([held, None]);
     }
 
     /// Whether write filter `id` keeps a put, a delete or a get from being sent: it says
@@ -7187,14 +7224,15 @@ impl SharedSession {
         // the session, and it must not do so holding an aggregate.
         //
         // The re-entrant case is the exception and is handled rather than
-        // deadlocked: when this thread is already inside a matching callback,
-        // the mutex it would wait on is the one its own frame holds. There, the
-        // sink is left in place and released by `Arc` drop when the entry falls,
-        // which is the pre-R311y535 behaviour and the only outcome available to
-        // a caller undeclaring from inside its own context.
+        // deadlocked: when this thread delivers for this session and a delivery
+        // holds the aggregate, the mutex it would wait on may be the one its own
+        // frame holds. There, the sink is left in place and released by `Arc`
+        // drop when the entry falls, which is the pre-R311y535 behaviour and the
+        // only outcome available to a caller undeclaring from inside its own
+        // session's callback.
         let retired = entry
             .as_ref()
-            .and_then(|entry| retire_matching_sink(&entry.state));
+            .and_then(|entry| retire_matching_sink(&entry.state, self.deliveries));
         drop(retired);
         drop(entry);
     }
@@ -7351,7 +7389,7 @@ impl SharedSession {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
         // The port's contract: the undeclare returns once the callback has been let go of, unless
-        // it is made from inside a subscriber callback.
+        // this thread delivers for this session.
         if let Some(released) = released {
             released.wait();
         }
@@ -7497,6 +7535,7 @@ impl SharedSession {
             sink,
         )
         .ok()
+        .map(|declared| declared.id)
     }
 
     /// [`Self::declare_queryable_on_wire`] for a queryable limited to the links of `links`
@@ -7511,7 +7550,7 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<QblId, wz_capi_port::Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, wz_capi_port::Refusal> {
         let mut guard = self.lock();
         let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
         {
@@ -7560,6 +7599,9 @@ impl SharedSession {
         if !links.is_restricted() {
             Self::answer_on_groups(&mut guard, &entry);
         }
+        // The text is the entry's heap buffer, which stays where it is when the entries move and
+        // goes with the entry.
+        let lent = lent_entry_key(&guard.tables, &entry.keyexpr, entry.held);
         guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
@@ -7572,7 +7614,7 @@ impl SharedSession {
                 &key,
             );
         }
-        Ok(id)
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
 
     /// Drop a C queryable: remove it from the SSOT so no future face replays
@@ -7838,7 +7880,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let querier = shared
             .declare_write_filter(
                 FilterPlane::Queryables {
@@ -7849,7 +7892,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         assert_ne!(publisher, querier, "each filter is its own entry");
         assert!(shared.write_filter_active(publisher));
         assert!(shared.write_filter_active(querier));
@@ -7943,6 +7987,104 @@ mod matching_aggregate_tests {
         );
     }
 
+    /// A write filter's entry keeps its key and holds the declaration the key is named by, which the
+    /// entity's key is lent with, from the filter's declaration until its undeclaration, when the
+    /// hold goes back. Turned red by an entry that takes no hold, lends another text or no
+    /// declaration, or keeps its hold or its key past the undeclaration.
+    #[test]
+    fn a_write_filter_lends_its_key_with_the_declaration_it_holds() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let key = "wz/wf/lent";
+        let hold = shared
+            .acquire_keyexpr(key.to_owned())
+            .expect("a session with room declares");
+        let row = hold.row().expect("a hold names its row");
+        let holds = |shared: &SharedSession| {
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds())
+        };
+        let wz_capi_port::Declared {
+            id: filter,
+            key: lent,
+        } = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                key.to_owned(),
+                &WireKey::aliased_tail(hold.mapping_id(), 0).at_row(Some(row)),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
+        // SAFETY: the entry keeps the text where it lent it until the filter is undeclared below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        let own = lent.own.expect("lent with the declaration the entry holds");
+        assert_eq!(
+            (own.row, own.mapping, own.prefix_len),
+            (row, hold.mapping_id(), key.len())
+        );
+        shared.undeclare_write_filter(filter);
+        assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
+        hold.release(&shared);
+    }
+
+    /// A queryable's entry keeps its key and holds the declaration the key is named by, which the
+    /// queryable's key is lent with, from its declaration until it is retracted, when the hold goes
+    /// back. Turned red by an entry that takes no hold, lends another text or no declaration, or
+    /// lends its key past the retraction.
+    #[test]
+    fn a_queryable_lends_its_key_with_the_declaration_it_holds() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let key = "wz/qbl/lent";
+        let hold = shared
+            .acquire_keyexpr(key.to_owned())
+            .expect("a session with room declares");
+        let row = hold.row().expect("a hold names its row");
+        let holds = |shared: &SharedSession| {
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds())
+        };
+        let wz_capi_port::Declared { id, key: lent } = shared
+            .declare_queryable_on_links(
+                key.to_owned(),
+                WireKey::aliased_tail(hold.mapping_id(), 0).at_row(Some(row)),
+                false,
+                Locality::Any,
+                LinkRestriction::Any,
+                None,
+                Arc::new(|_: &TokioQueryHolder| {
+                    Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}) as Box<_>
+                }),
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
+        let kept = |shared: &SharedSession| shared.lock().qbls.iter().any(|entry| entry.id == id);
+        assert!(kept(&shared), "CONTROL: the entry stands");
+        // SAFETY: the entry keeps the text where it lent it until the queryable is retracted below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        let own = lent.own.expect("lent with the declaration the entry holds");
+        assert_eq!(
+            (own.row, own.mapping, own.prefix_len),
+            (row, hold.mapping_id(), key.len())
+        );
+        shared.undeclare_queryable(id);
+        assert!(!kept(&shared), "gone with its entry");
+        assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
+        hold.release(&shared);
+    }
+
     /// A declaration whose key names a declaration with as many holders as its count holds is
     /// refused by that cause, through the engine port and through the registry's own door alike,
     /// and takes nothing: no entry, no entity id, no hold. A declaration that went refuses
@@ -8007,7 +8149,9 @@ mod matching_aggregate_tests {
         );
         // CONTROL: a holder lets go, and the declaration takes the room it left.
         holds.pop().expect("a hold").release(&shared);
-        let sub = declare(&shared).expect("a count with room takes the entry");
+        let sub = declare(&shared)
+            .expect("a count with room takes the entry")
+            .id;
         assert_eq!(
             shared
                 .lock()
@@ -8111,7 +8255,7 @@ mod matching_aggregate_tests {
                 None,
                 false,
             ),
-            None
+            Err(wz_capi_port::Refusal::NoEntityId)
         );
         assert_eq!(shared.next_entity_id(), None);
 
@@ -8144,7 +8288,8 @@ mod matching_aggregate_tests {
                 None,
                 true,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let remote_only = shared
             .declare_write_filter(
                 FilterPlane::Subscribers,
@@ -8153,7 +8298,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
         let sink: MatchingSink =
@@ -8560,7 +8706,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         assert_eq!(
             shared.put_kept_plain(filter, "wz/plain/kept", b"x"),
             FilteredPut::Suppressed
@@ -8603,7 +8750,8 @@ mod matching_aggregate_tests {
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
 
         // No face has said it matches: suppressed, and the same on every later put.
         for _ in 0..3 {
@@ -8893,17 +9041,20 @@ mod matching_aggregate_tests {
         // test's alone: a real C sink never reaches back into wz state.
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let probe = weak.clone();
-            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |now| {
-                log.lock().unwrap().push(now);
-                let probe = probe
-                    .upgrade()
-                    .expect("the aggregate is alive during its own call");
-                assert!(
-                    probe.try_lock().is_err(),
-                    "the aggregate mutex was NOT held across the C call -- two \
+            StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |now| {
+                    log.lock().unwrap().push(now);
+                    let probe = probe
+                        .upgrade()
+                        .expect("the aggregate is alive during its own call");
+                    assert!(
+                        probe.try_lock().is_err(),
+                        "the aggregate mutex was NOT held across the C call -- two \
                      threads can then invoke one C context concurrently"
-                );
-            })))
+                    );
+                }),
+                Deliveries::new(),
+            ))
         });
 
         deliver_matching_flip(&state, |agg| agg.apply(7, true));
@@ -8922,7 +9073,7 @@ mod matching_aggregate_tests {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
         deliver_matching_flip(&state, |agg| agg.apply(2, true));
@@ -8947,7 +9098,7 @@ mod matching_aggregate_tests {
         let observed = Arc::new(StdMutex::new(Vec::new()));
         let log = observed.clone();
         let sink: MatchingSink = MatchingSink::shared(move |now| log.lock().unwrap().push(now));
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         deliver_matching_flip(&state, |agg| agg.apply(3, true));
         deliver_matching_flip(&state, |agg| agg.apply(3, false));
@@ -8987,7 +9138,7 @@ mod matching_aggregate_tests {
                 inflight.fetch_sub(1, Ordering::SeqCst);
             })
         };
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(sink, Deliveries::new())));
 
         // Face 1 arrives and stays; then two threads race the arrival of face 2
         // against the departure of face 1. Whatever the interleaving, the
@@ -9051,24 +9202,26 @@ mod matching_aggregate_tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let observed = Arc::new(StdMutex::new(Vec::new()));
 
+        let session = Deliveries::new();
         let state = {
             let probe = DropProbe(dropped.clone());
             let log = observed.clone();
-            Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
-                move |now| {
+            Arc::new(StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |now| {
                     // Keep the probe owned BY the closure, exactly as a C sink owns
                     // its context, so the probe's drop is the closure's drop.
                     let _ = &probe;
                     log.lock().unwrap().push(now);
-                },
-            ))))
+                }),
+                session,
+            )))
         };
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
         assert_eq!(dropped.load(Ordering::SeqCst), 0, "not dropped while live");
 
         // The production retirement path, not a copy of it.
-        let retired = retire_matching_sink(&state);
+        let retired = retire_matching_sink(&state, session);
         assert!(retired.is_some(), "a live aggregate yields its sink");
         drop(retired);
         assert_eq!(
@@ -9086,7 +9239,7 @@ mod matching_aggregate_tests {
             "a retired listener must deliver nothing"
         );
         assert!(
-            retire_matching_sink(&state).is_none(),
+            retire_matching_sink(&state, session).is_none(),
             "retiring twice must not produce a second context to free"
         );
     }
@@ -9108,16 +9261,18 @@ mod matching_aggregate_tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = StdMutex::new(release_rx);
 
-        let state = Arc::new(StdMutex::new(MatchAggregate::new(MatchingSink::shared(
-            move |_now| {
+        let session = Deliveries::new();
+        let state = Arc::new(StdMutex::new(MatchAggregate::new(
+            MatchingSink::shared(move |_now| {
                 entered_tx.send(()).expect("the test thread is waiting");
                 release_rx
                     .lock()
                     .unwrap()
                     .recv()
                     .expect("the test thread releases the sink");
-            },
-        ))));
+            }),
+            session,
+        )));
 
         let deliverer = {
             let state = state.clone();
@@ -9130,7 +9285,7 @@ mod matching_aggregate_tests {
             let state = state.clone();
             let retired = retired.clone();
             std::thread::spawn(move || {
-                let sink = retire_matching_sink(&state);
+                let sink = retire_matching_sink(&state, session);
                 retired.store(1, Ordering::SeqCst);
                 drop(sink);
             })
@@ -9162,25 +9317,29 @@ mod matching_aggregate_tests {
     ///
     /// The re-entrant case is the one where waiting is impossible: the mutex the
     /// retirement wants is the one this thread's own frame holds. Without the
-    /// [`MatchingDeliveryGuard`] check this test HANGS rather than failing, which
-    /// is why it exists as its own leg.
+    /// check of the session's deliveries in [`retire_matching_sink`] this test
+    /// HANGS rather than failing, which is why it exists as its own leg.
     #[test]
     fn a_retirement_from_inside_the_callback_does_not_deadlock() {
         let reentered = Arc::new(AtomicUsize::new(0));
+        let session = Deliveries::new();
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<StdMutex<MatchAggregate>>| {
             let weak = weak.clone();
             let reentered = reentered.clone();
-            StdMutex::new(MatchAggregate::new(MatchingSink::shared(move |_now| {
-                let state = weak.upgrade().expect("alive during its own call");
-                // The re-entrant undeclare. It must RETURN, and it must decline
-                // to take the sink rather than block on this frame's own lock.
-                assert!(
-                    retire_matching_sink(&state).is_none(),
-                    "a re-entrant retirement must decline, not take a context \
-                     the current frame is executing in"
-                );
-                reentered.fetch_add(1, Ordering::SeqCst);
-            })))
+            StdMutex::new(MatchAggregate::new(
+                MatchingSink::shared(move |_now| {
+                    let state = weak.upgrade().expect("alive during its own call");
+                    // The re-entrant undeclare. It must RETURN, and it must decline
+                    // to take the sink rather than block on this frame's own lock.
+                    assert!(
+                        retire_matching_sink(&state, session).is_none(),
+                        "a re-entrant retirement must decline, not take a context \
+                         the current frame is executing in"
+                    );
+                    reentered.fetch_add(1, Ordering::SeqCst);
+                }),
+                session,
+            ))
         });
 
         deliver_matching_flip(&state, |agg| agg.apply(1, true));
@@ -9191,8 +9350,35 @@ mod matching_aggregate_tests {
         );
         // Outside the callback the ordinary path still works.
         assert!(
-            retire_matching_sink(&state).is_some(),
+            retire_matching_sink(&state, session).is_some(),
             "the sink is still there to retire once the callback has left"
+        );
+    }
+
+    /// A retirement made inside a delivery of the listener's session takes the sink of an
+    /// aggregate no delivery holds at once, and declines one a delivery holds rather than wait
+    /// for it. Turned red by a retirement that declines whenever its thread delivers, or one that
+    /// waits there (which never returns here, the holder being this thread).
+    #[test]
+    fn a_retirement_inside_a_delivery_of_the_session_takes_what_no_delivery_holds() {
+        let session = Deliveries::new();
+        let free = StdMutex::new(MatchAggregate::new(MatchingSink::shared(|_| {}), session));
+        let held = StdMutex::new(MatchAggregate::new(MatchingSink::shared(|_| {}), session));
+        let holding = held.lock().unwrap();
+        session.within(|| {
+            assert!(
+                retire_matching_sink(&free, session).is_some(),
+                "an aggregate no delivery holds is retired at once"
+            );
+            assert!(
+                retire_matching_sink(&held, session).is_none(),
+                "one a delivery holds is left to fall with its entry"
+            );
+        });
+        drop(holding);
+        assert!(
+            retire_matching_sink(&held, session).is_some(),
+            "outside the delivery, the aggregate let go of is retired"
         );
     }
 
@@ -11271,7 +11457,7 @@ mod sink_release_tests {
     #[test]
     fn a_release_is_waited_for_until_the_last_holder_lets_the_callback_go() {
         let flag = Arc::new(AtomicBool::new(false));
-        let (factory, release) = face_sink(sink_dropping(&flag));
+        let (factory, release) = face_sink(sink_dropping(&flag), Deliveries::new());
         let minted = factory();
         drop(factory);
         let holder = std::thread::spawn(move || {
@@ -11286,9 +11472,9 @@ mod sink_release_tests {
         holder.join().expect("the holder's thread");
     }
 
-    /// A wait made from inside a subscriber callback returns at once, the callback still held,
-    /// which is let go of as its last holder goes. Turned red by a callback that does not mark its
-    /// thread, or a wait that waits there (which never returns).
+    /// A wait made from inside a subscriber callback of the session returns at once, the callback
+    /// still held, which is let go of as its last holder goes. Turned red by a callback that does
+    /// not enter its session's delivery, or a wait that waits there (which never returns).
     #[test]
     fn a_release_waited_for_inside_a_subscriber_callback_returns_at_once() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -11298,16 +11484,17 @@ mod sink_release_tests {
             let dropped = Dropped(Arc::clone(&flag));
             let slot = Arc::clone(&slot);
             let returned = Arc::clone(&returned);
-            face_sink(wz_capi_port::SubscriberSink::shared(
-                move |_sample: &dyn SampleView| {
+            face_sink(
+                wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
                     let _ = &dropped;
                     let taken = slot.lock().unwrap_or_else(|held| held.into_inner()).take();
                     if let Some(release) = taken {
                         release.wait();
                         returned.store(true, Ordering::SeqCst);
                     }
-                },
-            ))
+                }),
+                Deliveries::new(),
+            )
         };
         *slot.lock().unwrap_or_else(|held| held.into_inner()) = Some(release);
         let mut minted = factory();
@@ -11344,7 +11531,8 @@ mod sink_release_tests {
             None,
             sink_dropping(&flag),
         )
-        .expect("an open session declares");
+        .expect("an open session declares")
+        .id;
         assert!(!flag.load(Ordering::SeqCst), "held while declared");
         SessionEngine::undeclare_subscriber(&shared, id);
         assert!(
@@ -11354,6 +11542,232 @@ mod sink_release_tests {
         assert!(
             shared.lock().sink_releases.is_empty(),
             "the undeclare took its release"
+        );
+    }
+
+    /// A session of its own, with no face.
+    fn session(zid: u8) -> Arc<SharedSession> {
+        Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                [zid; 16].into(),
+                SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        )
+    }
+
+    /// Wait for `flag`, five seconds at most.
+    fn wait_for(flag: &AtomicBool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !flag.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A subscriber of `shared` on `key` whose callback sets `entered` and holds its call until
+    /// `go` is set, five seconds at most, so a wait that should not happen ends rather than
+    /// hangs; `dropped` is set when the callback is let go of.
+    fn subscribe_holding(
+        shared: &SharedSession,
+        key: &str,
+        entered: &Arc<AtomicBool>,
+        go: &Arc<AtomicBool>,
+        dropped: &Arc<AtomicBool>,
+    ) -> SubId {
+        use wz_capi_port::SessionEngine;
+
+        let held = Dropped(Arc::clone(dropped));
+        let (entered, go) = (Arc::clone(entered), Arc::clone(go));
+        SessionEngine::declare_subscriber_on_wire(
+            shared,
+            key,
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                let _ = &held;
+                entered.store(true, Ordering::SeqCst);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !go.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }),
+        )
+        .expect("an open session declares")
+        .id
+    }
+
+    /// Put on `key` of `shared` and run the delivery on a thread of its own.
+    fn deliver_elsewhere(
+        shared: &Arc<SharedSession>,
+        key: &'static str,
+    ) -> std::thread::JoinHandle<()> {
+        let shared = Arc::clone(shared);
+        std::thread::spawn(move || {
+            shared
+                .publish_all(
+                    key,
+                    b"x",
+                    &PublishOptions::put().with_locality(Locality::Any),
+                )
+                .expect("a faceless publish is not an error");
+            shared.drain_local_plane();
+        })
+    }
+
+    /// An undeclare made inside a queryable callback of the session returns at once while the
+    /// subscriber's call runs on another thread, the callback still held: the thread delivers for
+    /// the session, as inside any of its callbacks. Turned red by a queryable callback that does not
+    /// enter its session's delivery, which makes the undeclare wait for the held call (five
+    /// seconds) and return with the callback let go of.
+    #[cfg(all(feature = "query", feature = "queryable"))]
+    #[test]
+    fn an_undeclare_inside_a_queryable_callback_of_the_session_returns_at_once() {
+        use wz_capi_port::SessionEngine;
+
+        let shared = session(0x12);
+        let (entered, go, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let id = subscribe_holding(&shared, "wz/inside/sub", &entered, &go, &dropped);
+        let delivering = deliver_elsewhere(&shared, "wz/inside/sub");
+        wait_for(&entered, "the subscriber's call");
+
+        let undeclared: Arc<StdMutex<Option<(std::time::Duration, bool)>>> = Arc::default();
+        let (weak, into, seen_dropped) = (
+            Arc::downgrade(&shared),
+            Arc::clone(&undeclared),
+            Arc::clone(&dropped),
+        );
+        SessionEngine::declare_queryable_on_wire(
+            &*shared,
+            "wz/inside/qbl",
+            WireKey::literal(),
+            false,
+            Locality::Any,
+            None,
+            wz_capi_port::QueryableSink::shared(move |_, _, _| {
+                if let Some(engine) = weak.upgrade() {
+                    let start = std::time::Instant::now();
+                    SessionEngine::undeclare_subscriber(&*engine, id);
+                    let at_return = seen_dropped.load(Ordering::SeqCst);
+                    *into.lock().unwrap_or_else(|held| held.into_inner()) =
+                        Some((start.elapsed(), at_return));
+                }
+            }),
+        )
+        .expect("an open session declares");
+        let opts = wz_session_core::query_options::QueryOptions::get()
+            .with_allowed_destination(Locality::SessionLocal);
+        SessionEngine::get_on_wire(
+            &*shared,
+            "wz/inside/qbl",
+            &WireKey::literal(),
+            &opts,
+            None,
+            &mut || wz_capi_port::ReplyCallback::shared(|_| {}),
+        )
+        .expect("an open session asks");
+        shared.drain_local_plane();
+        let seen = undeclared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take();
+        go.store(true, Ordering::SeqCst);
+        delivering.join().expect("the delivering thread");
+
+        let (took, dropped_at_return) = seen.expect("the queryable was called on this thread");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the undeclare waited {took:?} inside the session's own callback"
+        );
+        assert!(
+            !dropped_at_return,
+            "the callback was still held by its call when the undeclare returned"
+        );
+        wait_for(&dropped, "the callback let go of once its call ended");
+    }
+
+    /// An undeclare made inside a callback of another session waits for the subscriber's call on
+    /// another thread to end, and returns with the callback let go of: a thread delivering for one
+    /// session is no delivery of another. Turned red by one delivery mark for every session, or
+    /// an undeclare that skips its wait inside any callback.
+    #[test]
+    fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
+        use wz_capi_port::SessionEngine;
+
+        let (one, other) = (session(0x12), session(0x13));
+        let (entered, go, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let id = subscribe_holding(&one, "wz/across/sub", &entered, &go, &dropped);
+        let delivering = deliver_elsewhere(&one, "wz/across/sub");
+        wait_for(&entered, "the subscriber's call");
+
+        let undeclared: Arc<StdMutex<Option<(bool, bool)>>> = Arc::default();
+        let (weak, into, seen_go, seen_dropped) = (
+            Arc::downgrade(&one),
+            Arc::clone(&undeclared),
+            Arc::clone(&go),
+            Arc::clone(&dropped),
+        );
+        SessionEngine::declare_subscriber_on_wire(
+            &*other,
+            "wz/across/other",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            wz_capi_port::SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                if let Some(engine) = weak.upgrade() {
+                    SessionEngine::undeclare_subscriber(&*engine, id);
+                    let at_return = (
+                        seen_go.load(Ordering::SeqCst),
+                        seen_dropped.load(Ordering::SeqCst),
+                    );
+                    *into.lock().unwrap_or_else(|held| held.into_inner()) = Some(at_return);
+                }
+            }),
+        )
+        .expect("an open session declares");
+        let releasing = {
+            let go = Arc::clone(&go);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                go.store(true, Ordering::SeqCst);
+            })
+        };
+        other
+            .publish_all(
+                "wz/across/other",
+                b"x",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless publish is not an error");
+        other.drain_local_plane();
+        releasing.join().expect("the releasing thread");
+        delivering.join().expect("the delivering thread");
+
+        let (released, dropped_at_return) = undeclared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take()
+            .expect("the other session's callback ran on this thread");
+        assert!(
+            released,
+            "the undeclare returned before the call it retracts was released"
+        );
+        assert!(
+            dropped_at_return,
+            "the callback was let go of when the undeclare returned"
         );
     }
 }

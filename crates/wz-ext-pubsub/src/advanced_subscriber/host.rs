@@ -1069,7 +1069,8 @@ fn declare_subscription<E: EngineHolder>(
             form.retraction().cloned(),
             sink,
         )
-        .map_err(HostError::of("the engine has no subscribers"))?;
+        .map_err(HostError::of("the engine has no subscribers"))?
+        .id;
     Ok(Held {
         entity: Subscription {
             engine: E::clone(engine),
@@ -1090,7 +1091,8 @@ fn declare_liveliness_subscription<E: EngineHolder>(
 ) -> Result<Held<Subscription<E>>, HostError> {
     let id = engine
         .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
-        .map_err(HostError::of("the engine has no liveliness plane"))?;
+        .map_err(HostError::of("the engine has no liveliness plane"))?
+        .id;
     Ok(Held {
         entity: Subscription {
             engine: E::clone(engine),
