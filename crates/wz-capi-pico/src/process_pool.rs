@@ -140,7 +140,7 @@ const fn block_of(bytes: usize) -> usize {
     }
 }
 
-/// How many of each object the pools hold. Before [`resolve`] they are what a program or the build
+/// How many of each object the pools hold. Before `resolve` they are what a program or the build
 /// states, the entity counts per session; after it, for all sessions together.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
@@ -181,6 +181,35 @@ pub(crate) struct Counts {
     pub(crate) advanced_subscribers: usize,
     /// Link events listeners of each session.
     pub(crate) link_events_listeners: usize,
+}
+
+impl Counts {
+    /// No object of any kind: what a reckoning of some counts leaves the others at.
+    const NONE: Self = Self {
+        sessions: 0,
+        publishers: 0,
+        subscribers: 0,
+        queryables: 0,
+        liveliness_tokens: 0,
+        liveliness_subscribers: 0,
+        samples: 0,
+        replies: 0,
+        queries: 0,
+        configs: 0,
+        hellos: 0,
+        queriers: 0,
+        keyexprs: 0,
+        payload_blocks: [0; PAYLOAD_CLASSES],
+        encodings: 0,
+        gets: 0,
+        liveliness_gets: 0,
+        matching_listeners: 0,
+        decl_watches: 0,
+        transport_events_listeners: 0,
+        advanced_publishers: 0,
+        advanced_subscribers: 0,
+        link_events_listeners: 0,
+    };
 }
 
 /// A value a program holds apart from any session: the `HELD_*` limit the first open's config
@@ -244,7 +273,7 @@ const HELD_ROWS: [HeldRow; HELD] = [
     },
 ];
 
-/// The pool of the replies a program holds ([`Plan::of`]), or none in a build without them.
+/// The pool of the replies a program holds ([`Plan::laid`]), or none in a build without them.
 const REPLY_POOL: usize = {
     #[cfg(feature = "query")]
     let pool = Kind::Reply as usize;
@@ -253,7 +282,7 @@ const REPLY_POOL: usize = {
     pool
 };
 
-/// The pool of the queries a program holds ([`Plan::of`]), or none in a build without them.
+/// The pool of the queries a program holds ([`Plan::laid`]), or none in a build without them.
 const QUERY_POOL: usize = {
     #[cfg(feature = "queryable")]
     let pool = Kind::Query as usize;
@@ -262,7 +291,7 @@ const QUERY_POOL: usize = {
     pool
 };
 
-/// The pool of the hellos a program keeps ([`Plan::of`]), or none in a build without them.
+/// The pool of the hellos a program keeps ([`Plan::laid`]), or none in a build without them.
 const HELLO_POOL: usize = {
     #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
     let pool = Kind::Hello as usize;
@@ -437,6 +466,7 @@ pub(crate) enum Unplanned {
 }
 
 /// The bounds the limits of a session put on its entities, `None` where a limit holds none.
+#[cfg(any(test, feature = "object-pool"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Bounds {
     subscribers: Option<usize>,
@@ -455,9 +485,9 @@ pub(crate) struct Bounds {
     link_events_listeners: Option<usize>,
 }
 
+#[cfg(any(test, feature = "object-pool"))]
 impl Bounds {
     /// The bounds `limits` holds.
-    #[cfg(any(test, feature = "object-pool"))]
     pub(crate) fn of(limits: &SessionLimits) -> Self {
         Self {
             subscribers: limits.max_subscriptions().most(),
@@ -526,6 +556,7 @@ const fn bounded(
 
 /// The objects the pools hold, for all sessions together: each count read against the bounds of
 /// the limits of a session, the entity counts times the sessions.
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplanned> {
     let sessions = stated.sessions;
     Ok(Counts {
@@ -664,10 +695,15 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// The pools `objects` make: one per kind, each slot of the size of that kind's object.
+    #[cfg(any(test, feature = "object-pool"))]
     pub(crate) const fn of(objects: &Counts) -> Result<Self, Unplanned> {
-        let plan = Self::laid(objects);
+        Self::laid(objects).checked()
+    }
+
+    /// This plan, where it holds a slot and its pools' bytes fit the address space.
+    const fn checked(self) -> Result<Self, Unplanned> {
         let mut holds = false;
-        let mut rest: &[usize] = &plan.slots;
+        let mut rest: &[usize] = &self.slots;
         while let [slots, tail @ ..] = rest {
             holds |= *slots != 0;
             rest = tail;
@@ -675,8 +711,8 @@ impl Plan {
         if !holds {
             return Err(Unplanned::Empty);
         }
-        planned!(plan.bytes());
-        Ok(plan)
+        planned!(self.bytes());
+        Ok(self)
     }
 
     /// The pools `objects` make, unchecked: a plan of no slot, or of more bytes than the address
@@ -1319,7 +1355,7 @@ fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
 }
 
 /// Reserve at an open under `limits` that states `held` every stage of the pools not reserved
-/// yet, from that open's counts ([`counts_of`]), and fix the pools, so nothing is reserved after
+/// yet, from that open's plan ([`open_plan`]), and fix the pools, so nothing is reserved after
 /// it. `false`, the open to be refused as one that finds no memory, when the heap has not the
 /// memory, or when the pools, fixed by an earlier open or reserved by an object taken before
 /// this one, hold fewer of a held value than `held` states.
@@ -1330,11 +1366,11 @@ pub(crate) fn reserve_at_open(limits: &SessionLimits, held: &Held) -> bool {
     RESERVED.with(|reserved| reserved.at_open(&reserve, held))
 }
 
-/// The pools the first open reserves its stages from: its own counts', laid out without the
-/// checks of [`Plan::of`], which the reservation makes as it lays each stage ([`lay_stage`]).
+/// The pools the first open reserves its stages from: its own plan, without the checks of
+/// [`Plan::checked`], which the reservation makes as it lays each stage ([`lay_stage`]).
 #[cfg(not(test))]
 fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
-    Some(Plan::laid(&counts_of(limits, held).ok()?))
+    open_plan(limits, held).ok()
 }
 
 /// The pools the first open of this crate's unit-test binary reserves its stages from: the
@@ -1343,19 +1379,22 @@ fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
 /// open itself refuses.
 #[cfg(test)]
 fn open_reservation(limits: &SessionLimits, held: &Held) -> Option<Plan> {
-    counts_of(limits, held).ok()?;
+    open_plan(limits, held).ok()?;
     first_plan()
 }
 
 /// The counts of the build's pools: [`counts_of`] the limits the library opens a session under
 /// and the build's held values. Refused only by a build whose counts are past the address space.
+#[cfg(test)]
 const fn built_counts() -> Result<Counts, Unplanned> {
     counts_of(&session_limits(), &Held::BUILD)
 }
 
 /// The counts of the pools of an open under `limits` that states `held`: `HELD_SESSIONS`
 /// sessions, each holding as many of each entity as `limits` admit within the build's value of
-/// the limit, and the held values. Refused only by counts past the address space.
+/// the limit, and the held values. Refused only by counts past the address space. Every entity
+/// counted, those the build lays no pool of included: the reckoning [`open_plan`] is held to.
+#[cfg(test)]
 const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplanned> {
     let Held([samples, replies, queries, encodings, hellos, small, middle, largest]) = *held;
     let bounds = Bounds {
@@ -1421,6 +1460,135 @@ const fn counts_of(limits: &SessionLimits, held: &Held) -> Result<Counts, Unplan
     resolve(&built, &bounds)
 }
 
+/// The pools of an open under `limits` that states `held`, laid out unchecked ([`Plan::laid`]):
+/// `HELD_SESSIONS` sessions' entities ([`pooled_entities`]), the held values and `HELD_CONFIGS`
+/// configs. The one plan of an open and of the build ([`BUILT_PLAN`]): an open reads the limit of
+/// no entity the build lays no pool of, so a count that sizes nothing neither costs it a reading
+/// nor refuses it. Refused only by counts past the address space, or by a limit of no bound over
+/// an entity the build has a pool of.
+const fn open_plan(limits: &SessionLimits, held: &Held) -> Result<Plan, Unplanned> {
+    let Held([samples, replies, queries, encodings, hellos, small, middle, largest]) = *held;
+    let entities = planned!(pooled_entities(limits, caps::HELD_SESSIONS));
+    Ok(Plan::laid(&Counts {
+        sessions: caps::HELD_SESSIONS,
+        samples,
+        replies,
+        queries,
+        configs: caps::HELD_CONFIGS,
+        hellos,
+        payload_blocks: [small, middle, largest],
+        encodings,
+        ..entities
+    }))
+}
+
+/// The entities of `sessions` sessions under `limits` that lie in the process pools, every other
+/// count none: each session's declared keys, and on the tokio engine every entity of a session,
+/// as the cooperative engine holds the rest in each session's own arena. Each count is as many as
+/// `limits` admit within the build's value of the limit, the bound itself where it holds one.
+const fn pooled_entities(limits: &SessionLimits, sessions: usize) -> Result<Counts, Unplanned> {
+    let entities = Counts {
+        keyexprs: planned!(entity_count::<{ caps::MAX_DECLARED_KEYEXPRS }>(
+            true,
+            limits.max_declared_keyexprs(),
+            sessions,
+        )),
+        ..Counts::NONE
+    };
+    #[cfg(feature = "engine-tokio")]
+    let entities = Counts {
+        publishers: planned!(per_session(
+            match each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()) {
+                Some(publishers) => publishers,
+                None => 0,
+            },
+            sessions,
+        )),
+        subscribers: planned!(entity_count::<{ caps::MAX_SUBSCRIPTIONS }>(
+            true,
+            limits.max_subscriptions(),
+            sessions,
+        )),
+        queryables: planned!(entity_count::<{ caps::MAX_QUERYABLES }>(
+            cfg!(feature = "queryable"),
+            limits.max_queryables(),
+            sessions,
+        )),
+        liveliness_tokens: planned!(entity_count::<{ caps::MAX_LOCAL_TOKENS }>(
+            cfg!(feature = "liveliness"),
+            limits.max_local_tokens(),
+            sessions,
+        )),
+        liveliness_subscribers: planned!(entity_count::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
+            cfg!(feature = "liveliness"),
+            limits.max_liveliness_subscriptions(),
+            sessions,
+        )),
+        queriers: planned!(entity_count::<{ caps::MAX_QUERIERS }>(
+            cfg!(feature = "query"),
+            limits.max_queriers(),
+            sessions,
+        )),
+        gets: planned!(entity_count::<{ caps::MAX_PENDING_QUERIES }>(
+            cfg!(feature = "query"),
+            limits.max_pending_queries(),
+            sessions,
+        )),
+        liveliness_gets: planned!(entity_count::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
+            cfg!(feature = "liveliness-get"),
+            limits.max_pending_liveliness_gets(),
+            sessions,
+        )),
+        matching_listeners: planned!(entity_count::<{ caps::MAX_MATCHING_LISTENERS }>(
+            true,
+            limits.max_matching_listeners(),
+            sessions,
+        )),
+        decl_watches: planned!(entity_count::<{ caps::MAX_DECL_WATCHES }>(
+            cfg!(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            )),
+            limits.max_decl_watches(),
+            sessions,
+        )),
+        transport_events_listeners: planned!(entity_count::<
+            { caps::MAX_TRANSPORT_EVENTS_LISTENERS },
+        >(
+            cfg!(feature = "connectivity"),
+            limits.max_transport_events_listeners(),
+            sessions,
+        )),
+        advanced_publishers: planned!(entity_count::<{ caps::MAX_ADVANCED_PUBLISHERS }>(
+            cfg!(feature = "advanced"),
+            limits.max_advanced_publishers(),
+            sessions,
+        )),
+        advanced_subscribers: planned!(entity_count::<{ caps::MAX_ADVANCED_SUBSCRIBERS }>(
+            cfg!(feature = "advanced"),
+            limits.max_advanced_subscribers(),
+            sessions,
+        )),
+        link_events_listeners: planned!(entity_count::<{ caps::MAX_LINK_EVENTS_LISTENERS }>(
+            cfg!(feature = "connectivity"),
+            limits.max_link_events_listeners(),
+            sessions,
+        )),
+        ..entities
+    };
+    Ok(entities)
+}
+
+/// How many of an entity `sessions` sessions hold where the build has it (`has`): as many as
+/// `value` admits within `CEILING`, the build's value of its limit, each ([`bounded`]).
+const fn entity_count<const CEILING: usize>(
+    has: bool,
+    value: Quota,
+    sessions: usize,
+) -> Result<usize, Unplanned> {
+    bounded(has, sessions, 0, each::<CEILING>(value))
+}
+
 /// How many of an entity one session holds: `value`, the limit the library opens a session under,
 /// within `CEILING`, the build's value of it, which sizes the pool; `None` where the limit holds no
 /// bound.
@@ -1450,12 +1618,13 @@ fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
 }
 
-/// The plan of the build's pools ([`built_counts`]), every stage together, worked out when the
-/// library is compiled: the counts are the build's constants and the limits it opens sessions
-/// under, so nothing of it is left to the first object a program makes, which lays its own
-/// stage's pools of it ([`lay_stage`]).
-const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
-    Ok(objects) => Plan::of(&objects),
+/// The plan of the build's pools ([`open_plan`] of the limits the library opens a session under
+/// and the build's held values), every stage together, worked out when the library is compiled:
+/// the counts are the build's constants and the limits it opens sessions under, so nothing of it
+/// is left to the first object a program makes, which lays its own stage's pools of it
+/// ([`lay_stage`]).
+const BUILT_PLAN: Result<Plan, Unplanned> = match open_plan(&session_limits(), &Held::BUILD) {
+    Ok(plan) => plan.checked(),
     Err(unplanned) => Err(unplanned),
 };
 
@@ -2628,6 +2797,41 @@ mod tests {
             built_counts().and_then(|objects| Plan::of(&objects))
         );
         assert!(BUILT_PLAN.is_ok(), "the build's counts make pools");
+    }
+
+    /// The plan an open lays is the one every entity's count makes: reading only the limits of
+    /// the pools the build lays changes what an open reads, not what it lays. Under the limits a
+    /// session opens with and the build's, each held value at the build's, none or one, and an
+    /// entity limit lowered, wherever the full counts make pools. Turned red by a pool
+    /// `open_plan` sizes from a count other than its own, or one it leaves out.
+    #[test]
+    fn an_opens_plan_is_the_one_its_full_counts_make() {
+        let mut lowered = session_limits();
+        let mut limits = alloc::vec![session_limits(), SessionLimits::BUILD];
+        if lowered
+            .select_max_declared_keyexprs(Quota::at_most(1))
+            .is_ok()
+        {
+            limits.push(lowered);
+        }
+        if lowered.select_max_subscriptions(Quota::at_most(1)).is_ok() {
+            limits.push(lowered);
+        }
+        let mut compared = 0;
+        for limits in &limits {
+            for held in [Held::BUILD, Held([0; HELD]), Held([1; HELD])] {
+                let Ok(objects) = counts_of(limits, &held) else {
+                    continue;
+                };
+                assert_eq!(
+                    open_plan(limits, &held),
+                    Ok(Plan::laid(&objects)),
+                    "{limits:?} {held:?}"
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared >= 3, "the opening limits' counts make pools");
     }
 
     /// The build's counts: its sessions, each holding as many of each entity as the session's
