@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_background_subscriber,
@@ -67,6 +68,15 @@ unsafe fn open(key: u8, endpoint: &str) -> z_owned_session_t {
             z_config_loan_mut(&mut cfg),
             Z_CONFIG_MODE_KEY,
             c"peer".as_ptr()
+        ),
+        Z_OK
+    );
+    // The dialler holds two publishers on three keys, past what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_PUBLISHERS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr()
         ),
         Z_OK
     );
