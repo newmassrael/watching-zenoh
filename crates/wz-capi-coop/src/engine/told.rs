@@ -302,9 +302,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return false;
         }
         face.told.departed = true;
-        // The face is not dialled again: its life, closed with its link, moves no more.
-        face.link = Link::Idle;
         let id = face.id;
+        // The face is not dialled again: its life, closed with its link, moves no more. Let go of
+        // through the faces, which keep what the link counted.
+        self.transport.links.put_link(at, Link::Idle);
         self.session.registry.depart(HeldFace::new(at, id));
         true
     }

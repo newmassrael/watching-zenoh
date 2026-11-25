@@ -13,9 +13,10 @@
 //! The record is versioned and fixed-layout ([`wz_session_core::resource_snapshot`]); it starts
 //! with its own layout version and size, so a reader of an older build can tell a newer one.
 
-use std::ffi::c_void;
-use std::sync::OnceLock;
-use std::time::Instant;
+use alloc::string::String;
+use core::ffi::c_void;
+
+use wz_host_sync::{Instant, OnceLock};
 
 use wz_session_core::resource_snapshot::{
     BuildMessageReading, BuildSampler, HeapReading, ResourceReading, Snapshot, HAS_CPU, HAS_HEAP,

@@ -2888,6 +2888,12 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
         self.inner.takes_another()
     }
 
+    // A host that puts off what follows each record of a run does it here; a wrapper that kept it
+    // would leave a group's records owed until a record of another kind came.
+    fn end_records(&mut self) {
+        self.inner.end_records();
+    }
+
     fn holds_datagram(&self) -> bool {
         self.inner.holds_datagram()
     }

@@ -44,16 +44,11 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::c_void;
-// The lock and the polling task's wait are the host's (`wz-host-sync`, which both libraries that
-// compile the doors link), with `std` or without; the clock is `std`'s where the library has
-// `std`, and the host's own without it.
-#[cfg(feature = "std")]
-use std::time::Instant;
+// The lock, the clock and the polling task's thread are the host's (`wz-host-sync`, which both
+// libraries that compile the doors link), with `std` or without.
 #[cfg(feature = "multi-thread")]
 use wz_host_sync::Condvar;
-#[cfg(not(feature = "std"))]
-use wz_host_sync::Instant;
-use wz_host_sync::{Mutex, MutexGuard};
+use wz_host_sync::{Instant, Mutex, MutexGuard};
 
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::stream_supervisor::{
@@ -203,10 +198,8 @@ struct State {
     callback: Option<Callback>,
 }
 
-/// The polling task's thread: `std`'s, or the host's own without it.
-#[cfg(all(feature = "multi-thread", feature = "std"))]
-type TaskThread = std::thread::JoinHandle<()>;
-#[cfg(all(feature = "multi-thread", not(feature = "std")))]
+/// The polling task's thread: the host's own, its body in a record of `wz-host-sync`'s pool.
+#[cfg(feature = "multi-thread")]
 type TaskThread = wz_host_sync::Thread;
 
 #[cfg(feature = "multi-thread")]
@@ -218,43 +211,19 @@ struct Task {
 /// Start the polling task's thread running `body`; `None` when the host gave none.
 #[cfg(feature = "multi-thread")]
 fn spawn_task(body: impl FnOnce() + Send + 'static) -> Option<TaskThread> {
-    #[cfg(feature = "std")]
-    {
-        std::thread::Builder::new()
-            .name("wz-stream-supervisor".into())
-            .spawn(body)
-            .ok()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        wz_host_sync::spawn_fn(body)
-    }
+    wz_host_sync::spawn_fn(body)
 }
 
 /// Whether the calling thread is the task's own.
 #[cfg(feature = "multi-thread")]
 fn is_current(thread: &TaskThread) -> bool {
-    #[cfg(feature = "std")]
-    {
-        thread.thread().id() == std::thread::current().id()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        thread.id() == wz_host_sync::current_thread()
-    }
+    thread.id() == wz_host_sync::current_thread()
 }
 
 /// Wait for the task's thread to end.
 #[cfg(feature = "multi-thread")]
 fn join_task(thread: TaskThread) {
-    #[cfg(feature = "std")]
-    {
-        let _ = thread.join();
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        thread.join();
-    }
+    thread.join();
 }
 
 /// Wait out one period, or less when told to stop: the stop flag after the wait.
@@ -846,6 +815,28 @@ pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The polling task runs on a thread of `wz-host-sync`'s, in a build with `std` as without
+    /// it: the body reads itself as the task's thread, and the caller does not. Turned red by a
+    /// task started on `std`'s threads, whose number the host's call does not answer.
+    #[cfg(feature = "multi-thread")]
+    #[test]
+    fn the_polling_task_is_a_thread_of_the_host() {
+        let seen = Arc::new(Mutex::new(None::<usize>));
+        let thread = {
+            let seen = Arc::clone(&seen);
+            spawn_task(move || *seen.lock() = Some(wz_host_sync::current_thread()))
+                .expect("a host gives a thread")
+        };
+        assert!(!is_current(&thread), "the caller is not the task");
+        let id = thread.id();
+        join_task(thread);
+        assert_eq!(
+            *seen.lock(),
+            Some(id),
+            "the body ran on the task's own thread"
+        );
+    }
 
     #[test]
     fn a_slot_has_the_layout_the_header_declares() {

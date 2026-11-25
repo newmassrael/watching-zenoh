@@ -1220,13 +1220,13 @@ mod tests {
         rx.idle();
         assert_eq!(
             lent.rx_in_use(),
-            usize::from(!RxBuffer::POOLED),
+            usize::from(!RxBuffer::<Cell<bool>>::POOLED),
             "a pool's buffer goes back when idle; one of its own stays"
         );
         assert_eq!((tx.slots(), tx.slot_len()), (2, 8));
 
-        let mut own = RxBuffer::Owned(std::vec![0u8; 4]);
-        let none = TxBuffer::Owned(HeapTx::new(0, 0));
+        let mut own = RxBuffer::<Cell<bool>>::Owned(std::vec![0u8; 4]);
+        let none = TxBuffer::<Cell<bool>>::Owned(HeapTx::new(0, 0));
         assert_eq!(own.capacity(), 4);
         own.idle();
         assert_eq!(
@@ -1276,12 +1276,13 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_link_the_heap_has_no_room_for_is_refused_as_exhausted() {
-        let refused = crate::table_tests::refused(|| heap_link_buffers(None, 48, 0, 0));
+        let refused =
+            crate::table_tests::refused(|| heap_link_buffers::<Cell<bool>>(None, 48, 0, 0));
         assert!(matches!(
             refused,
             Err(crate::session_drive::LinkOpenError::Exhausted)
         ));
-        let (mut rx, tx) = heap_link_buffers(None, 48, 0, 0).expect("allocated");
+        let (mut rx, tx) = heap_link_buffers::<Cell<bool>>(None, 48, 0, 0).expect("allocated");
         assert_eq!(
             rx.bytes().map(|bytes| bytes.to_vec()),
             Some(std::vec![0u8; 48])

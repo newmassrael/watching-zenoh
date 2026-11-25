@@ -26,6 +26,9 @@
 //! ([`in_place`]), or in a build with `std` (the `std` feature) `std`'s where `std`'s lie in
 //! their own bytes as well. A lock whose holder panicked is handed out as it was left, and in a
 //! build with `std` reads as poisoned ([`Mutex::is_poisoned`]).
+//!
+//! [`OnceLock`] is a process-wide value made by its first caller at run time, in the shape of
+//! `std`'s, filled and read without memory of the heap.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -368,8 +371,10 @@ use in_place as chosen;
 use std_lock as chosen;
 
 pub mod in_place;
+mod once;
 
 pub use chosen::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use once::OnceLock;
 
 /// A reading of the monotonic clock ([`monotonic_ns`]): the shape of `std::time::Instant`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

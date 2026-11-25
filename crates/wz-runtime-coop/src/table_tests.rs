@@ -407,9 +407,9 @@ fn sleeper(
 
 /// A clock a test moves by hand that counts how often it is read. One per test, so its two words
 /// are statics of the test.
-struct Counted(&'static AtomicU64, &'static AtomicUsize);
+struct ReadCountingClock(&'static AtomicU64, &'static AtomicUsize);
 
-impl ClockSource for Counted {
+impl ClockSource for ReadCountingClock {
     fn now_us(&self) -> u64 {
         self.1.fetch_add(1, Ordering::SeqCst);
         self.0.load(Ordering::SeqCst)
@@ -424,7 +424,7 @@ impl ClockSource for Counted {
 fn a_pass_over_the_ready_tasks_reads_no_clock() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static READS: AtomicUsize = AtomicUsize::new(0);
-    let runtime = CoopRuntime::try_new(Counted(&NOW, &READS)).expect("the heap has room");
+    let runtime = CoopRuntime::try_new(ReadCountingClock(&NOW, &READS)).expect("the heap has room");
     let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let time = CoopTime::new(&runtime);
     let task = local.spawn_local(async move {

@@ -21,7 +21,7 @@
 //! nothing sent). The policy is the stamper's: a program that reads the clock (`z_timestamp_new`)
 //! is given its time whatever its standing.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use wz_capi_port::observation::{clock, Refusal};
 
@@ -120,7 +120,7 @@ mod tests {
     fn a_null_callback_is_refused_and_an_unknown_handle_and_event_are_invalid() {
         unsafe {
             assert_eq!(
-                wz_ext_clock_source_register(None, std::ptr::null_mut(), std::ptr::null_mut()),
+                wz_ext_clock_source_register(None, core::ptr::null_mut(), core::ptr::null_mut()),
                 Z_ERR_NULL
             );
         }

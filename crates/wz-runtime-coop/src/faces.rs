@@ -30,6 +30,8 @@ use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, LinkRole, UnicastLink};
 use wz_session_core::locator_directory::LocatorText;
+#[cfg(feature = "resource-snapshot")]
+use wz_session_core::resource_snapshot::{BuildMessageReading, BuildReceiveLedger};
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
@@ -71,6 +73,21 @@ pub trait FaceSession {
     fn input_seen(&self, ready: bool) {
         let _ = ready;
     }
+
+    /// `resource-snapshot` — what the link's receive path has counted: its transport messages and
+    /// how they were spaced, cumulative. Required, so no session of a link is left out of the
+    /// session's reading by a provided zero.
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(&self) -> BuildMessageReading;
+}
+
+/// `resource-snapshot` — what the session of the link `link` holds has counted, while it holds
+/// one: a link counts from the moment it is put in, its handshake included, until it is let go of.
+#[cfg(feature = "resource-snapshot")]
+fn counted<S: FaceSession, D, E, N: CountKind>(
+    link: &Link<S, D, E, N>,
+) -> Option<BuildMessageReading> {
+    link.wire().map(|wire| wire.session.message_reading())
 }
 
 /// One face as the session keeps it: the face's number and its link, beside whatever else the
@@ -909,6 +926,11 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// are counted (`N`), which a build without `listen` names in no field: the supervisor
     /// names both.
     records: core::marker::PhantomData<fn() -> (F, N)>,
+    /// `resource-snapshot` — what the links let go of had counted when they went, retired in the
+    /// step that lets each go, so the session's reading never falls when a link does
+    /// ([`Self::message_reading`]).
+    #[cfg(feature = "resource-snapshot")]
+    receive_ledger: BuildReceiveLedger,
 }
 
 impl<
@@ -938,6 +960,8 @@ impl<
             #[cfg(feature = "listen")]
             stood_by: None,
             records: core::marker::PhantomData,
+            #[cfg(feature = "resource-snapshot")]
+            receive_ledger: BuildReceiveLedger::new(),
         })
     }
 
@@ -983,6 +1007,16 @@ impl<
     /// Each face with its place, in the order of their places.
     pub fn placed(&self) -> impl Iterator<Item = (usize, &F)> {
         self.faces.placed()
+    }
+
+    /// `resource-snapshot` — what the receive paths of the faces' links have counted, those held
+    /// now and those let go of, as one reading that only grows: a reader takes windows by
+    /// subtracting two readings. Asked under the lock the links are let go of under, a link that
+    /// goes is in the retired total or among the links held, never in both or in neither.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(&self) -> BuildMessageReading {
+        self.receive_ledger
+            .total(self.faces.iter().filter_map(|face| counted(face.link())))
     }
 
     /// The table of the faces by their places, for a walk that names a face by its place.
@@ -1074,7 +1108,15 @@ impl<
         self.moved();
         self.regenerated();
         let id = self.faces.get(at)?.id();
-        self.faces.free(at).then_some(id)
+        // Read before the face goes, and retired only if it went: the dial role's never does.
+        #[cfg(feature = "resource-snapshot")]
+        let gone = self.faces.get(at).and_then(|face| counted(face.link()));
+        let freed = self.faces.free(at);
+        #[cfg(feature = "resource-snapshot")]
+        if let Some(gone) = gone.filter(|_| freed) {
+            self.receive_ledger.retire(&gone);
+        }
+        freed.then_some(id)
     }
 
     /// Begin a dial of `to`, which the network answers later.
@@ -1147,7 +1189,12 @@ impl<
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
     pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial, F::End, N>) {
         self.regenerated();
-        if let Some(face) = self.face_mut(at) {
+        self.moved();
+        if let Some(face) = self.faces.get_mut(at) {
+            #[cfg(feature = "resource-snapshot")]
+            if let Some(gone) = counted(face.link()) {
+                self.receive_ledger.retire(&gone);
+            }
             *face.link_mut() = link;
         }
     }
@@ -1603,13 +1650,16 @@ impl<
     /// dial role's face stays, with no link and no redial; the others go.
     pub fn end_faces(&mut self, mut each: impl FnMut(&mut F)) {
         self.regenerated();
-        for face in self.faces_mut() {
+        self.moved();
+        for face in self.faces.iter_mut() {
             each(face);
             // A close asks to let go of the dial or the link, which is what follows here for
             // every face alike, so its effects are not read; it reads no time.
             let _ = face.life_mut().input(LinkInput::Close, 0);
             let link = core::mem::replace(face.link_mut(), Link::Idle);
             if let Link::Wire(wire) = link {
+                #[cfg(feature = "resource-snapshot")]
+                self.receive_ledger.retire(&wire.session.message_reading());
                 if wire.established() {
                     wire.end();
                 }
@@ -1650,6 +1700,9 @@ mod tests {
         closed: Option<CloseReason>,
         #[cfg(any(feature = "listen", feature = "group"))]
         seen: Rc<Cell<Option<bool>>>,
+        /// How many transport messages the link's receive path has counted.
+        #[cfg(feature = "resource-snapshot")]
+        messages: Rc<Cell<u64>>,
     }
 
     impl FaceSession for Session {
@@ -1672,6 +1725,14 @@ mod tests {
         #[cfg(any(feature = "listen", feature = "group"))]
         fn input_seen(&self, ready: bool) {
             self.seen.set(Some(ready));
+        }
+
+        #[cfg(feature = "resource-snapshot")]
+        fn message_reading(&self) -> BuildMessageReading {
+            BuildMessageReading {
+                messages: self.messages.get(),
+                ..BuildMessageReading::empty()
+            }
         }
     }
 
@@ -1939,6 +2000,8 @@ mod tests {
             closed: None,
             #[cfg(any(feature = "listen", feature = "group"))]
             seen: Rc::new(Cell::new(None)),
+            #[cfg(feature = "resource-snapshot")]
+            messages: Rc::new(Cell::new(0)),
         }
     }
 
@@ -2088,6 +2151,84 @@ mod tests {
         assert_ne!(put, before, "a link put in is a change");
         assert!(faces.face_mut(0).is_some());
         assert_ne!(faces.moves(), put, "a reach to change a face is a change");
+    }
+
+    /// `resource-snapshot` — the reading of a session's links never falls: a link counts from when
+    /// it is put in, its handshake included, and what it counted stays once it is let go of (put
+    /// over, its face dropped, the links ended), read no more after that. Turned red by a reading
+    /// of the links held alone (a retire left out of `put_link`, `drop_face` or `end_faces`), by
+    /// a link let go of still read, or by a retire at a drop that was refused.
+    #[cfg(feature = "resource-snapshot")]
+    #[test]
+    fn the_message_reading_keeps_what_the_links_let_go_of_had_counted() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let counting = |messages: u64| {
+            let session = session(true, None);
+            session.messages.set(messages);
+            let counter = Rc::clone(&session.messages);
+            (Link::Wire(wire(&local, session, false, false)), counter)
+        };
+        let mut faces = supervisor(Link::Idle, 2);
+        assert_eq!(
+            faces.message_reading().messages,
+            0,
+            "no link, nothing counted"
+        );
+
+        let (first, first_count) = counting(3);
+        faces.put_link(0, first);
+        assert_eq!(faces.message_reading().messages, 3, "a link put in counts");
+        first_count.set(5);
+        assert_eq!(faces.message_reading().messages, 5, "read as it counts");
+
+        faces.put_link(0, Link::Idle);
+        assert_eq!(
+            faces.message_reading().messages,
+            5,
+            "what a link let go of counted stays"
+        );
+        first_count.set(9);
+        assert_eq!(
+            faces.message_reading().messages,
+            5,
+            "and the link is read no more"
+        );
+
+        let (second, _) = counting(2);
+        faces.put_link(0, second);
+        let (taken, _) = counting(4);
+        let taken = TestFace {
+            id: 1,
+            link: taken,
+            life: idle_life(),
+        };
+        assert!(faces.place_face(1, taken).is_ok());
+        assert_eq!(faces.message_reading().messages, 11);
+        assert_eq!(faces.drop_face(1), Some(1));
+        assert_eq!(
+            faces.message_reading().messages,
+            11,
+            "a dropped face's link stays counted"
+        );
+        assert_eq!(
+            faces.drop_face(0),
+            None,
+            "CONTROL: the dial role's face is never dropped"
+        );
+        assert_eq!(
+            faces.message_reading().messages,
+            11,
+            "so its link is not retired beside being held"
+        );
+
+        faces.end_faces(|_| {});
+        assert!(faces.faces().all(|face| face.link().wire().is_none()));
+        assert_eq!(
+            faces.message_reading().messages,
+            11,
+            "the links ended stay counted"
+        );
     }
 
     /// The links' generation moves at each change of a face's link and of the faces held, and at

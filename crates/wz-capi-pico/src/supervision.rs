@@ -25,7 +25,7 @@
 //! What the supervisor does is [`wz_capi_port::observation::supervision`]'s, which the zenoh-c
 //! ABI's doors act on too; this file is the pico ABI's names and result codes for it.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use wz_capi_port::observation::supervision as supervisor;
 use wz_capi_port::observation::Refusal;

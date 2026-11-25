@@ -343,6 +343,16 @@ shared-key-ids = [
 # `transport-stats`), which the engine sums with its links'.
 # A Rust surface only: neither zenoh-c nor zenoh-pico reports transport counters through C.
 transport-stats = ["wz-session-core/transport-stats", "wz-session-mcu/transport-stats"]
+# The node's resource snapshot (`SessionEngine::message_reading`): what the receive paths of the
+# session's links and the sessions of its groups counted, those up and those let go of, as one
+# reading that only grows. Off, which
+# is pico's build (pico has no snapshot), no link counts and the engine answers `None`, as the
+# port's provided answer does.
+resource-snapshot = [
+    "wz-session-core/resource-snapshot",
+    "wz-runtime-coop/resource-snapshot",
+    "wz-session-mcu/resource-snapshot",
+]
 # The declaration watch (`SessionEngine::declare_decl_watch`): what the peers of the session's links
 # declare and retract, told to a watch with the session's other deliveries, outside its lock. The
 # two features are the pico ABI's of the same names, which this engine honours as the tokio engine

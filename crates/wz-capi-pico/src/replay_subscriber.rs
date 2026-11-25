@@ -58,10 +58,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
 use core::mem::ManuallyDrop;
-// The library's clock for the replay's deadlines: `std`'s, or the host's monotonic one without it.
-#[cfg(feature = "std")]
-use std::time::Instant;
-#[cfg(not(feature = "std"))]
+// The library's clock for the replay's deadlines: the host's monotonic one, with `std` or without.
 use wz_host_sync::Instant;
 
 use wz_app_frame::e2e_receiver::Receiver;

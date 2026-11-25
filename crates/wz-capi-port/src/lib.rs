@@ -92,6 +92,25 @@ pub mod held_key;
 mod held_slab;
 pub mod listeners;
 pub mod lodge;
+// The instruments of the observation plane and the time base keep process-wide state under the
+// host's lock and read its clocks (`wz-host-sync`): a host's, with `std` or its own calls
+// (`os-sys`). An image's kernel answers neither, so a build of one without a host is refused here
+// by name.
+#[cfg(all(
+    any(
+        feature = "clock-source",
+        feature = "event-ring",
+        feature = "supervision",
+        feature = "resource-snapshot",
+        feature = "time-base"
+    ),
+    not(any(feature = "std", feature = "os-sys"))
+))]
+compile_error!(
+    "wz-capi-port: the observation plane and the time base need a host's lock and clock: `std`, or \
+     `os-sys` for a host library without it"
+);
+
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
 #[cfg(any(

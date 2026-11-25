@@ -16,7 +16,7 @@
 # thread that must wait sleeps on that word, and a release wakes a thread only when one waits on
 # it. No `std`, nothing exported and nothing allocated: `spawn_fn` moves a thread's body into
 # a record of a static pool of `THREADS`. Also the typed forms (`Mutex`, `Condvar`, `RwLock`,
-# `Instant`), in the shape of `std`'s: the one lock every crate of a C ABI's graph holds for a value
+# `Instant`, `OnceLock`), in the shape of `std`'s: the one lock every crate of a C ABI's graph holds for a value
 # it makes while a session is open, on every host, with `std` or without.
 
 [package]
