@@ -2575,7 +2575,9 @@ fn query_body_bytes<E: wz_session_core::ext_view::ExtEntryView>(
     // not plain bytes, and the descriptor it holds is not its size.
     // The value is told by its identity, as upstream tells it, and not by the id
     // field an extension that is mandatory shares with it.
-    wz_session_core::ext_view::find_by_eid(
+    // A repeated value is read by its last entry, as every reader of a received chain picks one
+    // (`wz_session_core::ext_view::last_by_eid`).
+    wz_session_core::ext_view::last_by_eid(
         extensions?,
         wz_session_core::ext_header::body_eid::QUERY_VALUE,
     )?

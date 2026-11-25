@@ -48,7 +48,6 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 #[cfg(feature = "alloc")]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
-use crate::ext_header::ext_eid;
 use crate::ext_nodeid::{EXT_ENC_ZBUF, EXT_FLAG_M};
 use crate::ext_view::ExtEntryView;
 use crate::vle::read_vle_u64;
@@ -145,7 +144,7 @@ pub fn ext_wireexpr_body_into(
     Some(crate::tx_buf::TxBuf::len(&buf))
 }
 
-/// Parse the FIRST `ext_keyexpr` entry in `exts` into its raw inner fields —
+/// Parse the `ext_keyexpr` entry in `exts` into its raw inner fields —
 /// `(inner_header, mapping_id, suffix_bytes)`. The single body-parse SSOT both
 /// [`read_ext_keyexpr`] (literal gate) and [`resolve_ext_keyexpr`] (table
 /// resolve) build on, so the ZBuf-body layout `[inner_header | id VLE | suffix]`
@@ -158,29 +157,26 @@ pub fn ext_wireexpr_body_into(
 /// Generic over the chain a reader can ask ([`ExtEntryView`]): the owned one, or
 /// the chain of a declaration read where its frame lies. One scan, so the two
 /// forms cannot disagree about which entry is the keyexpr.
+///
+/// The entry is told by its identity, the header without the chain flag, as
+/// upstream tells it (`ext::WireExprExt::ID`): a ZBuf of the same id that is not
+/// mandatory is another extension. A repeated one is read by its last entry, as
+/// upstream's undeclaration decoders read it
+/// (`commons/zenoh-codec/src/network/declare.rs` @ `ext_wire_expr = we;`), which
+/// is the one rule every reader of a received chain picks an entry by
+/// ([`crate::ext_view::last_by_eid`]).
 fn parse_ext_keyexpr_entry<E: ExtEntryView>(
     exts: Option<&[E]>,
 ) -> Option<(u8, crate::wire_id::ExprId, &[u8])> {
-    for ext in exts? {
-        // Told by its identity, the header without the chain flag, as upstream tells
-        // it (`ext::WireExprExt::ID`): a ZBuf of the same id that is not mandatory
-        // is another extension.
-        if ext_eid(ext.header()) != KEYEXPR_EXT_HEADER {
-            continue;
-        }
-        let Some(body) = ext.plain_zbuf() else {
-            continue;
-        };
-        let (&inner_header, rest) = body.split_first()?;
-        let (id, consumed) = read_vle_u64(rest)?;
-        let suffix_bytes = rest.get(consumed..)?;
-        return Some((
-            inner_header,
-            crate::wire_id::declared_expr_id(id),
-            suffix_bytes,
-        ));
-    }
-    None
+    let body = crate::ext_view::last_by_eid(exts?, KEYEXPR_EXT_HEADER)?.plain_zbuf()?;
+    let (&inner_header, rest) = body.split_first()?;
+    let (id, consumed) = read_vle_u64(rest)?;
+    let suffix_bytes = rest.get(consumed..)?;
+    Some((
+        inner_header,
+        crate::wire_id::declared_expr_id(id),
+        suffix_bytes,
+    ))
 }
 
 /// Read the LITERAL keyexpr from an `ext_keyexpr` extension in `exts`. `None`
@@ -223,21 +219,25 @@ pub fn set_ext_keyexpr_literal(
     exts: &mut Vec<ExtEntryOwned>,
     literal: &str,
 ) -> Result<bool, CodecError> {
-    let Some(index) = exts.iter().position(|ext| {
-        ext_eid(ext.header) == KEYEXPR_EXT_HEADER
-            && matches!(ext.body, ExtEntryOwnedVariant::CodecZenohExtZbuf(_))
-    }) else {
+    // The entry rewritten is the one every reader reads, the last of its identity
+    // (`crate::ext_view::last_index_by_eid`), so the peer the rewritten chain
+    // goes to reads the rewritten literal.
+    let Some(index) = crate::ext_view::last_index_by_eid(exts.as_slice(), KEYEXPR_EXT_HEADER)
+    else {
         return Ok(false);
     };
     // The literal gate is `read_ext_keyexpr`'s rather than a second copy of it:
-    // an aliased id has no literal to rewrite. Both readers select the FIRST
-    // id-matching ZBuf entry, so they cannot be looking at different ones.
+    // an aliased id has no literal to rewrite. Both select the entry by the same
+    // rule, so they cannot be looking at different ones.
     if read_ext_keyexpr(Some(exts)).is_none() {
         return Ok(false);
     }
     let Some(entry) = exts.get_mut(index) else {
         return Ok(false);
     };
+    if !matches!(entry.body, ExtEntryOwnedVariant::CodecZenohExtZbuf(_)) {
+        return Ok(false);
+    }
     entry.body = build_ext_keyexpr(literal)?.body;
     Ok(true)
 }

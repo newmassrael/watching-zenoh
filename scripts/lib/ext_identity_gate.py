@@ -329,7 +329,7 @@ def judge(
             errors.append(
                 f"{key[0]}:{lines[0]} (fn {key[1]}): reads an extension's 4-bit id; "
                 "tell the extension by its identity (`ext_eid` against an identity "
-                "constant, or `ext_view::find_by_eid`), or classify the site here "
+                "constant, or `ext_view::last_by_eid`), or classify the site here "
                 "with the upstream rule it follows"
             )
     for key, (kind, _reason) in sorted(CLASSIFIED.items()):

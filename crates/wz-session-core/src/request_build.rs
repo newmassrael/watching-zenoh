@@ -234,7 +234,7 @@ pub fn attach_query_value_shm(
     use wz_codecs::ext_unit::ExtUnit;
     use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
 
-    if crate::ext_view::find_by_eid(
+    if crate::ext_view::last_by_eid(
         crate::held_list::HeldList::entries(&query.extensions).unwrap_or(&[]),
         crate::ext_header::body_eid::QUERY_VALUE,
     )
@@ -292,7 +292,9 @@ pub fn attach_query_value_shm(
 }
 
 /// The value of a Query, if its extension chain holds one as a list of slices: the entry and the
-/// slices. A value that is a run of bytes, or a Query without one, answers `None`.
+/// slices. A value that is a run of bytes, or a Query without one, answers `None`. The value is
+/// the last entry of its identity, the one every reader of the chain reads
+/// ([`crate::ext_view::last_by_eid`]), so a forwarder re-expresses the value its peer will read.
 #[cfg(all(feature = "codec-request", feature = "transport-shm"))]
 fn sliced_query_value(
     query: &crate::wire::parts::QueryOwned,
@@ -305,24 +307,15 @@ fn sliced_query_value(
     use crate::wire::parts::QueryExtEntryOwnedVariant;
     use wz_codecs::query_value_zbuf::QueryValueZbufAfterShm;
 
-    query
-        .extensions
-        .entries()?
-        .iter()
-        .enumerate()
-        .find_map(|(index, ext)| match &ext.body {
-            QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)
-                if crate::ext_view::ExtEntryView::eid(ext) == body_eid::QUERY_VALUE =>
-            {
-                match &value.after_shm {
-                    QueryValueZbufAfterShm::AfterShm { slices, .. } => {
-                        Some((index, slices.as_slice()))
-                    }
-                    QueryValueZbufAfterShm::NotAfterShm { .. } => None,
-                }
-            }
-            _ => None,
-        })
+    let entries = query.extensions.entries()?;
+    let index = crate::ext_view::last_index_by_eid(entries, body_eid::QUERY_VALUE)?;
+    match &entries.get(index)?.body {
+        QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) => match &value.after_shm {
+            QueryValueZbufAfterShm::AfterShm { slices, .. } => Some((index, slices.as_slice())),
+            QueryValueZbufAfterShm::NotAfterShm { .. } => None,
+        },
+        _ => None,
+    }
 }
 
 /// transport-shm -- the serialized descriptor of every shared-memory slice of a Query's value, in

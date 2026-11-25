@@ -44,7 +44,7 @@ use wz_codecs::request::{RequestView, RequestViewVariant};
 use super::{
     DispatchOutcome, LocalQueryables, QueryDelivered, QueryEnvelope, QueryPeer, QueryProjection,
 };
-use crate::ext_view::{walked, ExtEntryView};
+use crate::ext_view::walked;
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
 use crate::wireexpr_resolve::{
     resolve_wireexpr_viewed, KeyexprBuf, KeyexprPastBound, MappingSpaces,
@@ -82,16 +82,17 @@ fn read_envelope_extensions(
 
 /// Whether a Query's chain carries its value as a list of slices: the shape the
 /// owned path un-swaps before routing (`QueryPeer::unswap_query_value`
-/// reads the first value entry that has slices).
+/// reads the value, the last entry of its identity, when it has slices).
 fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bool {
-    exts.into_iter().any(|ext| {
-        ext.eid() == crate::ext_header::body_eid::QUERY_VALUE
-            && matches!(
+    crate::ext_view::last_by_eid_in(exts, crate::ext_header::body_eid::QUERY_VALUE).is_some_and(
+        |ext| {
+            matches!(
                 &ext.body,
                 QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z)
                     if wz_codecs::query_value_zbuf::QueryValueZbufWire::input_after_shm(z)
             )
-    })
+        },
+    )
 }
 
 /// What a queryable is shown of `query` read in place, each field under the

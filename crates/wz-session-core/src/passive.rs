@@ -4045,10 +4045,13 @@ impl JoinStatement {
     }
 }
 
-/// The JOIN QoS extension of a decoded chain, if it carries one.
+/// The JOIN QoS extension of a decoded chain, if it carries one: the last entry of it, as
+/// upstream's Join decoder reads a repeated one (`commons/zenoh-codec/src/transport/join.rs` @
+/// `ext_qos = Some(q);`) and every reader of a received chain picks one
+/// ([`crate::ext_view::last_by_eid`]).
 #[cfg(feature = "codec-join")]
 fn join_qos_ext(extensions: &[ExtEntryOwned]) -> Option<&ExtEntryOwned> {
-    crate::ext_view::find_by_eid(extensions, crate::join_decode::JOIN_QOS_EXT_EID)
+    crate::ext_view::last_by_eid(extensions, crate::join_decode::JOIN_QOS_EXT_EID)
 }
 
 /// What a `Fragment` came to, as the chain router judged it.

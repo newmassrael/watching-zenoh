@@ -578,7 +578,7 @@ pub(crate) fn response_responder<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     extensions: impl IntoIterator<Item = T>,
 ) -> Option<(&'c [u8], u32)> {
     let ext =
-        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::network_eid::RESPONDER)?;
+        crate::ext_view::last_by_eid_in(extensions, crate::ext_header::network_eid::RESPONDER)?;
     decode_responder_ext_body(ext.plain_zbuf_in()?)
 }
 

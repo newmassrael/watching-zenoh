@@ -216,7 +216,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // A message the nodes record on is delivered with a stack of its own to add to.
         #[cfg(feature = "pubsub-ts-stack")]
         if push.extensions.as_deref().is_some_and(|outer| {
-            crate::ext_view::find_by_eid(
+            crate::ext_view::last_by_eid(
                 outer,
                 crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
             )

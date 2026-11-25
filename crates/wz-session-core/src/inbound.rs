@@ -1125,9 +1125,8 @@ fn judge_transport_chain<C: crate::ext_chain::ChainHeaders + ?Sized>(
 /// dropping a non-DEFAULT priority is the [`crate::drive`] admit seam's call.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
-    extensions
-        .iter()
-        .find_map(qos_priority_of_entry)
+    crate::ext_view::last_by_eid(extensions, crate::ext_header::network_eid::TRANSPORT_QOS)
+        .and_then(qos_priority_of_entry)
         .unwrap_or(crate::qos::Priority::DEFAULT)
 }
 
@@ -1502,7 +1501,13 @@ impl InPlaceExtChain {
             {
                 markers = markers.with_header(entry.header);
             }
-            if priority.is_none() {
+            // A later QoS entry supersedes an earlier one, as upstream's Frame and Fragment
+            // decoders assign each they meet (`commons/zenoh-codec/src/transport/frame.rs` @
+            // `ext_qos = q;`): the rule `crate::ext_view::last_by_eid` states, folded into
+            // the one walk this chain is read in.
+            if crate::ext_header::ext_eid(entry.header)
+                == crate::ext_header::network_eid::TRANSPORT_QOS
+            {
                 priority = qos_priority_of_entry(&entry);
             }
         }
@@ -3236,6 +3241,19 @@ mod frame_qos_identity_tests {
                 "{header:#04x} shares only the id with the transport QoS"
             );
         }
+    }
+
+    /// A Frame that carries its QoS twice is read by the last, as upstream's Frame and Fragment
+    /// decoders read it: their QoS arm assigns each entry it meets
+    /// (`commons/zenoh-codec/src/transport/frame.rs` @ `ext_qos = q;`,
+    /// `commons/zenoh-codec/src/transport/fragment.rs` @ `ext_qos = q;`).
+    #[test]
+    fn a_repeated_transport_qos_is_read_by_its_last_entry() {
+        let chain = [
+            zint(network_eid::TRANSPORT_QOS | EXT_FLAG_Z, 3),
+            zint(network_eid::TRANSPORT_QOS, 5),
+        ];
+        assert_eq!(ext_qos_priority(&chain), crate::qos::Priority::from_wire(5));
     }
 }
 

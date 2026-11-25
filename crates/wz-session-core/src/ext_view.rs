@@ -56,24 +56,46 @@ pub trait ExtEntryView {
     fn zint(&self) -> Option<u64>;
 }
 
-/// The first entry of `extensions` whose identity is `eid`.
+/// The entry of `extensions` a reader reads for the extension whose identity is `eid`: the LAST
+/// entry of that identity, or `None` for a chain that carries none.
 ///
-/// The one place a reader picks an extension out of a received chain. Upstream
-/// tells a received extension apart by its identity (`commons/zenoh-codec/src/zenoh/put.rs`
-/// @ `Ok(match iext::eid(ext) {`), so a reader that wants the extension named by
-/// `eid` finds it here and never by the id field, which an extension that
-/// differs in the mandatory bit or the encoding shares with it.
-pub fn find_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
-    extensions.iter().find(|ext| ext.eid() == eid)
+/// The one rule by which a reader picks an extension out of a received chain, whatever message
+/// carries the chain. Upstream tells a received extension apart by its identity
+/// (`commons/zenoh-codec/src/zenoh/put.rs` @ `Ok(match iext::eid(ext) {`), never by the id field
+/// an extension that differs in the mandatory bit or the encoding shares with it, and every
+/// decoder of zenoh 1.10.2 that reads an extension ASSIGNS the entry the extension's arm meets,
+/// so a later entry of an identity replaces an earlier one and a repeated extension is read by
+/// its last entry. No decoder refuses a repeat and none keeps the first:
+///
+/// - the establishment messages (`commons/zenoh-codec/src/transport/init.rs` @
+///   `ext_auth = Some(a);`), and the Join, Frame and Fragment
+///   (`commons/zenoh-codec/src/transport/join.rs` @ `ext_qos = Some(q);`,
+///   `commons/zenoh-codec/src/transport/frame.rs` @ `ext_qos = q;`);
+/// - the network messages: the Push (`commons/zenoh-codec/src/network/push.rs` @
+///   `ext_nodeid = nid;`), the Request (`commons/zenoh-codec/src/network/request.rs` @
+///   `ext_target = rt;`), the Response and the ResponseFinal
+///   (`commons/zenoh-codec/src/network/response.rs` @ `ext_respid = Some(t);`), the Declare and
+///   its bodies (`commons/zenoh-codec/src/network/declare.rs` @ `ext_wire_expr = we;`), the
+///   Interest (`commons/zenoh-codec/src/network/interest.rs` @ `ext_tstamp = Some(t);`) and the
+///   OAM (`commons/zenoh-codec/src/network/oam.rs` @ `ext_qos = q;`);
+/// - the bodies they carry: the Put (`commons/zenoh-codec/src/zenoh/put.rs` @
+///   `*ext_attachment = Some(a);`), the Del (`commons/zenoh-codec/src/zenoh/del.rs` @
+///   `ext_sinfo = Some(s);`), the Query (`commons/zenoh-codec/src/zenoh/query.rs` @
+///   `ext_body = Some(s);`) and the Err (`commons/zenoh-codec/src/zenoh/err.rs` @
+///   `ext_shm = Some(s);`).
+///
+/// A `session-slot` build keeps the last entry of a handshake extension alone
+/// (`crate::ext_chain::RECEIVED_EXT_KINDS`); every other chain is held or walked whole and read
+/// here.
+pub fn last_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
+    extensions.get(last_index_by_eid(extensions, eid)?)
 }
 
-/// The last entry of `extensions` whose identity is `eid`: how a reader of a received
-/// handshake chain picks an establishment extension. Upstream's establishment decoders assign
-/// each entry an extension's arm meets, so a repeated extension is read by its last entry
-/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_auth = Some(a);`), and a `session-slot`
-/// build keeps that entry alone (`crate::ext_chain::RECEIVED_EXT_KINDS`).
-pub fn last_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
-    extensions.iter().rev().find(|ext| ext.eid() == eid)
+/// Where in `extensions` the entry [`last_by_eid`] reads stands: for a reader that goes on to
+/// edit the chain at that entry (a forwarder re-expressing a Query's value), so the entry it
+/// edits is the entry a reader reads.
+pub fn last_index_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<usize> {
+    extensions.iter().rposition(|ext| ext.eid() == eid)
 }
 
 /// A reference to an entry answers as the entry does, so that a reader written over the entries a
@@ -174,13 +196,39 @@ impl<'a, I: Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>> EntryWalk<'
     }
 }
 
-/// [`find_by_eid`] over the entries a chain yields, by value or by reference: the first whose
-/// identity is `eid`.
-pub fn find_by_eid_in<'c, T: ExtEntryBytes<'c>>(
+/// [`last_by_eid`] over the entries a chain yields, by reference (a held chain) or by value (a
+/// chain walked where its frame lies): the last whose identity is `eid`. The walk goes to the
+/// chain's end, since an entry after the one found may supersede it.
+pub fn last_by_eid_in<T: ExtEntryView>(
     extensions: impl IntoIterator<Item = T>,
     eid: u8,
 ) -> Option<T> {
-    extensions.into_iter().find(|ext| ext.eid() == eid)
+    let [found] = last_of_each_in(extensions, [eid]);
+    found
+}
+
+/// [`last_by_eid_in`] for several identities in ONE walk of the chain: for each of `eids`, the
+/// entry that call would answer. A chain walked where its frame lies decodes every entry again at
+/// every walk, so a reader that wants several extensions of one chain asks once. The identities
+/// are distinct; an entry fills the place of the first of `eids` it matches.
+pub fn last_of_each_in<T: ExtEntryView, const N: usize>(
+    extensions: impl IntoIterator<Item = T>,
+    eids: [u8; N],
+) -> [Option<T>; N] {
+    let mut found: [Option<T>; N] = core::array::from_fn(|_| None);
+    for ext in extensions {
+        let eid = ext.eid();
+        if let Some(place) = eids
+            .iter()
+            .position(|want| *want == eid)
+            .and_then(|at| found.get_mut(at))
+        {
+            // A later entry of an identity supersedes the one before it, as upstream's decoders
+            // assign each entry they meet ([`last_by_eid`]).
+            *place = Some(ext);
+        }
+    }
+    found
 }
 
 /// The entry at any storage profile: owned, or as it is decoded where its frame lies
@@ -374,7 +422,7 @@ mod query {
         extensions: &[QueryExtEntryOwned<S>],
     ) -> usize {
         use sce_forge_runtime::codec::SceList;
-        super::find_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE).map_or(0, |ext| {
+        super::last_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE).map_or(0, |ext| {
             match &ext.body {
                 QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => match &z.after_shm {
                     QueryValueZbufAfterShm::NotAfterShm { value } => {

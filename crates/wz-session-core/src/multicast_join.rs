@@ -370,7 +370,7 @@ pub fn decode_join_qos(
 ) -> Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]> {
     use crate::ext_view::ExtEntryView as _;
     let (join, _) = crate::join_decode::read_join(bytes)?;
-    let qos = crate::ext_view::find_by_eid_in(
+    let qos = crate::ext_view::last_by_eid_in(
         crate::ext_view::walked(join.extensions.as_ref()),
         crate::join_decode::JOIN_QOS_EXT_EID,
     )?;

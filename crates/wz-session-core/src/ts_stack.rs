@@ -184,11 +184,13 @@ fn push_zint(out: &mut Vec<u8>, value: u64) {
 }
 
 /// The stack a chain of extensions carries, or `None` when it carries none or one that does not
-/// decode (a node that cannot read it behaves as if it were not there).
+/// decode (a node that cannot read it behaves as if it were not there). A repeated stack is read
+/// by its last entry, as upstream reads it (`commons/zenoh-codec/src/network/push.rs` @
+/// `ext_ts_stack = Some(ts);`, and the same arm of the Request's and the Response's decoders),
+/// through the one rule every reader of a received chain picks an entry by
+/// ([`crate::ext_view::last_by_eid`]).
 pub fn read_ts_stack<E: ExtEntryView>(extensions: impl IntoIterator<Item = E>) -> Option<TsStack> {
-    extensions
-        .into_iter()
-        .find(|ext| ext.eid() == ext_eid(TS_STACK_EXT_HEADER))
+    crate::ext_view::last_by_eid_in(extensions, ext_eid(TS_STACK_EXT_HEADER))
         .and_then(|ext| ext.plain_zbuf().and_then(TsStack::decode))
 }
 
