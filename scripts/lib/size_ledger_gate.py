@@ -78,13 +78,18 @@ A byte the line table names no source for, a row of line 0 or a byte no row cove
 of the innermost frame that holds it: the file its function is declared in, the compiler's own code
 in a function (drop glue, a closure's shim, a piece of a panic path) being that function's. When
 that function is the language runtime's, or no entry declares its file, the byte goes to its
-caller by the same walk, and a runtime function's own body keeps the runtime's file. Only a byte no
-function's code holds (an object built without debug information, the C runtime's start files) is
-UNATTRIBUTED: counted apart, in no area, and either library's unattributed bytes over
-`unattributed_bytes_at_most` fail, naming the bodies that hold most. LLVM gives line 0 to more
-code than GCC does, so reading it by its frame is what keeps that difference out of the comparison,
-and the limit is what keeps the rest from taking bytes out of wz's areas unseen. `--explain` says
-per area how many bytes of inlined runtime code and how many bytes of no source line it counts.
+caller by the same walk, and a runtime function's own body keeps the runtime's file. A byte no
+frame gives a file (rustc's line tables only write no DW_AT_decl_file on a function) is its body's:
+it goes to the area the body's symbols are placed in (the symbol reading below: its names' name
+rules, else their owners' rules), else it is unclassified under the owner its names carry, so the
+rule that owner lacks is what places it. Only a byte of a body whose names carry no owner and
+which no name rule places (a C symbol of an object built without debug information, the C
+runtime's start files) is UNATTRIBUTED: counted apart, in no area, and either library's
+unattributed bytes over `unattributed_bytes_at_most` fail, naming the bodies that hold most. LLVM
+gives line 0 to more code than GCC does, so reading it by its frame, then by its symbol, is what
+keeps that difference out of the comparison, and the limit is what keeps the rest from taking
+bytes out of wz's areas unseen. `--explain` says per area how many bytes of inlined runtime code,
+how many bytes of no source line by their frame and how many by their body's symbols it counts.
 
 The line tables are read from the build's bytes, DWARF 2 to 5, with `.debug_info` giving each
 unit's compilation directory, which a relative path is read from. A sequence that starts outside
@@ -256,13 +261,15 @@ EXPLAIN_SYMBOLS = 40
 EXPLAIN_GENERICS = 30
 EXPLAIN_FILES = 20
 EXPLAIN_NAME_WIDTH = 140
-EXPLAIN_SCHEMA = 3
+EXPLAIN_SCHEMA = 4
 DEMANGLER = "c++filt"
 EXPLAIN_DIR = "size-ledger"
 UNCLASSIFIED_AREA = "(unclassified)"
 UNATTRIBUTED_AREA = "(unattributed)"
 # How --explain names the bytes of a body no line row gives a source, and a source with no owner.
 NO_LINE = "(no source line)"
+# How --explain names bytes of no source line its body's symbols place and no owner of theirs names.
+BY_SYMBOL = "(no source line, placed by its symbol)"
 NO_OWNER = "(no owner)"
 # The tree the SCE output is committed in, whose directories mirror those of `crates/`.
 OUT_TREE = "out"
@@ -1912,6 +1919,9 @@ class Piece:
     # Whether the line table names no source for these bytes and they are given to the file of the
     # frame that holds them (`frame_file`).
     framed: bool = False
+    # Whether neither the line table nor a frame names a source for these bytes and they are placed
+    # by the body's symbols (`symbol_piece`): `owner` is then a symbol's owner, not a file's.
+    symbol_placed: bool = False
 
 
 def name_area(rules: Rules, body: Body, areas: list[str]) -> tuple[str | None, set[str]]:
@@ -1932,15 +1942,35 @@ def name_area(rules: Rules, body: Body, areas: list[str]) -> tuple[str | None, s
     return winner, used[winner]
 
 
+def symbol_piece(rules: Rules, body: Body, size: int) -> tuple[Piece, set[str]]:
+    """The `size` bytes of `body` neither a line nor a frame names a source for (module doc, "Who
+    wrote a byte"), and the rules that placed them: in the area the body's symbols are placed in
+    (`place_bodies`, its names' name rules, else their owners' rules); else unclassified by the
+    owner its names carry, so a rule for that owner places them; else, a body whose names carry no
+    owner, unattributed."""
+    owners = sorted({owner for symbol in (body.lead, *body.names) for owner in symbol.owners},
+                    key=lambda owner: (owner not in body.lead.owners, owner))
+    owner = owners[0] if owners else None
+    used: set[str] = set()
+    if body.area is not None:
+        for symbol in body.names:
+            area, rule = classify(rules, symbol)
+            if area == body.area:
+                used.update(rule)
+    if body.area is None and owner is None:
+        return Piece(body, size, None, None, None), used
+    return Piece(body, size, None, owner, body.area, symbol_placed=True), used
+
+
 def attribute(bodies: Iterable[Body], spans: list[Span],
               owners: Mapping[str, tuple[str | None, str | None]], rules: Rules,
               areas: list[str]) -> tuple[list[Piece], set[str]]:
     """Each body's bytes by the source the line table gives them (module doc, "Who wrote a byte"):
     a byte of the body's own file goes to the area a name rule gives the body when one does, every
-    other byte to the owner rule of its file's owner; a byte no span gives a source is
-    unattributed. `spans` are `dwarf_spans`, so the file of inlined language runtime code is
-    its caller's and the file of a byte of no source line its frame's. Returns the pieces and the
-    rules that placed a byte."""
+    other byte to the owner rule of its file's owner; a byte no span gives a source goes by the
+    body's symbols (`symbol_piece`). `spans` are `dwarf_spans`, so the file of inlined language
+    runtime code is its caller's and the file of a byte of no source line its frame's. Returns the
+    pieces and the rules that placed a byte."""
     starts = [span.start for span in spans]
     pieces: list[Piece] = []
     used: set[str] = set()
@@ -1949,7 +1979,7 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
         named, by_name = name_area(rules, body, areas)
         low, high = body.address, body.address + body.size
         sizes: dict[tuple[str | None, str | None, str | None, bool, bool], int] = {}
-        covered = 0
+        covered = unsourced = 0
         at = max(bisect.bisect_right(starts, low) - 1, 0)
         while at < len(spans) and spans[at].start < high:
             span = spans[at]
@@ -1958,46 +1988,55 @@ def attribute(bodies: Iterable[Body], spans: list[Span],
             if count <= 0:
                 continue
             covered += count
-            moved = span.inlined is not None
             if span.source is None:
-                key: tuple[str | None, str | None, str | None, bool, bool] = (
-                    None, None, None, False, False)
+                unsourced += count
+                continue
+            moved = span.inlined is not None
+            owner = owners.get(span.source, (None, None))[0]
+            if named is not None and span.source == own:
+                used |= by_name
+                key: tuple[str, str | None, str | None, bool, bool] = (
+                    span.source, owner, named, moved, span.framed)
             else:
-                owner = owners.get(span.source, (None, None))[0]
-                if named is not None and span.source == own:
-                    used |= by_name
-                    key = (span.source, owner, named, moved, span.framed)
-                else:
-                    prefix = owner_rule(rules, owner) if owner is not None else None
-                    if prefix is not None:
-                        used.add(f"owners {prefix}")
-                    key = (span.source, owner,
-                           rules.owners[prefix] if prefix is not None else None, moved,
-                           span.framed)
+                prefix = owner_rule(rules, owner) if owner is not None else None
+                if prefix is not None:
+                    used.add(f"owners {prefix}")
+                key = (span.source, owner, rules.owners[prefix] if prefix is not None else None,
+                       moved, span.framed)
             sizes[key] = sizes.get(key, 0) + count
-        if covered < body.size:
-            unlined = (None, None, None, False, False)
-            sizes[unlined] = sizes.get(unlined, 0) + body.size - covered
         pieces += [Piece(body, count, *key) for key, count in sizes.items()]
+        unsourced += body.size - covered
+        if unsourced:
+            piece, placed = symbol_piece(rules, body, unsourced)
+            pieces.append(piece)
+            used |= placed
     return pieces, used
 
 
 def piece_label(piece: Piece) -> str:
-    """How a piece's source is named in a finding and in --explain: its owner, else its file."""
-    if piece.source is None:
-        return NO_LINE
-    return piece.owner if piece.owner is not None else f"{NO_OWNER} {piece.source}"
+    """How a piece's source is named in a finding and in --explain: its owner, else its file, else
+    how its body's symbols placed it."""
+    if piece.owner is not None:
+        return piece.owner
+    if piece.symbol_placed:
+        return BY_SYMBOL
+    return NO_LINE if piece.source is None else f"{NO_OWNER} {piece.source}"
+
+
+def unattributed(piece: Piece) -> bool:
+    """Whether no line, no frame and no symbol of its body names who wrote a piece's bytes."""
+    return piece.source is None and not piece.symbol_placed
 
 
 def tally_pieces(pieces: Iterable[Piece], used: set[str], areas: list[str]) -> Tally:
     """The bytes of each area by line, the unplaced ones by the owner (or file) that holds them, and
-    the unattributed ones by the body that holds them."""
+    the unattributed ones (`unattributed`) by the body that holds them."""
     result = Tally({area: 0 for area in areas}, used=set(used))
     unplaced: dict[str, int] = {}
     unlined: dict[tuple[str, ...], int] = {}
     for piece in pieces:
         result.total += piece.size
-        if piece.source is None:
+        if unattributed(piece):
             names = tuple(sorted({s.name for s in piece.body.names}))
             unlined[names] = unlined.get(names, 0) + piece.size
         elif piece.area is None:
@@ -2152,17 +2191,17 @@ def unattributed_findings(side: str, tallied: Tally, limit: int | None) -> list[
     where = LEDGER.relative_to(ROOT)
     if limit is None:
         return [f"{side}: unattributed_bytes_at_most of {where} is null: this run reads "
-                f"{tallied.unattributed_bytes} bytes of text of no source line, and the limit is "
+                f"{tallied.unattributed_bytes} bytes of text no line, frame or symbol owner "
+                f"places, and the limit is "
                 f"set from a run of both sides"]
     if tallied.unattributed_bytes <= limit:
         return []
     shown = "; ".join(f"{size} B {' = '.join(names)}"
                       for size, names in tallied.unattributed[:UNCLASSIFIED_NAMED])
     return [f"{side}: {tallied.unattributed_bytes} bytes of text in {len(tallied.unattributed)} "
-            f"bodies have no source line and no frame (line 0, or no row of the line table, "
-            f"outside every function's code), over the {limit} "
-            f"{where} allows, so the areas no longer hold the code they are read from; the bodies "
-            f"that hold most: {shown}"]
+            f"bodies have no source line, no frame and no symbol that names an owner or an area, "
+            f"over the {limit} {where} allows, so the areas no longer hold the code they are read "
+            f"from; the bodies that hold most: {shown}"]
 
 
 def area_readings(areas: list[str], wz: Tally, pico: Tally, pin: str, toolchain: str,
@@ -2230,7 +2269,7 @@ def table_lines(table: dict, wz: Tally, pico: Tally) -> list[str]:
                  f"{pico.unclassified_bytes} of zenoh-pico, at most "
                  f"{table['unclassified_bytes_at_most']} each")
     limit = table["unattributed_bytes_at_most"]
-    lines.append(f"  size-ledger:   unattributed (no source line, no frame): "
+    lines.append(f"  size-ledger:   unattributed (no source line, frame or symbol owner): "
                  f"{wz.unattributed_bytes} "
                  f"bytes of wz, {pico.unattributed_bytes} of zenoh-pico, "
                  f"{'no limit yet' if limit is None else f'at most {limit} each'}")
@@ -2314,8 +2353,10 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     more than one copy; each list whole, largest first. `by_symbol` is what the symbol reading
     gives the area, `inlined` the bytes of language runtime code inlined into the area's
     functions that are counted in it by the file of the call (`to_frames`), in `inlined_bodies`
-    bodies, and `framed` the bytes of no source line counted in it by the file of the frame that
-    holds them (`frame_file`), in `framed_bodies` bodies."""
+    bodies, `framed` the bytes of no source line counted in it by the file of the frame that
+    holds them (`frame_file`), in `framed_bodies` bodies, and `symbol_placed` the bytes of no
+    source line and no frame counted in it by its body's symbols (`symbol_piece`), in
+    `symbol_placed_bodies` bodies."""
     owners: dict[str, dict[int, int]] = {}
     files: dict[str, dict[int, int]] = {}
     generics: dict[str, dict[int, int]] = {}
@@ -2323,6 +2364,7 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     total = 0
     inlined: dict[int, int] = {}
     framed: dict[int, int] = {}
+    placed: dict[int, int] = {}
     for piece in pieces:
         total += piece.size
         body = piece.body
@@ -2330,6 +2372,8 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
             inlined[body.address] = inlined.get(body.address, 0) + piece.size
         if piece.framed:
             framed[body.address] = framed.get(body.address, 0) + piece.size
+        if piece.symbol_placed:
+            placed[body.address] = placed.get(body.address, 0) + piece.size
         label = piece_label(piece)
         name = demangled.get(body.lead.name, body.lead.name)
         for groups, key in ((owners, label), (files, piece.source or NO_LINE),
@@ -2346,6 +2390,7 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     out = {"bytes": total, "by_symbol": by_symbol, "bodies": len(symbols),
            "inlined": sum(inlined.values()), "inlined_bodies": len(inlined),
            "framed": sum(framed.values()), "framed_bodies": len(framed),
+           "symbol_placed": sum(placed.values()), "symbol_placed_bodies": len(placed),
            "owners": _ranked(owners, "owner"), "symbols": symbols}
     if side == "wz":
         out["files"] = _ranked(files, "file")
@@ -2355,7 +2400,7 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
 
 def piece_area(piece: Piece) -> str:
     """The area --explain lists a piece under: its own, or the unclassified or the unattributed."""
-    if piece.source is None:
+    if unattributed(piece):
         return UNATTRIBUTED_AREA
     return piece.area if piece.area is not None else UNCLASSIFIED_AREA
 
@@ -2445,6 +2490,10 @@ def explain_lines(report: dict, previous: object) -> list[str]:
                      f"{wz.get('framed', 0)} B in {wz.get('framed_bodies', 0)} bodies, "
                      f"zenoh-pico {pico.get('framed', 0)} B in {pico.get('framed_bodies', 0)} "
                      "bodies")
+        lines.append(f"    code of no source line and no frame counted here by its body's symbol: "
+                     f"wz {wz.get('symbol_placed', 0)} B in {wz.get('symbol_placed_bodies', 0)} "
+                     f"bodies, zenoh-pico {pico.get('symbol_placed', 0)} B in "
+                     f"{pico.get('symbol_placed_bodies', 0)} bodies")
         lines += explain_table("wz modules", wz["owners"], EXPLAIN_OWNERS,
                                ("bytes", "bodies"), lambda row: row["owner"])
         lines += explain_table("wz source files", wz["files"], EXPLAIN_OWNERS,
@@ -2626,7 +2675,7 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
     pico = tally_pieces(*pieces["pico"], areas)
     print(f"  size-ledger: {case.id}: function bytes by area, each byte by the source its line "
           f"table names (inlined language runtime code by its caller's, code of no line by its "
-          f"frame's), against zenoh-pico "
+          f"frame's, else by its body's symbols), against zenoh-pico "
           f"{read.pin} as the same build ({read.toolchain}; both linked by {linker})")
     for line in table_lines(table, wz, pico):
         print(line)
@@ -3226,11 +3275,16 @@ def cmd_selftest() -> int:
 
     # Each byte by its source: an inlined helper goes to its own area.
     lrules = Rules(names=(("^z_", re.compile("^z_"), "door"),),
-                   owners={"wz_x": "x", "wz_x::k": "k", "wz_d": "door"}, separator="::")
+                   owners={"wz_x": "x", "wz_x::k": "k", "wz_d": "door", "wz_q": "k"},
+                   separator="::")
     lareas = ["door", "x", "k"]
+    # Bodies no row covers: one no rule places and no owner names, one whose owner no rule
+    # places, one whose owner a rule places.
     lbodies, _ = place_bodies(
         [Symbol(0x100, 0x40, "z_open", ()), Symbol(0x200, 0x20, "_Ra", ("wz_x::m::f",)),
-         Symbol(0x300, 0x10, "_Rb", ("wz_x::g::h",)), Symbol(0x300, 0x10, "_Rc", ("wz_x::g::i",))],
+         Symbol(0x300, 0x10, "_Rb", ("wz_x::g::h",)), Symbol(0x300, 0x10, "_Rc", ("wz_x::g::i",)),
+         Symbol(0x400, 8, "_start_c", ()), Symbol(0x500, 8, "_Rz", ("wz_z::q",)),
+         Symbol(0x600, 0x10, "_Rq", ("wz_q::r",))],
         lrules, lareas)
     lspans = [Span(0x100, 0x110, "/s/doors.rs"), Span(0x110, 0x120, "/s/k.rs"),
               Span(0x120, 0x128, None), Span(0x128, 0x130, "/s/unknown.rs"),
@@ -3242,28 +3296,38 @@ def cmd_selftest() -> int:
     lines_read = tally_pieces(lpieces, lused, lareas)
     by_name = tally(sum((list(b.names) for b in lbodies), []), lrules, lareas)
     expect("an inlined helper's bytes go to its source's area, not to the door it was inlined into",
-           lines_read.by_area == {"door": 0x10, "x": 0x20 + 0x10, "k": 0x10}
-           and by_name.by_area == {"door": 0x40, "x": 0x30, "k": 0})
+           lines_read.by_area == {"door": 0x10 + 0x18, "x": 0x20 + 0x10, "k": 0x10 + 0x10}
+           and by_name.by_area == {"door": 0x40, "x": 0x30, "k": 0x10})
     expect("a name rule places the body's own file, even where the owner rule names another area",
            any(p.source == "/s/doors.rs" and p.area == "door" and p.owner == "wz_x::doors"
                for p in lpieces)
-           and lused == {"names ^z_", "owners wz_x::k", "owners wz_x"})
-    expect("line 0 and bytes no row covers are unattributed, by the body that holds them",
-           lines_read.unattributed == [(8 + 0x10, ("z_open",))]
-           and lines_read.unattributed_bytes == 0x18)
+           and lused == {"names ^z_", "owners wz_x::k", "owners wz_x", "owners wz_q"})
+    expect("bytes no line and no frame gives a source go to the area the body's symbols are placed "
+           "in, by a name rule or by an owner rule",
+           [(p.size, p.area, p.owner, piece_label(p)) for p in lpieces if p.symbol_placed
+            and p.area is not None]
+           == [(8 + 0x10, "door", None, BY_SYMBOL), (0x10, "k", "wz_q::r", "wz_q::r")]
+           and explain_area("wz", [p for p in lpieces if piece_area(p) == "door"], {},
+                            None)["symbol_placed"] == 0x18)
+    expect("such bytes are unclassified under the owner their symbols carry when no rule places "
+           "it, and unattributed only when they carry none, by the body that holds them",
+           lines_read.unattributed == [(8, ("_start_c",))]
+           and lines_read.unattributed_bytes == 8
+           and [piece_area(p) for p in lpieces if p.body.address == 0x400] == [UNATTRIBUTED_AREA]
+           and [piece_area(p) for p in lpieces if p.body.address == 0x500] == [UNCLASSIFIED_AREA])
     expect("a file with no owner is unclassified, named by its file",
-           lines_read.unclassified == [(8, (f"{NO_OWNER} /s/unknown.rs",))])
+           lines_read.unclassified == [(8, (f"{NO_OWNER} /s/unknown.rs",)), (8, ("wz_z::q",))])
     expect("every byte of every body is counted once, the same total as by symbol",
-           lines_read.total == by_name.total == 0x40 + 0x20 + 0x10
+           lines_read.total == by_name.total == 0x40 + 0x20 + 0x10 + 8 + 8 + 0x10
            and sum(lines_read.by_area.values()) + lines_read.unclassified_bytes
            + lines_read.unattributed_bytes == lines_read.total)
     expect("unattributed bytes at the limit pass, over it fail naming the bodies, and no limit is "
            "a finding with the reading",
-           unattributed_findings("wz", lines_read, 0x18) == []
-           and len(over := unattributed_findings("wz", lines_read, 0x17)) == 1
-           and "z_open" in over[0]
+           unattributed_findings("wz", lines_read, 8) == []
+           and len(over := unattributed_findings("wz", lines_read, 7)) == 1
+           and "_start_c" in over[0]
            and len(unset := unattributed_findings("wz", lines_read, None)) == 1
-           and "null" in unset[0] and "24 bytes" in unset[0])
+           and "null" in unset[0] and "8 bytes" in unset[0])
 
     # Inlined standard library code goes to its caller's file; a library body keeps its own.
     wz_rs, ptr_rs = "/wz/crates/wz-x/src/lib.rs", "/rustc/abc/library/core/src/ptr/mod.rs"
