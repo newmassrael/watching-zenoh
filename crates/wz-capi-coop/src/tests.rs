@@ -91,9 +91,6 @@ enum Command {
     /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
     /// payload of each is its index.
     PushBatch(&'static str, u8),
-    /// Push `.1` samples on the key, each in a frame of its own, flushed before the next is
-    /// staged; the payload of each is its index.
-    PushFrames(&'static str, u8),
     /// [`Command::Push`] stamped with a time by the router.
     PushStamped(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
@@ -647,16 +644,6 @@ fn run_router(
                 let _ = actions.batch_start();
                 for index in 0..count {
                     let _ = actions.send_push_literal(key, &[index], true);
-                }
-                let _ = actions.batch_stop();
-            }
-            Ok(Command::PushFrames(key, count)) => {
-                // A window flushed after each push, so no writer of the router's link joins two
-                // pushes in one frame.
-                let _ = actions.batch_start();
-                for index in 0..count {
-                    let _ = actions.send_push_literal(key, &[index], true);
-                    let _ = actions.batch_flush();
                 }
                 let _ = actions.batch_stop();
             }
@@ -1461,22 +1448,33 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
     );
 }
 
-/// The read that hands what the session's link took from its stack in one receive, eight frames of
-/// a sample each, hands every one of them and moves the session's links once, after the last, and
-/// looks at the queue of handed publishes once, in a build of one thread as in one of threads: a
-/// step reads one record (one thread) or one frame (threads) while the link holds the rest, and
-/// leaves the links where they stood. Its tasks read the clock for their timers once, in the step
-/// that received the frames: the steps that go on with them wake no timer until the last, by that
-/// step's own reading, so a timer is late by one receive's reading at most. Turned red by a step
-/// that moves the links each time it reads (the `Stepped::Read` return taken out of
-/// `CoopEngine::step`), which moves them once a frame, a read that ends with that step while the
-/// link holds more, or a step that goes on with the receive's input and reads the clock for its
-/// timers (`run_tasks` in place of `run_tasks_at(None)` there), once a frame.
+/// The read that hands what the session's link took from its stack in one receive, eight samples
+/// of one datagram, hands every one of them and moves the session's links once, after the last,
+/// and looks at the queue of handed publishes once, in a build of one thread as in one of threads.
+/// A datagram link takes one datagram a receive, so the session's round is lowered below the
+/// datagram's samples: a step reads one record (one thread) or as many as the round has room for
+/// (threads) while the link keeps the rest, and leaves the links where they stood. Datagrams the
+/// stack still queues are not the link's input and each is a receive of its own. Its tasks read
+/// the clock for their timers once, in the step that received the datagram: the steps that go on
+/// with it wake no timer until the last, by that step's own reading, so a timer is late by one
+/// receive's reading at most. Turned red by a step that moves the links each time it reads (the
+/// `Stepped::Read` return taken out of `CoopEngine::step`), which moves them once a step, a read
+/// that ends with that step while the link keeps the rest, or a step that goes on with the
+/// receive's input and reads the clock for its timers (`run_tasks` in place of
+/// `run_tasks_at(None)` there), once a step.
 #[test]
 fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
-    const FRAMES: u8 = 8;
+    use entity_tables::{lowered, open_under};
+    use wz_session_core::limit_binding::Quota;
+    const SAMPLES: u8 = 8;
+    const RECORDS: usize = 4;
+    // The premise: the datagram holds more samples than a step of either build reads.
+    const _: () = assert!(SAMPLES as usize > RECORDS);
     let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let engine = open_under(
+        &router,
+        lowered(|l| l.select_delivery_lane_events(Quota::at_most(RECORDS))),
+    );
     let got = Arc::new(Mutex::new(Vec::new()));
     let into = got.clone();
     let declares_before = router.seen(|s| s.declares);
@@ -1494,28 +1492,24 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
-    router.send(Command::PushFrames("demo/frames", FRAMES));
-    // Nothing steps the session meanwhile, so every frame lies in its socket before the read.
+    router.send(Command::PushBatch("demo/batch", SAMPLES));
+    // Nothing steps the session meanwhile, so the datagram lies in its socket before the read.
     std::thread::sleep(Duration::from_millis(300));
-    #[cfg(feature = "transport-stats")]
-    let frames = engine.transport_stats().rx.t_msgs;
+    let rounds = engine.rounds_handed();
     let polls = engine.link_polls();
     let task_clock_reads = engine.task_clock_reads();
     #[cfg(any(feature = "listen", feature = "group"))]
     let handed = engine.takes.handed.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
-    // The premise: the samples came as frames of their own, which a build of threads reads a
-    // step each. A transport message besides them (a KeepAlive) only adds to the count.
-    #[cfg(feature = "transport-stats")]
-    assert!(
-        engine.transport_stats().rx.t_msgs - frames >= usize::from(FRAMES),
-        "the router wrote each sample in a frame of its own"
-    );
-    let sent: Vec<Vec<u8>> = (0..FRAMES).map(|index| vec![index]).collect();
+    let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
     assert_eq!(
         *got.lock().unwrap(),
         sent,
-        "every frame, in order, by the one read"
+        "every sample, in order, by the one read"
+    );
+    assert!(
+        engine.rounds_handed() - rounds >= usize::from(SAMPLES) / RECORDS,
+        "the datagram was read in more steps than one, a round each"
     );
     assert_eq!(
         engine.link_polls() - polls,
@@ -1525,7 +1519,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     assert_eq!(
         engine.task_clock_reads() - task_clock_reads,
         1,
-        "one reading of the clock for the tasks' timers, by the step that received the frames"
+        "one reading of the clock for the tasks' timers, by the step that received the datagram"
     );
     #[cfg(any(feature = "listen", feature = "group"))]
     assert_eq!(
