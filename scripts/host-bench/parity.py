@@ -26,9 +26,12 @@ A BOOT is one image running every workload once, each program started afresh:
                heap peak of the two processes, summed (bytes). The timed workloads run without it, so
                the shim's cost is in no time or CPU figure.
 
-The RSS of a workload is the peak resident set of each of its two processes (getrusage of the reaped
-child), summed (KiB). Every figure of a pair is the sum of its two processes, because both arms run
-both sides: a cost moved from one side to the other is the same cost.
+The RSS of a workload is the peak resident set of each of its two processes, summed (KiB). Each program
+is started under the launcher --rss-wrapper (fork_rss.c), which forks it and reports its maxrss: the
+maxrss of a child this runner reaps itself is at least this runner's own resident set, which Linux keeps
+across the child's exec, so every program would read as at least the runner. Every figure of a pair is
+the sum of its two processes, because both arms run both sides: a cost moved from one side to the other
+is the same cost.
 
 A timed workload (rtt, thr) is VALID only when the CPUs it was pinned to were used by nothing else
 (nodrop.py's rule: the busy time of those CPUs less the CPU time of the two processes, over the CPU
@@ -40,8 +43,10 @@ The ORDER of the boots alternates by round (A B, B A, A B, ...) as the kit lane'
 drift of the host over the run falls on both images alike.
 
     parity.py --family pico|c|rust --bin-dir DIR --run DIR --boots N --image KEY --reference KEY
-              [--sizes 8,1024] [--client-cpus 4-7] [--server-cpus 8-11] [--pings 20000]
+              --rss-wrapper PATH [--sizes 8,1024] [--client-cpus 4-7] [--server-cpus 8-11] [--pings 20000]
               [--warmup-s 3] [--window-s 10] [--heap-shim PATH] [--size-binary P=PATH --size-binary W=PATH]
+    parity.py --selftest
+              the launcher, built here with cc, read from a runner that holds BALLAST_MIB
 
 DIR holds <program>_P and <program>_W for z_put z_sub z_get z_queryable z_pub_thr z_sub_thr z_ping
 z_pong. The client side (z_ping, z_pub_thr, z_put, z_get) is pinned to --client-cpus and the server
@@ -51,6 +56,7 @@ side to --server-cpus.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -62,6 +68,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -88,6 +95,11 @@ DELIVERED = re.compile(r">> \[Subscriber\] Received")
 #: z_get of all three prints a reply as `>> Received ('key': 'value')` (zenoh-pico: `>> Received PUT (`);
 #: zenoh-pico also prints `>> Received query final notification`, which is no reply.
 REPLIED = re.compile(r">> Received[^\n]*\('")
+#: The lines of a launcher's report (fork_rss.c), each read only once its newline is written.
+REPORT_PID = re.compile(r"^pid=(\d+)\n", re.M)
+REPORT_RSS = re.compile(r"^peak_rss_kib=(\d+)\n", re.M)
+#: The seconds a launcher is given to fork its program.
+LAUNCH_WAIT_S = 5.0
 
 
 class Lost(Exception):
@@ -132,18 +144,56 @@ def sub_thr_args(family: str, where: str) -> list[str]:
 
 class Process:
     """One program of a workload, pinned, its output line-buffered into a file. It is reaped with
-    wait4, which gives its resource use whether it exited or was stopped by a signal."""
+    wait4, which gives its resource use whether it exited or was stopped by a signal.
 
-    def __init__(self, argv: list[str], cpus: str, out: pathlib.Path, env: dict[str, str]):
+    Started under the launcher `rss_wrapper` (fork_rss.c), the program is forked by the launcher and
+    not by this runner, and the launcher's report holds the program's pid and its peak resident set:
+    the maxrss of a child this runner reaps is at least this runner's own resident set, which Linux keeps
+    across the child's exec. `pid` is then the launcher's, which is waited for and signalled (it passes a
+    stop on), and `program_pid` the program's, whose /proc entries are read."""
+
+    def __init__(self, argv: list[str], cpus: str, out: pathlib.Path, env: dict[str, str],
+                 rss_wrapper: str | None = None):
         self.out_path = out
         self.out = out.open("wb")
-        full = dict(os.environ)
-        full.update(env)
-        self.popen = subprocess.Popen(["taskset", "-c", cpus, "stdbuf", "-oL", "-eL", *argv],
-                                      stdout=self.out, stderr=subprocess.STDOUT, env=full)
+        pinned = ["taskset", "-c", cpus, "stdbuf", "-oL", "-eL", *argv]
+        self.report: pathlib.Path | None = None
+        if rss_wrapper is None:
+            full = dict(os.environ)
+            full.update(env)
+            self.popen = subprocess.Popen(pinned, stdout=self.out, stderr=subprocess.STDOUT, env=full)
+        else:
+            self.report = out.with_suffix(".rss")
+            # A retried workload starts under the same name: a report left by the last try is not this one's.
+            self.report.unlink(missing_ok=True)
+            # Set after the launcher's fork, so a preloaded shim counts the program and never the launcher.
+            assigned = [f"{name}={value}" for name, value in env.items()]
+            self.popen = subprocess.Popen([rss_wrapper, str(self.report), *(["env", *assigned] if assigned else []),
+                                           *pinned], stdout=self.out, stderr=subprocess.STDOUT)
         self.pid = self.popen.pid
         self.status: int | None = None
         self.rusage = None
+        self.program_pid = self.pid if self.report is None else self.forked_pid()
+
+    def report_text(self) -> str:
+        try:
+            return "" if self.report is None else self.report.read_text(encoding="ascii", errors="replace")
+        except OSError:
+            return ""
+
+    def forked_pid(self) -> int | None:
+        """The program's pid once the launcher's report names it; None when the launcher ended, or did
+        not fork it in LAUNCH_WAIT_S."""
+        deadline = time.monotonic() + LAUNCH_WAIT_S
+        while True:
+            # Read after the look at the launcher, so a launcher that wrote the line and ended is not missed.
+            ended = self.reap(0)
+            found = REPORT_PID.search(self.report_text())
+            if found is not None:
+                return int(found.group(1))
+            if ended or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.005)
 
     def reap(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -166,14 +216,21 @@ class Process:
             except ProcessLookupError:
                 pass
             if not self.reap(5.0):
-                os.kill(self.pid, signal.SIGKILL)
-                self.reap(5.0)
+                # The program is killed and not its launcher, so the launcher still reaps it and reports.
+                launched = self.report is not None and self.program_pid is not None
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(self.program_pid if launched else self.pid, signal.SIGKILL)
+                if not self.reap(5.0) and launched:
+                    os.kill(self.pid, signal.SIGKILL)
+                    self.reap(5.0)
         self.out.close()
 
     def cpu_seconds(self) -> float | None:
-        """User and system time of all its threads so far, or None when it has ended."""
+        """User and system time of all the program's threads so far, or None when it has ended."""
+        if self.program_pid is None:
+            return None
         try:
-            text = pathlib.Path(f"/proc/{self.pid}/stat").read_text(encoding="ascii", errors="replace")
+            text = pathlib.Path(f"/proc/{self.program_pid}/stat").read_text(encoding="ascii", errors="replace")
         except OSError:
             return None
         fields = text[text.rindex(")") + 2:].split()
@@ -185,7 +242,15 @@ class Process:
         return 0.0 if self.rusage is None else self.rusage.ru_utime + self.rusage.ru_stime
 
     def rss_kib(self) -> int:
-        return 0 if self.rusage is None else int(self.rusage.ru_maxrss)
+        """The program's peak resident set, as its launcher read it. Raises Lost when there is none: a
+        program started without the launcher, whose reaped maxrss is at least this runner's, or one whose
+        launcher ended before it could report."""
+        if self.report is None:
+            raise Lost(f"{self.out_path.name} was started without the launcher that reads its peak resident set")
+        found = REPORT_RSS.search(self.report_text())
+        if found is None:
+            raise Lost(f"{self.out_path.name}: its launcher reported no peak resident set")
+        return int(found.group(1))
 
     def text(self) -> str:
         return self.out_path.read_text(encoding="utf-8", errors="replace")
@@ -209,7 +274,8 @@ class Boot:
         if heap:
             env = {"LD_PRELOAD": self.args.heap_shim, "HEAP_PEAK_FILE": str(self.dir / f"{tag}.{name}.heap")}
         cpus = self.args.client_cpus if side == "client" else self.args.server_cpus
-        return Process([self.program(name), *argv], cpus, self.dir / f"{tag}.{name}.out", env)
+        return Process([self.program(name), *argv], cpus, self.dir / f"{tag}.{name}.out", env,
+                       self.args.rss_wrapper)
 
     def heap_peak(self, tag: str, name: str) -> int:
         path = self.dir / f"{tag}.{name}.heap"
@@ -409,7 +475,124 @@ def keep_sizes(run: pathlib.Path, key: str, binary: str) -> None:
                    check=True)
 
 
+# -- the selftest -------------------------------------------------------------------------------------------
+
+#: What the selftest's runner holds while it starts a program, and what that program holds of its own.
+BALLAST_MIB = 200
+CHILD_MIB = 32
+
+
+def gone(pid: int | None, seconds: float) -> bool:
+    """Whether process `pid` no longer runs within `seconds`: it has no /proc entry, or is a zombie that
+    whoever adopted it has not reaped yet."""
+    deadline = time.monotonic() + seconds
+    while pid is not None:
+        try:
+            text = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        except OSError:
+            return True
+        if text[text.rindex(")") + 2:].startswith("Z"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def rss_or_none(proc: Process) -> int | None:
+    try:
+        return proc.rss_kib()
+    except Lost:
+        return None
+
+
+def within(rss: int | None, low: int, high: int) -> bool:
+    return rss is not None and low <= rss < high
+
+
+def cmd_selftest() -> int:
+    ok = 0
+    bad = 0
+
+    def expect(name: str, cond: bool) -> None:
+        nonlocal ok, bad
+        if cond:
+            ok += 1
+        else:
+            bad += 1
+            print(f"  parity selftest FAIL: {name}", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory(prefix="parity-selftest-") as tmp:
+        where = pathlib.Path(tmp)
+        launcher = str(where / "fork_rss")
+        source = pathlib.Path(__file__).resolve().parent / "fork_rss.c"
+        if shutil.which("cc") is None:
+            print("  parity selftest FAIL: no cc on PATH to build fork_rss.c", file=sys.stderr)
+            return 1
+        built = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-o", launcher, str(source)],
+                               capture_output=True, text=True)
+        if built.returncode != 0:
+            print(f"  parity selftest FAIL: fork_rss.c did not build:\n{built.stdout}{built.stderr}", file=sys.stderr)
+            return 1
+        ballast = bytes([1]) * (BALLAST_MIB << 20)
+        held = len(ballast) >> 10
+        cpu = str(min(os.sched_getaffinity(0)))
+        holds = [sys.executable, "-I", "-c", f"held = bytes([1]) * ({CHILD_MIB} << 20)\n"
+                 "import os, sys, time\n"
+                 "print('mark=' + os.environ.get('PARITY_SELFTEST_MARK', ''), flush=True)\n"
+                 "if sys.argv[1:] == ['wait']:\n"
+                 "    time.sleep(60)\n"]
+
+        ended = Process(holds, cpu, where / "ended.out", {}, launcher)
+        reaped = ended.reap(30.0)
+        ended.stop()
+        expect("a program started under the launcher is waited for through it, and its status is the program's",
+               reaped and ended.status is not None and os.waitstatus_to_exitcode(ended.status) == 0)
+        expect("the launcher reports the program's pid, not its own",
+               ended.program_pid is not None and ended.program_pid != ended.pid)
+        expect("the peak RSS read of a program that ended is its own, not its runner's",
+               within(rss_or_none(ended), CHILD_MIB << 10, held))
+
+        stopped = Process([*holds, "wait"], cpu, where / "stopped.out", {"PARITY_SELFTEST_MARK": "set"}, launcher)
+        deadline = time.monotonic() + 30.0
+        while "mark=" not in stopped.text() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        try:
+            launcher_env = pathlib.Path(f"/proc/{stopped.pid}/environ").read_bytes()
+        except OSError:
+            launcher_env = b"unread"
+        running = stopped.cpu_seconds() is not None
+        stopped.stop()
+        expect("an environment given for the program is the program's and not the launcher's",
+               "mark=set" in stopped.text() and b"unread" != launcher_env
+               and b"PARITY_SELFTEST_MARK=" not in launcher_env)
+        expect("the CPU read of a running program is the program's", running)
+        expect("a stop sent to the launcher ends the program, and the launcher ends as a shell reports it",
+               stopped.status is not None and os.waitstatus_to_exitcode(stopped.status) == 128 + signal.SIGTERM
+               and gone(stopped.program_pid, 5.0))
+        expect("the peak RSS read of a program stopped by a signal is its own, not its runner's",
+               within(rss_or_none(stopped), CHILD_MIB << 10, held))
+
+        killed = Process([*holds, "wait"], cpu, where / "killed.out", {}, launcher)
+        os.kill(killed.pid, signal.SIGKILL)
+        killed.reap(5.0)
+        killed.stop()
+        expect("a launcher killed hard leaves no program behind, and no peak RSS to read",
+               gone(killed.program_pid, 5.0) and rss_or_none(killed) is None)
+
+        bare = Process(holds, cpu, where / "bare.out", {})
+        bare.reap(30.0)
+        bare.stop()
+        expect("control: the maxrss of a child this runner reaps itself carries the runner's resident set",
+               bare.rusage is not None and int(bare.rusage.ru_maxrss) >= held)
+        expect("a program started without the launcher is refused a peak RSS", rss_or_none(bare) is None)
+    print(f"  parity selftest: {ok}/{ok + bad} arm(s) pass")
+    return 0 if bad == 0 else 1
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--selftest"]:
+        return cmd_selftest()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--family", required=True, choices=FAMILIES)
     parser.add_argument("--bin-dir", required=True)
@@ -424,6 +607,7 @@ def main() -> int:
     parser.add_argument("--warmup-s", type=float, default=3.0)
     parser.add_argument("--window-s", type=float, default=10.0)
     parser.add_argument("--heap-shim", default="")
+    parser.add_argument("--rss-wrapper", required=True, help="the launcher built from fork_rss.c")
     parser.add_argument("--size-binary", action="append", default=[], help="ARM=PATH, the file of an arm's size cells")
     args = parser.parse_args()
 
@@ -434,6 +618,9 @@ def main() -> int:
         return 2
     if args.heap_shim and not os.path.isfile(args.heap_shim):
         print(f"parity: NOT-MEASURED, no heap shim at {args.heap_shim}", flush=True)
+        return 2
+    if not os.access(args.rss_wrapper, os.X_OK):
+        print(f"parity: NOT-MEASURED, no launcher that reads a peak resident set at {args.rss_wrapper}", flush=True)
         return 2
     run = pathlib.Path(args.run)
     run.mkdir(parents=True, exist_ok=False)

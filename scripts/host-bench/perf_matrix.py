@@ -170,7 +170,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from nodrop import FOREIGN_LIMIT, MAX_RUNS, busy_seconds, cpu_list  # noqa: E402
-from parity import Lost, Process  # noqa: E402
+from parity import BALLAST_MIB, CHILD_MIB, Lost, Process  # noqa: E402
 from kit_compare import bootstrap_ratio  # noqa: E402
 
 SCHEMA = "wz-pico-perf/1"
@@ -225,6 +225,8 @@ PUB_KEYS = ("sent", "failed", "elapsed_ns", "cpu_ns", "start_ns", "end_ns")
 SUB_KEYS = ("received", "bytes", "window_ns", "cpu_ns", "start_ns", "end_ns")
 SUB_END_KEYS = ("total", "last_growth_ns", "peers")
 SUB_MARK_KEYS = ("pub_sent", "received_before_end")
+#: The last line of a role that ran (perf_probe.c): the program's own peak resident set.
+USAGE_KEYS = ("peak_rss_kib",)
 #: The transports whose links are reliable streams: a put under congestion control block is delivered there or
 #: refused, so one that answered success and never arrived loses its cell (`delivery`). A zenoh-pico peer, whose
 #: stream sockets do not block, leaves a batch it could not write whole to no one and answers success
@@ -294,24 +296,35 @@ def last_words(text: str) -> str:
 
 @dataclass(frozen=True)
 class Usage:
-    """A reaped process's whole CPU and its peak resident set."""
+    """A reaped process's whole CPU and its peak resident set, None when the program did not say it."""
 
     user_s: float
     sys_s: float
-    rss_kib: int
+    rss_kib: int | None
+
+
+def peak_rss_kib(text: str) -> int | None:
+    """The peak resident set a program printed as its last line (perf_probe.c), or None when it printed
+    none (it was killed, or /proc gave it no figure)."""
+    found = fields(text, "usage", USAGE_KEYS)
+    return None if found is None else int(found["peak_rss_kib"])
 
 
 def usage_of(proc: Process) -> Usage:
+    """The CPU of the reaped child and the peak resident set the program printed. The maxrss of the reaped
+    child is not that figure: Linux keeps the resident set a process had before its exec as a floor of it,
+    and the child is a copy of this runner until it executes the program."""
+    rss = peak_rss_kib(proc.text())
     if proc.rusage is None:
-        return Usage(0.0, 0.0, 0)
-    return Usage(proc.rusage.ru_utime, proc.rusage.ru_stime, int(proc.rusage.ru_maxrss))
+        return Usage(0.0, 0.0, rss)
+    return Usage(proc.rusage.ru_utime, proc.rusage.ru_stime, rss)
 
 
-def process_figures(client: Usage, server: Usage) -> dict[str, float]:
+def process_figures(client: Usage, server: Usage) -> dict[str, float | None]:
+    both = None if client.rss_kib is None or server.rss_kib is None else client.rss_kib + server.rss_kib
     return {"cpu_user_s_client": client.user_s, "cpu_sys_s_client": client.sys_s,
             "cpu_user_s_server": server.user_s, "cpu_sys_s_server": server.sys_s,
-            "rss_kib_client": client.rss_kib, "rss_kib_server": server.rss_kib,
-            "rss_kib": client.rss_kib + server.rss_kib}
+            "rss_kib_client": client.rss_kib, "rss_kib_server": server.rss_kib, "rss_kib": both}
 
 
 def rtt_figures(ping: dict[str, str], pong: dict[str, str] | None, client: Usage,
@@ -336,7 +349,8 @@ def rtt_figures(ping: dict[str, str], pong: dict[str, str] | None, client: Usage
     return figures
 
 
-def thr_figures(pub: dict[str, str], sub: dict[str, str], client: Usage, server: Usage) -> dict[str, float]:
+def thr_figures(pub: dict[str, str], sub: dict[str, str], client: Usage,
+                server: Usage) -> dict[str, float | None]:
     """The figures of a throughput cell from what pub and sub printed. Raises Lost when the subscriber's
     window did not lie inside the publisher's loop, or nothing was delivered in it."""
     if not int(pub["start_ns"]) <= int(sub["start_ns"]) <= int(sub["end_ns"]) <= int(pub["end_ns"]):
@@ -348,7 +362,7 @@ def thr_figures(pub: dict[str, str], sub: dict[str, str], client: Usage, server:
     window_s = int(sub["window_ns"]) / 1e9
     pub_cpu = int(pub["cpu_ns"]) / sent
     sub_cpu = int(sub["cpu_ns"]) / received
-    figures: dict[str, float] = {
+    figures: dict[str, float | None] = {
         "msgs_per_s": received / window_s, "bytes_per_s": int(sub["bytes"]) / window_s,
         "offered_msgs_per_s": sent / (int(pub["elapsed_ns"]) / 1e9), "put_failed": int(pub["failed"]),
         "cpu_ns_per_msg_pub": pub_cpu, "cpu_ns_per_msg_sub": sub_cpu, "cpu_ns_per_msg": pub_cpu + sub_cpu,
@@ -1686,6 +1700,24 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
 
 # -- the selftest -------------------------------------------------------------------------------------------
 
+def started_peak_rss() -> tuple[Usage, int, int]:
+    """A program started as a cell starts one, by a runner that holds BALLAST_MIB, which holds CHILD_MIB
+    and prints its VmHWM as perf_probe.c does: what the runner reads of it, the maxrss of the reaped child
+    (the control, which carries the runner's resident set), and the KiB the runner held."""
+    ballast = bytes([1]) * (BALLAST_MIB << 20)
+    program = (f"held = bytes([1]) * ({CHILD_MIB} << 20)\n"
+               "status = open('/proc/self/status').read().splitlines()\n"
+               "kib = next(line.split()[1] for line in status if line.startswith('VmHWM:'))\n"
+               "print('perf_probe usage peak_rss_kib=' + kib)\n")
+    with tempfile.TemporaryDirectory(prefix="perf-matrix-selftest-") as tmp:
+        proc = Process([sys.executable, "-I", "-c", program], str(min(os.sched_getaffinity(0))),
+                       pathlib.Path(tmp) / "usage.out", {})
+        proc.reap(30.0)
+        proc.stop()
+        usage = usage_of(proc)
+    return usage, 0 if proc.rusage is None else int(proc.rusage.ru_maxrss), len(ballast) >> 10
+
+
 def cmd_selftest() -> int:
     ok = 0
     bad = 0
@@ -1734,6 +1766,17 @@ def cmd_selftest() -> int:
     expect("a pong stopped by a signal gives no CPU per round trip",
            rtt_figures(ping, dict(pong, stopped_by="signal"), client, server)["pong_cpu_ns_per_rtt"] is None)
     expect("the peak RSS of a cell is the two processes'", figs["rss_kib"] == 10000)
+    expect("a program's peak RSS is the last line it printed",
+           peak_rss_kib("perf_probe usage peak_rss_kib=1234\n") == 1234
+           and peak_rss_kib("perf_probe ping round_trips=4\n") is None)
+    unsaid = process_figures(Usage(1.0, 0.5, None), server)
+    expect("a side that printed no peak RSS leaves the cell's sum out and keeps the other side's",
+           unsaid["rss_kib"] is None and unsaid["rss_kib_client"] is None and unsaid["rss_kib_server"] == 6000)
+    started, control, held = started_peak_rss()
+    expect("control: the maxrss of a reaped child carries the resident set of the runner that started it",
+           control >= held)
+    expect("the peak RSS read of a started program is its own, not its runner's",
+           started.rss_kib is not None and CHILD_MIB << 10 <= started.rss_kib < held)
     expect("no round trip counted is a lost cell",
            lost(lambda: rtt_figures(dict(ping, round_trips="0"), pong, client, server)))
 
