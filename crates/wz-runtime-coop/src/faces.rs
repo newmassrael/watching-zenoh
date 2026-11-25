@@ -577,10 +577,26 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
     /// acts on what its parts were paid pays first, so that it acts on the debts owed until then.
     #[inline]
     pub fn pay(&self, held: &mut FaceHeld<P>) {
-        let owed = self.owed.swap(0, Ordering::SeqCst);
+        let owed = self.take_owed();
         if owed != 0 {
             pay_held(held, owed);
         }
+    }
+
+    /// What is owed, the debt word left owing nothing: by one swap where another thread may owe
+    /// as it is read, and where no other thread reaches the site's values ([`LockKind::WAITS`]
+    /// false, the kind's own contract) by a read, then a write only of a word that owes, so a
+    /// lend that finds nothing owed writes nothing and takes no read-modify-write.
+    #[inline(always)]
+    fn take_owed(&self) -> u32 {
+        if K::WAITS {
+            return self.owed.swap(0, Ordering::SeqCst);
+        }
+        let owed = self.owed.load(Ordering::Relaxed);
+        if owed != 0 {
+            self.owed.store(0, Ordering::Relaxed);
+        }
+        owed
     }
 
     /// Pay a debt that came after the holder paid and before it let go: neither the holder, which
@@ -588,9 +604,16 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
     #[inline]
     fn pay_after(&self) {
         // Orders the holder's let go before its look, and the debtor's debt before its try: one
-        // of the two sees the other's write, so a debt is never left with neither to pay it.
-        fence(Ordering::SeqCst);
-        if self.owed.load(Ordering::SeqCst) != 0 {
+        // of the two sees the other's write, so a debt is never left with neither to pay it. A
+        // kind whose values no other thread reaches has its one thread's order for both, and no
+        // fence.
+        let owed = if K::WAITS {
+            fence(Ordering::SeqCst);
+            self.owed.load(Ordering::SeqCst)
+        } else {
+            self.owed.load(Ordering::Relaxed)
+        };
+        if owed != 0 {
             self.pay_late();
         }
     }
@@ -3141,13 +3164,22 @@ mod tests {
 
     /// A debt that came in the window after a holder paid and before it let go is paid by the
     /// look the holder makes as it lets go, through a try of the place, which is free by then;
-    /// with nothing owed, the look takes no lend. Turned red by a look that leaves the debt
-    /// unpaid (`FaceSite::pay_after` not reaching `FaceSite::pay_late`), or one that pays
-    /// when nothing is owed.
+    /// with nothing owed, the look takes no lend. So for a kind no other thread reaches, whose
+    /// look is made with no fence and whose pay takes no swap, and for a kind of a lock of the
+    /// value's own. Turned red by a look that leaves the debt unpaid (`FaceSite::pay_after` not
+    /// reaching `FaceSite::pay_late`, for either kind), one that pays when nothing is owed, or a
+    /// pay that leaves the word owing (`FaceSite::take_owed`).
     #[test]
     fn a_debt_owed_after_the_holder_paid_is_paid_as_it_lets_go() {
+        a_late_debt_is_paid_once::<crate::sync::Confined<TestOwner>>();
+        #[cfg(feature = "host-lock")]
+        a_late_debt_is_paid_once::<crate::sync::Shared>();
+    }
+
+    /// [`a_debt_owed_after_the_holder_paid_is_paid_as_it_lets_go`] on a site of kind `K`.
+    fn a_late_debt_is_paid_once<K: LockKind>() {
         let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
-        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        let site = FaceSite::<K, ApartParts>::empty();
         assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
         site.pay_after();
         assert_eq!(
