@@ -862,7 +862,9 @@ fn hand_query(
         // A panic unwinding OUT of the C callback across this `extern "C"` boundary
         // is UB and would tear down the thread dispatching it, so it is caught here.
         let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
+        let Some(_in_callback) = crate::ffi::InCallback::enter() else {
+            return;
+        };
         let _ = crate::ffi::catch(|| unsafe {
             call(query_ptr, ctx);
         });

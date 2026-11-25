@@ -1660,8 +1660,8 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
 
 /* ================================================ callbacks
  *
- * No door of wz's own: this section states how the cooperative engine calls
- * a program's subscriber and queryable callbacks (docs/c-abi-architecture.md,
+ * This section states how the cooperative engine calls a program's
+ * subscriber and queryable callbacks (docs/c-abi-architecture.md,
  * section 3, L3). A callback is called as zenoh-pico calls it: with no lock of
  * the library held, on the thread that delivers (the read task, or the thread
  * whose zp_read or put reached it), so it may run on two threads at once and
@@ -1685,7 +1685,18 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *
  * The library lets go of a callback once, after its last call has returned:
  * then its drop runs, and z_undeclare_subscriber returns after it, as
- * zenoh-pico's undeclare does. */
+ * zenoh-pico's undeclare does.
+ *
+ * A library built without std has no thread-local storage to mark a thread
+ * inside a callback with, so it marks each in a table of CALLBACK_THREADS
+ * entries in the multi-threaded arm and of one in the single-threaded arm,
+ * where the program calls from one thread at a time. A callback a thread past
+ * the table would run is not run, and is counted here. */
+
+/* How many callbacks the library did not run because the threads already
+ * inside callbacks filled its table; 0 in a library with std, which runs
+ * every one. */
+size_t wz_ext_callbacks_refused(void);
 
 /* ================================================ the program's transport
  *
@@ -2727,7 +2738,10 @@ z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
  * waiting, as it does from a callback the library runs itself, since the
  * wait would be for the callback that is waiting.
  *
- * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing. */
+ * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing;
+ * _Z_ERR_SYSTEM_OUT_OF_MEMORY, running nothing, when the library marks the
+ * threads in callbacks in a table of fixed room (a build without std) and
+ * other threads fill it (wz_ext_callbacks_refused). */
 z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
                                             void *context);
 
