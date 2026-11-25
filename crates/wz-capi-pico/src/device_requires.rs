@@ -367,6 +367,26 @@ mod tests {
         );
     }
 
+    /// A group endpoint is read off its bytes: the config span is all after the first `#`, the
+    /// interface may be any of its `;` pairs, a character of several bytes before or among them
+    /// moves nothing, and an `iface=` that is not a pair of the config span names no group.
+    /// Turned red by a config span cut at a later `#`, or by a pair read off the locator.
+    #[test]
+    fn a_group_endpoint_is_read_off_its_bytes() {
+        use crate::session::is_group_endpoint;
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#iface=lo"));
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#ttl=4;iface=lo"));
+        assert!(is_group_endpoint(
+            "udp/224.0.0.224:7447#n\u{e9}=\u{e9};iface=lo"
+        ));
+        assert!(is_group_endpoint("udp/224.0.0.224:7447#ttl=4#x;iface=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#ifacex=lo"));
+        assert!(!is_group_endpoint("udp/224.0.0.224:7447#"));
+        assert!(!is_group_endpoint("udp/iface=lo"));
+        assert!(!is_group_endpoint("tcp/127.0.0.1:7447#iface=lo"));
+        assert!(!is_group_endpoint(""));
+    }
+
     /// A client whose connect locator names a group joins it, as pico's client opens a multicast
     /// or raweth transport on it: the door asks for the group's membership, or for the
     /// link-layer socket. Turned red by a connect locator read as a unicast dial.

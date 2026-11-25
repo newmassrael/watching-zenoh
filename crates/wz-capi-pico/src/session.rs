@@ -105,6 +105,10 @@ use wz_session_core::WhatAmI;
 /// opens its raweth transport, a multicast session over raw Ethernet
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
+///
+/// Read as bytes, through the locator grammar's byte readers: every separator and prefix is
+/// ASCII, which no other character's UTF-8 encoding holds, so a byte search finds the places a
+/// character search would, and the library carries no character searcher.
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
     if endpoint.starts_with("reth/") {

@@ -99,6 +99,79 @@ wz_runtime_coop::with_heap_link_seams! {
     /// (`LinkWaits::wait`): it ends within a millisecond, and the step after it
     /// reads every link.
     pub(crate) const WAIT_SET_SOCKETS: usize = 64;
+
+    /// Move the entries of `on` that `ready` answers for to its front, and answer how many they
+    /// are: what a host's wait does with what its poll found
+    /// (`LinkWaits::wait_ready`). `ready` is asked of each entry once, front to back, so a poll's
+    /// entries, filled in that order, are read in it.
+    pub(crate) fn front_the_ready(
+        on: &mut [wz_runtime_coop::session_drive::LinkWait],
+        mut ready: impl FnMut(&wz_runtime_coop::session_drive::LinkWait) -> bool,
+    ) -> usize {
+        let mut front = 0;
+        for at in 0..on.len() {
+            let Some(wait) = on.get(at) else {
+                break;
+            };
+            if ready(wait) {
+                // `front` never passes `at`, so the window holds both, and a window of one entry
+                // is that entry left where it stands.
+                if let Some([first, .., last]) = on.get_mut(front..=at) {
+                    core::mem::swap(first, last);
+                }
+                front += 1;
+            }
+        }
+        front
+    }
+
+    #[cfg(test)]
+    mod front_the_ready_tests {
+        use wz_runtime_coop::session_drive::{LinkWait, WaitOn};
+
+        fn wait(handle: u64) -> LinkWait {
+            LinkWait::input(WaitOn::AppLink(handle))
+        }
+
+        /// The entries found ready come to the front in the order they stood, each swapped with
+        /// the first entry not yet found ready; the rest keep what is left of the set. Every entry
+        /// is asked once, front to back. Turned red by a swap that leaves an entry where it stood,
+        /// or by a count that is not the number found.
+        #[test]
+        fn the_ready_entries_come_to_the_front_in_their_order() {
+            let mut set = [wait(0), wait(1), wait(2), wait(3)];
+            let mut asked = [0u64; 4];
+            let mut times = 0;
+            let found = super::front_the_ready(&mut set, |entry| {
+                let WaitOn::AppLink(handle) = entry.on else {
+                    return false;
+                };
+                if let Some(slot) = asked.get_mut(times) {
+                    *slot = handle;
+                }
+                times += 1;
+                handle % 2 == 1
+            });
+            assert_eq!(found, 2);
+            assert_eq!(set, [wait(1), wait(3), wait(2), wait(0)]);
+            assert_eq!((times, asked), (4, [0, 1, 2, 3]));
+        }
+
+        /// A set found all ready stays as it stood, and one found none ready answers none and
+        /// stays too; an empty set answers none. CONTROL for the swap above: an entry swapped
+        /// with itself is left in place.
+        #[test]
+        fn all_ready_or_none_ready_leaves_the_set_as_it_stood() {
+            let mut all = [wait(5), wait(6), wait(7)];
+            assert_eq!(super::front_the_ready(&mut all, |_| true), 3);
+            assert_eq!(all, [wait(5), wait(6), wait(7)]);
+            let mut none = [wait(5), wait(6)];
+            assert_eq!(super::front_the_ready(&mut none, |_| false), 0);
+            assert_eq!(none, [wait(5), wait(6)]);
+            let mut empty: [LinkWait; 0] = [];
+            assert_eq!(super::front_the_ready(&mut empty, |_| true), 0);
+        }
+    }
 }
 
 // Written over the runtime's heap link layer, so compiled where the runtime declares it.

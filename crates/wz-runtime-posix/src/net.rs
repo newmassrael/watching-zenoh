@@ -207,28 +207,16 @@ impl LinkWaits for PosixWaits {
             return on.len();
         }
         // The entries are walked in the order `poll_on` filled `fds` in, so the next entry it
-        // named is the next of `fds`; each ready one is swapped to the front, past every entry
-        // walked already.
+        // named is the next of `fds`.
         let mut named = 0;
-        let mut front = 0;
-        for at in 0..on.len() {
-            let Some(wait) = on.get(at) else {
-                break;
-            };
-            let ready = match descriptor(wait.on) {
-                Some(_) if named < count => {
-                    let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
-                    named += 1;
-                    polled
-                }
-                _ => true,
-            };
-            if ready {
-                on.swap(front, at);
-                front += 1;
+        crate::front_the_ready(on, |wait| match descriptor(wait.on) {
+            Some(_) if named < count => {
+                let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
+                named += 1;
+                polled
             }
-        }
-        front
+            _ => true,
+        })
     }
 
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
