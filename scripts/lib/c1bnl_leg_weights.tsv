@@ -78,7 +78,6 @@ wz-capi-c:config::tests::wz_member:::821ad718 42  # wz-capi-c --features <1> con
 wz-capi-pico:key_ids::tests:::c6f801e4 8  # wz-capi-pico --features <2> key_ids::tests::
 wz-capi-pico:config_policy::tests::the_document_door_refuses_key_ids_without_the_capability:f5c1be69 10  # wz-capi-pico --features <1> config_policy::tests::the_document_door_refuses_key_ids_without_the_capability
 wz-capi-core:*:1119f98e 35  # wz-capi-core --features <2> <whole crate>
-wz-capi-core:faces::multicast:::237d74d7 33  # wz-capi-core --features <1> faces::multicast::
 wz-capi-core:drive::router_node:::3bd2a72b 26  # wz-capi-core --features <1> drive::router_node::
 wz-capi-core:drive::router_node::engine::port_tests:::cd349f1e 36  # wz-capi-core --features <2> drive::router_node::engine::port_tests::
 wz-capi-core:drive::router_node::engine::port_tests::shared_memory:::9567c493 27  # wz-capi-core --features <3> drive::router_node::engine::port_tests::shared_memory::

@@ -644,10 +644,6 @@ transport-link-ws|"
     # were compiled by no lane until this row -- the census reported them as
     # claimed by nothing. The filter is empty: every test of the build runs.
     "wz-capi-core|hook|access-extauth-usrpwd,interceptors|"
-    # Open-debt item 913 -- a group joined over raw Ethernet labels its member by the
-    # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
-    # compiled by no leg. The filter is the module path, so a test added there is covered.
-    "wz-capi-core|hook|raweth-transport|faces::multicast::"
     # The router node's own face (`drive::router_node::local_face`): what a program is told of the
     # liveliness tokens of the faces a router node holds, and where its own are counted. The module
     # is built only with `router-node`, which no leg named, so its six tests were compiled by
@@ -817,6 +813,9 @@ transport-link-ws|"
     # The host's named FIFOs (`unixpipe`): one listener holding a request FIFO and a dial finding
     # it, a dedicated read end reading its peer and the end of the stream, the suffix drawn.
     "wz-runtime-posix|hook|unixpipe|"
+    # The host's raw packet sockets (`raweth`): a name no interface has refused before the socket,
+    # and the open answering as the kernel answers a bare `socket(AF_PACKET)`.
+    "wz-runtime-posix|hook|raweth|"
     # lwIP's TCP (`lwip-sys`'s `tcp`, which compiles the stack's TCP sources in): the raw API's
     # own smoke test, a loopback connection that carries bytes both ways and closes. The census
     # found it claimed by nothing when the feature arrived; the filter is its module.
@@ -1594,6 +1593,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The cooperative engine's links over the program's transport (`app_link::`, `app-link`), with
     # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
+    # The cooperative engine's groups over raw Ethernet (`raweth`): the joiner's choice of device,
+    # a datagram framed for its entry and a frame read from a named source, and the route of a
+    # fragment a full device left (`reassembly`). The filter is the module path.
+    "wz-runtime-coop|hook|raweth,reassembly|raweth_group::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The in-place receive that delivers only what it can lend (`rx-lent-only`, a selector): a
     # Push or a Response the lent form cannot carry is refused where it lies and counted, which the
