@@ -1302,7 +1302,7 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
 /// faces: `HANDED_LEG_BYTES` cut into places of its links' batch, with their flags, under the
 /// build's `held-faces` value of `held-publish-drop`, and none under `every-face`. Turned red
 /// by places sized by anything but the links' batch, or reserved when the policy keeps none.
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", wz_round))]
 #[test]
 fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     use wz_session_core::policy::HeldPublishDrop;
@@ -1321,6 +1321,30 @@ fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     };
     assert_eq!(places.count, expected);
     assert_eq!(row(&plan, "handed leg flags").count, expected);
+}
+
+/// A session that listens and sends each face its own leg (`direct`) reserves no place for a
+/// handed publish, whatever `held-publish-drop` says: a leg dropped is dropped on its own face,
+/// and no other face is owed it. The CONTROL is the links' receive buffers, which it reserves.
+/// Turned red by the handed legs' rows laid out in a build that reads its faces where they lie.
+#[cfg(all(feature = "listen", not(wz_round)))]
+#[test]
+fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    assert!(
+        row(&plan, "link receive buffers").count > 0,
+        "CONTROL: the links' buffers are laid out"
+    );
+    for part in ["handed leg places", "handed leg flags", "handed legs"] {
+        assert!(
+            plan.rows().all(|row| row.part() != part),
+            "no row of {part}"
+        );
+    }
 }
 
 /// The session is lent one table of reassembly buffers its links share, a buffer for each chain

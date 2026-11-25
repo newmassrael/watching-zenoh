@@ -268,7 +268,7 @@ fn a_faces_room_lies_at_its_own_place() {
 /// publish is not sent it. A face that holds no place is named as every face, which drops the
 /// publish on all. Turned red by a place reused without its mark, or a face with no place the set
 /// leaves out.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 #[test]
 fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
     let answers = Answers::default();

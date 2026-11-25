@@ -46,7 +46,7 @@ use crate::prelude::*;
 use crate::arena::AllocatorMemory;
 #[cfg(feature = "advanced-cache")]
 use crate::arena::CacheSpan;
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use crate::arena::HandedTable;
 use crate::arena::{
     ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
@@ -111,7 +111,7 @@ use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::face_send::{self, Behind, FaceSend, Pass, PublishRun, Then, FIRST_FACE};
 #[cfg(feature = "listen")]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 #[cfg(wz_round)]
 use wz_runtime_coop::faces::DialAnswer;
@@ -752,7 +752,7 @@ struct LentApart<L: CoopLinks + 'static, C: ClockSource + 'static> {
     engine: EnginePlace,
     handle_place: Option<HandlePlace>,
     lodgings: LodgingPlaces,
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed: HandedTable,
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
@@ -1266,15 +1266,17 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// The droppable publishes that found the session held and were dropped on the faces its
     /// holder waits on, owed to the session's other faces ([`HandedTable`]), in the order they
     /// were handed. A build of the dial face alone owes a dropped publish to no face, and keeps
-    /// no queue.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    /// no queue; nor does one that sends a publish to each face on that face's own hold
+    /// (`direct`), where a leg dropped is dropped on its own face and the next face's leg tries
+    /// the session again.
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed: Mutex<HandedTable>,
     /// Whether `handed` holds a leg, written under its lock: a publish that reads it clear takes
     /// no lock for the queue, which is otherwise two lock round trips on every put of a stream for
     /// what is almost always nothing. A publish that reads it stale leaves the leg to the next
     /// holder, as one that took the queue a moment before the leg was handed does; a read step
     /// always looks under the lock ([`Self::send_handed_now`]).
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     owed: AtomicBool,
     /// Whether the last read's step left a link holding input it had already taken from its stack
     /// (a batch behind the one it read, the rest of a datagram the lane had no room for), or a
@@ -1290,7 +1292,7 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
     /// queue were its own would take before a droppable message found no room on it.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed_limits: HandedLimits,
     /// The droppable publishes dropped before they reached a link: on the faces a held session
     /// waits on, for want of room or by the profile's drop at once ([`Self::live_to_publish`]),
@@ -1390,7 +1392,7 @@ enum Stepped {
 #[derive(Default)]
 pub(crate) struct Takes {
     pub(crate) core: core::sync::atomic::AtomicUsize,
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: core::sync::atomic::AtomicUsize,
     /// The turns a droppable publish spun on a held session before it tried the session again.
     pub(crate) spins: core::sync::atomic::AtomicUsize,
@@ -1675,7 +1677,7 @@ pub(crate) const fn link_rooms_bytes<L: CoopLinks>(_links: &L) -> usize {
 pub(crate) struct RoomPlace {
     on: WaitOn,
     /// The table's mark when the face took the place.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     since: u64,
 }
 
@@ -1696,7 +1698,7 @@ fn mark_of_place(at: usize) -> u64 {
 
 /// The place a send's mark names ([`mark_of_place`]): one past every place for a mark that names
 /// none.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 fn place_of_mark(mark: u64) -> usize {
     usize::try_from(mark).unwrap_or(usize::MAX)
 }
@@ -1804,7 +1806,7 @@ impl<W: LinkWaits> LinkRooms<W> {
         rooms.mark = mark;
         *place = Some(RoomPlace {
             on,
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             since: mark,
         });
     }
@@ -1824,7 +1826,7 @@ impl<W: LinkWaits> LinkRooms<W> {
 
     /// The set of place `at` alone, as the table stands now: every face when no face holds the
     /// place, since a publish dropped on a face no place names is dropped on all.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) fn dropped_on(&self, at: usize) -> DroppedOn {
         let rooms = lock(&self.rooms);
         let mut set = DroppedOn::none(rooms.mark);
@@ -1842,7 +1844,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// when its face came is not known, and a droppable publish sent to a face that came after it
     /// costs that face one message it could have missed, where passing it over could lose one the
     /// face was owed.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) fn skips(&self, set: &DroppedOn, at: usize) -> bool {
         lock(&self.rooms)
             .places
@@ -2179,7 +2181,7 @@ enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// it is dropped on them, and the caller is told when `told` (the pico profile). A build of
     /// the dial face alone names no face: the one it holds is the one the publish is dropped on.
     DroppedOn {
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         faces: DroppedOn,
         told: bool,
     },
@@ -6260,7 +6262,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             engine: lent.engine,
             handle_place: lent.handle_place,
             lodgings: lent.lodgings,
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: lent.transport.handed,
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
@@ -6286,7 +6288,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             engine: place,
             handle_place,
             lodgings,
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed,
             #[cfg(feature = "advanced-cache")]
             cache,
@@ -6317,7 +6319,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let rooms = unsafe { core.rooms.share() };
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
         #[cfg(not(wz_round))]
@@ -6356,15 +6358,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).wait_before_drop_us).write(wait_before_drop_us);
                 addr_of_mut!((*at).held_drop).write(held_drop);
                 addr_of_mut!((*at).sending_on).write(AtomicU64::new(NOT_SENDING));
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).handed).write(Mutex::new(handed));
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(wz_round)]
                 addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
                 #[cfg(feature = "threads")]
                 addr_of_mut!((*at).hand_back).write(HandBack::new());
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
                 addr_of_mut!((*at).unsent_drops).write(AtomicU64::new(0));
@@ -6419,15 +6421,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 wait_before_drop_us: _,
                 held_drop: _,
                 sending_on: _,
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                     handed: _,
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                     owed: _,
                 #[cfg(wz_round)]
                     input_held: _,
                 #[cfg(feature = "threads")]
                     hand_back: _,
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                     handed_limits: _,
                 #[cfg(feature = "transport-stats")]
                     unsent_drops: _,
@@ -7054,7 +7056,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Behind::WaitForSession => {
                     return self.live().map_or(ToPublish::Closed, ToPublish::Live);
                 }
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 Behind::Dropped { on, told } => ToPublish::DroppedOn {
                     faces: match on {
                         DropSet::Faces(faces) => faces,
@@ -7064,7 +7066,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 },
                 // The dial face alone: the face congested, or held by another publish's send, is
                 // that face, and there is no other to owe the publish to.
-                #[cfg(not(any(feature = "listen", feature = "group")))]
+                #[cfg(not(all(wz_round, any(feature = "listen", feature = "group"))))]
                 Behind::Dropped { told, .. } => ToPublish::DroppedOn { told },
             };
             #[cfg(feature = "transport-stats")]
@@ -7450,11 +7452,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
             ToPublish::DroppedOn {
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 faces,
                 told,
             } => {
-                #[cfg(any(feature = "listen", feature = "group"))]
+                #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 self.hand_off(keyexpr, payload, opts, faces);
                 return if told {
                     Err(FanoutError::HeldConduit)
@@ -7477,7 +7479,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(not(feature = "listen"))]
         let probe = false;
         let mut run = PublishRun::new(
-            cfg!(any(feature = "listen", feature = "group")),
+            cfg!(all(wz_round, any(feature = "listen", feature = "group"))),
             probe,
             core.0.config.tx_queue.wait_before_close_us,
             // The faces are sent in the order of their places, the dial role's the first.
@@ -7486,7 +7488,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let begin = run.begin();
         // What was handed to the session before this publish leaves before it, and what was
         // handed while this publish held the session leaves after it.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         if begin.hand_before {
             self.send_handed(&mut core.0);
         }
@@ -7513,7 +7515,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Then::WaitForSlots { .. } => core.0.transport.links.owing_waits(),
             Then::Done => OwingWaits::new_static(),
         };
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         if fanned.hand_after {
             self.send_handed(&mut core.0);
         }
@@ -7598,6 +7600,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Then::WaitForSlots { .. } => core.0.transport.links.owing_waits(),
                 Then::Done => OwingWaits::new_static(),
             };
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             if fanned.hand_after {
                 self.send_handed(&mut core.0);
             }
@@ -7615,7 +7618,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the one that is reported; a face whose link is down is skipped, as a send over it would.
     /// The face being sent to is marked as the one this publish holds ([`SendingOn`]) for as long
     /// as its send takes. What a handed leg is sent by, so a build that hands none has none.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     fn fan_out(
         &self,
         core: &mut Core<L, C>,
@@ -7685,6 +7688,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut outcome = outcome;
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
                 continue;
             }
@@ -7725,7 +7729,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         tx: LinkTx<'_, C>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         let mut outcome = Ok(0);
-        #[cfg(not(any(feature = "listen", feature = "group")))]
+        #[cfg(not(all(wz_round, any(feature = "listen", feature = "group"))))]
         let _ = skip;
         for (at, wire) in core.up_wires_at() {
             // A publish's leg held for one face goes to that face alone.
@@ -7733,9 +7737,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if !tx.reaches(wire) {
                 continue;
             }
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             let dropped_on = skip.is_some_and(|dropped| self.rooms.skips(dropped, at));
-            #[cfg(not(any(feature = "listen", feature = "group")))]
+            #[cfg(not(all(wz_round, any(feature = "listen", feature = "group"))))]
             let dropped_on = false;
             // How the face is sent the publish is the face send value's (`Pass::face_send`): the
             // faces go in the order of their places, so a pass that stopped at one goes on from it.
@@ -7772,7 +7776,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// keeps at most, or with no place for it, it is dropped on the other faces too, as a message
     /// that finds its queue full is, and counted as the one drop it already is.
     // Out of line: the copy of a dropped publish is taken only when a holder drops it.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     #[inline(never)]
     fn hand_off(
         &self,
@@ -7801,7 +7805,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Send what was handed to the session ([`Self::hand_off`]), in the order it was handed, each
     /// publish to the faces it was not dropped on.
     // Out of line: four sends of a publish and of its hand-off ask it, each a copy inlined.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     #[inline(never)]
     fn send_handed(&self, core: &mut Core<L, C>) {
         if self.owed.load(Ordering::SeqCst) {
@@ -7815,7 +7819,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// send may wait for room and a publish that finds the session held must not wait behind it,
     /// and given back under the lock, so its place is free for the next. It is sent by its whole
     /// key, which holds no declaration the session might retract meanwhile.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     fn send_handed_now(&self, core: &mut Core<L, C>) {
         let whole = WireKey::literal();
         loop {
@@ -7852,7 +7856,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The table of handed publishes, held.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     fn handed(&self) -> MutexGuard<'_, HandedTable> {
         #[cfg(test)]
         self.takes.handed.fetch_add(1, Ordering::Relaxed);
@@ -8640,7 +8644,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Stepped::Read | Stepped::Closed => None,
         };
         // What was handed to the session leaves with the step that moves the links.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         if stepped != Stepped::Read {
             self.send_handed_now(&mut core.0);
         }
@@ -10895,7 +10899,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         drop(watches);
         // What publishes handed to the session and it never sent goes with it, let go of with no
         // lock held, as a sent leg is.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         {
             let handed = {
                 let mut handed = self.handed();
@@ -11363,7 +11367,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         self.core.dropping().end_links();
         // The kept publishes' places lie in the session's arena, which the state's drop gives
         // back: they are given back first.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         lock(&self.handed).clear();
         // The round's tables lie in the session's arena, which the state's drop gives back: they
         // are let go of first, with the callbacks their records owe, each call ended before the

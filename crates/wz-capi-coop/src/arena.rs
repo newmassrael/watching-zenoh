@@ -140,7 +140,7 @@ use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_sink::ConsolidatingSink;
@@ -517,8 +517,10 @@ const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
 const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
-/// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
-const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
+/// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
+/// alone owes no other face, nor does one that sends each face its own leg (`direct`).
+const HANDED_ROWS: usize =
+    3 * cfg!(all(wz_round, any(feature = "listen", feature = "group"))) as usize;
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
@@ -1230,7 +1232,7 @@ pub struct TransportRows {
     cells_held: HeldBits,
     /// How many publishes the session keeps for its other faces at once, each in a place of a
     /// link's batch (`HANDED_LEG_BYTES`).
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed_legs: usize,
     /// The receive buffers of the groups the session may join: how many, and the bytes of each.
     #[cfg(feature = "group")]
@@ -1260,7 +1262,7 @@ pub(crate) struct TransportTables {
     /// The rows of the endpoints' texts, none written.
     pub(crate) endpoints: EndpointTexts,
     /// The places of the publishes the session keeps for its other faces.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
     #[cfg(feature = "listen")]
@@ -1279,7 +1281,7 @@ impl TransportRows {
         endpoint_rows: (0, 0),
         cell_bytes: NO_CELLS,
         cells_held: HeldBits(0),
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         handed_legs: 0,
         #[cfg(feature = "group")]
         group_rx: (0, 0),
@@ -1300,7 +1302,7 @@ impl TransportRows {
             // ends; the session holds the table for its life.
             reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
@@ -1734,7 +1736,7 @@ impl ArenaPlan {
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed_legs: 0,
             #[cfg(feature = "group")]
             group_rx: (0, 0),
@@ -1942,7 +1944,7 @@ impl ArenaPlan {
         // place of a link's batch: a publish longer than one is dropped on every face, as one
         // that finds every place held is. Under `every-face` a publish that finds the session
         // held is dropped on every face, and the session reserves no place for one.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         {
             let bytes = self.lent(
                 ArenaLimit::HandedLegBytes,
@@ -3085,11 +3087,11 @@ pub(crate) const FACE_SLOT_WORDS: usize = MAX_FACE_SETS.div_ceil(u64::BITS as us
 pub(crate) type DroppedOn = wz_runtime_coop::handed::FaceSlots<FACE_SLOT_WORDS>;
 
 /// The publishes a session keeps for the faces they were not dropped on.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 pub(crate) type HandedTable = wz_runtime_coop::handed::HandedLegs<FACE_SLOT_WORDS>;
 
 /// One publish a session keeps for its other faces.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 pub(crate) type Handed = wz_runtime_coop::handed::HandedLeg<FACE_SLOT_WORDS>;
 
 /// The groups a session's plan counts at most: as many as its task cells hold in a build that
@@ -3154,7 +3156,7 @@ pub struct PlanShape {
     pub group_batch: usize,
     /// Whether its policy keeps a publish that found the session held for the faces it was not
     /// dropped on (`held-faces`), which a place of the arena then holds.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub keeps_handed: bool,
 }
 
@@ -3175,7 +3177,7 @@ impl PlanShape {
                 .map(|join| usize::from(join.profile.batch_size))
                 .max()
                 .unwrap_or(0),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             keeps_handed: keeps_handed(&crate::engine::resolve_policy(config)),
         }
     }
@@ -3193,7 +3195,7 @@ impl PlanShape {
             batch,
             #[cfg(feature = "group")]
             group_batch: 0,
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             keeps_handed: keeps_handed(&wz_session_core::policy::SessionPolicy::defaults()),
         }
     }
@@ -3233,7 +3235,7 @@ impl PlanShape {
 
 /// Whether `policy` keeps a publish that found the session held for the faces it was not dropped
 /// on.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 const fn keeps_handed(policy: &wz_session_core::policy::SessionPolicy) -> bool {
     matches!(policy.held_publish_drop(), HeldPublishDrop::HeldFaces)
 }

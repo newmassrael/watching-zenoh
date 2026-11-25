@@ -1316,8 +1316,8 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue
 /// of handed legs not at all, so a stream of puts pays no lock for what no other publish left
 /// behind. The CONTROL is a read step, which looks at the queue under its lock every time. A
-/// build of the dial face alone keeps no queue.
-#[cfg(any(feature = "listen", feature = "group"))]
+/// build of the dial face alone keeps no queue, nor does one that sends each face its own leg.
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 #[test]
 fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue() {
     let router = Router::start(CatchAll::None);
@@ -1837,7 +1837,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     let samples = engine.samples_handed();
     let polls = engine.link_polls();
     let task_clock_reads = engine.task_clock_reads();
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     let handed = engine.takes.handed.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
     let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
@@ -1860,7 +1860,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         0,
         "the tasks' timers are woken by the steps' own readings, with none of their own"
     );
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     assert_eq!(
         engine.takes.handed.load(Ordering::SeqCst) - handed,
         1,
