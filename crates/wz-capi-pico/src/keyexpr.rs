@@ -1003,6 +1003,9 @@ impl<'a> EntityKey<'a> {
 }
 
 impl Drop for EntityKey<'_> {
+    // Out of line: every door that declares an entity lets its hold go here, and each copy inlined
+    // carried the give-back at the row and the session's.
+    #[inline(never)]
     fn drop(&mut self) {
         if let Some(hold) = self.taken.take() {
             hold.release(crate::session::EngineHold::as_ref(self.engine));
