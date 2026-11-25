@@ -287,7 +287,8 @@ pub(crate) fn handshaking_actions_with_params(
     params: SessionInitParams,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let driver = recording_driver();
-    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
+    let actions =
+        new_session_actions(driver.clone(), params, TokioTime::new()).expect("the heap has room");
     (actions, driver)
 }
 
@@ -300,7 +301,7 @@ pub(crate) fn established_actions(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
 ) -> Arc<SessionLinkActions> {
-    let actions = new_session_actions(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new()).expect("the heap has room");
     actions.enter_established();
     actions
 }
@@ -336,7 +337,8 @@ pub(crate) fn recording_actions_length_prefixed(
         length_prefixed: true,
         best_effort_mtu: None,
     });
-    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
+    let actions =
+        new_session_actions(driver.clone(), params, TokioTime::new()).expect("the heap has room");
     (actions, driver)
 }
 
@@ -358,7 +360,8 @@ pub(crate) fn recording_actions_with_datagram_companion(
         length_prefixed: true,
         best_effort_mtu: Some(best_effort_mtu),
     });
-    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
+    let actions =
+        new_session_actions(driver.clone(), params, TokioTime::new()).expect("the heap has room");
     (actions, driver)
 }
 

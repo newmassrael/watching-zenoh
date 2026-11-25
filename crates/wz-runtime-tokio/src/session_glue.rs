@@ -429,11 +429,15 @@ pub use wz_session_core::peer_init_caps::PeerInitCaps;
 /// The per-handshake COOKIE NONCE is not this seam's: every engine's binding holds the AP's one
 /// source ([`OsEntropy`], [`new_session_engine`]) and draws it at each InitAck, so no accept
 /// path can forget it.
+///
+/// [`HeapRefused`](wz_session_core::link::HeapRefused) when the runtime has no room for the
+/// bundle, as every runtime answers ([`wz_session_core::link::SessionRuntime::wrap_actions`]):
+/// the open that asked is refused.
 pub fn new_session_actions<T: TimeSource>(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
     clock: T,
-) -> Arc<SessionLinkActions<TokioRuntime, T>> {
+) -> Result<Arc<SessionLinkActions<TokioRuntime, T>>, wz_session_core::link::HeapRefused> {
     // R311ja — annotate `R = TokioRuntime` explicitly: `new_generic` now
     // returns the non-injective `R::ActionsHandle<T>` (this profile's `Arc`),
     // so neither the `Arc<dyn _>` driver arg nor the declared return type can
@@ -442,7 +446,7 @@ pub fn new_session_actions<T: TimeSource>(
     let flushing_driver = driver.clone();
     #[cfg(feature = "transport-batching")]
     let batching = params.tx_queue.batching;
-    let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
+    let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock)?;
     // Declare this profile's reassembly budget to the TX side, so an
     // oversize send is refused where the caller can see it instead of being
     // fragmented into a chain this host's own dispatcher would drop
@@ -471,7 +475,7 @@ pub fn new_session_actions<T: TimeSource>(
             actions.set_auto_batching(true);
         }
     }
-    actions
+    Ok(actions)
 }
 
 /// Build a production session engine: an [`Engine`] over the generated
@@ -2259,6 +2263,7 @@ mod tests {
                 wz_runtime_tokio_test_support::fixture_session_init_params(),
                 TokioTime::new(),
             )
+            .expect("the heap has room")
         };
         let (a, b) = (mk(), mk());
         assert_eq!(
@@ -5547,7 +5552,8 @@ mod batch_tx_tests {
             frames: std::sync::Mutex::new(Vec::new()),
             flush: std::sync::Mutex::new(None),
         });
-        let actions = super::new_session_actions(link.clone(), params, TokioTime::new());
+        let actions = super::new_session_actions(link.clone(), params, TokioTime::new())
+            .expect("the heap has room");
         actions.enter_established();
         for i in 0..3u8 {
             actions
@@ -5814,7 +5820,8 @@ mod link_priority_tests {
             driver,
             wz_runtime_tokio_test_support::fixture_session_init_params(),
             crate::runtime_impl::TokioTime::new(),
-        );
+        )
+        .expect("the heap has room");
         assert!(actions.set_qos_offer(true), "qos offer applies");
         actions.enter_established();
 
@@ -6151,6 +6158,7 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.tx_queue = tx_queue;
         super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+            .expect("the heap has room")
     }
 
     /// R2926 — an established session whose batches hold 64 bytes, so a
@@ -6161,7 +6169,8 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.batch_size = 64;
         let actions =
-            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+                .expect("the heap has room");
         actions.enter_established();
         actions
     }
@@ -6333,7 +6342,8 @@ mod link_congestion_tests {
             )
         };
         let actions =
-            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
+            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new())
+                .expect("the heap has room");
         let mut engine = super::new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::OutboundStart);
@@ -6544,7 +6554,8 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.tx_queue = tx_queue;
         let actions =
-            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
+            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new())
+                .expect("the heap has room");
         actions.enter_established();
         let blocking = {
             let actions = Arc::clone(&actions);
@@ -6752,7 +6763,8 @@ mod link_congestion_tests {
             )
         };
         let actions =
-            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new());
+            super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+                .expect("the heap has room");
         actions.enter_established();
         check(actions);
     }
@@ -8452,7 +8464,8 @@ mod init_advertisement_tests {
         // zenoh-pico's rule, under which a wider InitAck batch is refused, so the last two
         // assertions read which size the refusal is measured against.
         params.link_rx.wider_init_ack_batch = WiderInitAckBatch::Refuse;
-        let actions = new_session_actions(Arc::new(SmallSlots), params, TokioTime::new());
+        let actions = new_session_actions(Arc::new(SmallSlots), params, TokioTime::new())
+            .expect("the heap has room");
         let advertised = |is_ack: bool, role: ExtChainRole| {
             let wire = actions
                 .encode_init_with_role(is_ack, None, role)

@@ -39,7 +39,8 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+        .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     (actions, engine)
@@ -128,7 +129,8 @@ mod keepalive_emitter {
         let recorder = Arc::new(LifecycleRecordingDriver::default());
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
         let actions =
-            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+                .expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         (recorder, actions, engine)
@@ -286,7 +288,8 @@ mod keepalive_emitter {
             keep_alive,
             ..fixture_session_init_params()
         };
-        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let actions =
+            new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);
@@ -367,7 +370,8 @@ mod keepalive_emitter {
         });
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
         let actions =
-            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+                .expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         (driver, actions, engine)
@@ -476,7 +480,8 @@ mod keepalive_emitter {
         });
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
         let actions =
-            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+                .expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);
@@ -601,7 +606,7 @@ mod keepalive_emitter {
         let recorder = Arc::new(LifecycleRecordingDriver::default());
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
         let clock = TokioTime::new();
-        let actions = new_session_actions(outbound, params, clock);
+        let actions = new_session_actions(outbound, params, clock).expect("the heap has room");
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         drive_to_established(&mut engine);

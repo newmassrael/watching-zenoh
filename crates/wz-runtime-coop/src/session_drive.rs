@@ -1166,9 +1166,12 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
     /// its loop reach the same link through clones of this. The default puts the
     /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
-    /// handle back, so its link is behind one pointer and not two.
-    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
-        crate::link_cells::CellRc::<Self::Pump, N>::on_heap(pump).into_link()
+    /// handle back, so its link is behind one pointer and not two. `None`, with `pump` let go
+    /// of, when the heap has no room for the pointer.
+    fn share_pump(
+        pump: Self::Pump,
+    ) -> Option<crate::link_cells::CellRc<dyn SessionDatagramLink, N>> {
+        crate::link_cells::CellRc::<Self::Pump, N>::try_on_heap(pump).map(|cell| cell.into_link())
     }
 }
 
@@ -3138,9 +3141,10 @@ mod wake_budget_tests {
     fn a_step_takes_the_datagrams_its_link_dropped() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         link.dropped.set(2);
         let config = SessionDriveConfig {
@@ -3167,15 +3171,16 @@ mod wake_budget_tests {
     fn a_session_whose_pump_the_heap_has_no_room_for_is_refused() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let config = || SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: Some(1),
         };
-        let entropy = SessionEntropy::new(Counting(0));
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let outcome = crate::table_tests::refused(|| {
             run_session(
                 &runtime,
@@ -3189,7 +3194,7 @@ mod wake_budget_tests {
         });
         assert_eq!(outcome, DriverOutcome::Refused);
         assert_eq!(link.reads.get(), 0, "a refused session reads nothing");
-        let entropy = SessionEntropy::new(Counting(0));
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let outcome = run_session(
             &runtime,
             link.clone(),
@@ -3207,9 +3212,10 @@ mod wake_budget_tests {
     fn waited(in_ms: Option<u64>) -> u64 {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         // The session's own clock, whose epoch is its runtime's and not the board's.
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
@@ -3231,9 +3237,10 @@ mod wake_budget_tests {
     fn raised(in_ms: Option<u64>) -> (usize, Option<u64>) {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
         let link = Rc::new(Recording::default());
@@ -3262,9 +3269,10 @@ mod wake_budget_tests {
     fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -3314,9 +3322,10 @@ mod wake_budget_tests {
     ) {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -3400,9 +3409,10 @@ mod wake_budget_tests {
     fn a_link_that_is_gone_ends_its_session() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -3465,11 +3475,12 @@ mod wake_budget_tests {
     #[test]
     fn a_session_spawned_over_a_router_made_in_place_runs_and_goes_with_its_task() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
         let before = crate::link_cells::CellRc::handles(&actions);
@@ -3524,9 +3535,10 @@ mod wake_budget_tests {
     fn a_session_placed_with_no_task_is_stepped_by_its_holder_and_dropped_in_its_place() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
         let before = crate::link_cells::CellRc::handles(&actions);
@@ -3588,11 +3600,12 @@ mod wake_budget_tests {
         use wz_session_core::unicast_rx::RouterLend;
         type Router = crate::reassembly_rx::CoopReassembly;
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let link = Rc::new(Recording::default());
         let lend = RouterLend::<Router>::new();
         let mut router = crate::reassembly_rx::mcu_reassembly(
@@ -3659,11 +3672,12 @@ mod wake_budget_tests {
                 },
             )
             .expect("the heap has room");
-            let local = CoopLocalSet::new(&runtime);
+            let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
-            let sink = crate::link_cells::heap_sink(Null);
-            let actions = new_session_actions(sink, params(), clock.clone());
-            let entropy = SessionEntropy::new(Counting(0));
+            let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+            let actions =
+                new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+            let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
                 &local,
@@ -3724,11 +3738,12 @@ mod wake_budget_tests {
             },
         )
         .expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let made = Rc::new(core::cell::Cell::new(0u32));
         let before = crate::link_cells::CellRc::handles(&actions);
         let refused = spawn_session_with_router(
@@ -3807,11 +3822,12 @@ mod wake_budget_tests {
         )
         .expect("the heap has room");
         runtime.seal();
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let task = spawn_session_with_router(
             &local,
             PumpFields {
@@ -3870,9 +3886,10 @@ mod wake_budget_tests {
     fn acceptor() -> (SessionPump<Stopped, Rc<Recording>>, u64) {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
-        let entropy = SessionEntropy::new(Counting(0));
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
+        let entropy = SessionEntropy::try_new(Counting(0)).expect("the heap has room");
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -3919,13 +3936,14 @@ mod wake_budget_tests {
 
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
-        let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone());
+        let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
         let now_ms = clock.now_monotonic_ms();
         let fields = PumpFields {
             link: Rc::new(Recording::default()),
             actions,
-            entropy: SessionEntropy::new(Counting(0)),
+            entropy: SessionEntropy::try_new(Counting(0)).expect("the heap has room"),
             clock,
             config: SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -4099,8 +4117,10 @@ mod wake_budget_tests {
                 CoopRuntime::try_new(Moved(Arc::clone(&now_us))).expect("the heap has room");
             let clock = CoopTime::new(&runtime);
             let sent = Rc::new(Cell::new(0u32));
-            let sink = crate::link_cells::heap_sink(KeepAlivesSent(Rc::clone(&sent)));
-            let actions = new_session_actions(sink, params(), clock.clone());
+            let sink = crate::link_cells::heap_sink(KeepAlivesSent(Rc::clone(&sent)))
+                .expect("the heap has room");
+            let actions =
+                new_session_actions(sink, params(), clock.clone()).expect("the heap has room");
             assert!(
                 actions.keepalive_interval_ms() + TICK_MS < SPAN_MS,
                 "the span holds a keep-alive interval"
@@ -4122,7 +4142,7 @@ mod wake_budget_tests {
                 runtime,
                 Rc::clone(&link),
                 actions,
-                SessionEntropy::new(Counting(0)),
+                SessionEntropy::try_new(Counting(0)).expect("the heap has room"),
                 clock,
                 config,
             )

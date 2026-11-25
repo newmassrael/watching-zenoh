@@ -113,9 +113,10 @@ impl SessionLinks<wz_capi_coop::LinkCount> for Links {
         _to: Locator,
     ) -> Result<OpenedLink<Feed, wz_capi_coop::LinkCount>, LinkOpenError> {
         Ok(OpenedLink {
-            sink: wz_runtime_coop::link_cells::CellRc::<_, wz_capi_coop::LinkCount>::on_heap(
+            sink: wz_runtime_coop::link_cells::CellRc::<_, wz_capi_coop::LinkCount>::try_on_heap(
                 Nowhere,
             )
+            .ok_or(LinkOpenError::Exhausted)?
             .into_sink(),
             pump: Feed(self.0.clone()),
         })

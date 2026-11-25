@@ -58,9 +58,10 @@
 //! assertion to "these are opaque bits we move" keeps that visible.
 
 use core::ffi::c_void;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
-use wz_capi_port::os::{Condvar, Mutex};
+use wz_capi_port::os::{condvar_in, mutex_in, Condvar, Mutex};
 
 use crate::bytes::NoRoom;
 use crate::prelude::*;
@@ -385,16 +386,38 @@ struct Channel {
 }
 
 impl Channel {
-    /// A channel of `capacity` places, or [`NoRoom`] when the heap refuses them.
-    fn new(capacity: usize) -> Result<Self, NoRoom> {
-        Ok(Self {
-            state: Mutex::new(ChannelState {
-                items: Ring::with_capacity(capacity)?,
-                closed: false,
-            }),
-            not_empty: Condvar::new(),
-            not_full: Condvar::new(),
-        })
+    /// An open channel over `items`, made in `place`, where it stays: its lock and its condition
+    /// variables are made there ([`mutex_in`]).
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it and holds none; the channel is not
+    /// moved from it until it is dropped there.
+    unsafe fn write_in(place: NonNull<Self>, items: Ring) {
+        let at = place.as_ptr();
+        // SAFETY: the caller's: each field is made once through a pointer to it, not null as it
+        // is inside the place.
+        unsafe {
+            mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).state)), |state| {
+                state.write(ChannelState {
+                    items,
+                    closed: false,
+                })
+            });
+            condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).not_empty)));
+            condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).not_full)));
+        }
+    }
+
+    /// A channel of `capacity` places in a box of its own, or [`NoRoom`] when the heap refuses
+    /// the places or the box.
+    fn boxed(capacity: usize) -> Result<Box<Self>, NoRoom> {
+        let items = Ring::with_capacity(capacity)?;
+        let make = |place: NonNull<Self>| {
+            // SAFETY: the place is the box's, valid for one channel, holding none, never moved.
+            unsafe { Self::write_in(place, items) }
+        };
+        // SAFETY: `make` makes the whole channel in the place it is handed.
+        unsafe { crate::bytes::try_box_in(make) }
     }
 }
 
@@ -488,7 +511,7 @@ unsafe fn install(slot: *mut c_void, capacity: usize, size: usize) -> ZResult {
     // uninitialised stack bytes would make that copy read indeterminate values.
     core::ptr::write_bytes(slot.cast::<u8>(), 0, size);
     // A full heap leaves the slot zeroed, a collection with no channel, as a refused one is.
-    let channel = match Channel::new(capacity).and_then(crate::bytes::try_box) {
+    let channel = match Channel::boxed(capacity) {
         Ok(channel) => channel,
         Err(no_room) => return no_room.code(),
     };

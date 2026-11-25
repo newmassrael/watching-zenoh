@@ -701,7 +701,8 @@ mod many_threads_tests {
 
         type Runtime = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Kind>;
         let mut face = FaceHeld::gather(|| {
-            let shared: CellRc<u32, OneFace> = <Runtime as ShareValues>::share(7);
+            let shared: CellRc<u32, OneFace> =
+                <Runtime as ShareValues>::share(7).expect("the heap has room");
             Halves(shared.clone(), shared)
         });
         let read = std::thread::spawn(move || {

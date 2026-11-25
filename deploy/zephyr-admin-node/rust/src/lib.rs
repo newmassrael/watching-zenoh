@@ -340,7 +340,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         log(c"wz: FAIL - the heap has no room for the runtime");
         return 2;
     };
-    let local = CoopLocalSet::new(&runtime);
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        log(c"wz: FAIL - the heap has no room for the local set");
+        return 2;
+    };
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
         return 2;
@@ -352,7 +355,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let limits = resolve_limits();
     // The node's one source, the board's: every session it accepts or dials draws its
     // handshake's secrets from it, each through a handle on it.
-    let entropy = SessionEntropy::new(ZephyrEntropy);
+    let Ok(entropy) = SessionEntropy::try_new(ZephyrEntropy) else {
+        log(c"wz: FAIL - the heap has no room for the board's entropy source");
+        return 2;
+    };
     let accept_entropy = entropy.clone();
     let node = AdminNode::new(
         &local,
@@ -368,15 +374,17 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         LISTEN_PORT,
         SessionTimeouts::from_build(),
         move || params(WhatAmI::Peer, zid, &key, &policy, &limits),
+        // A link whose session the heap has no room for is left unaccepted.
         move |sink| {
-            (
+            Some((
                 new_session_actions(
                     sink,
                     params(WhatAmI::Peer, zid, &key, &policy, &limits),
                     CoopTime::new(&accept_runtime),
-                ),
+                )
+                .ok()?,
                 accept_entropy.clone(),
-            )
+            ))
         },
         entropy,
     );
@@ -506,7 +514,10 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         log(c"wz: FAIL - the heap has no room for the runtime");
         return 2;
     };
-    let local = CoopLocalSet::new(&runtime);
+    let Some(local) = CoopLocalSet::try_new(&runtime) else {
+        log(c"wz: FAIL - the heap has no room for the local set");
+        return 2;
+    };
     let Ok(zid) = SessionZid::new(&net.zid()) else {
         log(c"wz: FAIL - the board's zid is not 1 to 16 bytes");
         return 2;
@@ -514,6 +525,10 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
     let zid_hex = zid_to_zenoh_hex(&zid);
     let policy = resolve_policy();
     let limits = resolve_limits();
+    let Ok(entropy) = SessionEntropy::try_new(ZephyrEntropy) else {
+        log(c"wz: FAIL - the heap has no room for the board's entropy source");
+        return 2;
+    };
     let mut node = ClientNode::new(
         &local,
         net.links(),
@@ -522,7 +537,7 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
         move || params(WhatAmI::Client, zid, &key, &policy, &limits),
         // The board's source, which every session the node dials draws its handshake's
         // secrets from.
-        SessionEntropy::new(ZephyrEntropy),
+        entropy,
     );
     if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
         || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()

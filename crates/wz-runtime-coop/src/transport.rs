@@ -162,6 +162,8 @@ pub enum TransportRefusal {
     EntropyUnavailable,
     /// The session's runtime had no task for a link's session or a group's.
     NoTask(SpawnRefusal),
+    /// The heap had no room for a link's shared handle.
+    HeapRefused,
 }
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks

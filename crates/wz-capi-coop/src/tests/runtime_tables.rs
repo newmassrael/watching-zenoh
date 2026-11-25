@@ -138,7 +138,7 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
     });
     assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
     let (runtime, _set) = placed_runtime(tables);
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let sessions: Vec<_> = (0..10u8)
         .map(|at| {
             local
@@ -174,7 +174,7 @@ fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states(
         ..client_config()
     });
     let (runtime, _set) = placed_runtime(tables);
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let first = local
         .try_spawn_local(async { 1u8 })
         .unwrap_or_else(|_| panic!("the dial role's link has the cell"));
@@ -219,7 +219,7 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         ..client_config()
     });
     let (runtime, _set) = placed_runtime(tables);
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
     let large = [7u8; LARGER];
     let refused = local
         .try_spawn_local(async move { large[0] })

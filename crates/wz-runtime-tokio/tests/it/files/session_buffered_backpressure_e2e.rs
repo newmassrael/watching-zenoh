@@ -76,7 +76,8 @@ fn burst_of_frames() -> Vec<Vec<u8>> {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
     let mut params = fixture_session_init_params();
     params.zid = [0x02; 4].into();
-    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let actions =
+        new_session_actions(outbound, params, TokioTime::new()).expect("the heap has room");
     actions.enter_established();
     let session = TokioSession::new(
         actions,
@@ -117,7 +118,8 @@ fn burst_of_frames() -> Vec<Vec<u8>> {
 async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions: Arc<SessionLinkActions> =
-        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+            .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
@@ -239,7 +241,8 @@ async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
 async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions: Arc<SessionLinkActions> =
-        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+            .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);
@@ -348,7 +351,8 @@ async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
 async fn a_host_that_wires_no_stage_still_delivers_under_backpressure() {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions: Arc<SessionLinkActions> =
-        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+            .expect("the heap has room");
     let mut engine = new_session_engine(&actions);
     engine.initialize().unwrap_or_else(|never| match never {});
     established(&mut engine);

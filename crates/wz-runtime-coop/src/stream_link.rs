@@ -3102,11 +3102,12 @@ mod tests {
         }
 
         fn link() -> crate::link_cells::CellRc<Heap> {
-            crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
+            crate::link_cells::CellRc::try_boxed(StreamDriver::with_buffers(
                 Pipe::<false>::default(),
                 STREAM_RX_CAPACITY,
                 HeapTx::new(4, 2048),
             ))
+            .expect("the heap has room")
         }
 
         /// A session over `sink`, established as one that completed its handshake stands
@@ -3116,7 +3117,8 @@ mod tests {
             sink: crate::link_cells::CellRc<dyn wz_session_core::link::BoxedLinkDriver>,
             runtime: &CoopRuntime<Stopped>,
         ) -> crate::session_runtime::SessionHandle<Stopped> {
-            let actions = new_session_actions(sink, params(), CoopTime::new(runtime));
+            let actions = new_session_actions(sink, params(), CoopTime::new(runtime))
+                .expect("the heap has room");
             actions.enter_established();
             actions
         }
@@ -3210,13 +3212,15 @@ mod tests {
         fn two_conduits_alternating_on_a_stream_lose_no_message() {
             use wz_session_core::link::STREAM_BATCH_LENGTH_BYTES;
             let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
-            let link = crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
+            let link = crate::link_cells::CellRc::try_boxed(StreamDriver::with_buffers(
                 Pipe::<false>::default(),
                 STREAM_RX_CAPACITY,
                 HeapTx::for_link(0, 0, 1024 + STREAM_BATCH_LENGTH_BYTES),
-            ));
+            ))
+            .expect("the heap has room");
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime))
+                .expect("the heap has room");
             assert!(
                 actions.set_qos_offer(true),
                 "the session carries a conduit for each priority"

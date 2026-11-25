@@ -503,16 +503,30 @@ impl<T, K> Answering<T, K> {
             kept: core::mem::ManuallyDrop::new(kept),
         }
     }
-}
 
-#[cfg(feature = "query")]
-impl<T> Answering<T> {
-    /// `value`, with nothing kept for its closures and none counted yet.
-    pub(crate) fn new(value: T) -> Self {
-        Self {
-            value: core::mem::ManuallyDrop::new(value),
-            open: crate::ffi::OpenClosures::default(),
-            kept: core::mem::ManuallyDrop::new(()),
+    /// As [`Self::keeping`], the value and what is kept written by `write` and `write_kept` in
+    /// the places where they stay: what a value holding a lock is made in, its lock made there
+    /// ([`wz_capi_port::os::mutex_in`]).
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none; `write` leaves a valid
+    /// `T` and `write_kept` a valid `K` in the place each is handed.
+    #[cfg(any(feature = "query", feature = "connectivity"))]
+    pub(crate) unsafe fn write_at(
+        at: *mut Self,
+        write: impl FnOnce(NonNull<T>),
+        write_kept: impl FnOnce(NonNull<K>),
+    ) {
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // `at` is valid; a `ManuallyDrop` has the layout of what it holds.
+        unsafe {
+            write(NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).value).cast::<T>(),
+            ));
+            core::ptr::addr_of_mut!((*at).open).write(crate::ffi::OpenClosures::default());
+            write_kept(NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).kept).cast::<K>(),
+            ));
         }
     }
 }
@@ -1071,7 +1085,7 @@ mod tests {
         let drops = core::cell::Cell::new(0);
         let object = Slot::take_entity(&engine, Kind::Querier)
             .expect("a querier's place")
-            .fill(Answering::new(Counted(&drops)))
+            .fill(Answering::keeping(Counted(&drops), ()))
             .cast::<Counted<'_>>();
         let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
             core::ptr::null_mut(),
@@ -1100,7 +1114,7 @@ mod tests {
 
         let object = Slot::take_entity(&engine, Kind::Querier)
             .expect("a querier's place")
-            .fill(Answering::new(Counted(&drops)))
+            .fill(Answering::keeping(Counted(&drops), ()))
             .cast::<Counted<'_>>();
         // SAFETY: as above, with no closure counted.
         unsafe { retire_entity::<_, ()>(object) };
@@ -1138,7 +1152,7 @@ mod tests {
         let drops = core::cell::Cell::new(0);
         let object = Slot::take_entity(&engine, Kind::Querier)
             .expect("a querier's place")
-            .fill(Answering::new(Counted(&drops)))
+            .fill(Answering::keeping(Counted(&drops), ()))
             .cast::<Counted<'_>>();
         // SAFETY: `object` was filled for an `Answering` just above, and its owner holds it.
         let kept = unsafe { keep_entity::<_, ()>(object) };

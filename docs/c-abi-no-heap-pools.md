@@ -669,9 +669,9 @@ suites (C1co, Layer Z) unchanged.
     a grown one (`CoopRuntime::new`); a spawn writes the future into a cell and its output after
     it, a waker is a reference to the cell, and none allocates where a cell or an entry is free.
     One timer table for both (`timer.rs`), reserved or grown the same way. The Zephyr OS layer's
-    `k_mutex`, `k_condvar` and read-task record and stack come from pools the image sizes
-    (`CONFIG_WZ_OS_MUTEXES`, `CONFIG_WZ_OS_CONDVARS`, `CONFIG_WZ_OS_THREADS`), none from the
-    kernel heap. Tests: `wz-runtime-coop` `table_tests` (a grown table spawns again with no
+    `k_mutex` and `k_condvar` are made in their owner's place, where they stay (`os::mutex_in`,
+    `os::StaticMutex`), and its read-task record and stack come from a pool the image sizes
+    (`CONFIG_WZ_OS_THREADS`), none from the kernel heap. Tests: `wz-runtime-coop` `table_tests` (a grown table spawns again with no
     allocation, a reserved runtime allocates when made and never after, each table refuses one
     past its rows, counted) and `static_tests`, unchanged, for the slot profile. The engine makes
     its runtime at open with `CoopRuntime::opening` over `RuntimeTables` (`MAX_TASKS`,
@@ -793,7 +793,7 @@ heap's own header of each block, not a measurement.
 | the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
-| a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | none from the heap: blocks of two memory slabs of `CONFIG_WZ_OS_MUTEXES` and `CONFIG_WZ_OS_CONDVARS` in `.noinit` (20 to 30 bytes a block, estimate) | done (U11) |
+| a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | none from the heap or a pool: made in place in the owner's memory (16 and 12 words kept for each, held to the kernel's sizes by `BUILD_ASSERT`), a static one on its first use; the callers' places move to the session region | in progress |
 | the session's handle, in a place of the session's arena, and its drive, the engine's own `Arc` kept in the handle | open | none beyond the arena | done (U9, U10) |
 | the config (`ConfigState`: `CONFIG_ENTRIES` rows of 16 bytes and `CONFIG_TEXT_BYTES` of text, one block written in place; `arm_w.conf` states 2 and 72) | before the open, dropped by it | about 110, alive while the arena is reserved (about 200 while it was a `BTreeMap<u8, String>` of the mode and the locator, and about 400 at the pico preset's 8 and 256) | U14 done; its pool slot U9 |
 | a link's setup: the entropy source's `Arc` (`SharedEntropy`; the box inside holds a source of no size, which allocates nothing), the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |

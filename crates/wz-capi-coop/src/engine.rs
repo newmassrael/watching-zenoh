@@ -584,6 +584,8 @@ pub enum OpenError {
     /// session open at once, [`RowClaim`]) holds the engine of a session open now.
     /// Nothing was reserved, bound, joined or dialled.
     NoEngineRow,
+    /// The heap had no room for a link's shared handle. Nothing of the link stays.
+    HeapRefused,
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -608,6 +610,7 @@ impl From<TransportRefusal> for OpenError {
             TransportRefusal::Unreachable(why) => OpenError::Unreachable(why),
             TransportRefusal::EntropyUnavailable => OpenError::EntropyUnavailable,
             TransportRefusal::NoTask(why) => OpenError::NoTask(why),
+            TransportRefusal::HeapRefused => OpenError::HeapRefused,
         }
     }
 }
@@ -7821,10 +7824,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     // The faces are told a row at a time, as they are written in place: a watcher of snapshots is
-    // told each face its rows gather into.
+    // told each face its rows gather into, gathered in a place of its own.
     #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
-        SessionEngine::watch_face_rows(self, wz_capi_port::face_rows::snapshots_of_rows(sink))
+        let place = wz_capi_port::lodge::Lent::try_boxed().map_err(|_| Declined::NoRoom)?;
+        SessionEngine::watch_face_rows(
+            self,
+            wz_capi_port::face_rows::snapshots_of_rows(sink, place),
+        )
     }
 
     #[cfg(feature = "connectivity")]

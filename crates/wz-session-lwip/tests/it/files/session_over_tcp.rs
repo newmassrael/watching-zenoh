@@ -198,7 +198,7 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link: LinkRef = Box::leak(Box::new(link));
     let runtime: Rt = RUNTIME.start(Frozen).expect("the runtime starts once");
-    let local = CoopLocalSet::new(&runtime);
+    let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
     listen(&LISTENER, PORT, &ACCEPT_CELLS).expect("the node listens");
     let loopback = std::net::IpAddr::from([127, 0, 0, 1]);
@@ -211,13 +211,13 @@ fn a_session_opens_over_tcp_between_a_dialling_node_and_an_accepting_one() {
     let mut acceptor = accept_stack.acceptor(LwipTcpListen::new(link, &LISTENER));
     let dial_stack = Stack::new(loopback, &DIAL_RX, &DIAL_TX, dial(link, &DIAL_CELLS));
     let dialler: Host<1, 1> = SessionHost::new(
-        CoopLocalSet::new(&runtime),
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
         &DIAL_SESSIONS,
         &DIAL_PUMPS,
         dial_stack,
     );
     let accepting: Host<1, 1> = SessionHost::new(
-        CoopLocalSet::new(&runtime),
+        CoopLocalSet::try_new(&runtime).expect("the heap has room"),
         &ACCEPT_SESSIONS,
         &ACCEPT_PUMPS,
         accept_stack,

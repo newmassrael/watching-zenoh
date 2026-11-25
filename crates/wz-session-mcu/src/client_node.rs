@@ -338,7 +338,7 @@ mod tests {
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
         let far_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
         let OpenedLink {
             sink: far_sink,
@@ -346,14 +346,15 @@ mod tests {
         } = far_links
             .open_acceptor(7447)
             .expect("bind the router's end");
-        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime));
+        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime))
+            .expect("the heap has room");
         let seen = Rc::new(Seen::default());
         let router_sees = seen.clone();
         let _far = spawn_session(
             &local,
             far_pump,
             far_actions.clone(),
-            SessionEntropy::new(Counting(9)),
+            SessionEntropy::try_new(Counting(9)).expect("the heap has room"),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -402,7 +403,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb1),
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         let settle = |node: &mut ClientNode<'_, _, _, _>| {
             for _ in 0..64 {
@@ -496,7 +497,7 @@ mod tests {
         }
         let net = MemoryNetwork::new();
         let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let sink = || BoxedSink::new(|_sample: &dyn wz_session_core::sink::SampleView| {});
 
         let mut node = ClientNode::new(
@@ -508,7 +509,7 @@ mod tests {
                 limits: stated,
                 ..params(0xb1)
             },
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         node.subscriber("test/a", sink()).expect("under the quota");
         node.subscriber("test/b", sink()).expect("under the quota");
@@ -535,7 +536,7 @@ mod tests {
             &ENDPOINTS,
             SessionTimeouts::from_build(),
             || params(0xb2),
-            SessionEntropy::new(Counting(2)),
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
         );
         for key in ["test/a", "test/b", "test/c"] {
             control

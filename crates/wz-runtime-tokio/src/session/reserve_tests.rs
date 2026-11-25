@@ -130,7 +130,8 @@ fn session_over(driver: &Arc<ReservingDriver>) -> TokioSession {
         driver.clone(),
         fixture_session_init_params(),
         TokioTime::new(),
-    );
+    )
+    .expect("the heap has room");
     actions.enter_established();
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     TokioSession::new(actions, observer, Arc::new(TokioTime::new()))

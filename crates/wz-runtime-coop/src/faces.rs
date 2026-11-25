@@ -1944,7 +1944,9 @@ mod tests {
         if finished {
             local.run_until_idle();
         }
-        let link = CellRc::boxed(Quiet { holds }).into_link();
+        let link = CellRc::try_boxed(Quiet { holds })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session, task, link, input_wait, room_wait)
     }
@@ -2018,7 +2020,9 @@ mod tests {
     /// An established wire over a link waited on by `on`, owing a write when `owes`.
     fn waited_wire(local: &CoopLocalSet<Still>, on: WaitOn, owes: bool) -> Wire<Session> {
         let task = local.spawn_local(async { DriverOutcome::Terminated });
-        let link = CellRc::boxed(Waited { on, owes }).into_link();
+        let link = CellRc::try_boxed(Waited { on, owes })
+            .expect("the heap has room")
+            .into_link();
         let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
         Wire::new(session(true, None), task, link, input_wait, room_wait)
     }
@@ -2132,7 +2136,7 @@ mod tests {
     #[test]
     fn a_node_is_held_by_another_face_while_its_link_is_up() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(Link::Idle, 2);
         let other = TestFace {
@@ -2158,7 +2162,7 @@ mod tests {
     #[test]
     fn a_face_is_read_as_the_input_its_life_takes() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(
             dialing(DialEndpoint::Listed(0), Some(Err(LinkOpenError::Refused))),
             2,
@@ -2346,7 +2350,7 @@ mod tests {
     #[test]
     fn a_face_stands_by_for_its_node_only_while_another_face_reaches_it() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(
             Link::Wire(wire(&local, session(false, Some(&node)), false, false)),
@@ -2378,7 +2382,7 @@ mod tests {
     #[test]
     fn the_dial_role_stands_by_while_another_face_holds_its_node() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let node = [7u8, 1];
         let mut faces = supervisor(
             Link::Wire(wire(&local, session(false, Some(&node)), false, true)),
@@ -2426,7 +2430,7 @@ mod tests {
     #[test]
     fn a_handshake_end_names_the_close_the_task_end_or_the_deadline() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let opening = |session| Link::Wire(wire(&local, session, false, false));
         let closed = Session {
             closed: Some(CloseReason::Generic),
@@ -2702,7 +2706,7 @@ mod tests {
         }
 
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         faces.put_link(
             0,
             Link::Wire(wire(&local, session(true, None), true, false)),
@@ -2721,7 +2725,7 @@ mod tests {
     #[test]
     fn a_read_waits_on_each_links_handle_and_on_its_room_while_it_owes() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let group = LinkWait::input(WaitOn::Socket(9));
         for (owes, first) in [
             (false, LinkWait::input(WaitOn::Socket(3))),
@@ -2749,10 +2753,12 @@ mod tests {
     #[test]
     fn a_wait_tells_each_waited_link_what_it_found_and_a_move_reads_them_all() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let waited = |session: Session, on: WaitOn| -> TestLink {
             let task = local.spawn_local(async { DriverOutcome::Terminated });
-            let link = CellRc::boxed(Waited { on, owes: false }).into_link();
+            let link = CellRc::try_boxed(Waited { on, owes: false })
+                .expect("the heap has room")
+                .into_link();
             let (input_wait, room_wait) = (link.input_wait(), link.room_wait());
             Link::Wire(Wire::new(session, task, link, input_wait, room_wait))
         };
@@ -2810,7 +2816,7 @@ mod tests {
     #[test]
     fn a_read_past_its_reserved_room_looks_again_and_grows_nothing() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let first = LinkWait::input(WaitOn::Socket(3));
         let group = LinkWait::input(WaitOn::Socket(9));
         for (room, waited, ms) in [(2, vec![first, group], 10), (1, vec![first], 1)] {
@@ -2845,7 +2851,7 @@ mod tests {
     #[test]
     fn a_publish_gathers_the_links_owing_a_write_without_allocating() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), true)), 3);
         let quiet = TestFace {
             life: idle_life(),
@@ -2880,7 +2886,7 @@ mod tests {
     #[should_panic(expected = "more links owe a write than the outbound slots they hold")]
     fn more_links_owing_than_the_slots_they_hold_is_named_in_a_test_build() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let past = OWING_WAITS.saturating_add(1);
         let mut faces = supervisor(
             Link::Wire(waited_wire(&local, WaitOn::Socket(3), true)),
@@ -3097,7 +3103,7 @@ mod tests {
         }
 
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
         let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         match faces.idle_wait(10, &mut || 0u64, [], Some(wake)) {
@@ -3116,7 +3122,7 @@ mod tests {
     #[test]
     fn a_read_while_another_waits_with_the_buffer_waits_behind_and_allocates_nothing() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let link = LinkWait::input(WaitOn::Socket(3));
         let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), false)), 1);
         let first = faces.idle_wait(10, &mut || 0u64, [], None);
@@ -3148,7 +3154,7 @@ mod tests {
     #[test]
     fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
-        let local = CoopLocalSet::new(&runtime);
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
         let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None), 3);
         faces.end_dials_and_ports();
         assert!(

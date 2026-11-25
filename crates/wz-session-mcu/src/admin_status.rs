@@ -549,7 +549,8 @@ mod tests {
                     region: None,
                 },
                 clock,
-            );
+            )
+            .expect("the heap has room");
         // The answers leave as data sends, which a session lets through only once established.
         actions.enter_established();
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
@@ -669,7 +670,8 @@ mod tests {
                     region: None,
                 },
                 clock,
-            );
+            )
+            .expect("the heap has room");
         // The answers leave as data sends, which a session lets through only once established.
         actions.enter_established();
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));

@@ -114,11 +114,12 @@ impl SessionLinks for ZephyrLinks {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = ZephyrUdpSocket::bind(SocketAddr::new(self.local, port))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = CellRc::boxed(ZephyrUdpDriver::acceptor_with_buffers(
+        let driver = CellRc::try_boxed(ZephyrUdpDriver::acceptor_with_buffers(
             socket,
             self.rx_capacity,
             HeapTx::for_link(self.tx_slots, self.tx_capacity, self.rx_capacity),
-        ));
+        ))
+        .ok_or(LinkOpenError::Exhausted)?;
         Ok(OpenedLink {
             sink: driver.clone().into_sink(),
             pump: driver,
@@ -137,12 +138,13 @@ impl SessionLinks for ZephyrLinks {
         // Port 0 has the stack choose a free one, one per initiator session.
         let socket = ZephyrUdpSocket::bind(dial_bind(self.local, ip.at))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = CellRc::boxed(ZephyrUdpDriver::initiator_with_buffers(
+        let driver = CellRc::try_boxed(ZephyrUdpDriver::initiator_with_buffers(
             socket,
             ip.at,
             self.rx_capacity,
             HeapTx::for_link(self.tx_slots, self.tx_capacity, self.rx_capacity),
-        ));
+        ))
+        .ok_or(LinkOpenError::Exhausted)?;
         Ok(OpenedLink {
             sink: driver.clone().into_sink(),
             pump: driver,

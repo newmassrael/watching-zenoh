@@ -359,12 +359,14 @@ impl Pair {
 
         let opened = links.open_acceptor(port).expect("bind the acceptor");
         let acceptor_actions =
-            new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime));
+            new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let mut acceptor = SessionPump::try_new(
             runtime.clone(),
             opened.pump,
             acceptor_actions.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(1))
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
         )
@@ -382,12 +384,14 @@ impl Pair {
                 opened.sink,
                 params(0xb1),
                 CoopTime::new(&runtime),
-            );
+            )
+            .expect("the heap has room");
         let mut initiator = SessionPump::try_new(
             runtime.clone(),
             opened.pump,
             initiator_actions.clone(),
-            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
+            wz_runtime_coop::session_runtime::SessionEntropy::try_new(Counting(0))
+                .expect("the heap has room"),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
         )
