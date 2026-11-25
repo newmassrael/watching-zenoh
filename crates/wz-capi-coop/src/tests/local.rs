@@ -118,7 +118,7 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
             .declare_matching_listener(
                 FilterPlane::Subscribers,
                 "demo/l/other",
-                Arc::new(|_: bool| {}),
+                wz_capi_port::MatchingSink::shared(|_: bool| {}),
                 false,
             )
             .expect("a session with rows left declares");
@@ -156,7 +156,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
             .declare_matching_listener(
                 FilterPlane::Subscribers,
                 "demo/l/x",
-                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                wz_capi_port::MatchingSink::shared(move |matching| {
+                    into.lock().unwrap().push(matching)
+                }),
                 count_local,
             )
             .expect("a session with rows left declares");
