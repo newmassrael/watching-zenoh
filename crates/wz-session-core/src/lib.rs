@@ -1346,9 +1346,10 @@ pub mod encoded_push;
 #[cfg(feature = "codec-push")]
 pub mod lent_push;
 
-/// A strict, allocation-free reader of the one record a data stream is made of (a `Push`
-/// carrying a `Put` with at most the QoS extension): the key's parts and the payload as
-/// ranges of the buffer, `None` for anything else so the generated codec reads it.
+/// The lane of a data stream: a frame every record of which is a plain `Put` (a `Push`
+/// carrying a `Put` with at most the QoS extension), read by the one reader of a Push and kept
+/// as the places of each record's key and payload; `None` for a frame with any other record,
+/// which the owned parse reads.
 pub mod plain_push;
 
 /// The payload of a Put body and the one rule that picks between its two wire

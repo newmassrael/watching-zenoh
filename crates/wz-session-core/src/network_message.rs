@@ -1930,7 +1930,7 @@ fn admit_lent(
         )
     )
 ))]
-mod push_read;
+pub(crate) mod push_read;
 
 #[cfg(all(
     feature = "codec-frame",

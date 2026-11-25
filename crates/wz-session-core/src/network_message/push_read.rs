@@ -4,7 +4,8 @@
 //! The one reader of a Push: the record as the codec's view (`wz_codecs::push::PushView`) and
 //! the verdict of the extension admission rule on its chains, read in one pass. Every walk that
 //! reads a Push reads it here: the walks that lend a record where its frame lies (`lend_push`),
-//! and the owned parse (`decode_one_record`), which projects the view into its owned message.
+//! the owned parse (`decode_one_record`), which projects the view into its owned message, and the
+//! lane of a data stream (`crate::plain_push`), which keeps of a plain Put the places of its parts.
 //!
 //! What it reads, and how it refuses what it does not, is the generated `PushView::decode`'s,
 //! error for error, and its verdict is the one the rule gives the view it reads (the Push's own
@@ -144,6 +145,19 @@ pub(super) fn read_push_view<'f>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
 ) -> Result<ExtAdmission, CodecError> {
+    let own = read_envelope(cursor, out)?;
+    read_body(cursor, out, own)
+}
+
+/// The envelope of the Push at the cursor, read into `out`: its header, its key and its own
+/// chain, and the verdict on that chain. The cursor is at the body's header after it. The plain
+/// lane reads the envelope alone: what it keeps of a record's prefix ends at that header, and the
+/// body of a plain Put is the header and the payload `read_payload` reads.
+#[inline(always)]
+pub(crate) fn read_envelope<'f>(
+    cursor: &mut SceCursor<'f>,
+    out: &mut PushView<'f>,
+) -> Result<ExtAdmission, CodecError> {
     let header = byte(cursor)?;
     read_key(cursor, header, &mut out.keyexpr.body)?;
     let mut own = Judge::new(ExtCarrier::Network(NetworkEnvelope::Push));
@@ -152,6 +166,18 @@ pub(super) fn read_push_view<'f>(
     } else {
         None
     };
+    out.header = header;
+    Ok(own.verdict)
+}
+
+/// The body of the Push whose envelope `read_envelope` read into `out` with the verdict
+/// `own`, read into `out`, and the verdict on the record's chains: `own`, then the body's.
+#[inline(always)]
+fn read_body<'f>(
+    cursor: &mut SceCursor<'f>,
+    out: &mut PushView<'f>,
+    own: ExtAdmission,
+) -> Result<ExtAdmission, CodecError> {
     let tag = cursor.peek_u8()? & 0x1f;
     out.body = match tag {
         TAG_PUT => PushViewVariant::CodecZenohMsgPut(MsgPutView::default()),
@@ -177,8 +203,7 @@ pub(super) fn read_push_view<'f>(
             )
         }
     };
-    out.header = header;
-    Ok(super::then_judge(own.verdict, || body))
+    Ok(super::then_judge(own, || body))
 }
 
 /// The key of a Push whose header is `header`: its id, and with `N` its suffix, in the arm its
@@ -267,13 +292,7 @@ fn read_put<'f>(
         put.payload_len = None;
         put.slice_count = Some(count);
     } else {
-        let length = vle_u64(cursor)?;
-        if length > PAYLOAD_MAX {
-            return Err(CodecError::LengthOutOfRange);
-        }
-        let length_bytes = usize::try_from(length).map_err(|_| CodecError::NeedMoreBytes)?;
-        let payload = cursor.peek_slice(length_bytes)?;
-        cursor.advance(length_bytes)?;
+        let (length, payload) = read_payload(cursor)?;
         // A chain with no marker is one the arm with an inline payload holds.
         let extensions = match extensions {
             Some(chain) => Some(
@@ -291,6 +310,19 @@ fn read_put<'f>(
     }
     put.header = header;
     Ok(judge.verdict)
+}
+
+/// The payload of a Put that carries it inline: its length, and that many bytes, where they lie.
+#[inline(always)]
+pub(crate) fn read_payload<'f>(cursor: &mut SceCursor<'f>) -> Result<(u64, &'f [u8]), CodecError> {
+    let length = vle_u64(cursor)?;
+    if length > PAYLOAD_MAX {
+        return Err(CodecError::LengthOutOfRange);
+    }
+    let length_bytes = usize::try_from(length).map_err(|_| CodecError::NeedMoreBytes)?;
+    let payload = cursor.peek_slice(length_bytes)?;
+    cursor.advance(length_bytes)?;
+    Ok((length, payload))
 }
 
 #[cfg(test)]
@@ -368,17 +400,103 @@ mod tests {
         ))
     }
 
-    /// The reader against the codec over `bytes`, and with an allocator the owned parse against
-    /// the codec's owned decode, where the first record is a Push: what each case below is held
+    /// What the plain lane is held to over a frame: the codec's reading of each record, every one a
+    /// Push whose own chain is the QoS entry alone or none and whose body is a Put with no
+    /// timestamp, encoding or chain, kept as the places of its parts, each said to repeat the key
+    /// of the record before it when its id, its mapping and its suffix's bytes are that record's;
+    /// `None` when any record is another, or the codec refuses one, and for an empty frame.
+    #[cfg(feature = "alloc")]
+    fn plain_through_the_codec(
+        frame: &[u8],
+    ) -> Option<alloc::vec::Vec<crate::plain_push::PlainPut>> {
+        use wz_codecs::ext_entry::ExtEntryViewVariant;
+        let place = |part: &[u8]| {
+            let start = part.as_ptr() as usize - frame.as_ptr() as usize;
+            (start as u32, (start + part.len()) as u32)
+        };
+        let mut cursor = SceCursor::new(frame);
+        let mut puts: alloc::vec::Vec<crate::plain_push::PlainPut> = alloc::vec::Vec::new();
+        let mut last_suffix: Option<&[u8]> = None;
+        while cursor.remaining() > 0 {
+            if cursor.peek_u8().ok()? & 0x1f != wz_codecs::wire_const::N_MID_PUSH {
+                return None;
+            }
+            let view = PushView::decode(&mut cursor).ok()?;
+            let qos = match &view.extensions {
+                None => None,
+                Some(chain) => {
+                    let mut entries = crate::ext_view::walked(Some(chain));
+                    let entry = entries.next()?;
+                    if entries.next().is_some() || entry.header != 0x21 {
+                        return None;
+                    }
+                    match entry.body {
+                        ExtEntryViewVariant::CodecZenohExtZint(value) => Some(value.value as u8),
+                        _ => return None,
+                    }
+                }
+            };
+            let PushViewVariant::CodecZenohMsgPut(put) = &view.body else {
+                return None;
+            };
+            let MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } = &put.extensions_has_0x12
+            else {
+                return None;
+            };
+            if put.header != 0x01 {
+                return None;
+            }
+            let (id, sender_mapping, suffix) = match &view.keyexpr.body {
+                WireexprViewVariant::WireexprLocal(key) => (
+                    key.id,
+                    true,
+                    key.suffix.map(|text| text.into_inner().as_bytes()),
+                ),
+                WireexprViewVariant::WireexprNonlocal(key) => (
+                    key.id,
+                    false,
+                    key.suffix.map(|text| text.into_inner().as_bytes()),
+                ),
+            };
+            let repeats_key = puts.last().is_some_and(|last| {
+                last.id == id && last.sender_mapping == sender_mapping && last_suffix == suffix
+            });
+            puts.push(crate::plain_push::PlainPut {
+                id,
+                sender_mapping,
+                suffix: suffix.map(place),
+                payload: place(payload.into_inner()),
+                qos,
+                repeats_key,
+            });
+            last_suffix = suffix;
+        }
+        if puts.is_empty() {
+            None
+        } else {
+            Some(puts)
+        }
+    }
+
+    /// The reader against the codec over `bytes`; with an allocator, the owned parse against the
+    /// codec's owned decode where the first record is a Push, and the plain lane over the whole of
+    /// `bytes` as a frame against the codec's reading of each record: what each case below is held
     /// to.
     fn agree(bytes: &[u8], case: &dyn core::fmt::Debug) {
         assert_eq!(reading(bytes), through_the_codec(bytes), "{case:?}");
         #[cfg(feature = "alloc")]
-        if bytes
-            .first()
-            .is_some_and(|header| header & 0x1f == wz_codecs::wire_const::N_MID_PUSH)
         {
-            assert_eq!(owned(bytes), owned_through_the_codec(bytes), "{case:?}");
+            if bytes
+                .first()
+                .is_some_and(|header| header & 0x1f == wz_codecs::wire_const::N_MID_PUSH)
+            {
+                assert_eq!(owned(bytes), owned_through_the_codec(bytes), "{case:?}");
+            }
+            assert_eq!(
+                crate::plain_push::read_plain_puts(bytes),
+                plain_through_the_codec(bytes),
+                "{case:?}"
+            );
         }
     }
 
@@ -427,12 +545,14 @@ mod tests {
 
     /// Over every shape, the reader reads what the codec reads and judges it as the rule judges
     /// the codec's view: the same view, the same end, the same verdict; the owned parse decodes it
-    /// as the codec's owned decode does; and with another record behind it, as a frame holds them,
-    /// the same.
+    /// as the codec's owned decode does, and the plain lane keeps of it what the codec reads; and
+    /// with other records around it, as a frame holds them, the same.
     #[test]
     fn every_shape_reads_as_the_codec_reads_it() {
         let behind = [0x9du8, 3, 0x21, 0x1a, 0x01, 1, b'n'];
         let mut refused = 0usize;
+        #[cfg(feature = "alloc")]
+        let mut plain = 0usize;
         for shape in shapes() {
             let read = reading(&shape);
             assert!(read.is_ok(), "{shape:02x?}: {read:?}");
@@ -443,11 +563,21 @@ mod tests {
             }
             let frame = [&shape[..], &behind[..]].concat();
             agree(&frame, &frame);
+            // A run of the same record around another, as a stream's frame holds them: the plain
+            // lane reads a record whose prefix repeats the one before it from that one's reading.
+            let run = [&shape[..], &shape[..], &behind[..], &behind[..], &shape[..]].concat();
+            agree(&run, &run);
+            #[cfg(feature = "alloc")]
+            if crate::plain_push::read_plain_puts(&run).is_some() {
+                plain += 1;
+            }
         }
         assert!(
             refused >= 3,
             "the corpus holds chains the rule refuses: {refused}"
         );
+        #[cfg(feature = "alloc")]
+        assert!(plain >= 3, "the corpus holds frames of plain Puts: {plain}");
     }
 
     /// Cut anywhere, a record is refused with the codec's error, and with any one byte changed to
