@@ -32,11 +32,12 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::zid_hex::same_zid;
 
 use crate::face_life::{FaceRole, Phase, Signals};
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CountKind, FaceHeld, FaceParts, OneTask};
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
     SessionDatagramLink, SessionLinks, WaitOn,
 };
+use crate::sync::{FacePlace, Lend, LockKind};
 use crate::CoopLocalJoinHandle;
 
 /// The number a session knows one of its faces by.
@@ -290,6 +291,128 @@ impl<S: FaceSession, E: LinkEnd, N: CountKind> FaceWire for Wire<S, E, N> {
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         self.link.write_owed_now();
+    }
+}
+
+/// The parts of one face's link that the face's place holds ([`FaceAt`]), read as the link's
+/// wire while the link is up or in its handshake.
+pub trait WireParts: FaceParts {
+    /// The wire the parts hold.
+    type Wire: FaceWire;
+
+    /// The parts' wire, while they hold one.
+    fn wire(&self) -> Option<&Self::Wire>;
+}
+
+/// A face's link whose parts lie in the face's place, apart from the session's state: what the
+/// face's record holds while the link is up or in its handshake, holding no handle on the parts.
+///
+/// The supervisor reads it under the session's lock, which never waits on a face, so each read
+/// tries the place and waits for nothing: a place another thread holds, or one that holds no
+/// wire, reads as a link that holds no input, owes no write, is not established, names no node
+/// and no Close, and is told nothing; its next look reads it again. A wait on the link's input
+/// and room is read off the link once, when it is made, and how its session ends is read and
+/// asked through its end (`E`), with no lend of the place.
+pub struct FaceAt<K: LockKind, P: WireParts, E: LinkEnd> {
+    place: core::ptr::NonNull<FacePlace<K, FaceHeld<P>>>,
+    end: E,
+    input: Option<WaitOn>,
+    room: Option<WaitOn>,
+}
+
+impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
+    /// The link whose parts lie in `place`, ended by `end`, waited on by `input` for its input
+    /// and by `room` for its room.
+    ///
+    /// # Safety
+    ///
+    /// `place` lives, at the address it has now, for as long as the handle does. No read of the
+    /// handle is made by a thread inside a lend of `place`: a kind whose values one owner's lock
+    /// keeps to one thread ([`crate::sync::Confined`]) lends whatever holds the place, so such a
+    /// read would reach the parts inside their own lend.
+    pub unsafe fn new(
+        place: &FacePlace<K, FaceHeld<P>>,
+        end: E,
+        input: Option<WaitOn>,
+        room: Option<WaitOn>,
+    ) -> Self {
+        Self {
+            place: core::ptr::NonNull::from(place),
+            end,
+            input,
+            room,
+        }
+    }
+
+    /// `f` on the wire of the parts when the place lends them now, else `absent`.
+    fn read<U: Send>(&self, absent: U, f: impl FnOnce(&P::Wire) -> U + Send) -> U {
+        // SAFETY: the place outlives the handle where it was when the handle was made, and is
+        // read by no thread inside its own lend (`Self::new`'s contract).
+        let place = unsafe { self.place.as_ref() };
+        match place.try_lend(|held| held.lend(|parts| parts.wire().map(f))) {
+            Lend::Lent(Some(answer)) => answer,
+            Lend::Lent(None) | Lend::Empty | Lend::Held => absent,
+        }
+    }
+}
+
+impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
+    fn established(&self) -> bool {
+        self.read(false, |wire| wire.established())
+    }
+
+    fn node(&self) -> Option<SessionZid> {
+        self.read(None, |wire| wire.node())
+    }
+
+    /// A link another thread holds is not told: the abort that follows each end
+    /// ([`LinkSupervisor::end_faces`]) reaches it through its end, with no lend.
+    fn end(&self) {
+        self.read((), |wire| wire.end());
+    }
+
+    fn close_reason(&self) -> Option<CloseReason> {
+        self.read(None, |wire| wire.close_reason())
+    }
+
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn input_seen(&self, ready: bool) {
+        self.read((), move |wire| wire.input_seen(ready));
+    }
+}
+
+impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
+    fn finished(&self) -> bool {
+        self.end.finished()
+    }
+
+    fn abort(&self) {
+        self.end.abort();
+    }
+
+    fn holds_input(&self) -> bool {
+        self.read(false, |wire| wire.holds_input())
+    }
+
+    fn owes_write(&self) -> bool {
+        self.read(false, |wire| wire.owes_write())
+    }
+
+    fn waits_for_buffer(&self) -> bool {
+        self.read(false, |wire| wire.waits_for_buffer())
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.input
+    }
+
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.room
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        self.read((), |wire| wire.write_owed_now());
     }
 }
 
@@ -1972,6 +2095,108 @@ mod tests {
         assert_eq!(aborted.get(), 0, "CONTROL: nothing ended the link yet");
         faces.end_faces(|_| {});
         assert_eq!(aborted.get(), 1, "the handle ended the link");
+    }
+
+    /// The owner of what a confined face's place holds in the tests below: one test's thread.
+    struct TestOwner;
+
+    // SAFETY: every value of a `Confined<TestOwner>` kind is made and reached by the one thread
+    // of the test that made it.
+    unsafe impl crate::sync::ConfinedOwner for TestOwner {}
+
+    /// The parts of a face's link in a face's place: its wire, while it holds one.
+    struct ApartParts(Option<ApartWire>);
+
+    // SAFETY: the parts are reached by the thread of the test that made them alone, and hold
+    // nothing bound to it.
+    unsafe impl FaceParts for ApartParts {}
+
+    impl WireParts for ApartParts {
+        type Wire = ApartWire;
+
+        fn wire(&self) -> Option<&ApartWire> {
+            self.0.as_ref()
+        }
+    }
+
+    /// Parts holding a wire that holds input, its aborts counted in `aborted`.
+    fn held_parts(aborted: &Rc<Cell<u32>>) -> FaceHeld<ApartParts> {
+        let parts = ApartParts(Some(ApartWire {
+            holds: true,
+            finished: false,
+            aborted: Rc::clone(aborted),
+        }));
+        // SAFETY: no handle on a cell of the parts lives outside them.
+        unsafe { FaceHeld::gathered(parts) }
+    }
+
+    /// A link whose parts lie in a face's place is read through a lend of the place, and its end
+    /// through the end it was made with, with no lend; an empty place reads as a quiet link.
+    /// Turned red by a handle that reads its end or its waits off the parts, or reads an empty
+    /// place as anything but quiet.
+    #[test]
+    fn a_link_in_a_faces_place_is_read_through_the_place() {
+        let aborted = Rc::new(Cell::new(0));
+        let place = FacePlace::<crate::sync::Confined<TestOwner>, FaceHeld<ApartParts>>::empty();
+        let end = Rc::new(HeldEnd::default());
+        // SAFETY: the place outlives the handle, in this frame, and no read of the handle is made
+        // inside a lend of the place.
+        let at = unsafe { FaceAt::new(&place, Rc::clone(&end), Some(WaitOn::Socket(3)), None) };
+        assert!(!at.holds_input(), "an empty place reads as no input");
+        assert!(!at.established(), "and as no link established");
+        assert!(
+            matches!(at.input_wait(), Some(WaitOn::Socket(3))),
+            "the wait the handle was made with"
+        );
+        assert!(place.hold(held_parts(&aborted)).is_none());
+        assert!(at.holds_input(), "the parts' wire read through the place");
+        assert!(at.established(), "as is its session");
+        assert!(!at.finished(), "CONTROL: a link whose session runs");
+        end.finished.set(true);
+        assert!(at.finished(), "the end read with no lend");
+        at.abort();
+        assert!(end.aborted.get(), "the abort reached the end");
+        assert_eq!(aborted.get(), 0, "and not the parts' wire");
+        assert!(place.take().is_some());
+        assert!(!at.holds_input(), "a place emptied reads as no input");
+    }
+
+    /// A link whose place another thread holds reads as a quiet link at once, waiting for
+    /// nothing, and as its parts once that thread lets go of the place. Turned red by a read that
+    /// waits for the place (the test then never ends), or reads it held as holding input.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_link_another_thread_holds_reads_as_quiet_and_waits_for_nothing() {
+        extern crate std;
+        use std::sync::Barrier;
+        let aborted = Rc::new(Cell::new(0));
+        let place = FacePlace::<crate::sync::Shared, FaceHeld<ApartParts>>::empty();
+        assert!(place.hold(held_parts(&aborted)).is_none());
+        let end = Rc::new(HeldEnd::default());
+        // SAFETY: the place outlives the handle, in this frame, and no read of the handle is made
+        // inside a lend of the place.
+        let at = unsafe { FaceAt::new(&place, end, None, None) };
+        assert!(
+            at.holds_input(),
+            "CONTROL: a place no thread holds lends its parts"
+        );
+        let (taken, done) = (Barrier::new(2), Barrier::new(2));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                place.lend(|_| {
+                    taken.wait();
+                    done.wait();
+                });
+            });
+            taken.wait();
+            assert!(
+                !at.holds_input(),
+                "a place another thread holds reads as no input"
+            );
+            assert!(!at.established(), "and as no link established");
+            done.wait();
+        });
+        assert!(at.holds_input(), "its parts once the place is let go of");
     }
 
     /// A reach of a face to change it is counted, and a look at one is not: what a session that
