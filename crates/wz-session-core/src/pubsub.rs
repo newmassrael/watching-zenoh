@@ -2508,7 +2508,9 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     let at = memo.slot_of(key);
     if let Some(Some(slot)) = memo.slots.get(at) {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
-            memo.answered_by(at);
+            // The fields, as `answered_by` writes them: `slot` still borrows the slots.
+            memo.last_at = at.saturating_add(1);
+            memo.last_writes = memo.writes;
             for position in slot.hits.iter() {
                 if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
                     deliver(id, sink);

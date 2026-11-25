@@ -445,7 +445,7 @@ pub enum PartsForm {
 }
 
 /// Why [`canonize_parts_as`] made no key of its parts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PartsRefusal {
     /// The canonizer refused the text for this cause, under either form.
     Canon(KeyexprCanonError),

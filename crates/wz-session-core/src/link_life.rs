@@ -429,11 +429,14 @@ impl UnicastLink {
     }
 
     /// [`Self::input`] for what a pump of the established link came to: one that terminated
-    /// ended the link, and one stopped at its iteration cap goes on.
+    /// ended the link, and one stopped at its iteration cap goes on. A pump refused before it ran
+    /// dropped the link it was given, so the link has ended as one that terminated has.
     #[cfg(feature = "storage-profile")]
     pub fn pumped(&mut self, outcome: DriverOutcome, now_us: u64) -> Effects {
         match outcome {
-            DriverOutcome::Terminated => self.input(LinkInput::Ended, now_us),
+            DriverOutcome::Terminated | DriverOutcome::Refused => {
+                self.input(LinkInput::Ended, now_us)
+            }
             DriverOutcome::IterationLimit => Effects::default(),
         }
     }
@@ -882,5 +885,19 @@ mod tests {
         let lost = link.pumped(DriverOutcome::Terminated, 2);
         assert!(lost.lose());
         assert_eq!(lost.dial(), Some(0));
+    }
+
+    /// A pump refused before it ran dropped its link: the established link is lost and the first
+    /// endpoint dialled again, as for one that terminated.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_refused_pump_ends_the_link() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        bring_up(link, 0);
+        let lost = link.pumped(DriverOutcome::Refused, 1);
+        assert!(lost.lose());
+        assert_eq!(lost.dial(), Some(0));
+        assert_eq!(link.phase(), LinkPhase::Dialing { row: 0 });
     }
 }
