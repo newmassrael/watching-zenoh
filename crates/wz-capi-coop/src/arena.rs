@@ -70,7 +70,7 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`]), lent after the record and before the tables that keep their keys in it. A
+//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
 //!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
 //!   declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
@@ -124,6 +124,7 @@ use wz_runtime_coop::RuntimePlace;
 use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
@@ -131,21 +132,25 @@ use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::policy::HeldPublishDrop;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-#[cfg(feature = "query")]
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::HeapSinks;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
+use wz_session_core::slot_observer::{RequesterRows, SlotObserverOf};
 
+#[cfg(feature = "query")]
+use crate::engine::LegHold;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-use crate::engine::{
-    CoopTables, FACE_SET_BYTES, REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES,
-};
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
+#[cfg(feature = "runtime-plan")]
+use crate::engine::{CoopTables, FACE_SET_BYTES};
+use crate::engine::{REGISTRY_LEND_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -962,7 +967,7 @@ impl GetTables {
 
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
@@ -1813,10 +1818,17 @@ impl ArenaPlan {
             limits.max_decl_observers(),
             caps::MAX_DECL_OBSERVERS,
         );
-        let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
-            watchers,
-        ));
-        self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        // A build of the region's form lays the lists out in its region, at the build's bound; the
+        // limit is still held, so a config over the build's is refused under its name either way.
+        #[cfg(feature = "runtime-plan")]
+        {
+            let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
+                watchers,
+            ));
+            self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        }
+        #[cfg(not(feature = "runtime-plan"))]
+        let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
             self.lent(
@@ -1846,7 +1858,8 @@ impl ArenaPlan {
         };
         // A row of tables, each the spans of one face's registries: a face takes one whole. A build
         // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
-        #[cfg(feature = "query")]
+        // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
@@ -1910,7 +1923,9 @@ impl ArenaPlan {
             dial: shape.dial_role(),
         };
         // The sets of face tables themselves, one for each face, in one table
-        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
+        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it. A
+        // build of the region's form holds its one set, its tables and their rows in its region.
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::FaceTables,
             self.session.peers.sets(),
@@ -1931,10 +1946,15 @@ impl ArenaPlan {
             self.session.peers.sets(),
             ROOM_PLACE_BYTES,
         );
-        let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
-        self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        #[cfg(feature = "runtime-plan")]
+        {
+            let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
+            self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        }
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
-        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
+        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline, as a
+        // build of the region's form does.
+        #[cfg(feature = "runtime-plan")]
         if SHARES_ROWS {
             let pools = self.session.peers.pools;
             let aliases = self.sized(pools.alias_bytes());
@@ -1996,6 +2016,9 @@ impl ArenaPlan {
                 );
             }
         }
+        // A build of the region's form holds the session's tables and its key arena in its region
+        // (`crate::region::StateRegion`).
+        #[cfg(feature = "runtime-plan")]
         self.put_entities();
         self.settled()
     }
@@ -2037,6 +2060,7 @@ impl ArenaPlan {
     }
 
     /// The rows of the session's declarations ([`EntityRows`]).
+    #[cfg(feature = "runtime-plan")]
     const fn put_entities(&mut self) {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.

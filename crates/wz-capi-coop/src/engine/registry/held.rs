@@ -8,17 +8,29 @@
 //! is written once over [`Holders`], so its tests build either form whatever the build.
 
 use super::{FaceId, FaceTables, DIAL_FACE};
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::bounded::{Arena, LendRefused};
 use wz_session_core::slot_observer::OtherPeers;
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 use super::{Others, NO_FACE};
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 use crate::arena::MAX_FACE_SETS;
-#[cfg(any(feature = "listen", feature = "group", test))]
-use wz_session_core::bounded::BoundedVec;
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
+use wz_session_core::bounded::{BoundedVec, Lent};
 
-use crate::RowPolicy;
 #[cfg(any(not(any(feature = "listen", feature = "group")), test))]
 use wz_session_core::slot_observer::NoOtherPeers;
 
@@ -32,7 +44,9 @@ pub(in crate::engine) trait Holders: Sized {
         Self: 'a;
 
     /// The index of `sets` sets, lent from `arena` where the form keeps one: the dial role's face
-    /// holds the first set, and every other is free. Refused when the arena has not the rows.
+    /// holds the first set, and every other is free. Refused when the arena has not the rows. A
+    /// build of the region's form holds its one set in the region and asks for no index.
+    #[cfg(feature = "runtime-plan")]
     fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused>;
 
     /// The face of each set, by the set's place.
@@ -52,18 +66,27 @@ pub(in crate::engine) trait Holders: Sized {
 /// The index of a session that adds faces beside its dial role's: a row for each set the open
 /// lent, lent from the arena with them (`crate::arena::ArenaPart::HeldFaces`), so a face coming
 /// or going writes its set's row and moves none.
-#[cfg(any(feature = "listen", feature = "group", test))]
-pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy>);
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
+pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, Lent>);
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 impl Holders for ManyHolders {
     type Others<'a>
         = Others<'a>
     where
         Self: 'a;
 
+    #[cfg(feature = "runtime-plan")]
     fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
-        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy> = arena.lend(sets)?;
+        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, Lent> = arena.lend(sets)?;
         let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
         for holder in faces.take(sets) {
             rows.push(holder).map_err(|_| LendRefused::OverCeiling {
@@ -114,6 +137,7 @@ impl Holders for OneHolder {
     where
         Self: 'a;
 
+    #[cfg(feature = "runtime-plan")]
     fn lent(_arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
         debug_assert_eq!(sets, 1, "a session of one face is lent one set");
         Ok(Self)

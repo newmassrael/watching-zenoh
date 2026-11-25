@@ -78,6 +78,7 @@ use wz_session_core::session_tables::{
     SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -143,7 +144,7 @@ use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
-use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 use wz_session_core::locality::Locality;
@@ -222,12 +223,24 @@ use ledger::{Ledger, Seen};
 mod direct;
 
 mod registry;
+#[cfg(not(feature = "runtime-plan"))]
+use crate::region::{RegionBlock, RegionField, StateRegion};
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
+
+/// How the session's state holds its registry: by value where the open lent its tables from the
+/// arena, and by the handle of the field of the session's region where the build laid it out
+/// (`crate::region`), which drops it in place.
+#[cfg(feature = "runtime-plan")]
+type RegistryHold = Registry;
+#[cfg(not(feature = "runtime-plan"))]
+type RegistryHold = RegionField<Registry>;
 
 mod replay;
 use replay::{Replay, TurnEnd};
@@ -695,7 +708,7 @@ struct SessionLent {
     transport: TransportTables,
     router: SessionReassembly,
     keys: KeySpace,
-    registry: Registry,
+    registry: RegistryHold,
     /// After the registry, whose dispatch reaches it by a handle that counts nothing.
     #[cfg(feature = "queryable")]
     plane: Placed<QueryPlane>,
@@ -728,6 +741,10 @@ struct SessionLent {
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
     engine: EnginePlace,
+    /// The region the session's registry and its key arena lie in: after the registry's handle,
+    /// which drops the registry in place, and every table that keeps a key there.
+    #[cfg(not(feature = "runtime-plan"))]
+    state: RegionBlock<StateRegion>,
     arena: SessionArena,
 }
 
@@ -735,7 +752,6 @@ struct SessionLent {
 /// (`SessionRows::lent_from`): the key arena, and the ends of its legs, their callbacks and the
 /// session's note of each leg pending.
 struct StateTables {
-    keys: LentKeys,
     #[cfg(feature = "query")]
     legs: Rows<Ended, { usize::MAX }>,
     #[cfg(feature = "query")]
@@ -755,11 +771,10 @@ struct StateTables {
 impl SessionRows {
     /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
-    fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
+    fn lent_from(&self, lend: &mut TableLender<'_>) -> StateTables {
         #[cfg(feature = "query")]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            keys: lend.keys(self.key_bytes(), longest),
             #[cfg(feature = "query")]
             legs: lend.table(legs),
             #[cfg(feature = "query")]
@@ -806,8 +821,14 @@ fn lend_session(
     // open moves into what it makes one by one, are taken apart at once instead: a table held as
     // a field of a set partly moved out would need its own drop on each refusal below.
     let transport = plan.transport().lent_from(&mut lend);
+    // The key arena is the arena's where the open lends the registry from it, and the region's
+    // otherwise, beside the registry whose tables keep their keys there.
+    #[cfg(feature = "runtime-plan")]
+    let keys = lend.keys(
+        plan.session().key_bytes(),
+        config.limits.max_keyexpr_bytes_held(),
+    );
     let StateTables {
-        keys,
         #[cfg(feature = "query")]
         legs,
         #[cfg(feature = "query")]
@@ -820,15 +841,25 @@ fn lend_session(
         refused_finals,
         #[cfg(feature = "advanced-cache")]
         cache,
-    } = plan
-        .session()
-        .lent_from(&mut lend, config.limits.max_keyexpr_bytes_held());
+    } = plan.session().lent_from(&mut lend);
     let PlaceTables {
         handle,
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
     let room_places: RoomPlaces = lend.table(plan.peers().sets());
+    #[cfg(feature = "runtime-plan")]
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    #[cfg(not(feature = "runtime-plan"))]
+    lend.finish().map_err(ArenaRefused::Lend)?;
+    // The registry and the key arena lie in the region the build lays out, one zeroed reservation
+    // beside the arena: the session's tables are its fields, placed over their rows by one walk.
+    #[cfg(not(feature = "runtime-plan"))]
+    let state = RegionBlock::<StateRegion>::reserve(memory)?;
+    // SAFETY: the block is a zeroed `StateRegion` this open alone reaches; it neither moves nor goes
+    // back before the registry's handle and every key of it are let go of, being held after them
+    // by what this hands back and then by the session's state.
+    #[cfg(not(feature = "runtime-plan"))]
+    let keys = unsafe { StateRegion::place(state.as_ptr(), resolve_limits(config)) };
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
@@ -898,6 +929,7 @@ fn lend_session(
     let delivery = RoundDelivery::new(lane);
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
+    #[cfg(feature = "runtime-plan")]
     let registry = Registry::new(
         resolve_limits(config),
         arena.arena_mut(),
@@ -912,6 +944,20 @@ fn lend_session(
         plan.peers(),
         delivery,
     )
+    .map_err(ArenaRefused::Lend)?;
+    // The application's tables are the region's, placed above; the session's one table set holds
+    // its tokens as rows, so the observer's own registry of them has none (`RegistryRegion`).
+    // SAFETY: the region was written and placed by `StateRegion::place` above and nothing reaches
+    // its registry yet; the block is held after the handle (`SessionLent`, then `Core`).
+    #[cfg(not(feature = "runtime-plan"))]
+    let registry = unsafe {
+        RegistryRegion::bind(
+            StateRegion::registry_at(state.as_ptr()),
+            resolve_limits(config),
+            &plan.tables(),
+            delivery,
+        )
+    }
     .map_err(ArenaRefused::Lend)?;
     let runtime = arena
         .runtime_place(holds.runtime)
@@ -943,6 +989,8 @@ fn lend_session(
         tx_pool_short: plan.tx_pool_short(),
         #[cfg(feature = "advanced-cache")]
         cache,
+        #[cfg(not(feature = "runtime-plan"))]
+        state,
         arena,
     })
 }
@@ -1910,7 +1958,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, 
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
 /// is refused before anything is taken, registered or sent.
 #[cfg(feature = "query")]
-type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, RowPolicy>;
+type Rows<T, const N: usize> =
+    wz_session_core::bounded::BoundedVec<T, N, wz_session_core::bounded::Lent>;
 
 /// What a move of the links left settled ([`Core::move_links`]): every face up or waiting for a
 /// time, no port to ask and no group. The links are moved again once a face's link ended, a face
@@ -2015,6 +2064,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// drop alone.
     #[cfg(feature = "listen")]
     _admission: Placed<Admission<C>>,
+    /// The region the session's registry and its key arena lie in (`crate::region`): after the
+    /// session's state, whose handle of the registry drops it in place, and every table that keeps
+    /// a key in it.
+    #[cfg(not(feature = "runtime-plan"))]
+    state: RegionBlock<StateRegion>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -2028,7 +2082,7 @@ type SessionState = wz_session_core::session_state::SessionState<CoopSession>;
 enum CoopSession {}
 
 impl SessionParts for CoopSession {
-    type Registry = Registry;
+    type Registry = RegistryHold;
     type Faces = Registry;
     type Callbacks = CoopRows;
     type Storage = RowPolicy;
@@ -2064,19 +2118,19 @@ impl SessionParts for CoopSession {
     #[cfg(not(feature = "local-queryable"))]
     type LocalRequests = ();
 
-    fn tables(registry: &Registry) -> &CoopTables {
+    fn tables(registry: &RegistryHold) -> &CoopTables {
         tables(registry)
     }
 
-    fn tables_mut(registry: &mut Registry) -> &mut CoopTables {
+    fn tables_mut(registry: &mut RegistryHold) -> &mut CoopTables {
         tables_mut(registry)
     }
 
-    fn faces(registry: &Registry) -> &Registry {
+    fn faces(registry: &RegistryHold) -> &Registry {
         registry
     }
 
-    fn faces_mut(registry: &mut Registry) -> &mut Registry {
+    fn faces_mut(registry: &mut RegistryHold) -> &mut Registry {
         registry
     }
 }
@@ -4936,6 +4990,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             _steps: lent.steps,
             #[cfg(feature = "listen")]
             _admission: admission,
+            #[cfg(not(feature = "runtime-plan"))]
+            state: lent.state,
             arena: lent.arena,
         };
         let apart = LentApart {
@@ -9029,7 +9085,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // the table.
         #[cfg(feature = "query")]
         {
-            let registry = &mut core.session.registry;
+            let registry = CoopSession::faces_mut(&mut core.session.registry);
             while let Some(pending) = core.session.pending_gets.pop() {
                 pending.unregister(&mut *registry);
             }
@@ -9247,7 +9303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller
                     .iter()
                     .position(|pending| pending.fan == Some(key))?;
                 let pending = core.session.pending_gets.remove(at);
-                pending.unregister(&mut core.session.registry);
+                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
                 Some(pending.leg)
             });
             let Some(leg) = leg else {
@@ -9458,7 +9514,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         #[cfg(feature = "query")]
         {
             let core = self.core.dropping();
-            let registry = &mut core.session.registry;
+            let registry = CoopSession::faces_mut(&mut core.session.registry);
             while let Some(pending) = core.session.pending_gets.pop() {
                 pending.unregister(&mut *registry);
             }

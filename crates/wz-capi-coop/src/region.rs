@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The state of a session whose shape the build fixes, as one struct: the session's tables, its one
-//! face's peer tables, the rows each lays out beside it and the key arena their keys lie in. Its
+//! The state of a session whose shape the build fixes, as one struct: the session's registry (the
+//! application's tables and its one face's), the rows each lays out beside it and the key arena
+//! their keys lie in. Its
 //! size is its `size_of` and its layout its fields' offsets; the allocator hands it zeroed, every
-//! table of it empty (`ZeroEmpty`), and [`StateRegion::bind`] joins each table to its rows and its
+//! table of it empty (`ZeroEmpty`), and [`StateRegion::open`] joins each table to its rows and its
 //! keys by one walk of the description the type states, so nothing is planned or lent at the open.
 //!
 //! A region is reached through a pointer to it, never by a reference to the whole: the tables'
@@ -12,16 +13,16 @@
 //! reference to the whole would cover them too. Each field is projected from the pointer alone.
 
 use core::alloc::Layout;
+use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of_mut, NonNull};
 
-use wz_session_core::bounded::{Region, RegionLines, ZeroEmpty};
+use wz_session_core::bounded::{RegionLines, ZeroEmpty};
 use wz_session_core::caps;
-use wz_session_core::key_arena::{place_region, KeyArena};
-use wz_session_core::peer_tables::{PeerTableRows, PeerTables, PEER_TABLE_LINES};
-use wz_session_core::session_tables::{SessionTables, SESSION_TABLE_LINES};
+use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
+use wz_session_core::limits::SessionLimits;
 
 use crate::arena::{ArenaMemory, ArenaRefused, ArenaRegion};
-use crate::engine::CoopRows;
+use crate::engine::{RegistryRegion, REGISTRY_REGION_LINES};
 use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
@@ -62,6 +63,12 @@ impl<T: ZeroEmpty> RegionBlock<T> {
     }
 }
 
+// SAFETY: the block owns the `T` it reserved, which nothing else reaches, as a `Box` owns its
+// value; the memory it gives it back to is `Sync` (`ArenaMemory`).
+unsafe impl<T: ZeroEmpty + Send> Send for RegionBlock<T> {}
+// SAFETY: a shared block hands out nothing but its pointer, as above.
+unsafe impl<T: ZeroEmpty + Sync> Sync for RegionBlock<T> {}
+
 impl<T: ZeroEmpty> Drop for RegionBlock<T> {
     fn drop(&mut self) {
         // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
@@ -75,59 +82,80 @@ impl<T: ZeroEmpty> Drop for RegionBlock<T> {
     }
 }
 
-/// The lines of a [`StateRegion`]'s description, at most: its session tables', its peer tables',
-/// and the final stage's of a build that answers queries.
-pub const STATE_REGION_LINES: usize = SESSION_TABLE_LINES + PEER_TABLE_LINES + 1;
+/// A value that lies in a field of a region and that this handle owns: reached through the
+/// pointer to the field, never through a reference to the whole region, and dropped in place by
+/// the handle's drop, which the region's own drop leaves to it (the field is a `MaybeUninit`). So
+/// the order a value is let go in is its handle's, wherever the handle is held, while its memory
+/// is the region's.
+pub struct RegionField<T> {
+    at: NonNull<T>,
+}
+
+impl<T> RegionField<T> {
+    /// The handle of the value at `at`.
+    ///
+    /// # Safety
+    /// `at` holds a value of `T` that nothing else drops or reaches but through this handle, and
+    /// its memory stays, unmoved, until after the handle is dropped.
+    pub unsafe fn new(at: NonNull<T>) -> Self {
+        Self { at }
+    }
+}
+
+impl<T> Deref for RegionField<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: the value is the handle's alone (`Self::new`), so a shared borrow of the handle
+        // is one of the value.
+        unsafe { self.at.as_ref() }
+    }
+}
+
+impl<T> DerefMut for RegionField<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as `deref`; a unique borrow of the handle is the only one of the value.
+        unsafe { self.at.as_mut() }
+    }
+}
+
+impl<T> Drop for RegionField<T> {
+    fn drop(&mut self) {
+        // SAFETY: the value is the handle's alone and still in place (`Self::new`); it is dropped
+        // once, here, and not reached after.
+        unsafe { core::ptr::drop_in_place(self.at.as_ptr()) }
+    }
+}
+
+// SAFETY: the handle owns its value as a `Box` does: it moves to another thread when the value may.
+unsafe impl<T: Send> Send for RegionField<T> {}
+// SAFETY: a shared handle hands out shared references to its value only.
+unsafe impl<T: Sync> Sync for RegionField<T> {}
+
+/// The lines of a [`StateRegion`]'s description, at most: its registry's.
+pub const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
 
 /// The state of a session of the build's shape: see the module documentation. The key arena is the
-/// last field, so a region dropped in place drops every table, and every key they hold, before it.
+/// last field, so a region dropped in place lets go of its keys after the registry, whose handle
+/// drops it first.
 pub struct StateRegion {
-    tables: SessionTables<CoopRows, Region>,
-    peer: PeerTables<Region>,
-    table_rows: wz_session_core::session_tables::SessionRows<CoopRows>,
-    peer_rows: PeerTableRows,
-    /// The Finals owed to the peer's queries; the replies to them are staged outside the session's
-    /// lock (the engine's `answer`), so the peer's reply stage is laid out no rows.
-    #[cfg(feature = "queryable")]
-    finals: wz_session_core::reply_stage::FinalStageRows,
+    registry: RegistryRegion,
     keys: KeyArena<{ caps::KEY_ARENA_BYTES }>,
 }
 
-// SAFETY: every field is `ZeroEmpty`: the tables and the peer tables of the region policy, their
-// rows (`MaybeUninit`) and the key arena.
+// SAFETY: the registry's region and the key arena are `ZeroEmpty`.
 unsafe impl ZeroEmpty for StateRegion {}
 
 impl StateRegion {
-    /// The region's description: the lines that place each table's rows and hand each table the
-    /// key arena, read by [`Self::bind`].
-    pub const DESCRIPTION: RegionLines<STATE_REGION_LINES> = {
-        let lines = RegionLines::EMPTY
-            .with(
-                &SessionTables::<CoopRows, Region>::places(
-                    core::mem::offset_of!(Self, tables),
-                    core::mem::offset_of!(Self, table_rows),
-                ),
-                0,
-            )
-            .with(
-                &PeerTables::<Region>::places(
-                    core::mem::offset_of!(Self, peer),
-                    core::mem::offset_of!(Self, peer_rows),
-                ),
-                0,
-            );
-        #[cfg(feature = "queryable")]
-        let lines = lines.seq(PeerTables::<Region>::finals_place(
-            core::mem::offset_of!(Self, peer),
-            core::mem::offset_of!(Self, finals),
-        ));
-        lines
-    };
+    /// The region's description: the lines that place each table of the registry over its rows
+    /// and hand each the key arena, read as the region is placed.
+    pub const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
+        RegistryRegion::places(core::mem::offset_of!(Self, registry));
 
     /// The state of a session of `config` in `build`, the region the build lays out: refused as
     /// [`ArenaRegion::admit`] refuses the config, having reserved nothing, or as
     /// [`RegionBlock::reserve`] refuses the memory; else reserved once, zeroed, from `memory`
-    /// and bound ([`Self::bind`]). Nothing is planned or lent: the type is the layout.
+    /// and placed over its rows. Nothing is planned or lent: the type is the layout.
     pub fn open<E: EndpointList>(
         build: &ArenaRegion,
         config: &CoopConfig<E>,
@@ -136,151 +164,75 @@ impl StateRegion {
         build.admit(config)?;
         let block = RegionBlock::<Self>::reserve(memory)?;
         // SAFETY: the block is a zeroed `StateRegion` it alone reaches; it neither moves nor goes
-        // back before its drop, which drops every table of it first.
-        unsafe { Self::bind(block.as_ptr(), build) };
+        // back before its drop.
+        unsafe { Self::place(block.as_ptr(), build.limits()) };
         Ok(block)
     }
 
-    /// Make the zeroed region at `region` a session's of `build`: each table placed its rows and
-    /// handed the key arena, then held to the build's rows and limits. Until then every bound of
-    /// the region is one of nothing, so a region not bound refuses all it is asked.
+    /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
+    /// its keys at most `limits` long, and hand back the key arena: the parts of the registry whose
+    /// empty value is not zero bytes written first, each bound one of nothing until the registry
+    /// is bound (`RegistryRegion::bind`).
     ///
     /// # Safety
     /// `region` points at a `StateRegion` of all zero bytes, aligned, that nothing else reaches,
-    /// and which neither moves nor is given back while a table of it lives.
-    pub unsafe fn bind(region: NonNull<Self>, build: &ArenaRegion) {
-        // SAFETY: the caller's contract.
-        unsafe { Self::place(region, build) };
-        let at = region.as_ptr();
-        // SAFETY: the tables field alone, projected from the pointer: the rows and the key arena
-        // are reached through the tables, not through this reference.
-        let tables = unsafe { &mut *addr_of_mut!((*at).tables) };
-        tables.limit_to(&build.tables());
-        // SAFETY: the peer tables field alone, as the tables above.
-        let peer = unsafe { &mut *addr_of_mut!((*at).peer) };
-        peer.limit_to(build.limits());
-    }
-
-    /// Place each table of the zeroed region at `region` its rows and hand it the key arena,
-    /// leaving every bound one of nothing.
-    ///
-    /// # Safety
-    /// As [`Self::bind`].
-    unsafe fn place(region: NonNull<Self>, build: &ArenaRegion) {
+    /// and which neither moves nor is given back while a table or a key of it lives.
+    pub(crate) unsafe fn place(region: NonNull<Self>, limits: &SessionLimits) -> KeySpace {
+        // SAFETY: the caller's contract; the registry's field of it is zeroed and reached by this
+        // call alone.
+        unsafe { RegistryRegion::write_parts(Self::registry_at(region), limits) };
         let at = region.as_ptr();
         // SAFETY: the key arena field alone, reached by this one reference before any key exists
         // and not after `space`; it stays in the region for as long as the tables do.
-        let keys =
-            unsafe { (*addr_of_mut!((*at).keys)).space(build.limits().max_keyexpr_bytes_held()) };
+        let keys = unsafe { (*addr_of_mut!((*at).keys)).space(limits.max_keyexpr_bytes_held()) };
         // SAFETY: the description is this type's own: its lines name the tables' sequences and key
         // handles in the region, each holding no value, and the rows beside them, which only those
         // tables reach; the caller's contract keeps the region in place.
         unsafe { place_region(region.cast::<u8>(), keys, &Self::DESCRIPTION) };
+        keys
+    }
+
+    /// Where the registry of the region at `region` lies.
+    ///
+    /// # Safety
+    /// `region` points at a `StateRegion`.
+    pub(crate) unsafe fn registry_at(region: NonNull<Self>) -> NonNull<RegistryRegion> {
+        // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
+        // null is not null either.
+        unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).registry)) }
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena::{ArenaPlan, PlanShape, TAKES_FACES};
-    use wz_session_core::limits::SessionLimits;
-    use wz_session_core::reply_stage::FinalStaging;
-    use wz_session_core::session_tables::{FILTER_ROWS, INTEREST_ROWS};
 
-    /// A client of the build's limits, the shape a build of fixed limits lays its arena out by.
-    const CLIENT: PlanShape = PlanShape {
-        max_faces: if TAKES_FACES { caps::MAX_FACES } else { 0 },
-        accept_pending: caps::MAX_ACCEPT_PENDING,
-        ..PlanShape::dial_only(0, 1024)
-    };
-
-    /// The region of that client, as the build lays it out when it is compiled.
-    static BUILD_REGION: ArenaRegion = match ArenaRegion::of(CLIENT, SessionLimits::BUILD) {
-        Ok(region) => region,
-        Err(_) => panic!("the build lays its own client out"),
-    };
-
-    /// A zeroed block of one `StateRegion`, given back when dropped.
-    struct Block(NonNull<StateRegion>);
-
-    impl Block {
-        fn zeroed() -> Self {
-            let layout = std::alloc::Layout::new::<StateRegion>();
-            // SAFETY: the layout is of a type of some bytes.
-            let block = unsafe { std::alloc::alloc_zeroed(layout) };
-            Self(NonNull::new(block.cast::<StateRegion>()).expect("the test allocator answers"))
-        }
-    }
-
-    impl Drop for Block {
-        fn drop(&mut self) {
-            // SAFETY: the region is dropped once, in place, its key arena last (its last field);
-            // then the block goes back with the layout it was given with.
-            unsafe {
-                core::ptr::drop_in_place(self.0.as_ptr());
-                std::alloc::dealloc(
-                    self.0.as_ptr().cast::<u8>(),
-                    std::alloc::Layout::new::<StateRegion>(),
-                );
+    /// Every line of the region's description lies inside the region, no two place the same
+    /// sequence or the same rows, and no two hand the key arena to the same handle. Turned red by
+    /// an offset of a part of the registry that is not the field it names, or by a set's lines
+    /// that reuse another's rows.
+    #[test]
+    fn a_state_regions_lines_lie_inside_it_and_name_nothing_twice() {
+        let size = core::mem::size_of::<StateRegion>();
+        let seqs = StateRegion::DESCRIPTION.seq_lines();
+        assert!(!seqs.is_empty());
+        for (at, line) in seqs.iter().enumerate() {
+            assert!(line.seq < size, "a sequence lies in the region");
+            assert!(
+                line.room == 0 || line.rows < size,
+                "its rows lie in the region"
+            );
+            for other in seqs.iter().skip(at + 1) {
+                assert_ne!(line.seq, other.seq, "a sequence is placed once");
+                if line.room != 0 && other.room != 0 {
+                    assert_ne!(line.rows, other.rows, "rows are one table's");
+                }
             }
         }
-    }
-
-    /// Each table the region lays out holds the rows the plan of the build's client counts for
-    /// it, no more and no fewer, and the key arena the plan's bytes. Turned red by a row array of
-    /// the region, or a line of its description, that differs from what the plan lends.
-    #[test]
-    fn a_state_regions_tables_hold_the_rows_the_builds_plan_counts() {
-        let plan = ArenaPlan::planned(CLIENT, &SessionLimits::BUILD).expect("the build's client");
-        let rows = plan.tables();
-        let block = Block::zeroed();
-        // SAFETY: the block is a zeroed `StateRegion` this test alone reaches, freed after.
-        unsafe { StateRegion::place(block.0, &BUILD_REGION) };
-        // SAFETY: the tables field alone; the rows are reached only through it.
-        let tables = unsafe { &*core::ptr::addr_of!((*block.0.as_ptr()).tables) };
-        assert_eq!(tables.keyexprs().capacity(), rows.keyexprs);
-        assert_eq!(tables.subscribers().capacity(), rows.subscribers);
-        assert_eq!(FILTER_ROWS, rows.write_filters());
-        assert_eq!(INTEREST_ROWS, rows.interests());
-        assert_eq!(plan.key_bytes(), caps::KEY_ARENA_BYTES);
-        let peers = plan.peers().rows;
-        assert_eq!(peers.pending_declares, caps::MAX_PENDING_DECLARES);
-        assert_eq!((peers.replies, peers.reply_bytes), (0, 0));
-        let finals = if cfg!(feature = "queryable") {
-            caps::MAX_PENDING_FINALS
-        } else {
-            0
-        };
-        assert_eq!(peers.finals, finals);
-    }
-
-    /// A region of all zero bytes holds nothing and, its bounds ones of nothing, admits nothing;
-    /// bound to the build, it admits what the build's limits do. Turned red by a zero field of the
-    /// region that is not an empty one, or by a bind that leaves a bound unstated.
-    #[test]
-    fn a_state_region_of_zero_bytes_admits_nothing_until_bound_to_the_build() {
-        let block = Block::zeroed();
-        {
-            // SAFETY: the fields alone, of a zeroed region every field of which is `ZeroEmpty`.
-            let (tables, peer) = unsafe {
-                (
-                    &*core::ptr::addr_of!((*block.0.as_ptr()).tables),
-                    &*core::ptr::addr_of!((*block.0.as_ptr()).peer),
-                )
-            };
-            assert!(tables.subscribers().is_empty());
-            assert!(tables.keyexprs().is_empty());
-            assert_eq!(peer.finals.owed(), 0);
-            assert!(
-                !peer.finals.has_room(),
-                "a stage placed no rows has no room"
-            );
+        let keys = StateRegion::DESCRIPTION.key_lines();
+        for (at, key) in keys.iter().enumerate() {
+            assert!(*key < size, "a handle lies in the region");
+            assert!(!keys.iter().skip(at + 1).any(|other| other == key));
         }
-        // SAFETY: the block is a zeroed `StateRegion` this test alone reaches, freed after.
-        unsafe { StateRegion::bind(block.0, &BUILD_REGION) };
-        // SAFETY: the peer tables field alone.
-        let peer = unsafe { &*core::ptr::addr_of!((*block.0.as_ptr()).peer) };
-        assert_eq!(peer.finals.has_room(), cfg!(feature = "queryable"));
-        assert_eq!(peer.queries.requester(), None);
     }
 }

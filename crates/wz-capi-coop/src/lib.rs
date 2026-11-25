@@ -119,9 +119,14 @@ mod engine;
 // The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
 #[cfg(not(feature = "runtime-plan"))]
 pub mod region;
-/// The storage policy of the session's tables, named once so every table of the engine and the
-/// rows each is given agree on it.
+/// The storage policy of the session's registry, named once so every table of it and the rows each
+/// is given agree on it: lent from the arena where the open lays the arena out from its config
+/// (`runtime-plan`), and placed in the region the build lays out otherwise (`region`).
+#[cfg(feature = "runtime-plan")]
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
+/// See the form of a build with `runtime-plan`.
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) type RowPolicy = wz_session_core::bounded::Region;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 #[cfg(feature = "group-host")]
