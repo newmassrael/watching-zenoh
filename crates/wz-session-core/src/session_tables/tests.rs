@@ -2713,9 +2713,9 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
 
 /// A write filter's row holds the declaration its entity's key is named by from its declaration to
 /// its undeclaration, which hands back that declaration's id when the row held it last; a count
-/// with no room refuses the filter, keeping nothing, its Interest closed. Turned red by a row that
-/// takes no hold or gives none back, an undeclaration that hands back no id, or a filter kept past
-/// a full count.
+/// with no room refuses the filter, keeping nothing and opening no Interest. Turned red by a row
+/// that takes no hold or gives none back, an undeclaration that hands back no id, or a filter kept
+/// past a full count.
 #[test]
 fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
     let mut tables = Tables::new();
@@ -2764,7 +2764,11 @@ fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
         ),
         Err(RegisterError::KeyexprHoldsFull)
     ));
-    assert_eq!(tables.interests().len(), interests, "its Interest went too");
+    assert_eq!(
+        tables.interests().len(),
+        interests,
+        "no Interest was opened"
+    );
     assert_eq!(
         tables.keyexprs().get(full.handle).map(|row| row.holds()),
         Some(KeyexprHolds::MAX),

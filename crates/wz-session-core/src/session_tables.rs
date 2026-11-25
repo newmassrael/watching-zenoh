@@ -1823,6 +1823,17 @@ impl<Key, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     }
 }
 
+/// Hold the declaration `held` names once more, for a row put in its table after its count was
+/// found to have room ([`Declaring::holdable`]). A holder at the row's address that filled the
+/// count since is let be, as a count at its bound is.
+fn hold_keyexpr<P: Storage>(keyexprs: &Keyexprs<P>, held: Option<KeyexprHandle>) {
+    if let Some(held) = held {
+        if let Some(row) = keyexprs.get(held) {
+            let _ = row.head.count.retain(held);
+        }
+    }
+}
+
 /// Take one hold of the declaration `handle` names off it: its id when that was the last, and the
 /// declaration is gone.
 fn release_keyexpr<P: Storage>(
@@ -1969,11 +1980,7 @@ impl<P: Storage> Declaring<'_, P> {
     /// ([`Self::holdable`]); a holder at the row's address that filled it since is let be, as a
     /// count at its bound is.
     fn hold(&mut self, prefix: Option<KeyexprHandle>) {
-        if let Some(prefix) = prefix {
-            if let Some(row) = self.keyexprs.get(prefix) {
-                let _ = row.head.count.retain(prefix);
-            }
-        }
+        hold_keyexpr(self.keyexprs, prefix);
     }
 
     /// Declare an entity on `text` into `table`: the row `make` builds of its id, its key and
@@ -2684,21 +2691,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 if !filters.is_full() && self.plane_has_room(filters, plane, for_listener) => {}
             _ => return Err(RegisterError::TableFull),
         }
+        // The declaration the key is named by is looked up once, and a count with no room for the
+        // row refuses the filter before anything is kept or asked. It is held once the row is in,
+        // as an entity's row holds its key's (`Declaring::hold`), so no refusal gives a hold back.
+        let own = Declaring::<P>::holdable(
+            own.and_then(|own| Some((own, self.keyexprs.get(own)?.holds()))),
+        )?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let asked = match ask {
             Some(name) => Some(self.open_interest(plane.interest_kind(), key, name)?),
             None => None,
         };
         let interest = asked.map(|opened| opened.handle);
-        // Held last, once nothing else can refuse but the insert: the caller holds the declaration
-        // through the call, so giving the hold back on that refusal is never its last.
-        let own = own.filter(|&own| self.keyexprs.get(own).is_some());
-        if own.is_some_and(|own| !self.retain_keyexpr(own)) {
-            if let Some(interest) = interest {
-                let _ = self.close_interest(interest);
-            }
-            return Err(RegisterError::KeyexprHoldsFull);
-        }
         let row = WriteFilterRow {
             plane,
             interest,
@@ -2718,16 +2722,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .kept_write_filters_mut()
             .and_then(|filters| filters.insert(row).ok());
         match inserted {
-            Some(handle) => Ok(Watching {
-                handle,
-                interest: asked,
-            }),
+            Some(handle) => {
+                hold_keyexpr(&self.keyexprs, own);
+                Ok(Watching {
+                    handle,
+                    interest: asked,
+                })
+            }
             None => {
                 if let Some(interest) = interest {
                     let _ = self.close_interest(interest);
-                }
-                if let Some(own) = own {
-                    let _ = release_keyexpr(&mut self.keyexprs, own);
                 }
                 Err(RegisterError::TableFull)
             }
