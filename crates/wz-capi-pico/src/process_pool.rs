@@ -1354,7 +1354,11 @@ fn lay_stage<'a>(
             pools.origin = Origin::Heap(layout);
         }
         Err(why) => {
-            *held = None;
+            // Pools whose memory was never found own nothing, so they are let go without the
+            // drop that would ask their origin to free it.
+            if let Some(unlaid) = held.take() {
+                core::mem::forget(unlaid);
+            }
             return Err(why);
         }
     }
