@@ -2552,8 +2552,10 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     )
     .expect("lays an arena out")
     .reserved_bytes();
-    // A build made at the preset has the preset's values as its defaults, and so no more to lower.
-    if limits == SessionLimits::defaults() {
+    // A build that admits no more faces and handshakes than the preset, one made at it, lays out
+    // the peer's links and faces at its defaults too, and so has nothing of them to lower.
+    let build = SessionLimits::defaults();
+    if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
         assert!(
             peer.reserved_bytes() <= at_the_build,
             "a peer at the preset reserves no more than a listener at a build of the preset"

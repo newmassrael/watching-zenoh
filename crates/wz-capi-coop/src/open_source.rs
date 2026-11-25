@@ -67,8 +67,8 @@ impl Counted {
         texts
             .into_iter()
             .fold(Self::default(), |counted, endpoint| Self {
-                count: counted.count + 1,
-                udp: counted.udp + usize::from(is_udp(endpoint)),
+                count: counted.count.saturating_add(1),
+                udp: counted.udp.saturating_add(usize::from(is_udp(endpoint))),
             })
     }
 }
