@@ -869,51 +869,36 @@ impl<T: TxStore> TxLender<T> {
         self.take_prefixed(slot, start, len, &[])
     }
 
-    /// Write `prefix` into the headroom just in front of the frame `start .. start + len` of
-    /// `slot`, and answer where the bytes to write are, prefix included, as a range of the slot;
-    /// the slot stays out of the pool, held by the link until it has written them
-    /// ([`Self::held`] reads them, [`Self::release`] ends the hold). `None` when the frame is
-    /// not inside the slot or the headroom is shorter than `prefix`, the slot still out.
-    pub fn frame_prefixed(
+    /// Seal the frame `start .. start + len` of `slot` for the wire where it lies: `seal` is
+    /// handed the slot from its first byte to the frame's last and the frame's start, writes
+    /// what goes in front of the frame into the headroom, may change the frame's bytes, and
+    /// answers where the bytes to write start ([`crate::stream_link::StreamFraming::seal`]).
+    /// The answer is where the bytes to write are, head included, as a range of the slot; the
+    /// slot stays out of the pool, held by the link until it has written them ([`Self::held`]
+    /// reads them, [`Self::release`] ends the hold). `None` when the frame is not inside the
+    /// slot or `seal` refuses it, the slot still out.
+    pub fn seal(
         &self,
         slot: TxSlot,
         start: usize,
         len: usize,
-        prefix: &[u8],
+        seal: impl FnOnce(&mut [u8], usize) -> Option<usize>,
     ) -> Option<(usize, usize)> {
         let (base, capacity) = self.storage(slot);
-        let from = start.checked_sub(prefix.len())?;
         let end = start.checked_add(len).filter(|&end| end <= capacity)?;
         // SAFETY: `base` is the first byte of a slot of the store, `capacity` bytes long, and
-        // `from .. start` is within it. The session handed the slot over, so nothing else writes
-        // it, and the prefix goes into the headroom, which the session left untouched.
-        unsafe { core::ptr::copy_nonoverlapping(prefix.as_ptr(), base.add(from), prefix.len()) };
+        // `..end` is within it. The session handed the slot over, so nothing else reads or writes
+        // it while it is sealed, and the borrow ends with `seal`.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(base, end) };
+        let from = seal(bytes, start)?;
         Some((from, end))
-    }
-
-    /// Mask the frame `start .. start + len` of `slot` with `key` where it lies, as a framing
-    /// that masks what it sends asks ([`crate::stream_link::StreamFraming::prefix`]): every byte
-    /// XORed with the key byte its place names. `false` when the frame is not inside the slot.
-    pub fn mask(&self, slot: TxSlot, start: usize, len: usize, key: [u8; 4]) -> bool {
-        let (base, capacity) = self.storage(slot);
-        if !start.checked_add(len).is_some_and(|end| end <= capacity) {
-            return false;
-        }
-        // SAFETY: `base` is the first byte of a slot of the store, `capacity` bytes long, and
-        // `start .. start + len` is within it. The session handed the slot over, so nothing else
-        // reads or writes it while the frame is masked.
-        let frame = unsafe { core::slice::from_raw_parts_mut(base.add(start), len) };
-        for (byte, key_byte) in frame.iter_mut().zip(key.iter().cycle()) {
-            *byte ^= key_byte;
-        }
-        true
     }
 
     /// The bytes `from .. end` of `slot`, cut to the slot.
     ///
     /// # Safety
     ///
-    /// The slot is held by the link ([`Self::frame_prefixed`]) and not
+    /// The slot is held by the link ([`Self::seal`]) and not
     /// with the session: nothing writes it while the bytes are borrowed.
     pub unsafe fn held(&self, slot: TxSlot, from: usize, end: usize) -> &[u8] {
         let (base, capacity) = self.storage(slot);

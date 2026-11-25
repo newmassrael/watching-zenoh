@@ -286,7 +286,17 @@ pub(crate) fn begin_frame(
     parent_flags: u8,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
-    write_frame_head(&mut TxSink::new(buf), sn, parent_flags, ext_qos)
+    // The codec writes the header on the stack through a sink it calls directly, and the header
+    // lands in `buf` in one write, whole or not at all: written into `buf` itself, each of its
+    // bytes was a call through the buffer's table.
+    //
+    // The room is the longest header: its header byte, an SN of the codec's widest VLE and the
+    // one QoS extension, its header and its one-byte value.
+    const FRAME_HEAD_ROOM: usize = 1 + wz_codecs::vle::VLE_LEN + 2;
+    let mut head = [0u8; FRAME_HEAD_ROOM];
+    let mut staged = crate::tx_buf::SliceTxBuf::new(&mut head);
+    write_frame_head(&mut TxSink::over(&mut staged), sn, parent_flags, ext_qos)?;
+    TxBuf::append(buf, TxBuf::as_slice(&staged))
 }
 
 /// The Frame header [`begin_frame`] writes, into any sink: a sink that cannot
@@ -2053,6 +2063,84 @@ mod tests {
             Err(CodecError::BufferOverflow),
             "a frame one byte past the slot is an error and not a panic"
         );
+    }
+
+    /// The Frame header lands in its buffer in one write, whatever the width of its SN and whether
+    /// it carries the QoS extension, and is the bytes the codec writes; a buffer too short for it
+    /// is left as it was. Turned red by a header written into its buffer a byte or a field at a
+    /// time, which a slot answers through its table at each.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "transport-tx-lend",
+        feature = "alloc"
+    ))]
+    #[test]
+    fn a_frame_header_lands_in_one_write_or_not_at_all() {
+        struct Counting {
+            bytes: alloc::vec::Vec<u8>,
+            room: usize,
+            writes: usize,
+        }
+        impl TxBuf for Counting {
+            type Error = CodecError;
+            fn len(&self) -> usize {
+                self.bytes.len()
+            }
+            fn as_slice(&self) -> &[u8] {
+                &self.bytes
+            }
+            fn truncate(&mut self, len: usize) {
+                self.bytes.truncate(len);
+            }
+            fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+                self.writes += 1;
+                if self.bytes.len() + bytes.len() > self.room {
+                    return Err(CodecError::BufferOverflow);
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(())
+            }
+        }
+        let mut compared = 0usize;
+        for reliable in [false, true] {
+            for ext_qos in [None, Some(Priority::Control)] {
+                for sn in [0u64, 0x7F, 0x80, 0x4000, u64::from(u32::MAX)] {
+                    let mut want = alloc::vec::Vec::new();
+                    write_frame_head(
+                        &mut TxSink::over(&mut want),
+                        sn,
+                        frame_flags(reliable),
+                        ext_qos,
+                    )
+                    .expect("a vector grows");
+                    let mut buf = Counting {
+                        bytes: alloc::vec::Vec::new(),
+                        room: usize::MAX,
+                        writes: 0,
+                    };
+                    begin_frame(&mut buf, sn, frame_flags(reliable), ext_qos).expect("room");
+                    assert_eq!(buf.bytes, want, "sn {sn:#x} reliable {reliable}");
+                    assert_eq!(buf.writes, 1, "sn {sn:#x} reliable {reliable}");
+
+                    let mut short = Counting {
+                        bytes: alloc::vec![9],
+                        room: want.len(),
+                        writes: 0,
+                    };
+                    assert_eq!(
+                        begin_frame(&mut short, sn, frame_flags(reliable), ext_qos),
+                        Err(CodecError::BufferOverflow)
+                    );
+                    assert_eq!(
+                        short.bytes,
+                        [9],
+                        "a refused header leaves the buffer as it was"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 20);
     }
 
     /// The batching writer appends a message to an open frame and, when it does
