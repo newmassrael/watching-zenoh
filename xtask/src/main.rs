@@ -404,7 +404,7 @@ fn regen_codec_deployment(
 ///                      session_fsm_multicast, multicast_peer,
 ///                      peer_connection, clock_quality, supervision,
 ///                      stream_activation, app_link, replay_round,
-///                      replay_serving (statecharts);
+///                      replay_serving, unicast_link (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts, the keyexpr matcher,
 ///                      stream_deadline, declaration_stall_deadline,
 ///                      take_generation (algorithms);
@@ -454,6 +454,9 @@ fn regen_statecharts_and_pools(root: &Path) {
         // publisher is answering one (and so holding its message's sends).
         "replay_round",
         "replay_serving",
+        // The life of the one link of a session that holds one face: dialled, up, lost and
+        // dialled again, or given up.
+        "unicast_link",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }

@@ -14,7 +14,7 @@
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_chunk_end(k: &[u8], s: u32) -> u32 {
-    let n: u32 = (k).len() as u32;
+    let n: u32 = k.len() as u32;
     if s > n {
         return n;
     }

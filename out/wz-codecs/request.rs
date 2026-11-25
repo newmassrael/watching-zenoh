@@ -742,20 +742,7 @@ impl RequestWire {
     /// [`Self::encode_source`] without the guard a parent has already made.
     #[doc(hidden)]
     pub fn write_source<S: RequestSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
-        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.len());
-        let _n_d_header_n_0: usize = usize::from(super::wireexpr::WireexprWire::input_n(src.keyexpr()));
-        let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
-        let _p_header_z_0: bool = src.extensions().is_some();
-        let _v_header_n: u8 = _n_d_header_n_0 as u8;
-        let _c_header: u8 = (((((src.header() & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
-        w.write_u8(_c_header)?;
-        w.write_vle_u32(src.rid())?;
-        super::wireexpr::WireexprWire::write_source(src.keyexpr(), w)?;
-        if let Some(_v) = src.extensions() {
-            for (_i, _e) in _v.enumerate() {
-                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
-            }
-        }
+        Self::write_envelope(src.header(), src.rid(), src.keyexpr(), src.extensions(), w)?;
         match src.body() {
             #[cfg(feature = "request-put-del")]
             RequestVariantSource::CodecZenohMsgPut(_b) => super::msg_put::MsgPutWire::write_source(_b, w)?,
@@ -763,6 +750,29 @@ impl RequestWire {
             RequestVariantSource::CodecZenohMsgDel(_b) => super::msg_del::MsgDelWire::write_source(_b, w)?,
             RequestVariantSource::CodecZenohQuery(_b) => super::query::QueryWire::write_source(_b, w)?,
             RequestVariantSource::Default { body: _b, .. } => super::query::QueryWire::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The writes [`Self::write_source`] makes before the body of the arm
+    /// `src` holds, over the fields they read, each handed in as `src`
+    /// returned it: one copy for the values whose fields have these types,
+    /// whatever arm each holds (docs/adr/0126).
+    #[inline(never)]
+    fn write_envelope<K: SceSink>(_s_header: u8, _s_rid: u32, _s_keyexpr: &impl super::wireexpr::WireexprSource, _s_extensions: Option<::sce_forge_runtime::codec::BoundedIter<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone, { usize::MAX }, 1>>, w: &mut K) -> Result<(), K::Error> {
+        let _k_extensions: usize = _s_extensions.clone().map_or(0, |_l| _l.len());
+        let _n_d_header_n_0: usize = usize::from(super::wireexpr::WireexprWire::input_n(_s_keyexpr));
+        let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(_s_keyexpr) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
+        let _p_header_z_0: bool = _s_extensions.clone().is_some();
+        let _v_header_n: u8 = _n_d_header_n_0 as u8;
+        let _c_header: u8 = (((((_s_header & !0x20) | (_v_header_n << 5)) & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        w.write_vle_u32(_s_rid)?;
+        super::wireexpr::WireexprWire::write_source(_s_keyexpr, w)?;
+        if let Some(_v) = _s_extensions.clone() {
+            for (_i, _e) in _v.enumerate() {
+                super::ext_entry::ExtEntryWire::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
         }
         Ok(())
     }

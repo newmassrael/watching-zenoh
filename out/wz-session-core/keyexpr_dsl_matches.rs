@@ -14,10 +14,10 @@
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_dsl_matches(p: &[u8], ps: u32, pe: u32, t: &[u8], ts: u32, te: u32) -> bool {
-    if pe > (p).len() as u32 {
+    if pe > p.len() as u32 {
         return false;
     }
-    if te > (t).len() as u32 {
+    if te > t.len() as u32 {
         return false;
     }
     if ps > pe {

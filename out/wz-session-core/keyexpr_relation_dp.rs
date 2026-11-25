@@ -19,8 +19,8 @@ use super::keyexpr_chunk_includes;
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_relation_dp(r: &[u8], c: &[u8], row_star: bool, col_star: bool, includes: bool, wild_single: bool, wild_dsl: bool) -> bool {
-    let rn: u32 = (r).len() as u32;
-    let cn: u32 = (c).len() as u32;
+    let rn: u32 = r.len() as u32;
+    let cn: u32 = c.len() as u32;
     let mut prev: u64 = 1;
     let mut m: u32 = 0;
     let mut cs0: u32 = 0;

@@ -710,11 +710,11 @@ impl StatePolicy for SensorMonitorPolicy {
     // and refused in the lift's words.
     fn admit_event_data(
         event_data: Self::EventData<'_>,
-    ) -> ::core::result::Result<(), ::sce_rust_runtime::event_payload::PayloadRefusal> {
+    ) -> ::core::result::Result<(), ::sce_rust_runtime::LentBreach> {
         match event_data {
             SensorMonitorEventData::TempUpdate(ev) => {
-                ::sce_rust_runtime::event_payload::lent_within("sensor_id", ev.sensor_id.len(), 64)?;
-                ::sce_rust_runtime::event_payload::lent_within("raw", ev.raw.len(), 64)?;
+                ::sce_rust_runtime::LentBreach::within("sensor_id", ev.sensor_id.len(), 64)?;
+                ::sce_rust_runtime::LentBreach::within("raw", ev.raw.len(), 64)?;
             }
             _ => {}
         }
