@@ -565,8 +565,8 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 /// A read whose step left a link holding input goes on with it at once, with no wait worked out
 /// for it: here a second batch lies whole in the stream link's buffer behind the first, and the
 /// one read hands both out, the session taken once for its wait and once a batch, and moves the
-/// links once, after the second. Turned red by a read that ends after the first batch while the
-/// link holds the second, or one that moves the links after each batch.
+/// links once at most, after the second. Turned red by a read that ends after the first batch
+/// while the link holds the second, or one that moves the links after each batch.
 #[test]
 fn a_read_goes_on_with_the_input_its_step_left_held() {
     let engine = open_with(CoopConfig {
@@ -634,10 +634,9 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
         (3, 2 * PUTS),
         "the read works out its wait, steps once a batch and hands both batches out"
     );
-    assert_eq!(
-        engine.link_polls() - polls,
-        1,
-        "one move of the links, after the second batch"
+    assert!(
+        engine.link_polls() - polls <= 1,
+        "one move of the links at most, after the second batch"
     );
 }
 

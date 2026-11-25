@@ -2968,3 +2968,35 @@ fn a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes() {
         "closed, it is reached by no handle"
     );
 }
+
+/// A session its dial role's lost link ended, with no redial, reads closed through a handle by
+/// the row's mark alone, as one its program closed does, though the handle still reaches the
+/// engine, which the row holds; the program's close then lets the row go, so the next open takes
+/// it, and a second close lets go of nothing twice. Turned red by a step's end of the session that
+/// leaves the row's mark current (no `ReachEngine::end`), a handle that reads an open session
+/// closed, or a close that lets go of nothing because a step said the session closed first.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let handle = EngineHold::downgrade(&engine);
+    assert!(handle.is_open(), "an open session's handle reads it open");
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the lost link to end the session", || {
+        wz_capi_port::SessionDrive::is_closed(&*engine)
+    });
+    assert!(!handle.is_open(), "ended by its step, it reads closed");
+    assert!(
+        handle.upgrade().is_some(),
+        "the row still holds the engine a step ended"
+    );
+    wz_capi_port::SessionDrive::close(&*engine);
+    assert!(
+        handle.upgrade().is_none(),
+        "the close vacates the row of a session a step ended"
+    );
+    wz_capi_port::SessionDrive::close(&*engine);
+    assert!(!handle.is_open(), "a second close changes nothing");
+}

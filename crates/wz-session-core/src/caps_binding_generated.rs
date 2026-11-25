@@ -346,18 +346,6 @@ pub const HELD_QUERIES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
-/// Where [`super::HELD_PAYLOADS`] is bound.
-pub const HELD_PAYLOADS: LimitBinding = LimitBinding {
-    kind: LimitKind::Bound,
-    driven: Some(Driven::Local),
-    range: None,
-    storage: Storage::Capacity,
-    scope: &[Scope::Runtime],
-    binding_heap: Some(Binding::Build),
-    binding_fixed: Some(Binding::Build),
-    wire: Wire::None,
-};
-
 /// Where [`super::HELD_CONFIGS`] is bound.
 pub const HELD_CONFIGS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -716,6 +704,18 @@ pub const MAX_TICKERS: LimitBinding = LimitBinding {
     binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
+};
+
+/// Where [`super::GROUP_READS_PER_MOVE`] is bound.
+pub const GROUP_READS_PER_MOVE: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 255)),
+    storage: Storage::Quota,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Live),
+    binding_fixed: Some(Binding::Live),
+    wire: Wire::Timing,
 };
 
 /// Where [`super::ADVANCED_CACHE_BYTES`] is bound.

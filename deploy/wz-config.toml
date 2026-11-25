@@ -3678,8 +3678,9 @@ range = [1, 255]
 default = 16
 storage = "quota"
 scope = "session"
-binding_heap = "build"
-binding_fixed = "build"
+binding_heap = "live"
+binding_fixed = "live"
+read = "snapshot"
 # `wire` is timing: what a session sends while a group's burst is read leaves after it.
 wire = "timing"
 help = '''

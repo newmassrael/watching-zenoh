@@ -171,6 +171,11 @@ impl Meta {
 pub struct TaskCell {
     wake: AtomicBool,
     cancel: AtomicBool,
+    /// Whether the task has produced a result or was aborted, since the cell was last taken for a
+    /// task: written beside the bookkeeping that says so, inside a critical section, and read
+    /// without one by the task's handle (`TaskJoin::is_finished`), so a session that looks at
+    /// each of its links' tasks at a step takes no section to do it.
+    ended: AtomicBool,
     /// Reached only inside a critical section (`Self::with_meta`).
     meta: UnsafeCell<Meta>,
     /// The count of the store that owns the cell, which a waker and a handle hold one of; null for
@@ -192,6 +197,7 @@ impl TaskCell {
         Self {
             wake: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             meta: UnsafeCell::new(Meta::new()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             owner: ptr::null(),
@@ -208,6 +214,7 @@ impl TaskCell {
         Self {
             wake: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             meta: UnsafeCell::new(meta),
             owner,
         }
@@ -677,6 +684,7 @@ impl TakesMemory for Taking {
                         if meta.state == State::Free && (refits || fits || (fills && empty)) {
                             meta.state = State::Spawning;
                             meta.set = set;
+                            cell.ended.store(false, Ordering::Relaxed);
                             Some((cell, meta.buf))
                         } else {
                             None
@@ -1303,6 +1311,7 @@ impl ExecutorState {
             if meta.state == State::Free {
                 meta.state = State::Spawning;
                 meta.set = set;
+                cell.ended.store(false, Ordering::Relaxed);
                 Some((cell, meta.buf))
             } else {
                 None
@@ -1460,6 +1469,7 @@ impl ExecutorState {
                 Left::Answered => true,
                 Left::Swept => false,
             };
+            cell.ended.store(true, Ordering::Release);
             meta.has_output = completed;
             if meta.handle {
                 meta.state = State::Done;
@@ -1665,6 +1675,7 @@ impl ExecutorState {
             let ops = meta.ops?;
             meta.state = State::Polling;
             meta.aborted = true;
+            cell.ended.store(true, Ordering::Release);
             Some((ops, meta.buf))
         });
         if let Some((ops, buf)) = live {
@@ -1820,6 +1831,7 @@ impl<T> TaskJoin<T> {
             }
             meta.aborted = true;
             cell.cancel.store(true, Ordering::Release);
+            cell.ended.store(true, Ordering::Release);
             meta.join_waker.take()
         });
         if let Some(waker) = waker {
@@ -1828,11 +1840,12 @@ impl<T> TaskJoin<T> {
     }
 
     /// True once the task has produced a result, or was aborted, that no poll has
-    /// taken yet.
+    /// taken yet. Read off the cell's flag, which is written with the bookkeeping that says so,
+    /// with no critical section.
     pub(crate) fn is_finished(&self) -> bool {
         match self.cell.filter(|_| !self.taken) {
             None => true,
-            Some(cell) => cell.with_meta(|meta| meta.state == State::Done || meta.aborted),
+            Some(cell) => cell.ended.load(Ordering::Acquire),
         }
     }
 

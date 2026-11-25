@@ -976,6 +976,19 @@
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"
             },
+            "GROUP_READS_PER_MOVE": {
+              "description": "How many datagrams of a multicast group in a row a read of the C ABI's cooperative engine takes, a step each, before it moves the session's links, timers and sweeps again.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 255,
+              "default": 16,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "quota",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "live",
+              "x-wz-binding-fixed": "live",
+              "x-wz-wire": "timing"
+            },
             "MAX_ADVANCED_PUBLISHERS": {
               "description": "The advanced publishers a session holds at once, each the C object over the publisher, its cache and its detection token, which are counted in their own tables.",
               "oneOf": [

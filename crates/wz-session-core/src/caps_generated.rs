@@ -50,7 +50,6 @@ pub(super) const ENGINE_ROWS: usize = limit(option_env!("WZ_LIMIT_ENGINE_ROWS"),
 pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"), 18);
 pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 18);
 pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 18);
-pub(super) const HELD_PAYLOADS: usize = limit(option_env!("WZ_LIMIT_HELD_PAYLOADS"), 32);
 pub(super) const HELD_CONFIGS: usize = limit(option_env!("WZ_LIMIT_HELD_CONFIGS"), 8);
 pub(super) const HELD_HELLOS: usize = limit(option_env!("WZ_LIMIT_HELD_HELLOS"), 16);
 pub(super) const PAYLOAD_SMALL_BLOCK_BYTES: usize =
@@ -97,6 +96,8 @@ pub(super) const MAX_MULTICAST_REPLIES: usize =
 pub(super) const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 16);
 pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 16);
 pub(super) const MAX_TICKERS: usize = limit(option_env!("WZ_LIMIT_MAX_TICKERS"), 16);
+pub(super) const GROUP_READS_PER_MOVE: usize =
+    limit(option_env!("WZ_LIMIT_GROUP_READS_PER_MOVE"), 16);
 pub(super) const ADVANCED_CACHE_BYTES: usize =
     limit(option_env!("WZ_LIMIT_ADVANCED_CACHE_BYTES"), 1712);
 pub(super) const MAX_ADVANCED_PUBLISHERS: usize =

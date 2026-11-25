@@ -690,6 +690,28 @@ const _: LimitDomain = MaxMulticastReplies::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxMulticastRepliesHeld = Limited<MaxMulticastReplies, { MaxMulticastReplies::HELD }>;
 
+/// `GROUP_READS_PER_MOVE`: How many datagrams of a multicast group in a row a read of the C
+/// ABI's cooperative engine takes, a step each, before it moves the session's links, timers
+/// and sweeps again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupReadsPerMove;
+
+impl LimitSpec for GroupReadsPerMove {
+    type Value = usize;
+    const LIMIT: &'static str = "GROUP_READS_PER_MOVE";
+    const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = None;
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 255, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::GROUP_READS_PER_MOVE;
+}
+
+const _: LimitDomain = GroupReadsPerMove::DOMAIN;
+
+/// How `GROUP_READS_PER_MOVE` is held: in no byte when its domain is one value.
+pub type GroupReadsPerMoveHeld = Limited<GroupReadsPerMove, { GroupReadsPerMove::HELD }>;
+
 /// `MAX_ADVANCED_PUBLISHERS`: The advanced publishers a session holds at once, each the C
 /// object over the publisher, its cache and its detection token, which are counted in their
 /// own tables.
@@ -1803,6 +1825,7 @@ impl SessionLimits {
         limits.keep(&MaxPendingFinalsHeld::build_default());
         limits.keep(&MaxReplyPayloadBytesHeld::build_default());
         limits.keep(&MaxMulticastRepliesHeld::build_default());
+        limits.keep(&GroupReadsPerMoveHeld::build_default());
         limits.keep(&MaxAdvancedPublishersHeld::build_default());
         limits.keep(&MaxAdvancedSubscribersHeld::build_default());
         limits.keep(&MaxFacesHeld::build_default());
@@ -2504,6 +2527,23 @@ impl SessionLimits {
     /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.keep(&MaxMulticastRepliesHeld::select(value)?);
+        Ok(())
+    }
+
+    /// `GROUP_READS_PER_MOVE` as this snapshot holds it.
+    pub const fn group_reads_per_move(&self) -> usize {
+        self.group_reads_per_move_held().get()
+    }
+
+    /// `GROUP_READS_PER_MOVE` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn group_reads_per_move_held(&self) -> GroupReadsPerMoveHeld {
+        self.limit()
+    }
+
+    /// Selects `GROUP_READS_PER_MOVE`, when the build's domain holds `value`.
+    pub fn select_group_reads_per_move(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.keep(&GroupReadsPerMoveHeld::select(value)?);
         Ok(())
     }
 
@@ -3428,8 +3468,14 @@ unsafe impl LimitField<SessionLimits> for MaxMulticastReplies {
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
-unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
+unsafe impl LimitField<SessionLimits> for GroupReadsPerMove {
     const WORD: usize = word_after::<MaxMulticastReplies, SessionLimits>();
+}
+
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
+unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
+    const WORD: usize = word_after::<GroupReadsPerMove, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
@@ -3655,7 +3701,7 @@ unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 68;
+pub const SESSION_LIMIT_COUNT: usize = 69;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its words.
@@ -3690,6 +3736,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxPendingFinals>(),
     LimitEntry::of::<MaxReplyPayloadBytes>(),
     LimitEntry::of::<MaxMulticastReplies>(),
+    LimitEntry::of::<GroupReadsPerMove>(),
     LimitEntry::of::<MaxAdvancedPublishers>(),
     LimitEntry::of::<MaxAdvancedSubscribers>(),
     LimitEntry::of::<MaxFaces>(),
@@ -4068,7 +4115,7 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
 /// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
 /// stage decides it, so neither snapshot holds it and a document that states it is refused by
 /// name.
-pub static CAPACITY_LIMITS: [&str; 43] = [
+pub static CAPACITY_LIMITS: [&str; 42] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
     "HELD_SESSIONS",
@@ -4077,7 +4124,6 @@ pub static CAPACITY_LIMITS: [&str; 43] = [
     "HELD_SAMPLES",
     "HELD_REPLIES",
     "HELD_QUERIES",
-    "HELD_PAYLOADS",
     "HELD_CONFIGS",
     "HELD_HELLOS",
     "PAYLOAD_SMALL_BLOCK_BYTES",

@@ -113,6 +113,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<C
         Some(EngineHold(unsafe { Shared::from_counted(engine) }))
     }
 
+    /// Whether the engine's session is open: the engine is in its row and no close or step ended
+    /// the session. Read from the row's mark, with no lock and no count of the engine
+    /// ([`ReachEngine::is_current`]).
+    pub fn is_open(&self) -> bool {
+        self.reach.is_current()
+    }
+
     /// Whether this is a handle of `engine`, open or closed.
     pub fn is_of(&self, engine: &CoopEngine<L, C>) -> bool {
         self.reach == engine.reach
@@ -130,6 +137,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
 
     fn upgrade(handle: &Self::Handle) -> Option<Self> {
         handle.upgrade()
+    }
+
+    /// The row's mark answers, with no lock and no count of the engine ([`EngineHandle::is_open`]).
+    fn handle_closed(handle: &Self::Handle) -> bool {
+        !handle.is_open()
     }
 
     fn ptr_eq(this: &Self, other: &Self) -> bool {

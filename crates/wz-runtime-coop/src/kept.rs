@@ -69,7 +69,7 @@ impl Kept {
             .fetch_update(Ordering::Acquire, Ordering::Relaxed, |held| match held {
                 0 => None,
                 held if held > MOST_HOLDERS => Some(held),
-                held => Some(held + 1),
+                held => Some(held.saturating_add(1)),
             })
             .is_ok()
     }

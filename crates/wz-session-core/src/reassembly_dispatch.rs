@@ -1028,6 +1028,10 @@ pub struct ReassemblyDispatcher<
     /// The chain the current ingest ended for a fragment not of it; see
     /// [`Self::displaced_by_last_ingest`].
     displaced: Option<DisplacedChain>,
+    /// No open chain's deadline is before this ([`Self::due_ms`]): lowered as a chain opens,
+    /// worked out again by a sweep that looked at every slot. A chain that ended otherwise leaves
+    /// it where it was, which only brings a sweep that finds nothing forward.
+    due_ms: u64,
 }
 
 impl<const SLOTS: usize, const CAP: usize, S, P> ReassemblyDispatcher<SLOTS, CAP, S, P>
@@ -1085,6 +1089,7 @@ where
                 capacity_refusals: _,
                 opened: _,
                 displaced: _,
+                due_ms: _,
             } = router;
         };
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`). An array of `SLOTS`
@@ -1105,6 +1110,7 @@ where
             addr_of_mut!((*at).capacity_refusals).write(0);
             addr_of_mut!((*at).opened).write(P::FIRST);
             addr_of_mut!((*at).displaced).write(None);
+            addr_of_mut!((*at).due_ms).write(u64::MAX);
             place.assume_init_mut()
         }
     }
@@ -1586,7 +1592,14 @@ where
         let mut loss = ChainLoss::default();
         // Split the borrow: `release` hands the chain's staging back to the
         // arena, and both live behind `&mut self`.
-        let Self { slots, staging, .. } = self;
+        let Self {
+            slots,
+            staging,
+            due_ms,
+            ..
+        } = self;
+        // The sweep looks at every slot, so the earliest deadline it leaves open is worked out here.
+        let mut next_ms = u64::MAX;
         for slot in slots.iter_mut() {
             // Read BEFORE the release, which is what makes the number takeable
             // at all: the handle is the arena's again the moment after.
@@ -1596,7 +1609,11 @@ where
                     open.key.reliable,
                     open.key.priority,
                 ),
-                _ => continue,
+                Some(open) => {
+                    next_ms = next_ms.min(open.deadline_ms);
+                    continue;
+                }
+                None => continue,
             };
             // `record_timeout` is a notice and posts no duty; the release
             // below is the sweep's own act on its own clock.
@@ -1606,7 +1623,14 @@ where
             loss.bytes = loss.bytes.saturating_add(staged);
             loss.chains = loss.chains.saturating_add(1);
         }
+        *due_ms = next_ms;
         loss
+    }
+
+    /// No open chain's deadline is before this: a sweep before it releases nothing, and a holder
+    /// of the Router may pass it over. `u64::MAX` with no chain opened since the last sweep.
+    pub fn due_ms(&self) -> u64 {
+        self.due_ms
     }
 
     fn find_active(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> Option<usize> {
@@ -1661,6 +1685,9 @@ where
         // is held by the open chain from here; a machine that does not begin
         // the chain gives it back with the slot ([`Slot::replace`]).
         let deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
+        // Lowered before the chain is known to open: a start refused below brings a sweep that
+        // finds nothing forward, and no more.
+        self.due_ms = self.due_ms.min(deadline_ms);
         let max_message_bytes = self.config.max_message_bytes;
         let opened = self.opened;
         let Self { slots, staging, .. } = self;
@@ -2752,6 +2779,24 @@ mod tests {
         // Sweep at t=10_000: PEER_B's chain expires too.
         assert_eq!(d.sweep(10_000), 1);
         assert_eq!(d.active_chains(), 0);
+    }
+
+    /// The watermark a holder passes the sweep over by falls to the deadline of each chain that
+    /// opens and is worked out again by a sweep: the next deadline left open, none once none is.
+    /// Turned red by an open that leaves it high (a chain past its deadline passed over) or a
+    /// sweep that leaves it low.
+    #[test]
+    fn due_ms_falls_with_an_open_chain_and_rises_with_a_sweep() {
+        let mut d = dispatcher::<4, 64>();
+        assert_eq!(d.due_ms(), u64::MAX, "no chain, due never");
+        d.ingest(frag(PEER_B, true, 1, 1, b"bbb"), MASK, 4_000, |_| {});
+        assert_eq!(d.due_ms(), 9_000);
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaa"), MASK, 0, |_| {});
+        assert_eq!(d.due_ms(), 5_000, "the earlier chain's deadline");
+        assert_eq!(d.sweep(6_000), 1);
+        assert_eq!(d.due_ms(), 9_000, "the chain left open");
+        assert_eq!(d.sweep(10_000), 1);
+        assert_eq!(d.due_ms(), u64::MAX, "none left open");
     }
 
     /// After a chain completes, its slot is reusable for a new chain.

@@ -178,18 +178,16 @@ pub struct TransportState<T: TransportFaces> {
 }
 
 /// What a step reads of a face and decides for it ([`TransportState::face_step`]): the face's
-/// value, what the session does about its link, the answer of its dial when one was asked, and
-/// the endpoint of a dial that is over.
-pub struct FaceStep<P> {
+/// value and what the session does about its link, and no more, so a step that leaves a face as it
+/// is moves a few words. The answer of a dial is written where the step asked for it, and a dial
+/// that is over (a [`FaceEffect::Handshake`] or a [`FaceEffect::DialFailed`], which nothing
+/// else decides) is let go of by the arm that carries the effect out, which takes its endpoint
+/// then ([`LinkSupervisor::end_dial`]).
+pub struct FaceStep {
     /// The face's value, read at the step.
     pub life: FaceLife,
     /// What the session does about the face's link.
     pub effect: FaceEffect,
-    /// The answer of the face's dial, when one was asked.
-    pub answer: DialAnswer<P>,
-    /// The endpoint the face's dial reached, when the dial is over at this step: moved out of
-    /// the dial as it is let go of, the one place its text is held.
-    pub endpoint: Option<DialEndpoint>,
 }
 
 /// A dial of one of the session's endpoints, asked once as it is begun
@@ -638,9 +636,10 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// What became of the link of the face at `at`, numbered `id`, read off it at `now_us` with
     /// the face's role, and what the face does about it (`FaceLife`), `redials` when the session
-    /// dials its endpoints again: the session carries it out, with the answer of the dial when one
-    /// was asked. A dial that is over is let go of here, with what it held for its link (a socket,
-    /// the link's buffers), before the face is dialled anew; its endpoint is moved out to the step.
+    /// dials its endpoints again: the session carries it out, with the answer of the dial, written
+    /// to `answer` when one was asked. A dial that is over stays in its face for the session to
+    /// let go of as it carries the effect out, with what it held for its link (a socket, the
+    /// link's buffers), before the face is dialled anew.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn face_step(
@@ -649,13 +648,13 @@ impl<T: TransportFaces> TransportState<T> {
         id: FaceId,
         redials: bool,
         now_us: u64,
-    ) -> FaceStep<PumpOf<T>> {
+        answer: &mut DialAnswer<PumpOf<T>>,
+    ) -> FaceStep {
         let FaceRead {
             role,
             phase,
             signals,
-            answer,
-        } = self.links.read_face(at, id);
+        } = self.links.read_face(at, id, answer);
         // The face is read out of line, so its role is a value here; a table of the dial role's
         // face alone holds no other role, which this step then knows when compiled.
         let role = if self.links.takes_faces() {
@@ -665,18 +664,9 @@ impl<T: TransportFaces> TransportState<T> {
         };
         let life = FaceLife::new(id, role, phase);
         let turn = life.turn(now_us, signals);
-        let endpoint = match turn {
-            Turn::DialOver { .. } => self.links.end_dial(at, now_us),
-            _ => None,
-        };
         let stood_by = self.stood_by(at, id, &turn);
         let effect = life.effect(turn, redials, stood_by);
-        FaceStep {
-            life,
-            effect,
-            answer,
-            endpoint,
-        }
+        FaceStep { life, effect }
     }
 
     /// End the handshake of the face at `at` that failed, and say why: the Close its peer sent,

@@ -1448,9 +1448,60 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
     );
 }
 
+/// A session whose links are all up and settled moves them on no more while nothing that moves
+/// them comes: the reads that hand samples look at no face's value. Once the link's task ends, a
+/// step moves them and finds the link lost, which ends a session that redials none. Turned red by
+/// a step that moves settled links at each receive (`Core::move_links` calling `poll_links`
+/// whatever it finds), or a settled session that misses its link's end.
+#[test]
+fn settled_links_are_moved_only_once_a_link_ends() {
+    const SAMPLES: u8 = 4;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = got.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            }),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    // A read more moves what the declaration changed, and leaves the links settled.
+    let _ = SessionDrive::read(&*engine, false);
+    let polls = engine.link_polls();
+    router.send(Command::PushBatch("demo/settled", SAMPLES));
+    until(&engine, "the samples", || {
+        got.lock().unwrap().len() == usize::from(SAMPLES)
+    });
+    assert_eq!(
+        engine.link_polls() - polls,
+        0,
+        "no move of settled links for the samples"
+    );
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the link's end to end the session", || {
+        SessionDrive::is_closed(&*engine)
+    });
+    assert!(
+        engine.link_polls() > polls,
+        "CONTROL: the link's end moves the links"
+    );
+}
+
 /// The read that hands what the session's link took from its stack in one receive, eight samples
-/// of one datagram, hands every one of them and moves the session's links once, after the last,
-/// and looks at the queue of handed publishes once, in a build of one thread as in one of threads.
+/// of one datagram, hands every one of them and moves the session's links once at most, after
+/// the last (none while they are settled, `settled_links_are_moved_only_once_a_link_ends`), and
+/// looks at the queue of handed publishes once, in a build of one thread as in one of threads.
 /// A datagram link takes one datagram a receive, so the session's round is lowered below the
 /// datagram's samples: a step reads one record (one thread) or as many as the round has room for
 /// (threads) while the link keeps the rest, and leaves the links where they stood. Datagrams the
@@ -1511,10 +1562,9 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         engine.rounds_handed() - rounds >= usize::from(SAMPLES) / RECORDS,
         "the datagram was read in more steps than one, a round each"
     );
-    assert_eq!(
-        engine.link_polls() - polls,
-        1,
-        "one move of the links for what the receive took"
+    assert!(
+        engine.link_polls() - polls <= 1,
+        "one move of the links at most for what the receive took"
     );
     assert_eq!(
         engine.task_clock_reads() - task_clock_reads,
