@@ -31,9 +31,12 @@ feature set and checks four facts about it:
                  whose configuration is known, so each is also the end-to-end witness that a
                  library states the build it is.
 
-The size cases state no limit or policy and turn no zenoh-c layout arm on. [`STATEMENT_CASES`]
-are the builds that do, graded on fact 5 alone: a limit and a policy stated through the build's
-environment, on each ABI, and the shared-memory arm of the zenoh-c drop-in.
+Each size case is built under the limits and policies of its ABI's own preset, its original's
+defconfig (`case_limits`, `wz_config.build_of` with no preset), as the ABI's release is: the
+pico cases at the bounds zenoh-pico holds, so a size, a ratio and a reading of the memory a build
+reserves are the shipped build's and never the host defaults of its build constants. They turn no
+zenoh-c layout arm on. [`STATEMENT_CASES`] are the builds that state a limit and a policy of
+their own, graded on fact 5 alone, on each ABI, and the shared-memory arm of the zenoh-c drop-in.
 
 PRESENCE is what makes ABSENCE mean something. A forbidden pattern that no build can match is a
 check that cannot fail (`--selftest` pins the matcher, and the full builds here are the live
@@ -144,6 +147,7 @@ from __future__ import annotations
 
 import datetime
 import argparse
+import functools
 import hashlib
 import io
 import json
@@ -164,6 +168,7 @@ import build_normalization  # noqa: E402  (the one rule that keeps paths and tim
 import elf_facts  # noqa: E402  (the one reader of an ELF's version needs)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 import pico_windows_package  # noqa: E402  (the Windows lane, whose cases share the ceiling table)
+import wz_package  # noqa: E402  (the shipping entry: how a release file is made from its build)
 from pico_host_ceiling import (  # noqa: E402  (the one rule of the ceiling table's rows)
     DEBT_PLACEHOLDER, HOST_CEILING, HOST_CEILING_SCHEMA, RATIO_TOLERANCE, ceil_ratio,
     ceiling_reading, ceiling_row, ceiling_rows, format_row, grade_ceiling, load_ceiling,
@@ -237,6 +242,21 @@ DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
+# Every library this gate builds is ONE build with its line tables, the shipping entry's
+# (`wz_package.ship_debug_env`), and every figure is read from that build with its debug
+# information taken off (`wz_package.strip_debug`), the file a deployer receives, written apart
+# under `SHIPPED_TARGET` so the build cargo left keeps its line tables for the size ledger
+# (`size_ledger_gate.py`), which reads its areas from them. A second build with line tables beside
+# one without them is not the same code (measured: its executable sections differed), so the line
+# tables of any other build would describe other code than the one measured. The zenoh-pico
+# reference is built so too (`reference_build`): GCC's level 1 (clang's line tables only), without
+# its command line in the producer string, where the prefix maps would put the host's paths, and
+# the same strip. Taking debug sections off moves no code, and that is not taken on trust: a file
+# whose executable sections are not its build's is refused (`link_findings`).
+LINE_TABLES_CFLAGS = ("-g1", "-gno-record-gcc-switches")
+SHIPPED_TARGET = TARGET / "shipped"
+# The reference's file without its debug information, under its build directory.
+SHIPPED_PICO = pathlib.Path("shipped") / "libzenohpico.so"
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -1660,6 +1680,9 @@ class Measured:
     relr_need: bool = False
     # Whether the library holds unwind tables (an `.eh_frame` or `.eh_frame_hdr` section).
     eh_frame: bool = False
+    # The executable sections the file measured does not hold as its build does
+    # (`wz_package.strip_debug`).
+    code_moved: tuple[str, ...] = ()
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1671,16 +1694,31 @@ def digests_in(data: bytes) -> tuple[str, ...]:
     return tuple(sorted({m.group(0)[:-1].decode("ascii") for m in DIGEST_IN_BINARY.finditer(data)}))
 
 
-def case_abi(case: Case) -> str:
-    return {"wz-capi-pico": "pico", "wz-capi-c": "c"}[case.package]
+#: The ABI whose library each package a case builds is.
+ABI_OF_PACKAGE = {"wz-capi-pico": "pico", "wz-capi-c": "c"}
 
 
-def stated_digest(case: Case | StatementCase, features: set[str]) -> str:
+def case_abi(case: Case | StatementCase) -> str:
+    return ABI_OF_PACKAGE[case.package]
+
+
+def stated_values(decl: dict, limits: Mapping[str, str]) -> dict[str, str]:
+    """`limits` (a build's `WZ_LIMIT_` and `WZ_POLICY_` environment) without the allowances of a
+    policy's domain: the statement names each limit's and policy's value, not what else a policy
+    may take."""
+    allowances = {wz_config.policy_allows_symbol(pol, value)
+                  for pol in decl["policies"] for value in wz_config.policy_values(pol)}
+    return {name: value for name, value in limits.items() if name not in allowances}
+
+
+def stated_digest(case: Case | StatementCase, features: set[str],
+                  limits: Mapping[str, str] | None = None) -> str:
     """The digest the conformance statement gives the case's build: its ABI and features, and the
-    limits and policies its environment states (none for a size case, so every limit is at its
-    default and every policy at upstream's)."""
-    return wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
-                                   dict(getattr(case, "env", ())), {})["digest"]
+    limits and policies it is built under (`case_limits` when not given)."""
+    decl = wz_config.load_decl()
+    given = case_limits(case) if limits is None else limits
+    return wz_config.env_statement(decl, case_abi(case), sorted(features),
+                                   stated_values(decl, given), {})["digest"]
 
 
 #: The capability whose door answers the conformance digest (`wz_ext_conformance_digest`).
@@ -1699,10 +1737,11 @@ def digest_door(case: Case | StatementCase, features: set[str]) -> bool:
 
 # The fifth fact for the builds the size cases do not make: the build script reads limits and
 # policies from the environment and the zenoh-c layout arm from a feature, and every size case
-# builds with none of them stated and no arm on. Without these, that reading is held only by unit
-# tests that hand the reader its answers (`wz-conformance-build`, and the statement vectors both
-# writers reproduce). These cases make real libraries with a non-default limit, a non-default
-# policy and the arm upstream's published zenoh-c archive has. Each must carry the digest its
+# builds under its ABI's own preset and no arm on (the zenoh-c original's preset sets no limit).
+# Without these, a value no preset sets is held only by unit tests that hand the reader its answers
+# (`wz-conformance-build`, and the statement vectors both writers reproduce). These cases make real
+# libraries with a limit and a policy of their own and the arm upstream's published zenoh-c
+# archive has. Each must carry the digest its
 # statement gives.
 #
 # They grade the digest and nothing else, so they carry no budget. They build with the dev profile
@@ -1737,14 +1776,37 @@ STATEMENT_CASES: tuple[StatementCase, ...] = (
 )
 
 
-def statement_env(case: StatementCase, base: Mapping[str, str]) -> dict[str, str]:
-    """The environment a statement case builds in: `base` (the gate's, see `build_env`), with
-    every limit and policy it states removed, and the case's added. Otherwise a value the shell
-    happened to export would build another library than the case names, and the statement would
-    still match it."""
+def limit_env(base: Mapping[str, str], limits: Mapping[str, str]) -> dict[str, str]:
+    """`base` (the gate's environment, see `build_env`) with every limit and policy it states
+    removed and `limits` added. Otherwise a value the shell happened to export would build another
+    library than the case names, and the statement would still match it."""
     env = {k: v for k, v in base.items()
            if not k.startswith(("WZ_LIMIT_", "WZ_POLICY_"))}
-    return {**env, **dict(case.env)}
+    return {**env, **limits}
+
+
+def statement_env(case: StatementCase, base: Mapping[str, str]) -> dict[str, str]:
+    """The environment a statement case builds in: its own limits and policies alone."""
+    return limit_env(base, dict(case.env))
+
+
+@functools.cache
+def original_limits(abi: str) -> tuple[tuple[str, str], ...]:
+    """The limits and policies of `abi`'s own preset, its original's defconfig with no preset
+    named (`wz_config.build_of`), as name and value. Resolved once a run: every size case of the
+    ABI is built under them. Raises `wz_config.PresetError` when it does not resolve (the pinned
+    Kconfig interpreter is not provisioned, or the defconfig is refused)."""
+    _, lines = wz_config.build_of(wz_config.load_decl(), abi, [])
+    return tuple((name, value) for name, _, value in (line.partition("=") for line in lines))
+
+
+def case_limits(case: Case | StatementCase) -> dict[str, str]:
+    """The limits and policies a case is built under: a statement case's own, a size case's its
+    ABI's preset (`original_limits`), and none for a package that is no ABI's library."""
+    if isinstance(case, StatementCase):
+        return dict(case.env)
+    abi = ABI_OF_PACKAGE.get(case.package)
+    return dict(original_limits(abi)) if abi is not None else {}
 
 
 def build_statement_case(case: StatementCase, base: Mapping[str, str]) -> tuple[str, ...]:
@@ -2034,6 +2096,10 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
     with; empty when it was linked as asked."""
     findings: list[str] = []
+    if lib.code_moved:
+        findings.append(f"{subject}: taking its debug information off changed its executable "
+                        f"sections ({', '.join(lib.code_moved)}), so the file measured is not the "
+                        f"build its line tables describe")
     if GNU_LD in lib.link_args and lib.linker and not lib.linker.startswith(NO_LINKER_NAMED):
         findings.append(f"{subject}: linked with `{GNU_LD}` and its .comment names {lib.linker}: "
                         f"another linker than GNU ld wrote it, so the two arms of the ratio are "
@@ -2098,8 +2164,9 @@ def comment_linker(dump: str) -> str:
 @dataclass(frozen=True)
 class CaseBuild:
     """How a case's library is built: the cargo command (run from `crates/`), the environment it
-    runs in, the library it leaves, and the linker arguments its flags give, which its zenoh-pico
-    reference is linked with alike (`reference_build`). The host performance matrix
+    runs in, the library it leaves, the linker arguments its flags give, which its zenoh-pico
+    reference is linked with alike (`reference_build`), and the `NAME=value` lines of the limits
+    and policies in that environment, for a run's record. The host performance matrix
     (`scripts/host-bench/perf_matrix.py wz-arm`) builds its arm W by this plan, so the library it
     times is built as the library this gate measures."""
 
@@ -2107,6 +2174,7 @@ class CaseBuild:
     env: Mapping[str, str]
     lib: pathlib.Path
     link_args: tuple[str, ...]
+    limits: tuple[str, ...] = ()
 
 
 def cargo_profiles(manifest: str) -> dict[str, dict[str, str]]:
@@ -2143,11 +2211,14 @@ def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, s
 
 
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
-               cfg: set[str] | None = None) -> CaseBuild:
-    """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
-    files is built for the host's own target, `triple` (this host's when not given), whose
-    `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags reach the
-    library's crates and not the build scripts."""
+               cfg: set[str] | None = None, limits: Mapping[str, str] | None = None) -> CaseBuild:
+    """The build of `case` in `env` (the gate's, `build_env`), under `limits` (`case_limits` when
+    not given) and none of the limits and policies `env` states (`limit_env`), with its line
+    tables as the shipping entry builds a release (`wz_package.ship_debug_env` of the case's
+    profile). A case that names configuration files is built for the host's own target, `triple`
+    (this host's when not given), whose `rustc --print cfg` lines are `cfg` (rustc's when not
+    given), so their flags reach the library's crates and not the build scripts."""
+    stated = case_limits(case) if limits is None else dict(limits)
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
@@ -2161,14 +2232,31 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
-    return CaseBuild(tuple(cmd), with_rustflags(env, flags), lib_dir / case.lib,
-                     tuple(link_args(flags)))
+    return CaseBuild(tuple(cmd), {**with_rustflags(limit_env(env, stated), flags),
+                                  **wz_package.ship_debug_env(case.profile)},
+                     lib_dir / case.lib, tuple(link_args(flags)),
+                     tuple(f"{k}={v}" for k, v in stated.items()))
 
 
-def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
-    plan = case_build(case, env)
+def strip_tool() -> pathlib.Path:
+    """The tool the shipping entry takes debug information off with
+    (`wz_package.toolchain_objcopy`), or a RuntimeError saying why this host has none."""
+    try:
+        return wz_package.toolchain_objcopy()
+    except wz_package.Refusal as e:
+        raise RuntimeError(str(e)) from e
+
+
+def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes,
+          limits: Mapping[str, str] | None = None) -> Measured:
+    """Build `case` (`case_build`, under `limits`) and measure the build without its debug
+    information, the file a deployer receives, written to `SHIPPED_TARGET`/<case>/; cargo's own
+    file keeps its line tables."""
+    plan = case_build(case, env, limits=limits)
     subprocess.run(list(plan.cmd), cwd=CRATES, env=dict(plan.env), check=True)
-    lib = plan.lib
+    lib = SHIPPED_TARGET / case.id / plan.lib.name
+    lib.parent.mkdir(parents=True, exist_ok=True)
+    moved = wz_package.strip_debug(plan.lib, lib, None, strip_tool())
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
@@ -2194,7 +2282,7 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
                     needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                    eh_frame=has_unwind_tables(data))
+                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved))
 
 
 @dataclass(frozen=True)
@@ -2217,6 +2305,8 @@ class Reference:
     eh_frame: bool = False
     # The C compiler flags it was built with beyond the rule's (`reference_build`).
     cflags: tuple[str, ...] = ()
+    # What `Measured` holds of the strip.
+    code_moved: tuple[str, ...] = ()
 
 
 def case_features(case: Case) -> set[str]:
@@ -2263,9 +2353,10 @@ def reference_build(link_args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[
     was linked with `link_args`, so a choice of the build moves both sides of the ratio alike:
     the linker (`GNU_LD`) and packed relocations as they are, and for a library whose unwind tables are discarded, C
     compiled without unwind tables (`NO_UNWIND_CFLAGS`) and linked with the same script, for
-    what the C runtime's own objects still bring."""
+    what the C runtime's own objects still bring. Its line tables are always asked
+    (`LINE_TABLES_CFLAGS`), as its case's are."""
     link: list[str] = []
-    cflags: list[str] = []
+    cflags: list[str] = list(LINE_TABLES_CFLAGS)
     for arg in link_args:
         if arg in (GNU_LD, PACKED_RELOCS_LINK):
             if arg not in link:
@@ -2322,10 +2413,14 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                          link: tuple[str, ...] = (),
                          cflags: tuple[str, ...] = ()) -> Reference:
     """zenoh-pico built with `asked` set, compiled with `cflags` and linked with `link` under
-    `env` ([`pico_reference_tree`]), measured, and searched for the build path prefixes `env`
+    `env` ([`pico_reference_tree`]), measured without its debug information (`SHIPPED_PICO` in
+    its directory, as a case is in `build`), and searched for the build path prefixes `env`
     maps."""
     work, pin, toolchain = pico_reference_tree(asked, env, link, cflags)
-    lib = work / "build" / "lib" / "libzenohpico.so"
+    lib = work / SHIPPED_PICO
+    lib.parent.mkdir(exist_ok=True)
+    moved = wz_package.strip_debug(work / "build" / "lib" / "libzenohpico.so", lib, None,
+                                   strip_tool())
     dynamic_section = subprocess.run(
         ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
@@ -2338,7 +2433,7 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                      linker=linker_of(lib), link_args=link,
                      relr=any("(RELR)" in line for line in dynamic_section),
                      relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                     eh_frame=has_unwind_tables(data), cflags=cflags)
+                     eh_frame=has_unwind_tables(data), cflags=cflags, code_moved=tuple(moved))
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -2437,7 +2532,14 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         print(f"  capability-cost: {e}", file=sys.stderr)
         return 2
     try:
+        limits_of = {case.id: case_limits(case) for case in CASES if chosen(case.id)}
+    except wz_config.PresetError as e:
+        print(f"  capability-cost: the limits of an ABI's own preset did not resolve "
+              f"(scripts/provision-kconfiglib.sh provisions the interpreter): {e}", file=sys.stderr)
+        return 2
+    try:
         linker = gnu_ld_version(env)
+        strip_tool()
     except RuntimeError as e:
         print(f"  capability-cost: {e}", file=sys.stderr)
         return 2
@@ -2456,9 +2558,12 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         if not chosen(case.id):
             continue
         started = time.monotonic()
-        got = build(case, env, prefixes)
-        stated = stated_digest(case, case_features(case))
+        limits = limits_of[case.id]
+        got = build(case, env, prefixes, limits)
+        stated = stated_digest(case, case_features(case), limits)
         door = digest_door(case, case_features(case))
+        print(f"  capability-cost: {case.id}: built under {len(limits)} limit and policy value(s) "
+              f"of its ABI's own preset")
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
               f"{', '.join(got.digests) or 'none'} "
@@ -2682,18 +2787,34 @@ def cmd_selftest() -> int:
     expect("every library the gate builds is linked by GNU ld through cc",
            link_args(GATE_RUSTFLAGS) == [GNU_LD] and "linker=cc" in GATE_RUSTFLAGS)
     # The plan of a case's build, which the performance matrix builds its arm W by.
-    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {})
+    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {}, limits={})
     expect("a case of no configuration file is built for the default target, by the gate's linker",
            plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico")
            and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
            and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
-           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
+           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS),
+                             **wz_package.ship_debug_env(SHIP_PROFILE)})
     expect("a case of the crate's default features names none",
            "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
            and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
+    shell = {"WZ_LIMIT_MAX_KEYEXPR_BYTES": "999", "WZ_POLICY_SN_RESOLUTION": "bits-8", "PATH": "/p"}
+    under = case_build(Case("t", "wz-capi-pico", "libt.so", "a", 1), shell,
+                       limits={"WZ_LIMIT_MAX_SUBSCRIPTIONS": "4"})
+    expect("a case is built under the limits of its build and none the shell exported, and its "
+           "plan names them",
+           under.env.get("WZ_LIMIT_MAX_SUBSCRIPTIONS") == "4"
+           and "WZ_LIMIT_MAX_KEYEXPR_BYTES" not in under.env
+           and "WZ_POLICY_SN_RESOLUTION" not in under.env and under.env.get("PATH") == "/p"
+           and under.limits == ("WZ_LIMIT_MAX_SUBSCRIPTIONS=4",))
+    expect("a package that is no ABI's library has no preset, and a statement case's limits are "
+           "its own",
+           case_limits(Case("t", "p", "l", None, 1)) == {}
+           and case_build(Case("t", "p", "l", None, 1), shell).limits == ()
+           and "WZ_LIMIT_MAX_KEYEXPR_BYTES" not in case_build(Case("t", "p", "l", None, 1), shell).env
+           and all(case_limits(s) == dict(s.env) for s in STATEMENT_CASES))
     bare_build = case_build(by_case["pico-client-coop-nostd"], {}, "x86_64-unknown-linux-gnu",
-                            linux_gnu)
+                            linux_gnu, limits={})
     expect("a case of configuration files is built for the target named, their flags the library's",
            bare_build.cmd[bare_build.cmd.index("--target") + 1] == "x86_64-unknown-linux-gnu"
            and bare_build.lib
@@ -2702,6 +2823,17 @@ def cmd_selftest() -> int:
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args)
+    expect("a case is built with its line tables by its own profile's variable, and no flag",
+           bare_build.env["CARGO_PROFILE_CAPI_NOSTD_DEBUG"] == wz_package.SHIP_DEBUG
+           and plain.env["CARGO_PROFILE_SHIP_DEBUG"] == wz_package.SHIP_DEBUG
+           and not any("debuginfo" in f or "strip" in f for f in
+                       bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")))
+    expect("a file whose strip moved its code is a finding naming the section, on either side",
+           len(found := link_findings("t", Measured(900, [], 3, code_moved=(".text",)))) == 1
+           and ".text" in found[0]
+           and len(link_findings("t", Reference(text=1, pin="p", toolchain="cc", refused=(),
+                                                code_moved=(".init",)))) == 1
+           and link_findings("t", Measured(900, [], 3)) == [])
     expect("the GNU ld line of the C compiler's linker version is read, and none is None",
            gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
            == "GNU ld (GNU Binutils for Ubuntu) 2.38"
@@ -2716,12 +2848,13 @@ def cmd_selftest() -> int:
            and link_findings("t", Measured(900, [], 3, linker="mold 2.30.0")) == [])
     absolute = f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}"
     expect("a reference is built as its case: packed as it is, without tables where it has none",
-           reference_build(()) == ((), ())
-           and reference_build((PACKED_RELOCS_LINK, "-Wl,-x")) == ((PACKED_RELOCS_LINK,), ())
+           reference_build(()) == ((), LINE_TABLES_CFLAGS)
+           and reference_build((PACKED_RELOCS_LINK, "-Wl,-x"))
+           == ((PACKED_RELOCS_LINK,), LINE_TABLES_CFLAGS)
            and reference_build((PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK))
-           == ((PACKED_RELOCS_LINK, absolute), NO_UNWIND_CFLAGS)
+           == ((PACKED_RELOCS_LINK, absolute), LINE_TABLES_CFLAGS + NO_UNWIND_CFLAGS)
            and reference_build((GNU_LD, PACKED_RELOCS_LINK, GNU_LD))
-           == ((GNU_LD, PACKED_RELOCS_LINK), ()))
+           == ((GNU_LD, PACKED_RELOCS_LINK), LINE_TABLES_CFLAGS))
     expect("the discard is read by its path from crates/ and by its absolute path alike",
            discards_unwind_tables((DISCARD_UNWIND_LINK,)) and discards_unwind_tables((absolute,))
            and not discards_unwind_tables(("-Wl,-T,other.ld", PACKED_RELOCS_LINK)))
@@ -2835,11 +2968,28 @@ def cmd_selftest() -> int:
            and digest_door(by_id["capic-client"], case_features(by_id["capic-client"]))
            and all(digest_door(s, case_features(s)) for s in STATEMENT_CASES))
     expect("a case's statement follows its features and its ABI",
-           stated_digest(by_id["pico-client"], case_features(by_id["pico-client"]))
-           == stated_digest(by_id["pico-client-small"], case_features(by_id["pico-client-small"]))
-           != stated_digest(by_id["pico-default"], case_features(by_id["pico-default"]))
-           and stated_digest(by_id["capic-client"], case_features(by_id["capic-client"]))
-           != stated_digest(by_id["pico-client"], case_features(by_id["pico-client"])))
+           stated_digest(by_id["pico-client"], case_features(by_id["pico-client"]), {})
+           == stated_digest(by_id["pico-client-small"], case_features(by_id["pico-client-small"]), {})
+           != stated_digest(by_id["pico-default"], case_features(by_id["pico-default"]), {})
+           and stated_digest(by_id["capic-client"], case_features(by_id["capic-client"]), {})
+           != stated_digest(by_id["pico-client"], case_features(by_id["pico-client"]), {}))
+    nostd_case = by_id["pico-client-coop-nostd"]
+    nostd_features = case_features(nostd_case)
+    lim0 = wz_config.load_decl()["limits"][0]
+    choice = next(p for p in wz_config.load_decl()["policies"] if p["kind"] == "choice")
+    allowance = wz_config.policy_allows_symbol(choice, wz_config.policy_values(choice)[-1])
+    expect("a case's statement follows the limits it is built under, and not a policy's allowance",
+           stated_digest(nostd_case, nostd_features, {lim0["kconfig"]: str(lim0["default"] + 1)})
+           != stated_digest(nostd_case, nostd_features, {})
+           == stated_digest(nostd_case, nostd_features, {allowance: "off"}))
+    if wz_config.kconfiglib_module() is not None:
+        _, shipped = wz_config.build_of(wz_config.load_decl(), "pico", [])
+        preset_limits = case_limits(nostd_case)
+        expect("a pico size case is built under its ABI's own preset, the pico bounds among them",
+               preset_limits == dict(line.partition("=")[::2] for line in shipped)
+               and any(name.startswith("WZ_LIMIT_") for name in preset_limits)
+               and all(case_build(nostd_case, {}, "x86_64-unknown-linux-gnu", linux_gnu).env.get(k) == v
+                       for k, v in preset_limits.items()))
     # The statement cases: each states something the defaults do not, through names the build
     # script reads, and the grader tells their pass from each way of failing.
     expect("case ids are unique across the size and statement cases",

@@ -923,7 +923,8 @@ def resolve_profile(decl: dict, profile: str) -> dict:
                       "this package is the pico ABI's")
     try:
         kconf = wz_config.resolve([path])
-        env_lines = wz_config.resolved_limit_env(decl, kconf) + wz_config.resolved_policy_env(decl, kconf)
+        # The limits and policies the one resolver gives the build (`wz_config.resolved_build`).
+        _, env_lines = wz_config.resolved_build(decl, "pico", kconf)
         # The profile's capabilities on the engine it chose, as `--resolve-features pico` prints them.
         features = wz_config.resolved_features(decl, "pico", kconf)
     except wz_config.PresetError as err:

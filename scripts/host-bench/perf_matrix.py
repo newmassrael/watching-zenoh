@@ -34,8 +34,8 @@ committed rows.
         feature list (`wz_config.pico_config_header`) in place of the reference's
     perf_matrix.py preset-arm --out DIR --original ORIGINAL --stdlib STDLIB
         arm W of the parity matrix's pico family (scripts/pico-compare.sh parity pico): wz-capi-pico for
-        configs/ORIGINAL_defconfig alone (`wz_config.original_features`), under its limits and policies
-        (`wz_config.original_env`), with STDLIB (`bench-stdlib`), built as
+        configs/ORIGINAL_defconfig alone, its features and its limits and policies from the one resolver
+        (`wz_config.configuration_of`, `capability_cost_gate.case_limits`), with STDLIB (`bench-stdlib`), built as
         the size gate builds the case of that form, as `wz-arm` builds its own; its library copied to
         DIR/lib-W, its log to DIR/build-wz.log, and two lines naming the build printed for the run's record
     perf_matrix.py pico-sys-include REPORT
@@ -1021,7 +1021,11 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
         return 2
     # Linked and compiled as the gate builds the reference of arm W's form, from the linker arguments arm W's
     # build is given (`wz-arm` builds it by the same plan).
-    plan = cost.case_build(shape, env)
+    try:
+        plan = cost.case_build(shape, env)
+    except wz_config.PresetError as error:
+        print(f"perf-matrix: NOT-MEASURED, the limits of arm W's build did not resolve: {error}", flush=True)
+        return 2
     link, cflags = cost.reference_build(plan.link_args)
     work, pin, toolchain = cost.pico_reference_tree(asked, env, link, cflags)
     header = work / "build" / "include" / "zenoh-pico" / "config.h"
@@ -1076,6 +1080,7 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
                                               dict(os.environ))
         case = bench_case(arm, engine, stdlib, named)
         env, _ = cost.build_env()
+        plan = cost.case_build(case, env)
     except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
         print(f"perf-matrix: NOT-MEASURED, arm {arm}: {error}", flush=True)
         return 2
@@ -1089,7 +1094,6 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
         print(f"perf-matrix: NOT-MEASURED, {reference_include} holds no headers of the reference: run "
               "`reference` first", flush=True)
         return 2
-    plan = cost.case_build(case, env)
     log = out / f"build-wz-{arm}.log"
     with log.open("w", encoding="utf-8") as stream:
         built = subprocess.run(list(plan.cmd), cwd=cost.CRATES, env=dict(plan.env), stdout=stream,
@@ -1108,17 +1112,19 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
     (inc / "zenoh-pico" / "config.h").write_text(header, encoding="utf-8")
     print(f"perf-matrix: arm {arm}: wz-capi-pico on the {engine} engine, {stdlib}, built as the size gate's "
           f"{SHAPE_CASES[(engine, stdlib)]} (profile {case.profile}, {list(case.cargo_configs) or 'no'} cargo "
-          f"configuration, linker arguments {list(plan.link_args)}), {len(named)} feature(s) named", flush=True)
+          f"configuration, linker arguments {list(plan.link_args)}), {len(named)} feature(s) named, under "
+          f"{len(plan.limits)} limit and policy value(s) of its ABI's own preset", flush=True)
     return 0
 
 
 def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
     """Arm W of the parity matrix (docs/upstream-parity.md section 5b) for the pico family: wz-capi-pico for
-    configs/<original>_defconfig alone (`wz_config.original_features`), under the limits and policies it sets
-    (`wz_config.original_env`), with `stdlib`, built as the size gate
-    builds the case of that form (`bench_case`, `capability_cost_gate.case_build` in the gate's `build_env`), so
-    the parity's size cells read the library a release ships unless told another form; its library copied to
-    OUT/lib-W and its build's log to OUT/build-wz.log. The two lines it prints are the run record's."""
+    configs/<original>_defconfig alone, its features from the one resolver's configuration
+    (`wz_config.configuration_of`), with `stdlib`, built as the size gate builds the case of that form
+    (`bench_case`, `capability_cost_gate.case_build` in the gate's `build_env`), and so under the limits and
+    policies of that same configuration (`capability_cost_gate.case_limits`, `wz_config.build_of`), so the
+    parity's size and memory cells read the library a release ships unless told another form; its library copied
+    to OUT/lib-W and its build's log to OUT/build-wz.log. The two lines it prints are the run record's."""
     import capability_cost_gate as cost
     import wz_config
 
@@ -1126,8 +1132,9 @@ def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
         print(f"perf-matrix: NOT-MEASURED, `{original}` is no original built through the pico ABI", flush=True)
         return 2
     table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
+    decl = wz_config.load_decl()
     try:
-        named = wz_config.original_features(original)
+        named = wz_config.resolved_features(decl, "pico", wz_config.configuration_of("pico", []))
         engine = wz_config.statement_engine("pico", wz_config.enabled_features(table, named))
         if engine != "coop":
             raise Refused(f"configs/{original}_defconfig builds the {engine} engine, and arm W is built in a "
@@ -1135,12 +1142,11 @@ def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
         if stdlib == "nostd":
             named = wz_config.nostd_named_features(named, table)
         case = bench_case("W", engine, stdlib, named)
-        preset_env = wz_config.original_env(original)
         env, _ = cost.build_env()
+        plan = cost.case_build(case, env)
     except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
         print(f"perf-matrix: NOT-MEASURED, arm W of {original}: {error}", flush=True)
         return 2
-    plan = cost.case_build(case, {**env, **dict(line.split("=", 1) for line in preset_env)})
     with (out / "build-wz.log").open("w", encoding="utf-8") as stream:
         built = subprocess.run(list(plan.cmd), cwd=cost.CRATES, env=dict(plan.env), stdout=stream,
                                stderr=subprocess.STDOUT)
@@ -1154,7 +1160,7 @@ def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
     print(f"wz_build=-p {case.package} --features {case.features}; stdlib {stdlib}, profile {case.profile}, "
           f"cargo configuration {list(case.cargo_configs) or 'none'}, linker arguments {list(plan.link_args)} "
           f"(the size gate's {SHAPE_CASES[(engine, stdlib)]})", flush=True)
-    print(f"wz_build_env={' '.join(preset_env)}", flush=True)
+    print(f"wz_build_env={' '.join(plan.limits)}", flush=True)
     return 0
 
 
@@ -2111,7 +2117,7 @@ def cmd_selftest() -> int:
            not_pico == 2 and "no original built through the pico ABI" in said.getvalue())
     nostd_reference = cost.reference_build(cost.case_build(bare, {}, "x86_64-unknown-linux-gnu",
                                                            {"unix", 'target_os="linux"', 'target_env="gnu"',
-                                                            'target_family="unix"'}).link_args)
+                                                            'target_family="unix"'}, limits={}).link_args)
     expect("the reference of arm W without std is compiled without unwind tables and linked as arm W is",
            set(cost.NO_UNWIND_CFLAGS) <= set(nostd_reference[1])
            and cost.PACKED_RELOCS_LINK in nostd_reference[0] and cost.GNU_LD in nostd_reference[0])

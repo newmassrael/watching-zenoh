@@ -761,20 +761,35 @@ parity_fail_log() {
     parity_fail "$@"
 }
 
-# The cargo arguments of the wz build of an original's preset: configs/<original>_defconfig alone, resolved.
-# It runs in a command substitution, so its refusal goes to stderr and the caller exits.
-parity_preset_args() {
-    python3 -I scripts/lib/wz_config.py --original-features "$1" \
-        || { echo "pico-compare: NOT-MEASURED, configs/$1_defconfig did not resolve (wz_config.py --original-features $1)" >&2; return 2; }
+# The wz build of an original's preset, configs/<original>_defconfig alone, as the one resolver gives every build
+# (`wz_config.py --resolve-build <abi>` with no preset): the cargo arguments on its first line, then the
+# WZ_LIMIT_<NAME>=<n> and WZ_POLICY_<NAME>=<value> lines the build runs under, without which it would hold every
+# build constant at its host default and not at the value the defconfig sets. Each helper runs in a command
+# substitution, so a refusal goes to stderr and the caller exits.
+parity_preset_build() {
+    local abi
+    case "$1" in
+        zenoh-pico) abi=pico ;;
+        zenoh-c) abi=c ;;
+        zenoh) abi=core ;;
+        *) echo "pico-compare: no ABI builds the original $1" >&2; return 2 ;;
+    esac
+    python3 -I scripts/lib/wz_config.py --resolve-build "$abi" \
+        || { echo "pico-compare: NOT-MEASURED, configs/$1_defconfig did not resolve (wz_config.py --resolve-build $abi)" >&2; return 2; }
 }
 
-# The other half of the same build, which cargo arguments cannot carry: the WZ_LIMIT_<NAME>=<n> and
-# WZ_POLICY_<NAME>=<value> lines of configs/<original>_defconfig, one a line, which the wz build runs under. A
-# build of the arguments alone holds every build constant at its host default, not at the value the defconfig
-# sets (zenoh-pico's turns on the pico preset of the limits), so the cells would read another build.
+# The cargo arguments of that build.
+parity_preset_args() {
+    local build
+    build="$(parity_preset_build "$1")" || return 2
+    printf '%s\n' "${build%%$'\n'*}"
+}
+
+# The limits and policies of that build, one a line; none when it sets none.
 parity_preset_env() {
-    python3 -I scripts/lib/wz_config.py --original-env "$1" \
-        || { echo "pico-compare: NOT-MEASURED, the limits of configs/$1_defconfig did not resolve (wz_config.py --original-env $1)" >&2; return 2; }
+    local build
+    build="$(parity_preset_build "$1")" || return 2
+    [[ "$build" != *$'\n'* ]] || printf '%s\n' "${build#*$'\n'}"
 }
 
 # zenoh-pico: the original is upstream's DEFAULT build (no switch passed; build-zenoh-pico-cli.sh configures that arm
