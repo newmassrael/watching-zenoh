@@ -1013,10 +1013,18 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// `None` for a face that held no dial, which waits all the same, and for one past the table.
     pub fn end_dial(&mut self, at: usize, at_us: u64) -> Option<DialEndpoint> {
         let link = self.face_mut(at)?.link_mut();
-        match core::mem::replace(link, Link::Waiting { at_us }) {
-            Link::Dialing { dial, .. } => Some(dial.into_endpoint()),
+        // Only the endpoint is moved out, and the link it leaves is let go of where it lies: a
+        // link moved out whole is copied to the caller's frame, and its dial again, at each place
+        // this is inlined.
+        let endpoint = match link {
+            Link::Dialing { dial, .. } => Some(core::mem::replace(
+                &mut dial.endpoint,
+                DialEndpoint::Listed(0),
+            )),
             _ => None,
-        }
+        };
+        *link = Link::Waiting { at_us };
+        endpoint
     }
 
     /// The face at `at`, whose handshake completed, holds its link up.
