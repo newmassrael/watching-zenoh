@@ -617,13 +617,11 @@ macro_rules! closure_shares_the_block {
 
 pub(crate) use closure_shares_the_block;
 
-/// The facts of an owned type and the ownership 6-function core over them (`internal_null`,
-/// `internal_check`, `loan`, `loan_mut`, `move`, `take`), for a type whose owned and loaned
-/// forms share one layout. `$drop` is the type's facts' `drop`.
-macro_rules! impl_owned_family {
-    ($Owned:ty, $Loaned:ty, $Moved:ty, $drop:expr,
-     $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
-     $mv:ident, $take:ident) => {
+/// `facts()` on an owned type: one static of its [`TypeFacts`], `$drop` its `drop`. Every family
+/// emits it, and a family written out by hand (a loan that is not a reinterpretation, a drop of its
+/// own) names it so that its null, take and drop are the shared bodies too.
+macro_rules! impl_type_facts {
+    ($Owned:ty, $drop:expr) => {
         impl $Owned {
             /// The facts of this type the families' shared bodies read.
             #[inline(always)]
@@ -633,6 +631,19 @@ macro_rules! impl_owned_family {
                 &FACTS
             }
         }
+    };
+}
+
+pub(crate) use impl_type_facts;
+
+/// The facts of an owned type and the ownership 6-function core over them (`internal_null`,
+/// `internal_check`, `loan`, `loan_mut`, `move`, `take`), for a type whose owned and loaned
+/// forms share one layout. `$drop` is the type's facts' `drop`.
+macro_rules! impl_owned_family {
+    ($Owned:ty, $Loaned:ty, $Moved:ty, $drop:expr,
+     $null:ident, $check:ident, $loan:ident, $loan_mut:ident,
+     $mv:ident, $take:ident) => {
+        $crate::abi::impl_type_facts!($Owned, $drop);
 
         /// Zero the owned struct in place (pico `z_internal_*_null`).
         #[no_mangle]
@@ -853,17 +864,10 @@ macro_rules! impl_boxed_element {
             }
         }
 
-        impl $Owned {
-            /// The facts of this type the families' shared bodies read.
-            #[inline(always)]
-            pub(crate) fn facts() -> &'static $crate::abi::TypeFacts {
-                static FACTS: $crate::abi::TypeFacts = $crate::abi::TypeFacts::of(
-                    ::core::mem::size_of::<$Owned>(),
-                    ::core::option::Option::Some($free as unsafe fn(*mut ::core::ffi::c_void)),
-                );
-                &FACTS
-            }
-        }
+        $crate::abi::impl_type_facts!(
+            $Owned,
+            ::core::option::Option::Some($free as unsafe fn(*mut ::core::ffi::c_void))
+        );
 
         /// Zero the owned struct in place (pico `z_internal_*_null`).
         #[no_mangle]
@@ -1230,6 +1234,134 @@ mod tests {
             1,
             "null forgets the closure, runs nothing"
         );
+    }
+
+    /// Through the string and slice exports written out by hand: take moves the block and leaves
+    /// the source null, the moved value still reads its bytes, and drop lets it go and leaves it
+    /// null, a second drop a no-op. Turned red by a family whose facts are another type's, or a
+    /// drop whose facts free with another type's function.
+    #[test]
+    fn the_string_and_slice_families_run_over_their_facts() {
+        use crate::bytes::{
+            z_internal_slice_check, z_internal_slice_null, z_internal_string_check,
+            z_slice_copy_from_buf, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move,
+            z_slice_take, z_string_copy_from_str, z_string_drop, z_string_len, z_string_loan,
+            z_string_move, z_string_take,
+        };
+        // SAFETY: owned values this crate makes, each dropped once.
+        unsafe {
+            let mut src = z_owned_string_t::null_value();
+            let mut dst = z_owned_string_t::null_value();
+            assert_eq!(
+                z_string_copy_from_str(&mut src, c"demo".as_ptr()),
+                crate::result::Z_OK
+            );
+            z_string_take(&mut dst, z_string_move(&mut src));
+            assert!(!z_internal_string_check(&src));
+            assert!(z_internal_string_check(&dst));
+            assert_eq!(z_string_len(z_string_loan(&dst)), 4);
+            z_string_drop(z_string_move(&mut dst));
+            assert!(!z_internal_string_check(&dst));
+            z_string_drop(z_string_move(&mut dst));
+
+            let mut slice = z_owned_slice_t::null_value();
+            let mut moved = z_owned_slice_t::null_value();
+            let bytes = [1u8, 2, 3];
+            assert_eq!(
+                z_slice_copy_from_buf(&mut slice, bytes.as_ptr(), bytes.len()),
+                crate::result::Z_OK
+            );
+            z_slice_take(&mut moved, z_slice_move(&mut slice));
+            assert!(!z_internal_slice_check(&slice));
+            assert_eq!(z_slice_len(z_slice_loan(&moved)), 3);
+            z_slice_drop(z_slice_move(&mut moved));
+            assert!(!z_internal_slice_check(&moved));
+            z_internal_slice_null(&mut moved);
+            assert!(!z_internal_slice_check(core::ptr::null()));
+        }
+    }
+
+    /// A key's null and take cover all its words, its handle in the fourth among them; its check
+    /// reads that handle, not the first word. Turned red by facts short of the key, or a key check
+    /// moved onto the shared one, which reads the first word.
+    #[test]
+    fn a_keys_null_and_take_cover_its_handle_in_the_fourth_word() {
+        use crate::keyexpr::{
+            z_internal_keyexpr_check, z_internal_keyexpr_null, z_keyexpr_move, z_keyexpr_take,
+        };
+        let mut src = z_owned_keyexpr_t {
+            _start: core::ptr::null(),
+            _len: 0,
+            _handle: 0,
+            _state: 0x40 as Handle,
+            _pad: [5, 6],
+        };
+        let mut dst = z_owned_keyexpr_t::null_value();
+        // SAFETY: two owned key blocks; the handle is never read through.
+        unsafe {
+            assert!(
+                z_internal_keyexpr_check(&src),
+                "a null first word, a live handle"
+            );
+            z_keyexpr_take(&mut dst, z_keyexpr_move(&mut src));
+            assert!(!z_internal_keyexpr_check(&src));
+            assert_eq!(dst._state as usize, 0x40);
+            assert_eq!(dst._pad, [5, 6]);
+            assert_eq!(src._pad, [0, 0]);
+            z_internal_keyexpr_null(&mut dst);
+            assert!(dst._state.is_null() && dst._pad == [0, 0]);
+        }
+    }
+
+    /// Each family written out by hand reads facts of its own block's size. Turned red by facts
+    /// named for another type.
+    #[test]
+    fn each_hand_written_familys_facts_are_its_own_size() {
+        fn bytes_of(facts: &TypeFacts) -> usize {
+            usize::from(facts.size)
+        }
+        use crate::session::z_owned_session_t;
+        assert_eq!(
+            bytes_of(z_owned_session_t::facts()),
+            core::mem::size_of::<z_owned_session_t>()
+        );
+        assert_eq!(
+            bytes_of(z_owned_slice_t::facts()),
+            core::mem::size_of::<z_owned_slice_t>()
+        );
+        assert_eq!(
+            bytes_of(z_owned_string_t::facts()),
+            core::mem::size_of::<z_owned_string_t>()
+        );
+        assert_eq!(
+            bytes_of(z_owned_keyexpr_t::facts()),
+            core::mem::size_of::<z_owned_keyexpr_t>()
+        );
+        assert_eq!(bytes_of(&CLOSURE), 3 * core::mem::size_of::<usize>());
+        #[cfg(feature = "liveliness")]
+        {
+            use crate::liveliness::z_owned_liveliness_token_t;
+            assert_eq!(
+                bytes_of(z_owned_liveliness_token_t::facts()),
+                core::mem::size_of::<z_owned_liveliness_token_t>()
+            );
+        }
+        #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+        {
+            use crate::scout::z_owned_hello_t;
+            assert_eq!(
+                bytes_of(z_owned_hello_t::facts()),
+                core::mem::size_of::<z_owned_hello_t>()
+            );
+        }
+        #[cfg(feature = "query")]
+        {
+            use crate::get::z_owned_reply_err_t;
+            assert_eq!(
+                bytes_of(z_owned_reply_err_t::facts()),
+                core::mem::size_of::<z_owned_reply_err_t>()
+            );
+        }
     }
 
     /// Only bytes has a borrowed form; the types the 7-function family emits for have none, which
