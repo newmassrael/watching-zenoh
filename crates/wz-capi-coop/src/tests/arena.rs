@@ -828,10 +828,11 @@ fn the_plan_lays_out_no_delivery_lane() {
 }
 
 /// A build that puts nothing in the round (`wz_round`) lays out none of it: no records, no
-/// callbacks, no keys and no round, however many the limits state. The CONTROL is a part every
-/// plan lays out. Turned red by a plan that still lays out a part of the round where the open
-/// places none.
-#[cfg(not(wz_round))]
+/// callbacks, no keys and no round, however many the limits state. The CONTROL is the router's
+/// lend, which every plan of a build that lays its session out at the open lays out; a build that
+/// does not keeps what it has in its region, and its arena holds no part of a round to look for.
+/// Turned red by a plan that still lays out a part of the round where the open places none.
+#[cfg(all(not(wz_round), feature = "runtime-plan"))]
 #[test]
 fn a_build_that_puts_nothing_in_the_round_lays_out_none_of_it() {
     let built =
