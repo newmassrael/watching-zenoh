@@ -2872,6 +2872,9 @@ impl SharedSession {
             },
         )?;
         let actions = new_session_actions(driver, params, clock);
+        // Nothing establishes the plane, whose link no handshake runs over: its sends (the
+        // declarations of its own registrations) are let through from the start.
+        actions.open_without_handshake();
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::with_limits(
             &session_limits,
         )));

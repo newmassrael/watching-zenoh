@@ -8264,6 +8264,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             ));
     }
 
+    /// Let data through a link no handshake runs over, with no peer at its far end: the
+    /// in-process plane a session delivers its own publications on. Its send limits are settled
+    /// from the session's own advertisement, as an establishment that heard no capabilities
+    /// settles them, and the data-send gate opens. It is not stamped established
+    /// ([`Self::is_established`] stays `false`): what waits on a peer's answer is still refused
+    /// on it.
+    pub fn open_without_handshake(&self) {
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))]
+        self.settle_tx_limits();
+        self.link.transport_available.open();
+    }
+
     /// The bytes of a batch that are not its frame: the length a streamed link writes in
     /// front of it ([`crate::link::STREAM_BATCH_LENGTH_BYTES`]) and the `BatchHeader` of a
     /// compressing session ([`crate::compression::BATCH_HEADER_BYTES`]). zenoh writes both
