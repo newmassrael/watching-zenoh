@@ -2026,9 +2026,11 @@ impl<T, L: RowList<T> + ?Sized> RowList<T> for &mut L {
     }
 }
 
-/// What a table of rows a peer writes answers to a reader: the part of [`RowList`] that writes
-/// nothing, which a table lent its owner's space only to read answers too ([`LentRowsRef`]).
-pub trait RowRead<T> {
+/// What a table of rows a peer writes answers to a reader for as long as `'a`, the borrow it was
+/// lent for: the part of [`RowList`] that writes nothing, which a table lent its owner's space only
+/// to read answers too ([`LentRowsRef`]). What it hands out lives for `'a`, not for the reader
+/// value.
+pub trait RowRead<'a, T: 'a> {
     /// How many values the table holds.
     fn len(&self) -> usize;
 
@@ -2038,33 +2040,25 @@ pub trait RowRead<T> {
     }
 
     /// The values, in order.
-    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a T>
-    where
-        T: 'a;
+    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a;
 }
 
-impl<T, L: RowList<T> + ?Sized> RowRead<T> for &L {
+impl<'a, T: 'a, L: RowList<T> + ?Sized> RowRead<'a, T> for &'a L {
     fn len(&self) -> usize {
-        L::len(self)
+        L::len(*self)
     }
 
-    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a T>
-    where
-        T: 'a,
-    {
-        L::iter(self)
+    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a {
+        L::iter(*self)
     }
 }
 
-impl<T, const N: usize> RowRead<T> for LentRowsRef<'_, Seq<T>, N> {
+impl<'a, T: 'a, const N: usize> RowRead<'a, T> for LentRowsRef<'a, Seq<T>, N> {
     fn len(&self) -> usize {
         LentRowsRef::len(self)
     }
 
-    fn iter<'b>(&'b self) -> impl Iterator<Item = &'b T>
-    where
-        T: 'b,
-    {
+    fn iter(&self) -> impl Iterator<Item = &'a T> + 'a {
         LentRowsRef::iter(self)
     }
 }
@@ -2080,8 +2074,8 @@ pub trait PeerSeq<T, H>: Default {
         Self: 'a,
         H: 'a,
         T: 'a;
-    /// The sequence lent the handle, to read.
-    type Ref<'a>: RowRead<T>
+    /// The sequence lent the handle, to read: what it hands out lives for the lend.
+    type Ref<'a>: RowRead<'a, T>
     where
         Self: 'a,
         H: 'a,
@@ -2107,6 +2101,16 @@ pub trait PeerSeq<T, H>: Default {
         keys: &'a H,
         slot: crate::peer_tables::PeerSlot,
     ) -> Self::Ref<'a>;
+
+    /// Give back the rows the sequence holds where they lie apart from it, through `keys`: what its
+    /// owner does before it drops the sequence or changes its handle. Nothing for a sequence that keeps
+    /// its own rows, which its own drop gives back.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    unsafe fn release(&mut self, keys: &H, slot: crate::peer_tables::PeerSlot) {
+        let _ = (keys, slot);
+    }
 }
 
 impl<T, const N: usize, P: Storage, H> PeerSeq<T, H> for BoundedVec<T, N, P> {
@@ -2163,6 +2167,16 @@ impl<T, const N: usize> PeerSeq<T, crate::key_arena::LentKeys> for PooledRows<Se
         let space = crate::peer_tables::lent_space::<Seq<T>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledRows::lend_ref(self, &space) }
+    }
+
+    unsafe fn release(
+        &mut self,
+        keys: &crate::key_arena::LentKeys,
+        slot: crate::peer_tables::PeerSlot,
+    ) {
+        let space = crate::peer_tables::lent_space::<Seq<T>>(keys, slot);
+        // SAFETY: as `lend`'s.
+        unsafe { PooledRows::lend(self, &space) }.clear();
     }
 }
 

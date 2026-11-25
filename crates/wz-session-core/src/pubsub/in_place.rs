@@ -716,7 +716,7 @@ mod tests {
     fn a_peer_alias_resolves_as_the_owned_path_resolves_it() {
         let peer = |r: &mut SubscriberRegistry| {
             let literal = crate::id_map::key_text("demo/a").expect("fits");
-            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 5, literal);
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases_mut(), 5, literal);
         };
         for suffix in [None, Some("/b")] {
             let built = crate::push_build::build_push_aliased(5, suffix, b"v").expect("build");
@@ -861,7 +861,7 @@ mod tests {
         let base = alloc::format!("{long_base}/");
         let peer = |r: &mut SubscriberRegistry| {
             let literal = crate::id_map::key_text(&base).expect("the alias fits the table");
-            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 9, literal);
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases_mut(), 9, literal);
         };
         let built = crate::push_build::build_push_aliased(9, Some("tail"), b"v").expect("build");
         let wire = wire_of(&built);

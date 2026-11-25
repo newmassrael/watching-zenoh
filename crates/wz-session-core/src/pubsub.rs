@@ -110,14 +110,14 @@ use crate::held_list::HeldList;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{IdMap, PeerAliases};
+use crate::id_map::{IdMap, IdRead, KeyText, PeerAliases, PeerIds};
 use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
 #[cfg(feature = "key-set-closed")]
 use crate::keyexpr_match::keyexpr_intersects_text;
 use crate::keyexpr_match::{keyexpr_intersects_text_with, KeyFacts, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-use crate::row_pool::RowList;
+use crate::row_pool::{PeerSeq, RowList, RowRead};
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
 // `wireexpr_resolve` module and is reached only from the `alloc`
@@ -562,7 +562,7 @@ struct InterestSide<P: Storage = Profile> {
     /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
     /// could.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-    rows: <P as Storage>::Pooled<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }>,
+    rows: InterestTable<P>,
     /// R311y530 — the staged interest-response chain, drained by
     /// [`Self::take_staged_sub_interest_replies`] through a
     /// [`crate::response_sink::DeclareReplySink`].
@@ -597,6 +597,21 @@ struct InterestSide<P: Storage = Profile> {
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     keys: P::Keys,
 }
+
+/// The rows of a side's interests, in the policy's sequence of a peer's rows.
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+type InterestTable<P> =
+    <P as Storage>::Pooled<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }>;
+
+/// A side's interest rows lent its keys, to write ([`PeerSeq::lend`]).
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+type InterestsMut<'a, P> =
+    <InterestTable<P> as PeerSeq<InboundSubInterest<P>, <P as Storage>::Keys>>::Mut<'a>;
+
+/// A side's interest rows lent its keys, to read ([`PeerSeq::lend_ref`]).
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+type InterestsRef<'a, P> =
+    <InterestTable<P> as PeerSeq<InboundSubInterest<P>, <P as Storage>::Keys>>::Ref<'a>;
 
 /// The Push records the in-place receive path (`drive::dispatch_datagram`, the
 /// MCU profile's `rx-in-place`) handed this registry lent, and that it then
@@ -1958,7 +1973,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 not(feature = "multicast-ingress-gate")
             ))]
             if record.is_past_sender_bound() {
-                self.naming.aliases.count_refused();
+                self.naming.aliases_mut().count_refused();
                 return;
             }
             self.absorb_declare_view(&declare.body, subs.own_space(), record.sender());
@@ -2917,18 +2932,20 @@ impl SubscriberPeer<Lent> {
     }
 
     /// Keep the aliases the peer declares from here on in rows of `space`, the session's: a pool the
-    /// faces share, or a span of this table's own; the aliases held elsewhere are forgotten first.
+    /// faces share, or a span of this table's own. It is the space the side's keys name for the
+    /// aliases (`keep_keys_in`), which lend it to the table for each operation.
     #[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
     pub fn keep_alias_rows_in(
         &mut self,
         space: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
     ) {
-        self.naming.aliases.keep_rows_in(space);
+        self.naming.aliases.attach(&space);
     }
 
     /// Keep the interests the peer asks from here on in rows `rows` hands out, the session's: a
-    /// pool the faces share, or a span of this side's own if no table took it before; the
-    /// interests held elsewhere are forgotten first. Rows with nothing left to hand change nothing.
+    /// pool the faces share, or a span of this side's own if no table took it before. It is the
+    /// space the side's keys name for the interests (`keep_keys_in`), which lend it to the rows
+    /// for each operation. Rows with nothing left to hand change nothing.
     #[cfg(all(
         feature = "declare-subscriber",
         feature = "interest-answer",
@@ -2936,7 +2953,7 @@ impl SubscriberPeer<Lent> {
     ))]
     pub fn keep_interest_rows_in(&mut self, rows: &mut InterestRows) {
         if let Some(space) = rows.0.hand_out() {
-            self.interests.rows.keep_rows_in(space);
+            self.interests.rows.attach(&space);
         }
     }
 }
@@ -3106,7 +3123,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// told no to over the life of the table, not what it holds now.
     pub fn forget_peer(&mut self) {
         #[cfg(feature = "storage-profile")]
-        self.naming.aliases.reset();
+        self.naming.aliases_mut().reset();
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.interests.forget();
         // The next peer on this slot is not known to be the last one.
@@ -3231,7 +3248,7 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(feature = "alloc")]
     pub fn resolve_inbound_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
         self.naming
-            .aliases
+            .aliases_ref()
             .find(crate::wire_id::peer_key(id))
             .map(|text| String::from(&**text))
     }
@@ -3239,7 +3256,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// How many keyexpr aliases the peer has declared and not retracted.
     #[cfg(feature = "storage-profile")]
     pub fn alias_count(&self) -> usize {
-        self.naming.aliases.count()
+        self.naming.aliases_ref().count()
     }
 
     /// Hold the peer's alias table to the `MAX_PEER_KEYEXPR_ALIASES` the creator of the
@@ -3271,12 +3288,16 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.key_quota
     }
 
-    /// Keep the keys of the aliases the peer declares from here on in `keys`: the session's key
-    /// arena, on the lent policy. The aliases already held keep theirs.
+    /// Keep the keys of the aliases the peer declares and the interests it asks from here on in
+    /// `keys`: the session's key arena, on the lent policy. Rows lent through the keys held before
+    /// are given back through them first, as they lie in the space those keys name and the new
+    /// keys may name another; a table that keeps its own rows keeps what it holds.
     #[cfg(feature = "storage-profile")]
     pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.naming.release_aliases();
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         {
+            self.interests.release_rows();
             self.interests.keys = keys.clone();
         }
         self.naming.keys = keys;
@@ -3296,7 +3317,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// while no quota is stated, as its room refuses nothing.
     #[cfg(feature = "storage-profile")]
     pub fn alias_refusals(&self) -> u32 {
-        self.naming.aliases.refusals()
+        self.naming.aliases_ref().refusals()
     }
 
     /// R231 — install this session's own zid (1..=16 bytes) so
@@ -3416,7 +3437,7 @@ impl<P: Storage> SubscriberPeer<P> {
                         Ok(text) => text,
                         Err(crate::bounded::KeyUnkept::TooLong) => return,
                         Err(crate::bounded::KeyUnkept::NoRoom) => {
-                            self.naming.aliases.count_refused();
+                            self.naming.aliases_mut().count_refused();
                             return;
                         }
                     };
@@ -3424,7 +3445,7 @@ impl<P: Storage> SubscriberPeer<P> {
                 // table itself; the declaration that did not fit is dropped here, with
                 // the peer none the wiser.
                 let quota = self.naming.alias_quota;
-                let _ = self.naming.aliases.bind_within(
+                let _ = self.naming.aliases_mut().bind_within(
                     crate::wire_id::declared_peer_key(d.id),
                     text,
                     |count| quota.admits(count),
@@ -3432,7 +3453,7 @@ impl<P: Storage> SubscriberPeer<P> {
             }
             DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
                 self.naming
-                    .aliases
+                    .aliases_mut()
                     .unbind(crate::wire_id::declared_peer_key(u.id));
             }
             // DeclSubscriber / UndeclSubscriber are observed by
@@ -3510,13 +3531,13 @@ impl<P: Storage> SubscriberPeer<P> {
                         Ok(text) => text,
                         Err(crate::bounded::KeyUnkept::TooLong) => return,
                         Err(crate::bounded::KeyUnkept::NoRoom) => {
-                            self.naming.aliases.count_refused();
+                            self.naming.aliases_mut().count_refused();
                             return;
                         }
                     };
                 // A refusal is counted by the table itself, as for the owned form.
                 let quota = self.naming.alias_quota;
-                let _ = self.naming.aliases.bind_within(
+                let _ = self.naming.aliases_mut().bind_within(
                     crate::wire_id::declared_sender_peer_key(sender, d.id),
                     text,
                     |count| quota.admits(count),
@@ -3524,7 +3545,7 @@ impl<P: Storage> SubscriberPeer<P> {
             }
             DeclareVariant::CodecZenohUndeclKexpr(u) => {
                 self.naming
-                    .aliases
+                    .aliases_mut()
                     .unbind(crate::wire_id::declared_sender_peer_key(sender, u.id));
             }
             // The other arms are the dedicated registries', as in the owned form.
@@ -3540,8 +3561,57 @@ impl<P: Storage> SubscriberPeer<P> {
     }
 }
 
+/// The peer's alias table lent its side's keys, to bind and unbind ([`PeerIds::lend`]).
+#[cfg(feature = "storage-profile")]
+type AliasesMut<'a, P> = <PeerAliases<P> as PeerIds<KeyText<P>, <P as Storage>::Keys>>::Mut<'a>;
+
+/// The peer's alias table lent its side's keys, to read ([`PeerIds::lend_ref`]).
+#[cfg(feature = "storage-profile")]
+type AliasesRef<'a, P> = <PeerAliases<P> as PeerIds<KeyText<P>, <P as Storage>::Keys>>::Ref<'a>;
+
 #[cfg(feature = "storage-profile")]
 impl<P: Storage> PeerNaming<P> {
+    /// The peer's aliases lent the side's keys, to bind and unbind: the one place the table is
+    /// paired with the space its rows lie in.
+    fn aliases_mut(&mut self) -> AliasesMut<'_, P> {
+        // SAFETY: the side attaches the alias table only to the space its keys name for the
+        // aliases' slot (`SubscriberPeer::keep_alias_rows_in`), and `SubscriberPeer::keep_keys_in`
+        // gives every row back through the old keys before it changes them, so the keys lend the
+        // table the space it was attached to.
+        unsafe {
+            <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::lend(
+                &mut self.aliases,
+                &self.keys,
+                crate::peer_tables::PeerSlot::Aliases,
+            )
+        }
+    }
+
+    /// The peer's aliases lent the side's keys, to read.
+    fn aliases_ref(&self) -> AliasesRef<'_, P> {
+        // SAFETY: as `aliases_mut`'s: the keys name the space the table was attached to.
+        unsafe {
+            <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::lend_ref(
+                &self.aliases,
+                &self.keys,
+                crate::peer_tables::PeerSlot::Aliases,
+            )
+        }
+    }
+
+    /// Give the alias rows lent through the side's keys back through them, before the keys change
+    /// or the side goes: nothing on a policy whose table keeps its own rows.
+    fn release_aliases(&mut self) {
+        // SAFETY: as `aliases_mut`'s: the keys name the space the table was attached to.
+        unsafe {
+            <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::release(
+                &mut self.aliases,
+                &self.keys,
+                crate::peer_tables::PeerSlot::Aliases,
+            );
+        }
+    }
+
     /// The two id spaces this session resolves a keyexpr against: the peer's
     /// aliases and, when installed, our own.
     fn spaces(&self) -> MappingSpaces<'_, P> {
@@ -3568,11 +3638,21 @@ impl<P: Storage> PeerNaming<P> {
         // tables where it is handed them, and refuses it as the relay face does where it is not.
         #[cfg(not(feature = "alloc"))]
         let own = tables;
+        let spaces = MappingSpaces::<P, O>::of_aliases(self.aliases_ref(), own);
         #[cfg(feature = "shared-key-ids")]
         if let Some(ids) = &self.shared_key_ids {
-            return MappingSpaces::<P, O>::of_aliases(&self.aliases, own).with_shared(ids);
+            return spaces.with_shared(ids);
         }
-        MappingSpaces::<P, O>::of_aliases(&self.aliases, own)
+        spaces
+    }
+}
+
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> Drop for PeerNaming<P> {
+    /// Give every alias row back through the side's keys: a lent table cannot reach its rows
+    /// without them, and dropped holding rows it would leave them held.
+    fn drop(&mut self) {
+        self.release_aliases();
     }
 }
 
@@ -3725,7 +3805,11 @@ impl<P: Storage> InterestSide<P> {
         // reply resolves its keyexpr and its decl id THROUGH this row at drain,
         // so a CURRENT-only interest needs it too. Refreshing rather than
         // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
-        let row_held = if self.rows.iter().any(|row| row.interest_id == interest_id) {
+        let row_held = if self
+            .rows_ref()
+            .iter()
+            .any(|row| row.interest_id == interest_id)
+        {
             true
         } else {
             // Of the interest side's own policy: the row it is kept in is that side's, and so is
@@ -3767,9 +3851,12 @@ impl<P: Storage> InterestSide<P> {
             // interest: its id is at least the counter AFTER the id the row
             // took. `watermark` is that boundary, for a table that learns of
             // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
-            let stored = self.quota.admits(self.rows.len().saturating_add(1))
+            // The count is read in a statement of its own: the lent view it is read through would
+            // otherwise be held to the end of the one below, across the push.
+            let held = self.rows_ref().len();
+            let stored = self.quota.admits(held.saturating_add(1))
                 && subs.next_entity_id().is_some_and(|decl_id| {
-                    self.rows
+                    Self::rows_mut(&mut self.rows, &self.keys)
                         .push(InboundSubInterest {
                             interest_id,
                             keyexpr,
@@ -3879,7 +3966,7 @@ impl<P: Storage> InterestSide<P> {
             let Some(new_pattern) = subs.pattern_of(new_id) else {
                 return;
             };
-            for row in self.rows.iter() {
+            for row in self.rows_ref().iter() {
                 if subscription_matches_interest(new_pattern, Some(&*row.keyexpr))
                     && hits.push((row.interest_id, row.aggregate)).is_err()
                 {
@@ -3920,7 +4007,7 @@ impl<P: Storage> InterestSide<P> {
         // A buffer of its own, as in `push_registered`.
         let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }, P::Scratch> =
             BoundedVec::default();
-        for row in self.rows.iter() {
+        for row in self.rows_ref().iter() {
             if row.aggregate
                 && row.announced
                 && !any_matches(subs, Some(&*row.keyexpr))
@@ -3939,7 +4026,7 @@ impl<P: Storage> InterestSide<P> {
     /// Retire the row of `interest_id`: the peer cancelled it, or a recycled id
     /// must not inherit a dead publisher's keyexpr.
     fn retire(&mut self, interest_id: u64) {
-        self.rows.retain(|row| row.interest_id != interest_id);
+        Self::rows_mut(&mut self.rows, &self.keys).retain(|row| row.interest_id != interest_id);
     }
 
     /// Whether the staging takes `count` more items: its storage has the slots,
@@ -3996,8 +4083,59 @@ impl<P: Storage> InterestSide<P> {
 
     /// Drop the rows and the staging, in place.
     fn forget(&mut self) {
-        self.rows.clear();
+        Self::rows_mut(&mut self.rows, &self.keys).clear();
         self.staged.clear();
+    }
+
+    /// The interests' rows lent the side's keys, to write: the one place the rows are paired with
+    /// the space they lie in. It takes the two fields and not the side, so the staging and the
+    /// counts stay the caller's to write while the rows are lent.
+    fn rows_mut<'a>(rows: &'a mut InterestTable<P>, keys: &'a P::Keys) -> InterestsMut<'a, P> {
+        // SAFETY: the side attaches its interest rows only to the space its keys name for the
+        // interests' slot (`SubscriberPeer::keep_interest_rows_in`), and
+        // `SubscriberPeer::keep_keys_in` gives every row back through the old keys before it
+        // changes them, so the keys lend the rows the space they were attached to.
+        unsafe {
+            <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::lend(
+                rows,
+                keys,
+                crate::peer_tables::PeerSlot::Interests,
+            )
+        }
+    }
+
+    /// The interests' rows lent the side's keys, to read.
+    fn rows_ref(&self) -> InterestsRef<'_, P> {
+        // SAFETY: as `rows_mut`'s: the keys name the space the rows were attached to.
+        unsafe {
+            <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::lend_ref(
+                &self.rows,
+                &self.keys,
+                crate::peer_tables::PeerSlot::Interests,
+            )
+        }
+    }
+
+    /// Give the interest rows lent through the side's keys back through them, before the keys
+    /// change or the side goes: nothing on a policy whose sequence keeps its own rows.
+    fn release_rows(&mut self) {
+        // SAFETY: as `rows_mut`'s: the keys name the space the rows were attached to.
+        unsafe {
+            <InterestTable<P> as PeerSeq<InboundSubInterest<P>, P::Keys>>::release(
+                &mut self.rows,
+                &self.keys,
+                crate::peer_tables::PeerSlot::Interests,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+impl<P: Storage> Drop for InterestSide<P> {
+    /// Give every interest row back through the side's keys: lent rows cannot be reached without
+    /// them, and a table dropped holding rows would leave them held.
+    fn drop(&mut self) {
+        self.release_rows();
     }
 }
 
@@ -4038,7 +4176,7 @@ impl<P: Storage> SubscriberPeer<P> {
 
     /// How many interests this peer has registered and not cancelled.
     pub fn interest_count(&self) -> usize {
-        self.interests.rows.len()
+        self.interests.rows_ref().len()
     }
 
     /// R311y530 — take the staged interest-response chain for the drain.
@@ -4077,9 +4215,8 @@ impl<P: Storage> SubscriberPeer<P> {
     /// encodes; this runs after that borrow has ended.
     #[cfg(feature = "declare-undeclare")]
     pub fn mark_aggregate_announced(&mut self, interest_id: u64) {
-        if let Some(row) = self
-            .interests
-            .rows
+        let mut rows = InterestSide::<P>::rows_mut(&mut self.interests.rows, &self.interests.keys);
+        if let Some(row) = rows
             .iter_mut()
             .find(|row| row.interest_id == interest_id && row.aggregate)
         {
@@ -4121,12 +4258,13 @@ impl<P: Storage> SubscriberPeer<P> {
         // rows times subscriptions on the stack.
         let InterestSide {
             rows,
+            keys,
             staged,
             refusals,
             reply_quota,
             ..
         } = &mut self.interests;
-        for row in rows.iter_mut() {
+        for row in InterestSide::<P>::rows_mut(rows, keys).iter_mut() {
             let (interest_id, aggregate, watermark) =
                 (row.interest_id, row.aggregate, row.watermark);
             let mut told = false;
@@ -4205,9 +4343,8 @@ impl<P: Storage> SubscriberPeer<P> {
         subs: &L,
         interest_id: u64,
     ) -> Option<u64> {
-        let row = self
-            .interests
-            .rows
+        let mut rows = InterestSide::<P>::rows_mut(&mut self.interests.rows, &self.interests.keys);
+        let row = rows
             .iter_mut()
             .find(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
         if any_matches(subs, Some(&*row.keyexpr)) {
@@ -4229,7 +4366,7 @@ impl<P: Storage> SubscriberPeer<P> {
         match item {
             SubInterestReply::Aggregate { interest_id } => self
                 .interests
-                .rows
+                .rows_ref()
                 .iter()
                 .find(|row| row.interest_id == *interest_id)
                 .filter(|row| any_matches(subs, Some(&*row.keyexpr)))

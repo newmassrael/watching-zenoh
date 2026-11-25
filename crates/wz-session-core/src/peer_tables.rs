@@ -1085,18 +1085,20 @@ mod lent_tests {
     }
 
     /// Pools the faces share of `each` rows of every kind, lent from an arena of their own, so the
-    /// arena a peer's tables are lent from is laid out by their plan alone.
-    fn pools(each: usize) -> PeerPools {
-        rows_of(each, true)
+    /// arena a peer's tables are lent from is laid out by their plan alone, and named by `keys`,
+    /// the key arena the tables that keep rows in them are handed.
+    fn pools(each: usize, keys: KeySpace) -> PeerPools {
+        rows_of(each, true, keys)
     }
 
-    /// One face's own spans of `each` rows of every kind, lent from an arena of their own.
+    /// One face's own spans of `each` rows of every kind, lent from an arena of their own and
+    /// named by `keys`.
     #[cfg(feature = "peer-row-pools")]
-    fn own_rows(each: usize) -> PeerPools {
-        rows_of(each, false)
+    fn own_rows(each: usize, keys: KeySpace) -> PeerPools {
+        rows_of(each, false, keys)
     }
 
-    fn rows_of(each: usize, shared: bool) -> PeerPools {
+    fn rows_of(each: usize, shared: bool, keys: KeySpace) -> PeerPools {
         let rows = PeerPoolRows {
             aliases: each,
             remote_decls: each,
@@ -1105,17 +1107,19 @@ mod lent_tests {
         };
         PeerPools::lent(
             &mut arena(PeerPools::arena_bytes(rows).expect("small pools")),
+            keys,
             rows,
         )
         .expect("the arena is the pools' span")
     }
 
     fn lent(rows: PeerRows) -> PeerTables<Lent> {
+        let keys = keys(1024);
         PeerTables::<Lent>::lent(
             &mut arena(1 << 16),
-            keys(1024),
+            keys,
             rows,
-            &mut pools(16),
+            &mut pools(16, keys),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows")
@@ -1149,11 +1153,12 @@ mod lent_tests {
     fn lent_peer_tables_take_the_bytes_their_plan_states() {
         let rows = rows(2);
         let mut memory = arena(1 << 16);
+        let keys = keys(64);
         let tables = PeerTables::<Lent>::lent(
             &mut memory,
-            keys(64),
+            keys,
             rows,
-            &mut pools(1),
+            &mut pools(1, keys),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
@@ -1170,9 +1175,15 @@ mod lent_tests {
         let rows = rows(1);
         let limits = SessionLimits::defaults();
         let mut by_value_memory = arena(1 << 16);
-        let mut by_value =
-            PeerTables::<Lent>::lent(&mut by_value_memory, keys(64), rows, &mut pools(1), &limits)
-                .expect("the rows");
+        let by_value_keys = keys(64);
+        let mut by_value = PeerTables::<Lent>::lent(
+            &mut by_value_memory,
+            by_value_keys,
+            rows,
+            &mut pools(1, by_value_keys),
+            &limits,
+        )
+        .expect("the rows");
         let mut memory = arena(1 << 16);
         let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
         let in_place = PeerTables::init_in(&mut place);
@@ -1180,8 +1191,15 @@ mod lent_tests {
             !in_place.finals.has_room(),
             "CONTROL: tables of no rows refuse a Final"
         );
+        let in_place_keys = keys(64);
         in_place
-            .lend_rows(&mut memory, keys(64), rows, &mut pools(1), &limits)
+            .lend_rows(
+                &mut memory,
+                in_place_keys,
+                rows,
+                &mut pools(1, in_place_keys),
+                &limits,
+            )
             .expect("the arena has the rows");
         assert_eq!(
             memory.high_water(),
@@ -1219,11 +1237,12 @@ mod lent_tests {
         let rows = rows(1);
         let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
         let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
+        let keys = keys(64);
         let refused = PeerTables::init_in(&mut place).lend_rows(
             &mut arena(planned - 1),
-            keys(64),
+            keys,
             rows,
-            &mut pools(1),
+            &mut pools(1, keys),
             &SessionLimits::defaults(),
         );
         assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
@@ -1237,11 +1256,12 @@ mod lent_tests {
     fn lent_peer_tables_the_arena_cannot_hold_are_refused() {
         let rows = rows(1);
         let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+        let keys = keys(64);
         let refused = PeerTables::<Lent>::lent(
             &mut arena(planned - 1),
-            keys(64),
+            keys,
             rows,
-            &mut pools(1),
+            &mut pools(1, keys),
             &SessionLimits::defaults(),
         );
         assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
@@ -1254,11 +1274,12 @@ mod lent_tests {
             finals: caps::MAX_PENDING_FINALS + 1,
             ..rows(1)
         };
+        let keys = keys(64);
         let refused = PeerTables::<Lent>::lent(
             &mut arena(1 << 20),
-            keys(64),
+            keys,
             over,
-            &mut pools(1),
+            &mut pools(1, keys),
             &SessionLimits::defaults(),
         );
         assert!(matches!(
@@ -1401,7 +1422,7 @@ mod lent_tests {
             &mut arena(1 << 16),
             keys,
             rows(1),
-            &mut pools(4),
+            &mut pools(4, keys),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
@@ -1489,7 +1510,7 @@ mod lent_tests {
             &mut arena(1 << 16),
             keys,
             rows(1),
-            &mut pools(4),
+            &mut pools(4, keys),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
@@ -1547,7 +1568,7 @@ mod lent_tests {
             &mut arena(1 << 16),
             keys,
             rows(1),
-            &mut pools(4),
+            &mut pools(4, keys),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
@@ -1595,10 +1616,11 @@ mod lent_tests {
     #[test]
     fn one_faces_own_spans_go_to_the_first_tables_alone() {
         let limits = SessionLimits::defaults();
-        let mut own = own_rows(2);
+        let own_keys = keys(64);
+        let mut own = own_rows(2, own_keys);
         assert!(!own.is_shared() && own.counts().is_none());
         let _first =
-            PeerTables::<Lent>::lent(&mut arena(1 << 16), keys(64), rows(1), &mut own, &limits)
+            PeerTables::<Lent>::lent(&mut arena(1 << 16), own_keys, rows(1), &mut own, &limits)
                 .expect("the arena has the rows");
         assert!(
             own.aliases.hand_out().is_none()
@@ -1607,10 +1629,16 @@ mod lent_tests {
                 && own.tokens.hand_out().is_none(),
             "the first tables took every span"
         );
-        let mut shared = pools(2);
-        let _first =
-            PeerTables::<Lent>::lent(&mut arena(1 << 16), keys(64), rows(1), &mut shared, &limits)
-                .expect("the arena has the rows");
+        let shared_keys = keys(64);
+        let mut shared = pools(2, shared_keys);
+        let _first = PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            shared_keys,
+            rows(1),
+            &mut shared,
+            &limits,
+        )
+        .expect("the arena has the rows");
         assert!(
             shared.aliases.hand_out().is_some() && shared.tokens.hand_out().is_some(),
             "a pool goes to every table that asks"
@@ -1666,8 +1694,9 @@ mod lent_tests {
             // A table of fewer rows refuses the third declaration by itself.
             return;
         }
-        let mut shared = pools(FACES * 2);
-        let mut faces = faces_sharing(FACES, &mut shared, keys(4096));
+        let keys = keys(4096);
+        let mut shared = pools(FACES * 2, keys);
+        let mut faces = faces_sharing(FACES, &mut shared, keys);
         let mut table = RemoteSubscribers::default();
         for (n, tables) in faces.iter_mut().enumerate() {
             for id in 1..=2u64 {
@@ -1748,8 +1777,9 @@ mod lent_tests {
             // A table of fewer rows refuses the third declaration by itself.
             return;
         }
-        let mut shared = pools(4);
-        let mut faces = faces_sharing(2, &mut shared, keys(4096));
+        let keys = keys(4096);
+        let mut shared = pools(4, keys);
+        let mut faces = faces_sharing(2, &mut shared, keys);
         let mut table = RemoteSubscribers::default();
         let mut interests = SubscriberTable::<BoxedSink>::default();
         declare_alias(&mut faces[0], 1, "demo/a/alias");
@@ -1822,11 +1852,12 @@ mod lent_tests {
             // A table of fewer rows refuses the third declaration by itself.
             return;
         }
-        let mut own = own_rows(2);
+        let keys = keys(1024);
+        let mut own = own_rows(2, keys);
         assert!(!own.is_shared() && own.counts().is_none());
         let mut tables = PeerTables::<Lent>::lent(
             &mut arena(1 << 16),
-            keys(1024),
+            keys,
             rows(1),
             &mut own,
             &SessionLimits::defaults(),
@@ -1866,7 +1897,7 @@ mod lent_tests {
         );
         let mut second = PeerTables::<Lent>::lent(
             &mut arena(1 << 16),
-            keys(1024),
+            keys,
             rows(1),
             &mut own,
             &SessionLimits::defaults(),

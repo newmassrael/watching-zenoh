@@ -114,20 +114,20 @@ pub trait IdMap<V> {
     }
 }
 
-/// What a table of values by a peer's ids answers to a reader: the part of [`IdMap`] that writes
-/// nothing, which a table lent its owner's space only to read answers too ([`LentIdsRef`]). Every
-/// [`IdMap`] answers it by a shared reference.
-pub trait IdRead<V> {
+/// What a table of values by a peer's ids answers to a reader for as long as `'a`, the borrow it
+/// was lent for: the part of [`IdMap`] that writes nothing, which a table lent its owner's space
+/// only to read answers too ([`LentIdsRef`]). What it hands out lives for `'a`, not for the
+/// reader value, so a lent table made in a call hands out what outlives it. Every [`IdMap`]
+/// answers it by a shared reference.
+pub trait IdRead<'a, V: 'a> {
     /// The value bound to `id`, if any.
-    fn find(&self, id: u64) -> Option<&V>;
+    fn find(&self, id: u64) -> Option<&'a V>;
 
     /// How many ids are bound.
     fn count(&self) -> usize;
 
     /// Every binding, in no order a caller may rely on.
-    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
-    where
-        V: 'a;
+    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a;
 
     /// How many NEW ids were refused since the table was made ([`IdMap::refusals`]).
     fn refusals(&self) -> u32;
@@ -138,24 +138,21 @@ pub trait IdRead<V> {
     }
 }
 
-impl<V, T: IdMap<V> + ?Sized> IdRead<V> for &T {
-    fn find(&self, id: u64) -> Option<&V> {
-        T::find(self, id)
+impl<'a, V: 'a, T: IdMap<V> + ?Sized> IdRead<'a, V> for &'a T {
+    fn find(&self, id: u64) -> Option<&'a V> {
+        T::find(*self, id)
     }
 
     fn count(&self) -> usize {
-        T::count(self)
+        T::count(*self)
     }
 
-    fn entries<'a>(&'a self) -> impl Iterator<Item = (u64, &'a V)>
-    where
-        V: 'a,
-    {
-        T::entries(self)
+    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
+        T::entries(*self)
     }
 
     fn refusals(&self) -> u32 {
-        T::refusals(self)
+        T::refusals(*self)
     }
 }
 
@@ -458,8 +455,8 @@ pub trait PeerIds<V, H>: Default {
         Self: 'a,
         H: 'a,
         V: 'a;
-    /// The table lent the handle, to read.
-    type Ref<'a>: IdRead<V>
+    /// The table lent the handle, to read: what it hands out lives for the lend.
+    type Ref<'a>: IdRead<'a, V> + Copy
     where
         Self: 'a,
         H: 'a,
@@ -485,6 +482,16 @@ pub trait PeerIds<V, H>: Default {
         keys: &'a H,
         slot: crate::peer_tables::PeerSlot,
     ) -> Self::Ref<'a>;
+
+    /// Give back the rows the table holds where they lie apart from it, through `keys`: what its
+    /// owner does before it drops the table or changes its handle. Nothing for a table that keeps
+    /// its own rows, which its own drop gives back.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    unsafe fn release(&mut self, keys: &H, slot: crate::peer_tables::PeerSlot) {
+        let _ = (keys, slot);
+    }
 }
 
 impl<V, const N: usize, H> PeerIds<V, H> for FixedIdMap<V, N> {
@@ -565,6 +572,16 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
         let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledIdMap::lend_ref(self, &space) }
+    }
+
+    unsafe fn release(
+        &mut self,
+        keys: &crate::key_arena::LentKeys,
+        slot: crate::peer_tables::PeerSlot,
+    ) {
+        let space = crate::peer_tables::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
+        // SAFETY: as `lend`'s.
+        unsafe { PooledIdMap::lend(self, &space) }.reset();
     }
 }
 
@@ -656,8 +673,8 @@ impl<V, const N: usize> Clone for LentIdsRef<'_, V, N> {
 
 impl<V, const N: usize> Copy for LentIdsRef<'_, V, N> {}
 
-impl<V, const N: usize> IdRead<V> for LentIdsRef<'_, V, N> {
-    fn find(&self, id: u64) -> Option<&V> {
+impl<'a, V: 'a, const N: usize> IdRead<'a, V> for LentIdsRef<'a, V, N> {
+    fn find(&self, id: u64) -> Option<&'a V> {
         self.rows.get_id(id)
     }
 
@@ -665,10 +682,7 @@ impl<V, const N: usize> IdRead<V> for LentIdsRef<'_, V, N> {
         self.rows.len()
     }
 
-    fn entries<'b>(&'b self) -> impl Iterator<Item = (u64, &'b V)>
-    where
-        V: 'b,
-    {
+    fn entries(&self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
         self.rows.iter()
     }
 
@@ -841,9 +855,7 @@ pub type DeclaredQueryables<P = Profile> =
 /// sequence of a peer's rows (`Storage::Pooled`), inline on the static policy and in a pool the
 /// session's faces share on the lent one, as the peer's id tables are.
 #[cfg(feature = "alloc")]
-pub struct DeclaredAliases<P: Storage = Profile>(
-    <P as Storage>::Pooled<(u64, u64), { caps::MAX_REMOTE_DECLS }>,
-);
+pub struct DeclaredAliases<P: Storage = Profile>(AliasRows<P>);
 
 #[cfg(feature = "alloc")]
 impl<P: Storage> Default for DeclaredAliases<P> {
@@ -854,13 +866,11 @@ impl<P: Storage> Default for DeclaredAliases<P> {
 
 #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
 impl DeclaredAliases<crate::bounded::Lent> {
-    /// Keep the aliases recorded from here on in rows of `space`, the session's; the ones held go
-    /// first, as their rows belong to the space before.
-    pub fn keep_rows_in(
-        &mut self,
-        space: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
-    ) {
-        self.0.keep_rows_in(space);
+    /// Record the aliases that come from here on in rows of `space`, the session's. Aliases held in
+    /// a space of the same form keep their rows; their owner gives back the ones held in a space of
+    /// another form first ([`LentAliases::clear`]), as only that space reaches them.
+    pub fn attach(&mut self, space: &crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>) {
+        self.0.attach(space);
     }
 }
 
@@ -875,11 +885,75 @@ impl DeclaredAliases<Static> {
 
 #[cfg(feature = "alloc")]
 impl<P: Storage> DeclaredAliases<P> {
+    /// The aliases lent `keys` for their slot `slot`, to record and forget.
+    ///
+    /// # Safety
+    /// As [`crate::row_pool::PeerSeq::lend`]'s: `keys` is the handle of the owner that holds these
+    /// aliases, and `slot` the one it attached their rows to.
+    #[inline]
+    pub unsafe fn lend<'a>(
+        &'a mut self,
+        keys: &'a P::Keys,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> LentAliases<'a, P> {
+        // SAFETY: the caller's contract.
+        LentAliases(unsafe { crate::row_pool::PeerSeq::lend(&mut self.0, keys, slot) })
+    }
+
+    /// The aliases lent `keys` for their slot `slot`, to read.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    #[inline]
+    pub unsafe fn lend_ref<'a>(
+        &'a self,
+        keys: &'a P::Keys,
+        slot: crate::peer_tables::PeerSlot,
+    ) -> LentAliasesRef<'a, P> {
+        // SAFETY: the caller's contract.
+        LentAliasesRef(unsafe { crate::row_pool::PeerSeq::lend_ref(&self.0, keys, slot) })
+    }
+
+    /// Give every row the aliases hold in the space `keys` names for `slot` back, through it: what
+    /// their owner does before it changes its keys or goes. Aliases that keep their rows themselves
+    /// keep them.
+    ///
+    /// # Safety
+    /// As [`Self::lend`]'s.
+    #[inline]
+    pub unsafe fn release(&mut self, keys: &P::Keys, slot: crate::peer_tables::PeerSlot) {
+        // SAFETY: the caller's contract.
+        unsafe { crate::row_pool::PeerSeq::release(&mut self.0, keys, slot) }
+    }
+}
+
+/// The rows of [`DeclaredAliases`]: the policy's sequence of a peer's rows.
+#[cfg(feature = "alloc")]
+type AliasRows<P> = <P as Storage>::Pooled<(u64, u64), { caps::MAX_REMOTE_DECLS }>;
+
+/// [`DeclaredAliases`] lent its owner's handle, to record and forget ([`DeclaredAliases::lend`]).
+#[cfg(feature = "alloc")]
+pub struct LentAliases<'a, P: Storage>(
+    <AliasRows<P> as crate::row_pool::PeerSeq<(u64, u64), P::Keys>>::Mut<'a>,
+);
+
+/// [`DeclaredAliases`] lent its owner's handle, to read ([`DeclaredAliases::lend_ref`]).
+#[cfg(feature = "alloc")]
+pub struct LentAliasesRef<'a, P: Storage>(
+    <AliasRows<P> as crate::row_pool::PeerSeq<(u64, u64), P::Keys>>::Ref<'a>,
+);
+
+/// The id the alias `id` stood for among `rows`, if `id` is one.
+#[cfg(feature = "alloc")]
+fn told_among<'r>(mut rows: impl Iterator<Item = &'r (u64, u64)>, id: u64) -> Option<u64> {
+    rows.find(|(held, _)| *held == id).map(|(_, told)| *told)
+}
+
+#[cfg(feature = "alloc")]
+impl<P: Storage> LentAliases<'_, P> {
     /// The id the application was told the keyexpr of `id` under, if `id` is an alias.
     pub fn told_as(&self, id: u64) -> Option<u64> {
-        RowList::iter(&self.0)
-            .find(|(held, _)| *held == id)
-            .map(|(_, told)| *told)
+        told_among(RowList::iter(&self.0), id)
     }
 
     /// Record that `id` repeats a keyexpr the application was told under `told`.
@@ -902,9 +976,18 @@ impl<P: Storage> DeclaredAliases<P> {
     pub fn remove(&mut self, id: u64) -> Option<u64> {
         RowList::remove_first(&mut self.0, |(held, _)| *held == id).map(|(_, told)| told)
     }
-    /// Forget every alias.
+
+    /// Forget every alias, each row given back.
     pub fn clear(&mut self) {
         RowList::clear(&mut self.0);
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<P: Storage> LentAliasesRef<'_, P> {
+    /// The id the application was told the keyexpr of `id` under, if `id` is an alias.
+    pub fn told_as(&self, id: u64) -> Option<u64> {
+        told_among(crate::row_pool::RowRead::iter(&self.0), id)
     }
 }
 
@@ -919,23 +1002,39 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn static_aliases_hold_as_many_as_the_declarations() {
+        use crate::peer_tables::PeerSlot;
         let ids = caps::MAX_REMOTE_DECLS as u64;
-        let mut aliases = DeclaredAliases::<Static>::new_static();
-        for id in 0..ids {
-            aliases.insert(id, id + 100);
+        let mut table = DeclaredAliases::<Static>::new_static();
+        let keys = crate::bounded::InlineKeys;
+        {
+            // SAFETY: the static policy keeps its rows itself and is lent no space.
+            let mut aliases = unsafe { table.lend(&keys, PeerSlot::SubRepeats) };
+            for id in 0..ids {
+                aliases.insert(id, id + 100);
+            }
+            assert_eq!(aliases.told_as(0), Some(100));
+            assert_eq!(
+                aliases.told_as(ids - 1),
+                Some(ids + 99),
+                "the last one is kept"
+            );
+            aliases.insert(0, 7);
+            assert_eq!(aliases.told_as(0), Some(7), "a repeat rebinds its row");
+            assert_eq!(aliases.remove(0), Some(7));
+            assert_eq!(aliases.told_as(0), None);
         }
-        assert_eq!(aliases.told_as(0), Some(100));
+        // SAFETY: as above.
+        let read = unsafe { table.lend_ref(&keys, PeerSlot::SubRepeats) };
         assert_eq!(
-            aliases.told_as(ids - 1),
-            Some(ids + 99),
-            "the last one is kept"
+            read.told_as(1),
+            Some(101),
+            "a reader sees what was recorded"
         );
-        aliases.insert(0, 7);
-        assert_eq!(aliases.told_as(0), Some(7), "a repeat rebinds its row");
-        assert_eq!(aliases.remove(0), Some(7));
-        assert_eq!(aliases.told_as(0), None);
-        aliases.clear();
-        assert_eq!(aliases.told_as(1), None);
+        // SAFETY: as above.
+        unsafe { table.lend(&keys, PeerSlot::SubRepeats) }.clear();
+        // SAFETY: as above.
+        let read = unsafe { table.lend_ref(&keys, PeerSlot::SubRepeats) };
+        assert_eq!(read.told_as(1), None);
     }
 
     /// One block of an arena's memory in a test, aligned as an arena's spans start.
@@ -986,7 +1085,10 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "peer-row-pools")))]
     #[test]
     fn lent_aliases_need_no_arena_without_pools() {
-        let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
+        let mut table = DeclaredAliases::<crate::bounded::Lent>::default();
+        let keys = crate::key_arena::LentKeys::default();
+        // SAFETY: without `peer-row-pools` the aliases keep their rows inline: no space is lent.
+        let mut aliases = unsafe { table.lend(&keys, crate::peer_tables::PeerSlot::SubRepeats) };
         aliases.insert(3, 1);
         assert_eq!(aliases.told_as(3), Some(1));
         assert_eq!(aliases.remove(3), Some(1));
@@ -998,8 +1100,11 @@ mod tests {
     #[test]
     fn lent_aliases_keep_their_rows_in_the_sessions_pool() {
         let pool = pool_of::<crate::row_pool::Seq<(u64, u64)>>(2);
-        let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
-        aliases.keep_rows_in(pool.space());
+        let space = pool.space();
+        let mut table = DeclaredAliases::<crate::bounded::Lent>::default();
+        table.attach(&space);
+        // SAFETY: the aliases were just attached to `space`, the one space this test lends them.
+        let mut aliases = LentAliases::<crate::bounded::Lent>(unsafe { table.0.lend(&space) });
         aliases.insert(3, 1);
         aliases.insert(3, 2);
         assert_eq!(aliases.told_as(3), Some(2), "a repeat rebinds its row");

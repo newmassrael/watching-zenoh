@@ -198,6 +198,7 @@ fn liveliness_gets_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
 #[cfg(feature = "codec-declare")]
 mod declarations {
     use super::*;
+    use wz_session_core::bounded::InlineKeys;
     use wz_session_core::id_map::PeerAliases;
     use wz_session_core::wireexpr_resolve::MappingSpaces;
 
@@ -255,7 +256,7 @@ mod declarations {
         /// The id past `MAX_REMOTE_DECLS` is refused and counted where the capacity is
         /// hard or the build's quota is the capacity, taken where neither refuses; the ids
         /// that fit are all there either way.
-        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage<Keys = InlineKeys>>() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
             let mut peer: RemoteSubscriberPeer<P> = RemoteSubscriberPeer::default();
@@ -285,7 +286,9 @@ mod declarations {
 
         /// A flood of one session's peer table is that session's own: the other
         /// peer's table, built from the same type, holds its single declaration.
-        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<
+            P: Storage<Keys = InlineKeys>,
+        >() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
             let mut flooded: RemoteSubscriberPeer<P> = RemoteSubscriberPeer::default();
@@ -319,7 +322,7 @@ mod declarations {
             fx::declare_envelope_decl_queryable(fx::decl_queryable(id, 0, Some(ke)))
         }
 
-        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage<Keys = InlineKeys>>() {
             let mut table: RemoteQueryableTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteQueryableTable::default();
             let mut peer: RemoteQueryablePeer<P> = RemoteQueryablePeer::default();
@@ -345,7 +348,9 @@ mod declarations {
             assert!(peer.has_matching("peer/1"));
         }
 
-        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<
+            P: Storage<Keys = InlineKeys>,
+        >() {
             let mut table: RemoteQueryableTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteQueryableTable::default();
             let mut flooded: RemoteQueryablePeer<P> = RemoteQueryablePeer::default();
@@ -385,7 +390,7 @@ mod declarations {
             fx::declare_envelope_decl_token(fx::decl_token(id, 0, Some(ke)))
         }
 
-        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage<Keys = InlineKeys>>() {
             let mut table: LivelinessSubscriberTable<NoopTokenSink, P> =
                 LivelinessSubscriberTable::default();
             let mut peer: PeerTokens<P> = PeerTokens::default();
@@ -407,7 +412,9 @@ mod declarations {
             }
         }
 
-        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<
+            P: Storage<Keys = InlineKeys>,
+        >() {
             let mut table: LivelinessSubscriberTable<NoopTokenSink, P> =
                 LivelinessSubscriberTable::default();
             let mut flooded: PeerTokens<P> = PeerTokens::default();
@@ -433,7 +440,7 @@ mod declarations {
     /// The peer's alias table read through `MappingSpaces`: a keyexpr declared with an
     /// id resolves to its literal on both policies, and an id the table does not hold
     /// does not resolve, so the policy is not visible to the reader.
-    pub(crate) fn peer_aliases_resolve_the_same_on_both<P: Storage>() {
+    pub(crate) fn peer_aliases_resolve_the_same_on_both<P: Storage<Keys = InlineKeys>>() {
         let aliases = PeerAliases::<P>::default();
         let spaces = MappingSpaces::<P, P>::for_aliases(&aliases, None);
         assert!(spaces.peer().is_empty());
