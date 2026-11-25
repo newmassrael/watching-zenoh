@@ -956,8 +956,8 @@ impl Drop for Pools {
 struct Reserved(Option<Pools>);
 
 impl Reserved {
-    /// The pools reserved now, the build's ([`BUILT_PLAN`]) reserved here when none are; `None`
-    /// when the counts make no pool or the heap has not the memory. One body for every caller, and
+    /// The pools reserved now, the first plan's ([`first_plan`]) reserved here when none are;
+    /// `None` when the counts make no pool or the heap has not the memory. One body for every caller, and
     /// the pools are laid where they are held rather than returned and copied in.
     #[inline(never)]
     fn built(&mut self) -> Option<&mut Pools> {
@@ -2169,12 +2169,13 @@ mod tests {
         );
     }
 
-    /// The build's pools are laid where the reservation holds them as a reservation laid aside
-    /// lays them, and once: the next object finds the same pools. Turned red by a reservation that
-    /// lays its pools again for each object, or leaves a part of them unlaid.
+    /// The first plan's pools are laid where the reservation holds them as a reservation of that
+    /// plan laid aside lays them, and once: the next object finds the same pools. Turned red by a
+    /// reservation that lays its pools again for each object, leaves a part of them unlaid, or
+    /// lays a plan other than the one the first object reserves.
     #[test]
     fn the_builds_pools_are_laid_where_they_are_held_and_once() {
-        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let plan = first_plan().expect("the test binary's counts make pools");
         let aside = reserve_from_heap(&plan).expect("the test's heap has the memory");
         let mut reserved = Reserved(None);
         let pools = reserved.built().expect("the test's heap has the memory");
