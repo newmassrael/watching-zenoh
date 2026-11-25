@@ -417,6 +417,25 @@ mod tests {
         );
     }
 
+    /// An end the heap has no room for is refused as a network with no port left, and leaves the
+    /// port unbound: the same bind with the heap's room takes it. Turned red by a claim that
+    /// registers the port before it has the end's cell, or ends the process on the refusal.
+    #[test]
+    fn an_end_the_heap_has_no_room_for_is_exhausted_and_leaves_its_port_free() {
+        let net = MemoryNetwork::new();
+        let at = SocketAddr::from((HOST_A, 7450));
+        let refused = crate::test_heap::refused(|| net.bind(at, None).err());
+        std::assert!(matches!(refused, Some(LinkOpenError::Exhausted)));
+        std::assert!(
+            net.bind(at, None).is_ok(),
+            "the refused bind left the port to the next"
+        );
+
+        let ephemeral =
+            crate::test_heap::refused(|| net.bind_ephemeral(HOST_B.into(), Some(at)).err());
+        std::assert!(matches!(ephemeral, Some(LinkOpenError::Exhausted)));
+    }
+
     /// An end lends its slots for a frame to be encoded into: a lent frame reaches the peer as the
     /// bytes the session wrote, a slot given back is lent again, and with every slot out the end
     /// lends none, which a lend-only session counts as a refusal.

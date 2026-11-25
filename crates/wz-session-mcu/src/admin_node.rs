@@ -700,6 +700,67 @@ mod tests {
         );
     }
 
+    /// A link whose session the heap has no room for is not accepted, and the node is left
+    /// listening: the next tick binds the port again and accepts with the room it has then.
+    /// Turned red by a listen that takes the bundle the accept refused as given.
+    #[test]
+    fn a_link_the_heap_has_no_session_for_is_not_accepted_and_the_node_listens_again() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STATUS: NodeStatus = NodeStatus::new(true);
+        static LIVES: Lives = Lives::new();
+
+        let net = MemoryNetwork::new();
+        let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
+        let runtime = CoopRuntime::try_new(FrozenClock).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let accept_runtime = runtime.clone();
+        let mut room = false;
+        let mut node = AdminNode::new(
+            &local,
+            node_links,
+            &CONTROL,
+            &STATUS,
+            NodeIdentity {
+                zid_hex: String::from("b6b6b6b6"),
+                whatami: "peer",
+                version: String::from("wz-test"),
+                locators: vec![String::from("udp/10.0.0.2:7533")],
+            },
+            7533,
+            SessionTimeouts::from_build(),
+            || params(0xb6),
+            move |sink| {
+                // The first link finds no room; the ones after it do.
+                if !core::mem::replace(&mut room, true) {
+                    return None;
+                }
+                Some((
+                    new_session_actions(sink, params(0xb6), CoopTime::new(&accept_runtime))
+                        .expect("the heap has room"),
+                    SessionEntropy::try_new(Witness::new(&LIVES)).expect("the heap has room"),
+                ))
+            },
+            SessionEntropy::try_new(Counting(2)).expect("the heap has room"),
+        )
+        .expect("a fresh node takes its admin keys");
+        let listen_at = core::net::SocketAddr::from(([10, 0, 0, 2], 7533));
+
+        node.tick(0);
+        std::assert!(
+            node.acceptor().is_none(),
+            "the refused link is not accepted"
+        );
+        std::assert_eq!(LIVES.made_and_alive(), (0, 0), "and no session was made");
+        std::assert!(
+            net.bind(listen_at, None).is_ok(),
+            "the refused link let its port go"
+        );
+
+        node.tick(1);
+        std::assert!(node.acceptor().is_some(), "listening again, with room");
+        std::assert_eq!(LIVES.made_and_alive(), (1, 1));
+    }
+
     /// The order a firmware loop really has: the executor runs, then the node
     /// ticks. A session that ended is already dropped by the executor by then, so
     /// the node's own hold on the session's link is all that is left on the port,

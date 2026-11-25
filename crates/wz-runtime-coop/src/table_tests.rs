@@ -1010,8 +1010,8 @@ fn a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap() {
 }
 
 /// A runtime the heap has no room for is not made, whichever making is asked, and the same
-/// making with the heap's memory is. Turned red by a making that ends the process on the refusal
-/// (`Shared::boxed` for its state, `TaskStore::new` for its cells).
+/// making with the heap's memory is. Turned red by a making that ends the process on the refusal,
+/// of its state or of its task cells, where it answers none.
 #[test]
 fn a_runtime_the_heap_has_no_room_for_is_not_made() {
     let rows = RuntimeRows {
