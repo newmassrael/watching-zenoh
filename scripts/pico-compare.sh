@@ -244,7 +244,7 @@ case "${1:-}" in
         ;;
 esac
 
-# THE WZ ARM OF THE INSTRUCTION COUNTS (subprofile, opprofile) is the library a release ships: wz-capi-pico for
+# THE WZ ARM OF THE INSTRUCTION COUNTS (subprofile, opprofile) is the library a release ships: wz-capi-pico-lib for
 # configs/zenoh-pico_defconfig under the limits and policies it sets, in the release's form (no_std, no heap after
 # the open) unless PICO_CMP_STDLIB names the other, built as the size gate builds that case: the same build as arm
 # W of `parity pico` (perf_matrix.py preset-arm). A count read off another form says nothing of what ships.
@@ -1099,7 +1099,7 @@ parity_build_pico() {
         || parity_fail "the standard library of the wz preset did not resolve (bench-stdlib said why above)"
     built="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" preset-arm --out "$dir" --original zenoh-pico \
         --stdlib "$stdlib")" \
-        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico was not built for the preset: $built"
+        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico-lib was not built for the preset: $built"
     cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
@@ -1356,7 +1356,7 @@ perf_wz_arm() {
     # shellcheck disable=SC2086 # the cargo words are words on purpose
     (cd crates && cargo build "${wz_pico_args[@]}" --message-format=json-render-diagnostics -p zenoh-pico-sys \
         -p wz-capi-pico-lib $args) >"$report" 2>"$dir/build-wz-$arm.log" \
-        || perf_fail "wz-capi-pico for arm $arm did not build (see $dir/build-wz-$arm.log)"
+        || perf_fail "wz-capi-pico-lib for arm $arm did not build (see $dir/build-wz-$arm.log)"
     inc="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pico-sys-include "$report")" \
         || perf_fail "the build of arm $arm named no single pico header arm"
     rm -rf "$dir/include-$arm" "$dir/lib-$arm"
