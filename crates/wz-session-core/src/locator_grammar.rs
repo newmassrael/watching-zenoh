@@ -141,7 +141,9 @@ impl Default for SerialOptions {
 
 /// The address of a serial locator, borrowed from its text: a host device path
 /// (`/dev/ttyUSB0`) or a TX/RX pin pair. Mirrors pico's
-/// `_z_serial_endpoint_cfg_t` dev-vs-pins split (serial_protocol.c:79-131).
+/// `_z_serial_endpoint_cfg_t` dev-vs-pins split
+/// (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
+/// @ `static z_result_t _z_serial_endpoint_parse(`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerialAddress<'a> {
     /// A device path opened by a host tty backend.
@@ -162,7 +164,8 @@ pub struct SerialLocatorText<'a> {
     pub address: SerialAddress<'a>,
     /// The baud rate, [`SERIAL_DEFAULT_BAUDRATE`] when the locator names none. Carried as written:
     /// whether a backend can run a line at it is that backend's question when it opens the line
-    /// (pico validates it at tty open, tty_posix.c:27-56).
+    /// (pico validates it at tty open, `vendor/zenoh-pico/src/link/transport/serial/tty_posix.c`
+    /// @ `static speed_t _z_posix_tty_baudrate_to_speed(uint32_t baudrate) {`).
     pub baudrate: u32,
     /// The other three keys upstream reads.
     pub options: SerialOptions,
@@ -184,14 +187,16 @@ pub enum SerialTextError<'a> {
 /// Read a zenoh serial locator into its parts, allocating nothing.
 ///
 /// Accepted forms (mirror of `_z_serial_endpoint_parse`,
-/// serial_protocol.c:79-131):
+/// `vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
+/// @ `static z_result_t _z_serial_endpoint_parse(`):
 /// - device: `serial//dev/ttyUSB0#baudrate=115200`
 /// - pins:   `serial/12.13#baudrate=115200`
 ///
 /// The scheme is the substring before the first `/`; the remainder is
 /// `<address>[?<metadata>][#<config>]`. An address containing `.` is read as a
 /// `TX.RX` pin pair, otherwise as a device path — the same `.`-heuristic pico
-/// uses (serial_protocol.c:109).
+/// uses (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
+/// @ `dot = strchr(address, '.');`).
 pub fn read_serial_locator(locator: &str) -> Result<SerialLocatorText<'_>, SerialTextError<'_>> {
     let (scheme, rest) = locator
         .split_once('/')
@@ -331,8 +336,9 @@ fn baudrate(config: &str) -> Result<u32, SerialTextError<'_>> {
 }
 
 /// A positive `u32` config value (baud rate or pin). Pico's `_z_serial_parse_u32`
-/// (serial_protocol.c:62) rejects zero — a `0` baud rate or pin number is
-/// invalid — so `0` is a `BadNumber` here too, for parity.
+/// (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
+/// @ `parsed == 0 || parsed > UINT32_MAX`) rejects zero — a `0` baud rate or pin
+/// number is invalid — so `0` is a `BadNumber` here too, for parity.
 fn positive_u32(text: &str) -> Result<u32, SerialTextError<'_>> {
     match text.parse::<u32>() {
         Ok(value) if value != 0 => Ok(value),

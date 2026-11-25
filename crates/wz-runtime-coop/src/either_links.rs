@@ -187,6 +187,10 @@ impl<V: LinkWaits, W: LinkWaits> LinkWaits for EitherWaits<V, W> {
         on_side!(EitherWaits, self, waits => waits.wait(on, timeout_ms))
     }
 
+    fn wait_ready(&self, on: &mut [LinkWait], timeout_ms: u32) -> usize {
+        on_side!(EitherWaits, self, waits => waits.wait_ready(on, timeout_ms))
+    }
+
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
         on_side!(EitherWaits, self, waits => waits.wait_room(on, timeout_us))
     }
@@ -210,6 +214,10 @@ impl<P, Q> LinkListener<EitherPump<P, Q>> for EitherListener<P, Q> {
 
     fn input_wait(&self) -> Option<WaitOn> {
         on_side!(EitherListener, self, listener => listener.input_wait())
+    }
+
+    fn asked_when_ready(&self) -> bool {
+        on_side!(EitherListener, self, listener => listener.asked_when_ready())
     }
 }
 

@@ -783,6 +783,37 @@ mod tests {
             );
         }
 
+        /// A wait that tells what it found ready moves the socket with a datagram and the handle it
+        /// cannot name to the front, and answers two: the quiet sockets stay behind. A set of quiet
+        /// sockets alone answers none. Turned red by a wait that answers every entry, which would
+        /// ask a quiet port for a connection after every wait.
+        #[test]
+        fn the_stacks_wait_moves_what_it_found_ready_to_the_front() {
+            use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
+
+            let waits = super::super::WindowsWaits;
+            let (quiet, sender) = pair();
+            let ready = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
+            let on = |socket: &WindowsUdpSocket| {
+                LinkWait::input(socket.input_wait().expect("a socket names its handle"))
+            };
+            let mut set = [on(&quiet), on(&quiet)];
+            assert_eq!(
+                waits.wait_ready(&mut set, 10),
+                0,
+                "CONTROL: quiet sockets alone are none ready"
+            );
+
+            let elsewhere = LinkWait::input(WaitOn::AppLink(7));
+            sender.send_to(ready.local(), b"wake").expect("a send");
+            // The datagram has arrived once a wait on its socket alone ends; nothing reads it.
+            waits.wait(&[on(&ready)], 5_000);
+            let mut set = [on(&quiet), on(&ready), on(&quiet), elsewhere];
+            let found = waits.wait_ready(&mut set, 5_000);
+            assert_eq!(found, 2, "the socket with a datagram and the handle it cannot name");
+            assert_eq!(set.get(..found), Some(&[on(&ready), elsewhere][..]));
+        }
+
         /// A session's wake ends a wait over the sockets beside it once its waker is woken from
         /// another thread, and the wait that found it reads it quiet: the next wait sleeps its
         /// time. CONTROL: before the waker is woken the wait sleeps too. Turned red by a wake that

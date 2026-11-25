@@ -444,13 +444,20 @@ pub enum HandshakeEnd {
 struct Listening<P> {
     listener: Box<dyn LinkListener<P>>,
     endpoint: Option<usize>,
+    /// What the port gave the last read's wait to wait on, when the port is asked for a
+    /// connection only once a wait found it ready (`LinkListener::asked_when_ready`); `None` for
+    /// a port asked at every step.
+    on: Option<WaitOn>,
+    /// Whether a wait found the port ready since it last had no connection to give.
+    ready: bool,
 }
 
 /// What a link taken off a port came to ([`LinkSupervisor::accept_at`]).
 pub enum Accepted<P> {
     /// A connection, with the endpoint its port is stated for.
     Link(OpenedLink<P>, Option<DialEndpoint>),
-    /// No connection waits on the port now, or the stack had nothing left to take one with.
+    /// No connection waits on the port now, no wait found it ready since it last had none, or the
+    /// stack had nothing left to take one with.
     Idle,
     /// The port is broken for good, and let go of.
     Broken,
@@ -494,16 +501,17 @@ pub enum IdleWait {
 impl IdleWait {
     /// Wait on the links and ports with `waits`, the waits of their stack
     /// ([`SessionLinks::waits`]), sleeping with `sleep` (milliseconds) where there is nothing to
-    /// wait on. The wait keeps the session's buffer it was made in, emptied, for the session to
-    /// take back ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its
+    /// wait on. The wait keeps the session's buffer it was made in, holding the entries the stack
+    /// found ready ([`LinkWaits::wait_ready`]), for the session to take back
+    /// ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its
     /// reads wait.
     #[inline(never)]
     pub fn wait(&mut self, waits: &impl LinkWaits, sleep: impl FnOnce(u32)) {
         match self {
             IdleWait::None => {}
             IdleWait::Input { on, ms } => {
-                waits.wait(on, *ms);
-                on.clear();
+                let ready = waits.wait_ready(on, *ms);
+                on.truncate(ready);
             }
             IdleWait::Sleep(ms) | IdleWait::Behind(ms) => sleep(*ms),
         }
@@ -862,7 +870,12 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// texts when the session states one.
     pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
-        self.listeners.push(Listening { listener, endpoint });
+        self.listeners.push(Listening {
+            listener,
+            endpoint,
+            on: None,
+            ready: false,
+        });
         Ok(())
     }
 
@@ -881,10 +894,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
     /// Take a connection off the port at `at`: `None` past the last port. A port broken for good
     /// is let go of, so the port after it is then at `at`.
     pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump>> {
-        let listening = self.listeners.get(at)?;
+        let listening = self.listeners.get_mut(at)?;
+        // A port a wait names is asked only once a wait found it ready: under a stream of input
+        // a step a batch would otherwise ask the stack for a connection that is not there.
+        if listening.on.is_some() && !listening.ready {
+            return Some(Accepted::Idle);
+        }
         Some(match listening.listener.accept() {
             Ok(Some(opened)) => Accepted::Link(opened, listening.endpoint.map(DialEndpoint::Port)),
-            Ok(None) | Err(LinkOpenError::Exhausted) => Accepted::Idle,
+            Ok(None) => {
+                listening.ready = false;
+                Accepted::Idle
+            }
+            // The connection still waits on the port, which the next step asks again.
+            Err(LinkOpenError::Exhausted) => Accepted::Idle,
             Err(_) => {
                 self.listeners.remove(at);
                 Accepted::Broken
@@ -1141,9 +1164,18 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         }
         // Asked at each wait: a listener whose own work is under way (a WebSocket handshake) or
         // that takes no connection now gives no wait on its port until that changes.
-        for listening in &self.listeners {
-            match listening.listener.input_wait() {
-                Some(on) => look_again |= !put_wait(&mut waits, LinkWait::input(on)),
+        for listening in &mut self.listeners {
+            let on = listening.listener.input_wait();
+            listening.on = on.filter(|_| listening.listener.asked_when_ready());
+            match on {
+                Some(on) => {
+                    if !put_wait(&mut waits, LinkWait::input(on)) {
+                        // No wait can find a port ready that the read has no room to wait on:
+                        // it is asked at every look until a read has room for it.
+                        listening.on = None;
+                        look_again = true;
+                    }
+                }
                 None => look_again = true,
             }
         }
@@ -1184,12 +1216,22 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
         }
     }
 
-    /// Take back a read's wait, once made ([`IdleWait::wait`]): the session's buffer of its
-    /// waits, which the wait took whole ([`Self::idle_wait`]). Out of line: the open's steps and
-    /// each read hand their wait back.
+    /// Take back a read's wait, once made ([`IdleWait::wait`]), and mark each port it found
+    /// ready: the session's buffer of its waits, which the wait took whole ([`Self::idle_wait`]).
+    /// Out of line: the open's steps and each read hand their wait back.
     #[inline(never)]
     pub fn waited(&mut self, wait: IdleWait) {
-        if let IdleWait::Input { on, .. } = wait {
+        if let IdleWait::Input { mut on, .. } = wait {
+            // What the wait left in the buffer is what it found ready (`IdleWait::wait`).
+            for listening in &mut self.listeners {
+                if listening
+                    .on
+                    .is_some_and(|port| on.iter().any(|ready| ready.on == port))
+                {
+                    listening.ready = true;
+                }
+            }
+            on.clear();
             self.waits = Some(on);
         }
     }
@@ -1336,6 +1378,73 @@ mod tests {
             _at: Locator,
         ) -> Result<Box<dyn LinkListener<Rc<Quiet>>>, LinkOpenError> {
             Ok(Box::new(Busy(Cell::new(0))))
+        }
+    }
+
+    /// A network whose ports are each waited on by `Socket(9)` and never hold a connection: how
+    /// often one was asked for a connection, and whether its ports are asked only when ready.
+    struct Ports(Rc<Cell<u32>>, bool);
+
+    impl SessionLinks for Ports {
+        type Pump = Rc<Quiet>;
+        type Dial = Answer;
+        type Waits = crate::session_drive::NoWaits;
+
+        fn waits(&self) -> Self::Waits {
+            crate::session_drive::NoWaits
+        }
+
+        fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Rc<Quiet>>, LinkOpenError> {
+            Err(LinkOpenError::Unsupported)
+        }
+
+        fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Rc<Quiet>>, LinkOpenError> {
+            Err(LinkOpenError::Unsupported)
+        }
+
+        fn open_listener(
+            &self,
+            _at: Locator,
+        ) -> Result<Box<dyn LinkListener<Rc<Quiet>>>, LinkOpenError> {
+            Ok(Box::new(Empty(self.0.clone(), self.1)))
+        }
+    }
+
+    /// A port waited on by `Socket(9)` that holds no connection, counting each time it is asked,
+    /// and asked only when ready as `.1` says.
+    struct Empty(Rc<Cell<u32>>, bool);
+
+    impl LinkListener<Rc<Quiet>> for Empty {
+        fn local(&self) -> Locator {
+            Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447)))
+        }
+
+        fn accept(&self) -> Result<Option<OpenedLink<Rc<Quiet>>>, LinkOpenError> {
+            self.0.set(self.0.get() + 1);
+            Ok(None)
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            Some(WaitOn::Socket(9))
+        }
+
+        fn asked_when_ready(&self) -> bool {
+            self.1
+        }
+    }
+
+    /// The waits of a stack that found none of what it waited on ready.
+    struct NoneReady;
+
+    impl LinkWaits for NoneReady {
+        fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {}
+
+        fn wait_ready(&self, _on: &mut [LinkWait], _timeout_ms: u32) -> usize {
+            0
+        }
+
+        fn wait_room(&self, _on: WaitOn, _timeout_us: u64) -> bool {
+            true
         }
     }
 
@@ -2047,8 +2156,9 @@ mod tests {
         let _ = faces.owing_waits();
     }
 
-    /// A wait on links is the stack's for the whole time, and leaves its buffer emptied.
-    /// Turned red by a wait that bounds the links' wait short of its time.
+    /// A wait on links is the stack's for the whole time, and leaves in its buffer what the stack
+    /// found ready: every entry, for a stack that cannot tell. Turned red by a wait that bounds
+    /// the links' wait short of its time.
     #[test]
     fn a_wait_on_links_is_the_stacks_for_the_whole_time() {
         let link = LinkWait::input(WaitOn::Socket(3));
@@ -2060,9 +2170,100 @@ mod tests {
         wait.wait(&asked, |_| panic!("no sleep"));
         assert_eq!(asked.entries.load(Ordering::Relaxed), 1);
         assert_eq!(asked.ms.load(Ordering::Relaxed), 10);
-        assert!(matches!(wait, IdleWait::Input { ref on, .. } if on.is_empty()));
+        assert!(matches!(wait, IdleWait::Input { ref on, .. } if *on == [link]));
     }
 
+    /// The looks at a port a test of `accept_at` makes, its port asked only when ready as
+    /// `when_ready` says: one before any wait, three after a wait that found nothing ready, three
+    /// after one whose stack cannot tell. How often the port was asked.
+    fn asks_of_a_port(when_ready: bool) -> u32 {
+        let asked = Rc::new(Cell::new(0));
+        let mut faces: LinkSupervisor<Ports, TestFace> = LinkSupervisor::new(
+            Ports(asked.clone(), when_ready),
+            TestFace {
+                id: 100,
+                link: Link::Waiting { at_us: u64::MAX },
+            },
+            1,
+            2,
+        )
+        .expect("the heap holds two waits");
+        faces
+            .listen(
+                Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447))),
+                None,
+            )
+            .expect("the port is bound");
+        assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        let mut wait = faces.idle_wait(10, &mut || 0u64, [], None);
+        assert!(
+            matches!(wait, IdleWait::Input { ref on, .. } if *on == [LinkWait::input(WaitOn::Socket(9))]),
+            "the read waits on the port"
+        );
+        wait.wait(&NoneReady, |_| panic!("no sleep"));
+        faces.waited(wait);
+        for _ in 0..3 {
+            assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        }
+        let mut wait = faces.idle_wait(10, &mut || 0u64, [], None);
+        wait.wait(&crate::session_drive::NoWaits, |_| panic!("no sleep"));
+        faces.waited(wait);
+        for _ in 0..3 {
+            assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        }
+        asked.get()
+    }
+
+    /// A port asked only when ready is asked for a connection once before any wait names it, and
+    /// after that only once a wait found it ready, until it answers that it has none: a step a
+    /// batch asks the stack nothing. CONTROL: a port that is not so is asked at every look.
+    /// Turned red by a step that asks every port (the readiness test taken out of `accept_at`),
+    /// or a wait that marks a port it did not find ready.
+    #[test]
+    fn a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready() {
+        assert_eq!(
+            asks_of_a_port(true),
+            2,
+            "once before any wait, none after a wait that found nothing, once after one that did"
+        );
+        assert_eq!(asks_of_a_port(false), 7, "CONTROL: asked at every look");
+    }
+
+    /// A port asked only when ready that the read has no room to wait on is asked at every look:
+    /// no wait can find it ready, and the read does not grow its buffer for it. CONTROL: with room
+    /// for its wait, a wait that found nothing ready leaves it unasked
+    /// (`a_port_is_asked_for_a_connection_only_after_a_wait_found_it_ready`). Turned red by a port
+    /// left to a wait the read made no room for, which is then never asked.
+    #[test]
+    fn a_port_its_read_has_no_room_to_wait_on_is_asked_at_every_look() {
+        let asked = Rc::new(Cell::new(0));
+        let mut faces: LinkSupervisor<Ports, TestFace> = LinkSupervisor::new(
+            Ports(asked.clone(), true),
+            TestFace {
+                id: 100,
+                link: Link::Waiting { at_us: u64::MAX },
+            },
+            1,
+            0,
+        )
+        .expect("the heap holds no wait");
+        faces
+            .listen(
+                Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447))),
+                None,
+            )
+            .expect("the port is bound");
+        let wait = faces.idle_wait(10, &mut || 0u64, [], None);
+        assert!(
+            !matches!(wait, IdleWait::Input { .. }),
+            "the read has no room to wait on the port"
+        );
+        faces.waited(wait);
+        for _ in 0..3 {
+            assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        }
+        assert_eq!(asked.get(), 3, "the port is asked at every look");
+    }
     /// A wake beside the links joins the wait they make, after them; a sleep to the next dial
     /// becomes a wait on the wake for the same time; and where they make no wait, it makes none.
     /// CONTROL: without it the same faces sleep. Turned red by a wake that is left out of a

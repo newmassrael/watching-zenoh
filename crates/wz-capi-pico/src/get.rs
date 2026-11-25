@@ -1310,20 +1310,6 @@ pub(crate) unsafe fn parameters_in<'a>(
     }
 }
 
-/// The length of the NUL-terminated `parameters`, 0 for a null pointer: the `strlen` pico's own
-/// `z_get` and `z_querier_get` delegate to their `_with_parameters_substr` forms with
-/// (`src/api/api.c:1743-1746`).
-///
-/// # Safety
-/// `parameters` must be null or a NUL-terminated C string.
-pub(crate) unsafe fn parameters_strlen(parameters: *const core::ffi::c_char) -> usize {
-    if parameters.is_null() {
-        0
-    } else {
-        core::ffi::CStr::from_ptr(parameters).to_bytes().len()
-    }
-}
-
 /// Shared body of `z_get` / `z_get_with_parameters_substr`.
 ///
 /// The moved closure and the moved parts of the options are consumed on EVERY path
@@ -1771,7 +1757,7 @@ pub unsafe extern "C" fn z_get(
     options: *mut z_get_options_t,
 ) -> ZResult {
     guarded(|| {
-        let len = parameters_strlen(parameters);
+        let len = crate::abi::c_str_len(parameters);
         get_inner(zs, keyexpr, parameters, len, callback, options, Ok(None))
     })
 }
@@ -2822,16 +2808,13 @@ mod tests {
         assert_eq!(DROPS.load(Ordering::SeqCst), before + 1);
     }
 
-    /// The parameters a get reads: none for a null pointer or a zero length, the bytes otherwise;
-    /// and a NUL-terminated string's length, 0 for a null pointer.
+    /// The parameters a get reads: none for a null pointer or a zero length, the bytes otherwise.
     #[test]
     fn a_gets_parameters_are_read_where_they_lie() {
         let text = b"a=1;b=2\0";
         let ptr = text.as_ptr().cast::<core::ffi::c_char>();
         // SAFETY: `text` is NUL-terminated and readable for its length.
         unsafe {
-            assert_eq!(parameters_strlen(core::ptr::null()), 0);
-            assert_eq!(parameters_strlen(ptr), 7);
             assert_eq!(parameters_in(core::ptr::null(), 3), b"");
             assert_eq!(parameters_in(ptr, 0), b"");
             assert_eq!(parameters_in(ptr, 3), b"a=1");

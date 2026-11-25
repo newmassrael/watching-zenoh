@@ -585,8 +585,18 @@ impl<C: ClockSource, D: ?Sized, K: LockKind> CoopRuntime<C, D, K> {
     /// The deploy main loop calls this between hardware-poll passes.
     /// See module doc for the canonical loop shape.
     pub fn run_until_idle(&self) {
-        let now = self.inner.clock.now_us();
-        self.inner.timers.pop_expired(now);
+        self.run_ready(Some(self.inner.clock.now_us()));
+    }
+
+    /// [`Self::run_until_idle`] with no reading of the clock: the timers due by `due_at` are
+    /// woken first when it is given, none when it is not, then every ready task is polled at most
+    /// once. A caller that read the clock already passes its reading; one that goes on with work
+    /// an earlier pass took on (the rest of what a link read in one receive) passes `None`, and
+    /// a timer due meanwhile is woken by the next pass given a time.
+    pub fn run_ready(&self, due_at: Option<u64>) {
+        if let Some(now) = due_at {
+            self.inner.timers.pop_expired(now);
+        }
         self.inner.executor.run_until_idle();
     }
 

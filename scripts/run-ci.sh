@@ -2590,6 +2590,10 @@ layer_c0_test_discipline() {
     _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
     _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
     _runci_leg perf_matrix.table_windows --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling_windows.json
+    # The launcher the parity runs read a program's peak resident set through (fork_rss.c), built with cc
+    # and read from a runner that holds 200 MiB: the figure is the program's own, whether it ended or was
+    # stopped, a launcher killed hard leaves no program, and a program started without it has no figure.
+    _runci_leg parity.selftest -- python3 scripts/host-bench/parity.py --selftest
     # The MCU speed matrix's gate (docs/mcu-speed-matrix.md): its readers and rules over synthetic consoles
     # and runs, and the committed table held to the rows of the default matrix on its platform. The runs it
     # judges are scripts/mcu-speed.sh's, which no lane makes until the table is filled from a first run.

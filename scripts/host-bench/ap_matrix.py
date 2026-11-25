@@ -67,6 +67,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -889,6 +890,7 @@ def build(run: pathlib.Path) -> tuple[dict[str, pathlib.Path], dict]:
     shutil.copy2(exe, bins / "router_W")
     capture(["cc", "-O2", "-shared", "-fPIC", "-o", str(bins / "heap_peak.so"), str(HERE / "heap_peak.c")],
             logs / "heap-shim.log")
+    capture(["cc", "-O2", "-o", str(bins / "fork_rss"), str(HERE / "fork_rss.c")], logs / "fork-rss.log")
     rustc = capture(["rustc", "-V"], logs / "rustc.log", cwd=ROOT / "crates").strip()
     record = {"upstream_version": version, "upstream_root": str(root), "zenohd": said,
               "router_features": list(ROUTER_FEATURES), "router_profile": profile,
@@ -898,7 +900,8 @@ def build(run: pathlib.Path) -> tuple[dict[str, pathlib.Path], dict]:
 
 def given_bins(directory: pathlib.Path) -> dict[str, pathlib.Path]:
     """The programs a run measures, from a directory of an earlier build; refused when one lacks."""
-    names = [f"{p}_{a}" for p in PROGRAMS for a in ARMS] + [f"router_{a}" for a in ARMS] + ["heap_peak.so"]
+    names = ([f"{p}_{a}" for p in PROGRAMS for a in ARMS] + [f"router_{a}" for a in ARMS]
+             + ["heap_peak.so", "fork_rss"])
     missing = [n for n in names if not (directory / n).is_file()]
     if missing:
         raise Refusal(f"{directory} lacks {', '.join(missing)}")
@@ -954,7 +957,7 @@ class Runner:
         env = {}
         if heap:
             env = {"LD_PRELOAD": str(self.bins["heap_peak.so"]), "HEAP_PEAK_FILE": str(out.with_suffix(".heap"))}
-        return Process([str(self.bins[f"{program}_{arm}"]), *argv], cpus, out, env)
+        return Process([str(self.bins[f"{program}_{arm}"]), *argv], cpus, out, env, str(self.bins["fork_rss"]))
 
     def router(self, arm: str, port: int, connect: int | None, label: str, cpus: str | None = None,
                heap: bool = False) -> Process:
@@ -1196,8 +1199,10 @@ class Runner:
             proc = self.start("z_sub", arm, peer_args("listen", free_port()), self.args.server_cpus, label)
         try:
             time.sleep(IDLE_S)
+            pid = proc.program_pid
             try:
-                rss = vm_rss_kib(pathlib.Path(f"/proc/{proc.pid}/status").read_text(encoding="ascii", errors="replace"))
+                rss = None if pid is None else vm_rss_kib(
+                    pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii", errors="replace"))
             except OSError:
                 rss = None
         finally:
@@ -1573,6 +1578,14 @@ def cmd_selftest() -> int:
            abs(open_gap([(1.0, "Opening session..."), (1.0025, "Putting Data ('a': 'b')...")]) - 2500) < 1e-3)
     expect("a z_put that did not say both lines is lost",
            raises(Lost, lambda: open_gap([(1.0, "Opening session...")])))
+    with tempfile.TemporaryDirectory(prefix="ap-matrix-selftest-") as tmp:
+        earlier = pathlib.Path(tmp)
+        for name in [f"{p}_{a}" for p in PROGRAMS for a in ARMS] + [f"router_{a}" for a in ARMS] + ["heap_peak.so"]:
+            (earlier / name).write_bytes(b"")
+        refused = raises(Refusal, lambda: given_bins(earlier))
+        (earlier / "fork_rss").write_bytes(b"")
+        expect("programs of an earlier build without the launcher that reads a peak resident set are refused",
+               refused and given_bins(earlier)["fork_rss"] == earlier / "fork_rss")
     expect("the idle resident set is read from the status file",
            vm_rss_kib("Name:\tz_sub\nVmRSS:\t   1234 kB\n") == 1234 and vm_rss_kib("Name:\tz\n") is None)
     manifest = ('[workspace]\nmembers = []\n\n[profile.release]\ncodegen-units = 1\n'

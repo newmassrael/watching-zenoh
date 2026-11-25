@@ -22,8 +22,8 @@ use wz_session_core::keyexpr_canon::KeyexprCanonError;
 use wz_session_core::WhatAmI;
 
 use crate::abi::{
-    view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t, z_owned_keyexpr_t,
-    z_view_keyexpr_t, z_view_string_t,
+    c_str_len, view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t,
+    z_owned_keyexpr_t, z_view_keyexpr_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{
@@ -696,19 +696,6 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
     // pico's is the substring form over the string's length, and so is this one, so the two
     // judge a text through one body.
     z_view_keyexpr_from_substr(keyexpr, name, c_str_len(name))
-}
-
-/// The length of the C string at `name`, `0` for a null one: what each `_from_str` door of a key
-/// hands its substring form.
-///
-/// # Safety
-/// `name` must be null or a valid NUL-terminated string.
-unsafe fn c_str_len(name: *const c_char) -> usize {
-    if name.is_null() {
-        0
-    } else {
-        CStr::from_ptr(name).to_bytes().len()
-    }
 }
 
 /// Build a view keyexpr WITHOUT validating it (pico
