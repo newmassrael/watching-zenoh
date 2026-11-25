@@ -235,7 +235,7 @@ pub unsafe extern "C" fn wz_ext_internal_time_base_null(this_: *mut wz_ext_owned
 pub unsafe extern "C" fn wz_ext_internal_time_base_check(
     this_: *const wz_ext_owned_time_base_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 /// The clock a session of the cooperative engine runs on: the host's, or the time base the

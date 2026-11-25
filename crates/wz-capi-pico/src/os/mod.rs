@@ -20,7 +20,7 @@
 //!
 //! Every backend provides: the types `Clock`, `WallTime`, `RawMutex`, `RawCondvar`,
 //! `RawTask` and `TaskAttr`; the constant `TASK_NULL`; and the functions `malloc`, `free`,
-//! `realloc`, `sleep`, `clock_now`, `clock_elapsed_between`, `clock_advance`, `wall_now`,
+//! `realloc`, `sleep` (here, for the Unix and Windows hosts alike), `clock_now`, `clock_elapsed_between`, `clock_advance`, `wall_now`,
 //! `wall_elapsed`, `wall_render_local`, `random_fill`, `mutex_init`, `mutex_destroy`,
 //! `mutex_lock`, `mutex_try_lock`, `mutex_unlock`, `condvar_init`, `condvar_destroy`,
 //! `condvar_signal`, `condvar_wait`, `condvar_wait_until`, `task_spawn`, `task_join`
@@ -35,6 +35,36 @@ pub(crate) enum Unit {
     Micro,
     Milli,
     Second,
+}
+
+/// Sleep at least `time` of `unit`, as pico's `z_sleep_*` do, by the host's one sleep that the
+/// engine port's sleeps are too: `nanosleep` on a Unix, slept again for what a signal cuts short,
+/// and `Sleep` on Windows in whole milliseconds, a part of one rounded up as pico's `z_sleep_us`
+/// rounds.
+#[cfg(all(
+    any(feature = "std", feature = "os-posix", feature = "os-windows"),
+    any(unix, windows)
+))]
+pub(crate) fn sleep(unit: Unit, time: usize) {
+    wz_host_sync::sleep_us(micros_of(unit, time));
+}
+
+/// `count` of `unit` in microseconds; a count past the `u64` microseconds, some half a million
+/// years, is read as the longest sleep there is.
+#[cfg(any(
+    all(
+        any(feature = "std", feature = "os-posix", feature = "os-windows"),
+        any(unix, windows)
+    ),
+    test
+))]
+fn micros_of(unit: Unit, count: usize) -> u64 {
+    let per_unit: u64 = match unit {
+        Unit::Micro => 1,
+        Unit::Milli => 1_000,
+        Unit::Second => 1_000_000,
+    };
+    (count as u64).saturating_mul(per_unit)
 }
 
 // The pure arithmetic of the Windows backend. It is plain integer and floating-point
@@ -128,3 +158,19 @@ compile_error!(
      providing the names listed in src/os/mod.rs, modelled on zenoh-pico's \
      system/<host>/system.c"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each unit of the sleep exports reads as its microseconds, and a count no sleep could last
+    /// reads as the longest one. Turned red by a unit read at another's scale or a product that
+    /// wraps.
+    #[test]
+    fn a_sleep_count_reads_as_its_microseconds() {
+        assert_eq!(micros_of(Unit::Micro, 7), 7);
+        assert_eq!(micros_of(Unit::Milli, 7), 7_000);
+        assert_eq!(micros_of(Unit::Second, 7), 7_000_000);
+        assert_eq!(micros_of(Unit::Second, usize::MAX), u64::MAX);
+    }
+}

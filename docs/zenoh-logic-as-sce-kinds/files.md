@@ -803,6 +803,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/ext_admit.rs` | S1 | |
 | `crates/wz-session-core/src/ext_chain.rs` | S1 | |
 | `crates/wz-session-core/src/ext_chain_role.rs` | S1 | |
+| `crates/wz-session-core/src/ext_chains_cfg.rs` | S1 | |
 | `crates/wz-session-core/src/ext_header.rs` | S1 | |
 | `crates/wz-session-core/src/ext_name.rs` | S1 | |
 | `crates/wz-session-core/src/ext_nodeid.rs` | S1 | |
@@ -876,6 +877,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/locator.rs` | S1 | |
 | `crates/wz-session-core/src/locator_directory.rs` | S1 | |
 | `crates/wz-session-core/src/locator_grammar.rs` | S1 | |
+| `crates/wz-session-core/src/match_set.rs` | S2 | |
 | `crates/wz-session-core/src/metadata.rs` | S3 | |
 | `crates/wz-session-core/src/multicast_dispatch.rs` | S1 | |
 | `crates/wz-session-core/src/multicast_join.rs` | S1 | |

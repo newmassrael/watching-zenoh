@@ -531,7 +531,7 @@ pub unsafe extern "C" fn wz_ext_internal_transport_null(this_: *mut wz_ext_owned
 pub unsafe extern "C" fn wz_ext_internal_transport_check(
     this_: *const wz_ext_owned_transport_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 /// Why an open over the transport `config` names would be refused before any link is opened, or

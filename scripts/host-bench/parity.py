@@ -15,7 +15,12 @@ A BOOT is one image running every workload once, each program started afresh:
 
   * rtt        z_pong listens, z_ping connects and makes --pings round trips of 8 bytes after its
                warm-up; the boot's figure is the median round trip (microseconds);
-  * thr_<n>B   z_sub_thr listens, z_pub_thr connects and publishes n bytes as fast as it can; after
+  * nodrop_<n>B  the throughput cell: the no-drop rate of n bytes (nodrop.py's search, RFC 2544: the
+               highest rate OFFERED at which every message is delivered), paced_pub and count_sub both of
+               the arm, and the CPU of the two per message in a trial at that rate with the publisher
+               sleeping between its slots (nanoseconds); the Rust family has no paced pair and loses it;
+  * thr_<n>B   a DIAGNOSTIC, written to the boot's `diagnostic` and never graded: z_sub_thr listens,
+               z_pub_thr connects and publishes n bytes as fast as it can; after
                --warmup-s the subscriber's reports of --window-s seconds are read: the boot's
                throughput is their median (messages a second), and the CPU of both processes over the
                same window (/proc/<pid>/stat) divided by what the median rate delivers in it is the
@@ -46,13 +51,14 @@ drift of the host over the run falls on both images alike.
 
     parity.py --family pico|c|rust --bin-dir DIR --run DIR --boots N --image KEY --reference KEY
               --rss-wrapper PATH [--sizes 8,1024] [--client-cpus 4-7] [--server-cpus 8-11] [--pings 20000]
-              [--warmup-s 3] [--window-s 10] [--heap-shim PATH] [--size-binary P=PATH --size-binary W=PATH]
+              [--warmup-s 3] [--window-s 10] [--nodrop-trial-s 3] [--heap-shim PATH]
+              [--size-binary P=PATH --size-binary W=PATH]
     parity.py --selftest
               the launcher, built here with cc, read from a runner that holds BALLAST_MIB
 
 DIR holds <program>_P and <program>_W for z_put z_sub z_get z_queryable z_pub_thr z_sub_thr z_ping
-z_pong. The client side (z_ping, z_pub_thr, z_put, z_get) is pinned to --client-cpus and the server
-side to --server-cpus.
+z_pong, and for the C families paced_pub and count_sub. The client side (z_ping, z_pub_thr, z_put,
+z_get, paced_pub) is pinned to --client-cpus and the server side to --server-cpus.
 """
 
 from __future__ import annotations
@@ -75,11 +81,15 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from nodrop import FOREIGN_LIMIT, MAX_RUNS, busy_seconds, cpu_list  # noqa: E402
+from nodrop import FOREIGN_LIMIT, MAX_RUNS, busy_seconds, cpu_list, search, trial  # noqa: E402
 
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
 PROGRAMS = ("z_put", "z_sub", "z_get", "z_queryable", "z_pub_thr", "z_sub_thr", "z_ping", "z_pong")
 FAMILIES = ("pico", "c", "rust")
+#: The paced pair of the no-drop search (scripts/host-bench/paced_pub.c and count_sub.c), C sources that
+#: bench_api.h builds against a zenoh-pico or a zenoh-c API; the Rust family has no such pair.
+NODROP_PROGRAMS = ("paced_pub", "count_sub")
+NODROP_FAMILIES = ("pico", "c")
 #: The seconds a listener is given before the other side connects to it.
 SETTLE_S = 1.5
 #: A functional workload that did not deliver is run again this many times in all.
@@ -106,6 +116,11 @@ LAUNCH_WAIT_S = 5.0
 
 class Lost(Exception):
     """A workload that did not give a valid figure: the reason is the message."""
+
+
+def programs_of(family: str) -> tuple[str, ...]:
+    """The programs a run of the family needs in the bin directory, each as <program>_P and <program>_W."""
+    return PROGRAMS + (NODROP_PROGRAMS if family in NODROP_FAMILIES else ())
 
 
 def rates(lines: list[str]) -> list[float]:
@@ -289,6 +304,8 @@ class Boot:
         self.arm = arm
         self.dir = directory
         self.cpus = sorted(set(cpu_list(args.client_cpus)) | set(cpu_list(args.server_cpus)))
+        #: A step that gave some of its figures and lost the others says here why.
+        self.partly_lost: dict[str, str] = {}
 
     def program(self, name: str) -> str:
         return str(pathlib.Path(self.args.bin_dir) / f"{name}_{self.arm}")
@@ -391,6 +408,38 @@ class Boot:
 
         return self.timed(body)
 
+    def nodrop(self, size: int) -> dict[str, float]:
+        """The throughput cell: the arm's no-drop rate (nodrop.py's search, RFC 2544: the highest rate
+        offered at which every message is delivered, its publisher and subscriber both of this arm), and
+        the CPU per message of the two processes in a trial at that rate with the publisher sleeping
+        between its slots, so the CPU read is the library's and not the pacer's spin. A trial at the
+        rate that does not pass on an idle host in MAX_RUNS leaves the CPU cell out and says why."""
+        args = self.args
+        if self.family not in NODROP_FAMILIES:
+            raise Lost(f"the {self.family} family has no paced pair ({', '.join(NODROP_PROGRAMS)} are C)")
+        rate, trials, note = search(args.bin_dir, self.arm, self.arm, size, args.nodrop_trial_s,
+                                    args.client_cpus, args.server_cpus, "")
+        if rate is None:
+            raise Lost(f"no no-drop rate in {trials} trials: {note}")
+        figures = {f"throughput_nodrop_{size}B": rate}
+        reasons = []
+        for _ in range(MAX_RUNS):
+            at = trial(args.bin_dir, self.arm, self.arm, size, rate, args.nodrop_trial_s,
+                       args.client_cpus, args.server_cpus, "", sleep_wait=True)
+            if "foreign" not in at:
+                reasons.append(at["why"])
+            elif at["foreign"] > FOREIGN_LIMIT:
+                reasons.append(f"the pinned CPUs were {at['foreign'] * 100:.0f}% used by something else")
+            elif not at["passed"]:
+                reasons.append(at["why"])
+            else:
+                figures[f"cpu_ns_per_msg_nodrop_{size}B"] = at["cpu_s"] / at["put"] * 1e9
+                return figures
+            time.sleep(1)
+        self.partly_lost[f"cpu_nodrop_{size}B"] = (f"no passing trial at the no-drop rate {rate:.0f} in "
+                                                   f"{MAX_RUNS}: " + "; ".join(reasons))
+        return figures
+
     # -- the functional workloads -------------------------------------------------------------------
 
     def functional(self, body) -> dict[str, float]:
@@ -477,7 +526,7 @@ class Boot:
         lost: dict[str, str] = {}
         sizes = [int(s) for s in self.args.sizes.split(",")]
         steps = [("rtt", self.rtt)]
-        steps += [(f"thr_{s}B", lambda s=s: self.thr(s)) for s in sizes]
+        steps += [(f"nodrop_{s}B", lambda s=s: self.nodrop(s)) for s in sizes]
         steps += [("pubsub", lambda: self.pubsub(False)), ("query", lambda: self.query(False))]
         if self.args.heap_shim:
             steps += [("heap_pubsub", lambda: self.pubsub(True)), ("heap_query", lambda: self.query(True)),
@@ -487,7 +536,19 @@ class Boot:
                 values.update(step())
             except Lost as why:
                 lost[name] = str(why)
-        return {"values": values, "lost": lost}
+        lost.update(self.partly_lost)
+        # The free-running pair of upstream's throughput examples is kept as a diagnostic beside the cells
+        # and never graded: it says how a pair behaves when the publisher floods it, which the reference of
+        # a family may not survive (docs/upstream-parity.md section 5b), and a figure it gives is not a rate
+        # at which nothing was lost.
+        diagnostic: dict[str, float] = {}
+        diagnostic_lost: dict[str, str] = {}
+        for size in sizes:
+            try:
+                diagnostic.update(self.thr(size))
+            except Lost as why:
+                diagnostic_lost[f"thr_{size}B"] = str(why)
+        return {"values": values, "lost": lost, "diagnostic": diagnostic, "diagnostic_lost": diagnostic_lost}
 
 
 def keep_sizes(run: pathlib.Path, key: str, binary: str) -> None:
@@ -612,6 +673,9 @@ def cmd_selftest() -> int:
                bare.rusage is not None and int(bare.rusage.ru_maxrss) >= held)
         expect("a program started without the launcher is refused a peak RSS", rss_or_none(bare) is None)
 
+    expect("a family with a paced pair needs it beside upstream's programs, and the Rust family does not",
+           programs_of("pico")[-2:] == NODROP_PROGRAMS and programs_of("c")[-2:] == NODROP_PROGRAMS
+           and programs_of("rust") == PROGRAMS)
     expect("a throughput program's rates are its positive bare numbers, with or without msg/s",
            rates(["3965575.130", "0.000", "Received 5 msg/s", "12 msg/s", "Stats being dropped"]) == [3965575.13, 12.0])
     flood = [1.5e7] * 100
@@ -641,12 +705,13 @@ def main() -> int:
     parser.add_argument("--pings", type=int, default=20000)
     parser.add_argument("--warmup-s", type=float, default=3.0)
     parser.add_argument("--window-s", type=float, default=10.0)
+    parser.add_argument("--nodrop-trial-s", type=int, default=3, help="seconds of a trial of the no-drop search")
     parser.add_argument("--heap-shim", default="")
     parser.add_argument("--rss-wrapper", required=True, help="the launcher built from fork_rss.c")
     parser.add_argument("--size-binary", action="append", default=[], help="ARM=PATH, the file of an arm's size cells")
     args = parser.parse_args()
 
-    missing = [f"{p}_{arm}" for p in PROGRAMS for arm in "PW"
+    missing = [f"{p}_{arm}" for p in programs_of(args.family) for arm in "PW"
                if not os.access(pathlib.Path(args.bin_dir) / f"{p}_{arm}", os.X_OK)]
     if missing:
         print(f"parity: NOT-MEASURED, {args.bin_dir} lacks {', '.join(missing)}", flush=True)
@@ -669,8 +734,9 @@ def main() -> int:
 
     print(f"parity: family {args.family}, {args.boots} boots of {keys['P']} (P) and {keys['W']} (W), "
           f"alternating; client side on {args.client_cpus}, server side on {args.server_cpus}; "
-          f"sizes {args.sizes}; {args.pings} round trips; throughput window {args.window_s:g} s after "
-          f"{args.warmup_s:g} s; heap shim {'on' if args.heap_shim else 'off'}", flush=True)
+          f"sizes {args.sizes}; {args.pings} round trips; no-drop trials of {args.nodrop_trial_s} s; "
+          f"free-running throughput (diagnostic) window {args.window_s:g} s after {args.warmup_s:g} s; "
+          f"heap shim {'on' if args.heap_shim else 'off'}", flush=True)
     with (run / "manifest.tsv").open("w", encoding="utf-8") as manifest:
         for rnd in range(1, args.boots + 1):
             order = ("P", "W") if rnd % 2 else ("W", "P")
@@ -688,6 +754,10 @@ def main() -> int:
                 print(f"  parity {key} r{rnd}: {shown}", flush=True)
                 for name, why in sorted(result["lost"].items()):
                     print(f"  parity {key} r{rnd}: LOST {name}: {why}", flush=True)
+                shown = ", ".join(f"{k} {v:.4g}" for k, v in sorted(result["diagnostic"].items()))
+                print(f"  parity {key} r{rnd}: diagnostic, not graded: {shown or 'none'}", flush=True)
+                for name, why in sorted(result["diagnostic_lost"].items()):
+                    print(f"  parity {key} r{rnd}: diagnostic {name} gave nothing: {why}", flush=True)
     return 0
 
 

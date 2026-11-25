@@ -291,7 +291,7 @@ pub unsafe extern "C" fn wz_ext_e2e_sender_next(
     stream: usize,
     out: *mut u64,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if out.is_null() {
             return false;
         }
@@ -386,5 +386,5 @@ pub unsafe extern "C" fn wz_ext_internal_e2e_sender_null(this_: *mut wz_ext_owne
 pub unsafe extern "C" fn wz_ext_internal_e2e_sender_check(
     this_: *const wz_ext_owned_e2e_sender_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }

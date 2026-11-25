@@ -669,6 +669,107 @@ fn a_sample_reaches_the_subscribers_its_key_and_origin_admit() {
     assert!(reached(&tables, "d", false).is_empty());
 }
 
+// A build whose key set is closed refuses every key of a peer's until its image gives the gate
+// its table, so these deliver nothing there.
+#[cfg(not(feature = "key-set-closed"))]
+/// The callbacks a peer's message on `key` is handed through `mark`
+/// ([`crate::pubsub::LocalSubscribers::deliver_from_peer_marked`]), in the order they are handed it.
+fn delivered_marked(
+    tables: &mut Tables,
+    key: &str,
+    mark: &mut crate::match_set::MatchEntry,
+) -> Vec<u32> {
+    let mut seen = Vec::new();
+    let fired = crate::pubsub::LocalSubscribers::deliver_from_peer_marked(
+        tables,
+        key,
+        None,
+        mark,
+        |_, row| seen.push(*row.row()),
+    );
+    assert_eq!(fired, seen.len());
+    seen
+}
+
+#[cfg(not(feature = "key-set-closed"))]
+/// How many times the subscribers were matched against a key on this thread.
+fn scans() -> usize {
+    crate::pubsub::MATCH_SCANS.with(|count| count.get())
+}
+
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn a_peers_key_is_matched_once_and_its_answer_read_back_while_the_subscribers_stand() {
+    let mut tables = Tables::new();
+    subscribe(&mut tables, "a/b", Locality::Any, 1);
+    subscribe(&mut tables, "a/b", Locality::SessionLocal, 2);
+    subscribe(&mut tables, "c", Locality::Any, 3);
+    let mut mark = crate::match_set::MatchEntry::NONE;
+    let before = scans();
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![1]
+    );
+    assert_eq!(scans() - before, 1);
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![1]
+    );
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![1]
+    );
+    assert_eq!(scans() - before, 1, "a kept answer is not matched again");
+}
+
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn a_subscriber_declared_after_a_keys_answer_was_kept_hears_the_next_message() {
+    let mut tables = Tables::new();
+    let first = subscribe(&mut tables, "a/b", Locality::Any, 1);
+    let mut mark = crate::match_set::MatchEntry::NONE;
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![1]
+    );
+    subscribe(&mut tables, "a/b", Locality::Remote, 4);
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![1, 4]
+    );
+    // Undeclared, it hears no more, and the one that stands still does.
+    assert!(tables.undeclare_subscriber(first.handle).is_some());
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![4]
+    );
+}
+
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn a_key_no_subscriber_reaches_keeps_an_empty_answer_until_one_does() {
+    let mut tables = Tables::new();
+    subscribe(&mut tables, "c", Locality::Any, 3);
+    let mut mark = crate::match_set::MatchEntry::NONE;
+    let before = scans();
+    assert!(delivered_marked(&mut tables, "a/b", &mut mark).is_empty());
+    assert!(delivered_marked(&mut tables, "a/b", &mut mark).is_empty());
+    assert_eq!(scans() - before, 1);
+    subscribe(&mut tables, "a/b", Locality::Any, 5);
+    assert_eq!(
+        delivered_marked(&mut tables, "a/b", &mut mark),
+        std::vec![5]
+    );
+}
+
+#[test]
+fn replacing_the_key_gate_moves_the_subscriber_epoch() {
+    let mut tables = Tables::new();
+    let epoch = crate::pubsub::LocalSubscribers::epoch(&tables);
+    tables.set_key_gate(KeyGate::of_build());
+    assert_ne!(crate::pubsub::LocalSubscribers::epoch(&tables), epoch);
+}
+
 #[cfg(feature = "keyexpr-wildcard-single")]
 #[test]
 fn a_sample_reaches_a_subscriber_whose_pattern_intersects_its_key() {

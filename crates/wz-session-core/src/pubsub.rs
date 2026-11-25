@@ -392,6 +392,14 @@ pub struct SubscriberPeer<P: Storage = Profile> {
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     in_place_fallbacks: InPlaceFallbacks,
+    /// The subscribers each key the peer declared reached when it last sent a message on it, read
+    /// back while the subscriptions and the peer's aliases are what they were then
+    /// ([`crate::match_set`]). The peer's, since what an id names is the peer's.
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    matches: crate::match_set::PeerMatches,
     /// Where a key the peer names by one of its ids with a suffix, or by one of ours, is composed
     /// while one of its messages is delivered: the policy's room ([`Storage::Compose`]), a row
     /// lent at open on the lent policy.
@@ -511,6 +519,10 @@ struct PeerNaming<P: Storage = Profile> {
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
     own_zid: OwnZid,
+    /// How many times the aliases changed: what the side's memory of the subscribers each key
+    /// reached ([`SubscriberPeer::matches`]) was read under, and forgotten past.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    names: u64,
 }
 
 /// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
@@ -2674,6 +2686,47 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     fired
 }
 
+/// Deliver a peer's message on a key whose answer `mark` keeps
+/// ([`LocalSubscribers::deliver_from_peer_marked`]), over a table's rows alone: an answer kept at
+/// `epoch` is handed to the rows it names, in the table's order, with nothing matched and the key
+/// gate not asked; any other is asked of the gate (`admitted`, which counts a refusal) and matched
+/// by [`scan_subscribers`], and what it reached is kept when every row it reached has a place in a
+/// set. A key the gate refuses or the matcher cannot match is not kept.
+pub(crate) fn fire_into_marked<R: SubscriberRows>(
+    rows: &mut R,
+    mark: &mut crate::match_set::MatchEntry,
+    epoch: u64,
+    key: &str,
+    admitted: impl FnOnce() -> bool,
+    mut deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
+) -> usize {
+    if let Some(set) = mark.answer(epoch) {
+        let mut fired = 0usize;
+        for place in set.places() {
+            // A row of the answer is live: undeclaring one moves the epoch.
+            if let Some((id, sink)) = rows.sink_at(place) {
+                deliver(id, sink);
+                fired = fired.saturating_add(1);
+            }
+        }
+        return fired;
+    }
+    if !admitted() {
+        return 0;
+    }
+    let mut set = crate::match_set::SubscriberSet::EMPTY;
+    let mut whole = true;
+    let Some(fired) = scan_subscribers(rows, key, true, deliver, |place| {
+        whole &= set.insert(place);
+    }) else {
+        return 0;
+    };
+    if whole {
+        mark.keep(epoch, set);
+    }
+    fired
+}
+
 /// Whether `keyexpr`, read as `facts`, is deeper than the matcher's bound on the fixed backing: a
 /// message on it is delivered to nobody. The depth is counted only for a key the facts do not
 /// already place within the bound.
@@ -2968,6 +3021,8 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: crate::bounded::ZeroOption::NONE,
                 own_zid: OwnZid::NONE,
+                #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+                names: 0,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::default(),
@@ -2978,6 +3033,11 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 any(feature = "pubsub-put", feature = "pubsub-delete")
             ))]
             in_place_fallbacks: InPlaceFallbacks::NONE,
+            #[cfg(all(
+                feature = "storage-profile",
+                any(feature = "pubsub-put", feature = "pubsub-delete")
+            ))]
+            matches: crate::match_set::PeerMatches::NONE,
             #[cfg(feature = "storage-profile")]
             compose: Default::default(),
             class: None,
@@ -3002,6 +3062,8 @@ impl SubscriberPeer<crate::bounded::Static> {
                 #[cfg(feature = "shared-key-ids")]
                 shared_key_ids: crate::bounded::ZeroOption::NONE,
                 own_zid: OwnZid::NONE,
+                #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+                names: 0,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
             interests: InterestSide::new_static(),
@@ -3012,6 +3074,11 @@ impl SubscriberPeer<crate::bounded::Static> {
                 any(feature = "pubsub-put", feature = "pubsub-delete")
             ))]
             in_place_fallbacks: InPlaceFallbacks::NONE,
+            #[cfg(all(
+                feature = "storage-profile",
+                any(feature = "pubsub-put", feature = "pubsub-delete")
+            ))]
+            matches: crate::match_set::PeerMatches::NONE,
             #[cfg(feature = "storage-profile")]
             compose: (),
             class: None,
@@ -3040,6 +3107,7 @@ pub const SUBSCRIBER_PEER_LINES: usize = 2;
 // `LentKeys` of none; the bounds are `Limited` (`ZeroEmpty`), bounds of nothing until the session
 // states them; the own id space and the shared key ids are `ZeroOption`s of none, the own zid is
 // one of no bytes (`OwnZid::NONE`), the class is `None` (`ClassId` is a transparent `NonZeroU16`);
+// the memory of the keys' subscribers keeps no answer (`MatchEntry` with `kept` false);
 // the shared-memory state is `ZeroEmpty`; every count and epoch is zero; the composing row is
 // `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
 unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
@@ -3155,6 +3223,7 @@ impl SubscriberPeer<Lent> {
         &mut self,
         space: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
     ) {
+        self.naming.names_changed();
         self.naming.aliases.attach(&space);
     }
 
@@ -3343,7 +3412,7 @@ impl<P: Storage> SubscriberPeer<P> {
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         self.interests.forget();
         // The next peer on this slot is not known to be the last one.
-        self.class = None;
+        self.set_class(None);
     }
 
     /// Say which declared peer this session's peer is, once its zid is known:
@@ -3353,6 +3422,12 @@ impl<P: Storage> SubscriberPeer<P> {
     /// the peer ([`Self::forget_peer`]).
     pub fn set_class(&mut self, class: Option<ClassId>) {
         self.class = class;
+        // The key gate is asked with the class, so an answer kept under another one may not hold.
+        #[cfg(all(
+            feature = "storage-profile",
+            any(feature = "pubsub-put", feature = "pubsub-delete")
+        ))]
+        self.matches.forget();
     }
 
     /// The declared peer this session's peer was said to be, `None` when none was.
@@ -3791,6 +3866,7 @@ impl<P: Storage> PeerNaming<P> {
     /// The peer's aliases lent the side's keys, to bind and unbind: the one place the table is
     /// paired with the space its rows lie in.
     fn aliases_mut(&mut self) -> AliasesMut<'_, P> {
+        self.names_changed();
         // SAFETY: the side attaches the alias table only to the space its keys name for the
         // aliases' slot (`SubscriberPeer::keep_alias_rows_in`), and `SubscriberPeer::keep_keys_in`
         // gives every row back through the old keys before it changes them, so the keys lend the
@@ -3801,6 +3877,16 @@ impl<P: Storage> PeerNaming<P> {
                 &self.keys,
                 crate::row_pool::PeerSlot::Aliases,
             )
+        }
+    }
+
+    /// Count a change of the aliases, which may name another key by an id than before: every one
+    /// the side's table may change through is counted, so an answer kept for an id is read only
+    /// while the id names what it named. Counted where nothing reads it as well.
+    fn names_changed(&mut self) {
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        {
+            self.names = self.names.wrapping_add(1);
         }
     }
 
@@ -3820,6 +3906,7 @@ impl<P: Storage> PeerNaming<P> {
     /// Give the alias rows lent through the side's keys back through them, before the keys change
     /// or the side goes: nothing on a policy whose table keeps its own rows.
     fn release_aliases(&mut self) {
+        self.names_changed();
         // SAFETY: as `aliases_mut`'s: the keys name the space the table was attached to.
         unsafe {
             <PeerAliases<P> as PeerIds<KeyText<P>, P::Keys>>::release(
@@ -4749,6 +4836,34 @@ pub trait LocalSubscribers {
     ) -> usize
     where
         Self: Sized;
+
+    /// [`Self::deliver_from_peer`] of a message read in place, on a key whose answer the peer's
+    /// side keeps in `mark` (a key the peer declared, named by its id with no suffix): a table
+    /// that keeps answers by [`Self::epoch`] hands the message to the rows `mark` answers at
+    /// this epoch with no pattern matched and no key gate asked, and otherwise gates and matches
+    /// it and keeps what it reached in `mark`. A refused key is not kept, so each of its
+    /// messages is refused and counted. A table that keeps no answer delivers as
+    /// `deliver_from_peer` delivers a message read in place and leaves `mark` as it was.
+    fn deliver_from_peer_marked<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
+        &mut self,
+        key: &str,
+        class: Option<ClassId>,
+        _mark: &mut crate::match_set::MatchEntry,
+        deliver: D,
+    ) -> usize
+    where
+        Self: Sized,
+    {
+        self.deliver_from_peer(
+            key,
+            class,
+            PeerDelivery {
+                no_allocation: true,
+                ..PeerDelivery::default()
+            },
+            deliver,
+        )
+    }
 
     /// The frame whose plain `Put`s were just delivered has no more records: `cx` is told of
     /// every row ([`SampleDelivery::end_plain_frame`]), matched or not.

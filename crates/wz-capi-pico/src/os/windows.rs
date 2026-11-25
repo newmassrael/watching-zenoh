@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicI64, Ordering};
 use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
-use windows_sys::Win32::System::Threading::{Sleep, INFINITE};
+use windows_sys::Win32::System::Threading::Sleep;
 use windows_sys::Win32::System::Time::{
     FileTimeToSystemTime, GetTimeZoneInformation, SystemTimeToTzSpecificLocalTime,
     TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
@@ -78,28 +78,6 @@ pub unsafe fn free(ptr: *mut c_void) {
 /// pico `z_realloc`: the C runtime's `realloc`.
 pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     libc::realloc(ptr, size)
-}
-
-/// Sleep at least `time` of `unit`, as pico's `Sleep` does: whole milliseconds, a part of one
-/// rounded up, as pico's `z_sleep_us` rounds. `Sleep` takes a 32-bit count whose largest value is
-/// `INFINITE`, so a longer sleep is taken in parts.
-pub fn sleep(unit: Unit, time: usize) {
-    let time = time as u64;
-    let mut left = match unit {
-        Unit::Micro => time.div_ceil(1_000),
-        Unit::Milli => time,
-        Unit::Second => time.saturating_mul(1_000),
-    };
-    loop {
-        let part = left.min(u64::from(INFINITE - 1));
-        // SAFETY: any thread, any count below `INFINITE`.
-        unsafe { Sleep(part as u32) };
-        // `part` is at most `left`.
-        left = left.wrapping_sub(part);
-        if left == 0 {
-            break;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1488,7 +1488,7 @@ async fn an_in_place_frame_followed_by_a_second_frame_reads_it_as_the_next_unit(
         }) if !messages.is_empty() => seen.push((*reliable, *sn)),
         _ => {}
     };
-    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, 0, &mut sink);
     assert!(
         matches!(path, DatagramPath::InPlace),
         "the datagram begins with an admissible Frame; got {path:?}"
@@ -1577,7 +1577,7 @@ async fn a_kept_datagram_is_read_on_from_where_it_stopped() {
     let mut lends = 0;
     loop {
         sink.handed = 0;
-        dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
+        dispatch_datagram(&unit, &actions, &mut engine, &mut reader, 0, &mut sink);
         lends += 1;
         if !reader.resumes() {
             break;
@@ -1717,8 +1717,8 @@ async fn an_in_place_refused_frame_leaves_the_frame_behind_it_for_the_next_unit(
         }
         _ => {}
     };
-    dispatch_datagram(&first, &actions, &mut engine, &mut reader, &mut sink);
-    dispatch_datagram(&batch, &actions, &mut engine, &mut reader, &mut sink);
+    dispatch_datagram(&first, &actions, &mut engine, &mut reader, 0, &mut sink);
+    dispatch_datagram(&batch, &actions, &mut engine, &mut reader, 0, &mut sink);
     // What follows the refused frame is read on where the datagram lies, in the same call.
     assert!(
         dispatch_pending(&actions, &mut engine).is_none(),
@@ -1770,7 +1770,7 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
         }) if !messages.is_empty() => seen.push((*reliable, *sn)),
         _ => {}
     };
-    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
+    let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, 0, &mut sink);
     assert_eq!(
         path,
         DatagramPath::Copied(CopyReason::NotAFrame),
@@ -1818,7 +1818,7 @@ async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
     drive_to_sent_init_syn(&mut engine);
     let mut reported = 0usize;
     let mut lends = |_event: IterationEvent<'_, '_>| reported += 1;
-    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, &mut lends);
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, 0, &mut lends);
     assert_eq!(
         path,
         DatagramPath::Copied(CopyReason::NotAFrame),
@@ -1829,7 +1829,7 @@ async fn an_empty_datagram_is_read_once_when_lent_and_not_at_all_when_kept() {
     let (actions, mut engine) = fresh_setup();
     drive_to_sent_init_syn(&mut engine);
     let mut keeps = Keeps::default();
-    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, &mut keeps);
+    let path = dispatch_datagram(&[], &actions, &mut engine, &mut reader, 0, &mut keeps);
     assert_eq!(
         path,
         DatagramPath::InPlace,
@@ -1864,7 +1864,7 @@ async fn a_frame_the_in_place_reader_refuses_is_a_framing_error_read_no_further_
                 parse_errors.push(matches!(outcome, DriverLoopOutcome::ParseError(_)));
             }
         };
-        let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, &mut sink);
+        let path = dispatch_datagram(&unit, &actions, &mut engine, &mut reader, 0, &mut sink);
         assert_eq!(path, DatagramPath::Copied(reason), "{unit:?}");
         assert_eq!(parse_errors, [parse_error], "{unit:?}: one outcome");
         assert_eq!(

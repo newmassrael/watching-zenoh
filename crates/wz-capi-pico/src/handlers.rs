@@ -162,7 +162,7 @@ pub unsafe extern "C" fn _z_rc_increase_weak(cnt: *mut c_void) -> ZResult {
 /// it is why this may also free the block and null `*cnt`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_rc_decrease_strong(cnt: *mut *mut c_void) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if cnt.is_null() {
             return false;
         }
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn _z_rc_decrease_strong(cnt: *mut *mut c_void) -> bool {
 /// freed the counter block, in which case `*cnt` is nulled.
 #[no_mangle]
 pub unsafe extern "C" fn _z_rc_decrease_weak(cnt: *mut *mut c_void) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if cnt.is_null() {
             return false;
         }
@@ -230,16 +230,14 @@ pub unsafe extern "C" fn _z_rc_weak_upgrade(cnt: *mut c_void) -> ZResult {
 /// Live strong references (pico `_z_rc_strong_count`).
 #[no_mangle]
 pub unsafe extern "C" fn _z_rc_strong_count(cnt: *mut c_void) -> usize {
-    guard_val(0, || {
-        rc_block(cnt).map_or(0, |block| block.strong.load(Ordering::Relaxed))
-    })
+    guard_val(|| rc_block(cnt).map_or(0, |block| block.strong.load(Ordering::Relaxed)))
 }
 
 /// Live USER weak references (pico `_z_rc_weak_count`) — the book-keeping weak
 /// the strong set holds is subtracted while any strong reference remains.
 #[no_mangle]
 pub unsafe extern "C" fn _z_rc_weak_count(cnt: *mut c_void) -> usize {
-    guard_val(0, || {
+    guard_val(|| {
         let Some(block) = rc_block(cnt) else {
             return 0;
         };
@@ -767,9 +765,7 @@ pub unsafe extern "C" fn _z_fifo_mt_init(fifo: *mut _z_fifo_mt_t, capacity: usiz
 /// pico `_z_fifo_mt_new`: heap-allocate and initialise, `NULL` on failure.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_new(capacity: usize) -> *mut _z_fifo_mt_t {
-    guard_val(core::ptr::null_mut(), || {
-        new_collection(capacity, core::mem::size_of::<_z_fifo_mt_t>()).cast()
-    })
+    guard_val(|| new_collection(capacity, core::mem::size_of::<_z_fifo_mt_t>()).cast())
 }
 
 /// pico `_z_fifo_mt_close`.
@@ -781,13 +777,13 @@ pub unsafe extern "C" fn _z_fifo_mt_close(fifo: *mut _z_fifo_mt_t) -> ZResult {
 /// pico `_z_fifo_mt_clear`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_clear(fifo: *mut _z_fifo_mt_t, free_f: z_element_free_f) {
-    guard_val((), || clear(fifo.cast::<c_void>(), free_f));
+    guard_val(|| clear(fifo.cast::<c_void>(), free_f));
 }
 
 /// pico `_z_fifo_mt_free`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_free(fifo: *mut _z_fifo_mt_t, free_f: z_element_free_f) {
-    guard_val((), || {
+    guard_val(|| {
         clear(fifo.cast::<c_void>(), free_f);
         crate::platform::z_free(fifo.cast::<c_void>());
     });
@@ -842,9 +838,7 @@ pub unsafe extern "C" fn _z_ring_mt_init(ring: *mut _z_ring_mt_t, capacity: usiz
 /// pico `_z_ring_mt_new`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_ring_mt_new(capacity: usize) -> *mut _z_ring_mt_t {
-    guard_val(core::ptr::null_mut(), || {
-        new_collection(capacity, core::mem::size_of::<_z_ring_mt_t>()).cast()
-    })
+    guard_val(|| new_collection(capacity, core::mem::size_of::<_z_ring_mt_t>()).cast())
 }
 
 /// pico `_z_ring_mt_close`.
@@ -856,13 +850,13 @@ pub unsafe extern "C" fn _z_ring_mt_close(ring: *mut _z_ring_mt_t) -> ZResult {
 /// pico `_z_ring_mt_clear`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_ring_mt_clear(ring: *mut _z_ring_mt_t, free_f: z_element_free_f) {
-    guard_val((), || clear(ring.cast::<c_void>(), free_f));
+    guard_val(|| clear(ring.cast::<c_void>(), free_f));
 }
 
 /// pico `_z_ring_mt_free`.
 #[no_mangle]
 pub unsafe extern "C" fn _z_ring_mt_free(ring: *mut _z_ring_mt_t, free_f: z_element_free_f) {
-    guard_val((), || {
+    guard_val(|| {
         clear(ring.cast::<c_void>(), free_f);
         crate::platform::z_free(ring.cast::<c_void>());
     });

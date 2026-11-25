@@ -2763,9 +2763,7 @@ pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
     // Upstream: `if (!z_session_is_closed(zs)) { return _z_runtime_spin_once(..); } return
     // false;`, so a closed session answers `false` like a null one. The engine answers the
     // rest: one that drives itself answers "alive", one the program steps runs the turn.
-    crate::ffi::guard_val(false, || {
-        session_handle(zs).is_some_and(|handle| handle.drive.spin_once())
-    })
+    crate::ffi::guard_val(|| session_handle(zs).is_some_and(|handle| handle.drive.spin_once()))
 }
 
 // --- the single-threaded entry points (pico `Z_FEATURE_MULTI_THREAD == 0`) --
@@ -3015,19 +3013,13 @@ pub(crate) unsafe fn entity_global_id(
 pub unsafe extern "C" fn z_session_id(
     zs: *const z_loaned_session_t,
 ) -> crate::entity::z_entity_global_id_t {
-    crate::ffi::guard_val(
-        crate::entity::z_entity_global_id_t {
+    crate::ffi::guard_val(|| match session_handle(zs) {
+        Some(handle) => entity_global_id(handle, 0),
+        None => crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::empty(),
             eid: 0,
         },
-        || match session_handle(zs) {
-            Some(handle) => entity_global_id(handle, 0),
-            None => crate::entity::z_entity_global_id_t {
-                zid: crate::zid::z_id_t::empty(),
-                eid: 0,
-            },
-        },
-    )
+    })
 }
 
 /// Whether the session has been closed (pico `z_session_is_closed`).
@@ -3041,7 +3033,7 @@ pub unsafe extern "C" fn z_session_id(
 /// `zs` must be null or a live loaned session.
 #[no_mangle]
 pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> bool {
-    crate::ffi::guard_val(true, || match session_handle(zs) {
+    crate::ffi::guard_val(|| match session_handle(zs) {
         Some(handle) => handle.drive.is_closed(),
         None => true,
     })
@@ -3055,7 +3047,7 @@ pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> b
 pub unsafe extern "C" fn z_publisher_keyexpr(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(core::ptr::null(), || {
+    crate::ffi::guard_val(|| {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_publisher_t,
             crate::pubsub::PublisherState,
@@ -3094,7 +3086,7 @@ pub unsafe extern "C" fn z_publisher_id(
 pub unsafe extern "C" fn z_querier_keyexpr(
     querier: *const crate::querier::z_loaned_querier_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(core::ptr::null(), || {
+    crate::ffi::guard_val(|| {
         match crate::abi::handle_ref::<
             crate::querier::z_loaned_querier_t,
             crate::querier::QuerierState,
@@ -3131,7 +3123,7 @@ pub unsafe extern "C" fn z_querier_id(
 pub unsafe extern "C" fn z_subscriber_keyexpr(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> *const crate::abi::z_loaned_keyexpr_t {
-    crate::ffi::guard_val(core::ptr::null(), || {
+    crate::ffi::guard_val(|| {
         match crate::abi::handle_ref::<
             crate::pubsub::z_loaned_subscriber_t,
             crate::pubsub::SubscriberState,

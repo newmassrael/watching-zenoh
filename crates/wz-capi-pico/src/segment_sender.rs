@@ -507,7 +507,7 @@ pub unsafe extern "C" fn wz_ext_segment_sender_next(
     this_: *const wz_ext_loaned_segment_sender_t,
     out: *mut u64,
 ) -> bool {
-    guard_val(false, || {
+    guard_val(|| {
         if out.is_null() {
             return false;
         }
@@ -606,7 +606,7 @@ pub unsafe extern "C" fn wz_ext_internal_segment_sender_null(
 pub unsafe extern "C" fn wz_ext_internal_segment_sender_check(
     this_: *const wz_ext_owned_segment_sender_t,
 ) -> bool {
-    guard_val(false, || !this_.is_null() && !(*this_).handle.is_null())
+    guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
 
 #[cfg(test)]
