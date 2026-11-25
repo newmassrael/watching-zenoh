@@ -272,6 +272,10 @@ unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
 // SAFETY: a `PhantomData` is no bytes.
 unsafe impl<T: ?Sized> ZeroEmpty for PhantomData<T> {}
 
+// SAFETY: an `AtomicBool` has the layout of a `bool`, whose zero byte is `false`.
+#[cfg(target_has_atomic = "8")]
+unsafe impl ZeroEmpty for core::sync::atomic::AtomicBool {}
+
 /// A value or none, whose all zero bytes are none whatever the value's type: a flag and a place
 /// for the value. An `Option<T>` is `None` at zero bytes only where `T` has a niche the language
 /// guarantees (a reference, `NonNull`, a `NonZero` integer), so a field of a region that may hold
@@ -1954,6 +1958,9 @@ pub struct Arena {
     base: NonNull<u8>,
     bytes: usize,
     lent: usize,
+    /// Whether every byte not lent yet is zero ([`Self::over_zeroed`]): a table whose empty state
+    /// is all-zero bytes is then lent as the memory lies.
+    zeroed: bool,
 }
 
 /// Why an [`Arena`] lent no table. A refused lend takes nothing.
@@ -2140,6 +2147,24 @@ impl Arena {
             base,
             bytes,
             lent: 0,
+            zeroed: false,
+        }
+    }
+
+    /// An arena of the `bytes` bytes at `base`, none of them lent and every one of them zero: memory
+    /// handed zeroed, as the allocator's zeroed block or a region in `.bss` is. A table it lends
+    /// whose empty state is all-zero bytes is lent as the memory lies and written by nothing, so a
+    /// page no table of it uses stays unwritten. The spans it lends only grow from its start, so
+    /// what it has not lent stays as it was handed.
+    ///
+    /// # Safety
+    /// As [`Self::over`], and every one of the `bytes` bytes is zero.
+    pub const unsafe fn over_zeroed(base: NonNull<u8>, bytes: usize) -> Self {
+        Self {
+            base,
+            bytes,
+            lent: 0,
+            zeroed: true,
         }
     }
 
@@ -2153,6 +2178,7 @@ impl Arena {
             base: NonNull::from(&NO_BYTES).cast::<u8>(),
             bytes: 0,
             lent: 0,
+            zeroed: false,
         }
     }
 
@@ -2353,7 +2379,9 @@ impl Arena {
     /// Lend a table of `count` buffers of `size` bytes, every one free and its bytes zero: the
     /// next span holds the flags that say which are lent, and the one after it their bytes. A
     /// buffer a link claims from it is a [`ByteBuf`](crate::byte_cells::ByteBuf), as one of a
-    /// table the image declares is. Refused, taking nothing, past what is left.
+    /// table the image declares is. An arena over zeroed memory ([`Self::over_zeroed`]) lends the
+    /// table as it lies, since a free flag and a zero byte are both all-zero; any other writes
+    /// them. Refused, taking nothing, past what is left.
     ///
     /// The table's memory is this arena's: whoever owns the arena gives it back only once every
     /// copy of the table and every buffer claimed from it is gone, as it does for a lent table.
@@ -2395,17 +2423,21 @@ impl Arena {
         };
         // SAFETY: both spans lie inside the arena past what it has lent, as `lent` only grows, so
         // nothing else uses them. A flag is one byte with no alignment of its own and the bytes are
-        // bytes, so any address in the arena is aligned for them. Each flag is written `false`
-        // and each byte zero before the table is made, which is what `LentByteCells::over` asks.
+        // bytes, so any address in the arena is aligned for them. Each flag is `false` and each
+        // byte zero before the table is made, which is what `LentByteCells::over` asks: written so
+        // here, or so already in a zeroed arena, whose bytes past what it lent are zero, which is a
+        // flag's `false` (`CellFlag` is `ZeroEmpty`).
         let table = unsafe {
             let at = self.base.as_ptr().add(self.lent);
             let taken = at.cast::<F>();
-            for cell in 0..count {
-                taken.add(cell).write(F::new(false));
-            }
             let data = at.add(flags);
-            // `byte_cells_spans` answered, so the product does not overflow.
-            core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
+            if !self.zeroed {
+                for cell in 0..count {
+                    taken.add(cell).write(F::new(false));
+                }
+                // `byte_cells_spans` answered, so the product does not overflow.
+                core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
+            }
             LentByteCells::over(
                 NonNull::new_unchecked(taken),
                 NonNull::new_unchecked(data),
@@ -2900,6 +2932,95 @@ mod tests {
             })
         );
         assert_eq!(arena.high_water(), asked, "a refused table takes nothing");
+    }
+
+    /// A table of byte buffers lent from an arena over zeroed memory is lent as the memory lies,
+    /// written by nothing: a region marked with a byte that is not zero, handed to the arena as if
+    /// it were zeroed, keeps its mark after the lend. The CONTROL is the same lend from an arena
+    /// over memory not said to be zero, which writes the flags free and the bytes zero. Turned red
+    /// by a zeroed arena's lend that writes its table.
+    #[test]
+    fn a_zeroed_arena_lends_byte_buffers_without_writing_them() {
+        const MARK: u8 = 0x5a;
+        let asked = Arena::byte_cells_bytes(10, 3).expect("within the address space");
+        let lent_over = |zeroed: bool| {
+            let blocks = asked.div_ceil(ARENA_ALIGN);
+            let region: &'static mut [Block] = std::vec![
+                Block {
+                    _bytes: [MARK; ARENA_ALIGN]
+                };
+                blocks
+            ]
+            .leak();
+            let base = NonNull::from(region).cast::<u8>();
+            // SAFETY: the region is aligned to `ARENA_ALIGN`, holds `asked` bytes and is leaked.
+            // It is not zero: the zeroed arena is told it is to show what its lend writes, and no
+            // table lent from it is used, only the region's raw bytes read.
+            let mut arena = unsafe {
+                if zeroed {
+                    Arena::over_zeroed(base, asked)
+                } else {
+                    Arena::over(base, asked)
+                }
+            };
+            let _table = arena
+                .lend_byte_cells(10, 3)
+                .expect("the arena holds the table");
+            // SAFETY: the region's `asked` bytes, leaked, read after the lend.
+            unsafe { core::slice::from_raw_parts(base.as_ptr(), asked) }.to_vec()
+        };
+        assert!(
+            lent_over(true).iter().all(|byte| *byte == MARK),
+            "the zeroed arena's lend wrote its table"
+        );
+        let written = lent_over(false);
+        let flags = Arena::span(3 * LentByteCells::FLAG_BYTES).expect("a small span");
+        assert!(
+            written[..3].iter().all(|byte| *byte == 0),
+            "CONTROL: flags free"
+        );
+        assert!(
+            written[flags..flags + 30].iter().all(|byte| *byte == 0),
+            "CONTROL: bytes zero"
+        );
+    }
+
+    /// A table lent from an arena over memory that is zero holds free buffers whose bytes are zero,
+    /// with nothing written by the lend: every buffer is claimed once and the one past them is
+    /// refused. Turned red by a flag whose all-zero byte is not `false` (a table that reads as
+    /// all lent), or by a zeroed arena that lends a span it lent before.
+    #[test]
+    fn a_zeroed_arena_lends_free_buffers_of_zero_bytes() {
+        let asked = Arena::byte_cells_bytes(10, 3).expect("within the address space");
+        let blocks = asked.div_ceil(ARENA_ALIGN) * 2;
+        let region: &'static mut [Block] =
+            std::vec![Block { _bytes: [0; ARENA_ALIGN] }; blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds `2 * asked` bytes at least, every
+        // one zero, and is leaked, so nothing else uses it and it outlives every lent table.
+        let mut arena =
+            unsafe { Arena::over_zeroed(NonNull::from(region).cast::<u8>(), blocks * ARENA_ALIGN) };
+        let first = arena
+            .lend_byte_cells(10, 3)
+            .expect("the arena holds the table");
+        let atomic = arena
+            .lend_byte_cells_of::<core::sync::atomic::AtomicBool>(10, 3)
+            .expect("the arena holds a second table");
+        assert_eq!(
+            arena.high_water(),
+            2 * asked,
+            "two tables, each its own span"
+        );
+        let mut held = std::vec::Vec::new();
+        while let Some(mut buffer) = first.claim() {
+            assert!(buffer.as_mut_slice().iter().all(|&b| b == 0), "lent zero");
+            held.push(buffer);
+        }
+        assert_eq!(held.len(), 3, "every buffer free, none past them");
+        let mut atomics = std::vec::Vec::new();
+        while let Some(buffer) = atomic.claim() {
+            atomics.push(buffer);
+        }
+        assert_eq!(atomics.len(), 3, "every atomic flag free");
     }
 
     /// Fill to `N`, then one more: refused with the value handed back on a policy

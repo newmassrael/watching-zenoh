@@ -3542,7 +3542,7 @@ impl SessionArena {
         // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
         // block is given back (`Drop`, or the last count of `Self::keep`).
         let arena =
-            unsafe { Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes) };
+            unsafe { Arena::over_zeroed(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes) };
         Ok((
             Self {
                 arena,
@@ -3751,6 +3751,21 @@ mod tests {
                 .iter()
                 .all(|byte| *byte == 0);
         assert!(zero, "CONTROL: the provided zeroed reservation is zero");
+    }
+
+    /// A session's arena lends its tables of buffers as its zeroed block lies: the lend writes none
+    /// of their flags or bytes, so a buffer no link claims is never written. Turned red by the
+    /// arena made over its block as memory not said to be zero (`Arena::over`), whose lend writes
+    /// them.
+    #[test]
+    fn a_session_arena_lends_its_buffers_without_writing_them() {
+        let (mut arena, _) = SessionArena::of_bytes_after(Layout::new::<()>(), 4096, &Marked)
+            .expect("a zeroed reservation");
+        let mut lend = arena.lender();
+        let _cells = lend.byte_cells(1024, 3);
+        lend.finish().expect("the arena holds the table");
+        assert!(arena.arena.high_water() > 3 * 1024, "the table was lent");
+        assert!(still_marked(&arena), "the lend wrote the table");
     }
 
     /// Whether each 4 KiB page of the `len` bytes at `at` is present in this process, read from
