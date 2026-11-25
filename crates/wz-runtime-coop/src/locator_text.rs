@@ -89,12 +89,26 @@ pub struct NamedHost<'a> {
     link: NamedLink,
 }
 
-/// The link a dial of a [`NamedHost`] opens at each address the host resolves to.
+/// The link a dial of a [`NamedHost`] opens at each address the host resolves to: what a dial
+/// keeps of the host to pass to its next address when the network refuses one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamedLink {
+pub enum NamedLink {
+    /// A link of the IP scheme.
     Ip(LinkProto),
+    /// A WebSocket link.
     #[cfg(feature = "ws")]
     Ws,
+}
+
+impl NamedLink {
+    /// The locator of this link at `at`.
+    pub fn locator(self, at: SocketAddr) -> Locator {
+        match self {
+            NamedLink::Ip(proto) => Locator::ip(proto, at),
+            #[cfg(feature = "ws")]
+            NamedLink::Ws => Locator::ws(at),
+        }
+    }
 }
 
 impl<'a> NamedHost<'a> {
@@ -110,11 +124,12 @@ impl<'a> NamedHost<'a> {
 
     /// The locator a dial of the host opens at `at`, one of the addresses it resolved to.
     pub fn locator(&self, at: SocketAddr) -> Locator {
-        match self.link {
-            NamedLink::Ip(proto) => Locator::ip(proto, at),
-            #[cfg(feature = "ws")]
-            NamedLink::Ws => Locator::ws(at),
-        }
+        self.link.locator(at)
+    }
+
+    /// The link a dial of the host opens at each of its addresses.
+    pub fn link(&self) -> NamedLink {
+        self.link
     }
 }
 
@@ -129,60 +144,58 @@ impl<'a> NamedHost<'a> {
 /// number (`0x7f.1`, `127.1`) is never handed to it as a name: a text the address reader
 /// refused stays refused when it reads as a number to another reader.
 pub fn read_dial_target(endpoint: &str) -> Result<DialTarget<'_>, DialRefused> {
-    match parse_locator(endpoint) {
-        Ok(at) => Ok(DialTarget::At(at)),
-        Err(DialRefused::BadAddress) => named_host(endpoint)
+    let (link, rest) = match scheme_of(endpoint) {
+        Scheme::Read(read) => return read.map(DialTarget::At),
+        Scheme::Ip(link, rest) => (link, rest),
+    };
+    match socket_addr::<true>(rest, false) {
+        Ok(at) => Ok(DialTarget::At(link.locator(at))),
+        Err(DialRefused::BadAddress) => named_host(link, rest)
             .map(DialTarget::Named)
             .ok_or(DialRefused::BadAddress),
         Err(refused) => Err(refused),
     }
 }
 
-/// The host and port of an IP scheme's text, or `None` for a text that names none.
-fn named_host(endpoint: &str) -> Option<NamedHost<'_>> {
-    let schemes = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
-        .into_iter()
-        .map(|proto| (proto.scheme(), NamedLink::Ip(proto)));
-    #[cfg(feature = "ws")]
-    let schemes = schemes.chain(core::iter::once((
-        wz_session_core::link::LinkKind::Ws.scheme(),
-        NamedLink::Ws,
-    )));
-    let (link, rest) = schemes.into_iter().find_map(|(scheme, link)| {
-        let rest = endpoint.strip_prefix(scheme)?.strip_prefix('/')?;
-        Some((link, rest))
-    })?;
-    let (host, port) = rest.rsplit_once(':')?;
-    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) || !is_host_name(host) {
-        return None;
-    }
-    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
-    Some(NamedHost { host, port, link })
+/// The host and port of an IP scheme's text after its `<scheme>/`, or `None` for a text that
+/// names none. The port is read by the address reader's own reader of a port.
+fn named_host(link: NamedLink, rest: &str) -> Option<NamedHost<'_>> {
+    let colon = rest.bytes().rposition(|b| b == b':')?;
+    let host = rest.get(..colon)?;
+    let port = Text(rest.as_bytes().get(colon.wrapping_add(1)..)?)
+        .port()
+        .filter(|port| *port != 0)?;
+    is_host_name(host.as_bytes()).then_some(NamedHost { host, port, link })
 }
 
-/// Whether `host` is a name as [`read_dial_target`] reads one.
-fn is_host_name(host: &str) -> bool {
+/// Whether `host` is a name as [`read_dial_target`] reads one, in one pass over its bytes.
+fn is_host_name(host: &[u8]) -> bool {
     if host.len() > HOST_NAME_MAX {
         return false;
     }
-    let mut last_opens_with_letter = false;
-    for label in host.split('.') {
-        let bytes = label.as_bytes();
-        let (Some(first), Some(last)) = (bytes.first(), bytes.last()) else {
-            return false;
-        };
-        if bytes.len() > 63
-            || *first == b'-'
-            || *last == b'-'
-            || !bytes
-                .iter()
-                .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
-        {
+    // The length of the label being read, its first byte, and the byte before this one.
+    let (mut label, mut first, mut before) = (0usize, 0u8, b'.');
+    for &byte in host {
+        if byte == b'.' {
+            if label == 0 || before == b'-' {
+                return false;
+            }
+            label = 0;
+        } else if byte.is_ascii_alphanumeric() || byte == b'-' {
+            if label == 0 {
+                first = byte;
+            }
+            // At most 64 before the test below refuses the label, so the sum does not wrap.
+            label = label.wrapping_add(1);
+            if label > 63 || first == b'-' {
+                return false;
+            }
+        } else {
             return false;
         }
-        last_opens_with_letter = first.is_ascii_alphabetic();
+        before = byte;
     }
-    last_opens_with_letter
+    label != 0 && before != b'-' && first.is_ascii_alphabetic()
 }
 
 /// Read `udp/<a.b.c.d>:<port>`, `tcp/[<ipv6>]:<port>`, `tls/...` into the locator it
@@ -218,13 +231,31 @@ fn parse_endpoint<const IPV6: bool>(
     endpoint: &str,
     any_port: bool,
 ) -> Result<Locator, DialRefused> {
+    match scheme_of(endpoint) {
+        Scheme::Read(read) => read,
+        Scheme::Ip(link, rest) => socket_addr::<IPV6>(rest, any_port).map(|at| link.locator(at)),
+    }
+}
+
+/// What the scheme an endpoint's text opens with makes of it: a link reached at a socket address
+/// and the text after its `<scheme>/` ([`Scheme::Ip`]), or the reading of a link of another kind,
+/// or the refusal of a scheme no link here carries ([`Scheme::Read`]).
+enum Scheme<'a> {
+    Ip(NamedLink, &'a str),
+    Read(Result<Locator, DialRefused>),
+}
+
+/// The one reader of an endpoint's scheme, for the reader of an address and the reader of a
+/// dial's text alike.
+#[inline(always)]
+fn scheme_of(endpoint: &str) -> Scheme<'_> {
     #[cfg(feature = "serial")]
     if let Some(serial) = serial_endpoint(endpoint) {
-        return serial;
+        return Scheme::Read(serial);
     }
     #[cfg(feature = "unixpipe")]
     if let Some(unixpipe) = unixpipe_endpoint(endpoint) {
-        return unixpipe;
+        return Scheme::Read(unixpipe);
     }
     // A WebSocket link is reached at a socket address as a TCP one is
     // (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @ `pub async fn get_ws_addr(`), so its text is
@@ -235,18 +266,18 @@ fn parse_endpoint<const IPV6: bool>(
         .strip_prefix(wz_session_core::link::LinkKind::Ws.scheme())
         .and_then(|rest| rest.strip_prefix('/'))
     {
-        return socket_addr::<IPV6>(rest, any_port).map(Locator::ws);
+        return Scheme::Ip(NamedLink::Ws, rest);
     }
-    let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
+    let ip = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
         .into_iter()
         .find_map(|proto| {
             let rest = endpoint.strip_prefix(proto.scheme())?.strip_prefix('/')?;
-            Some((proto, rest))
-        })
-    else {
-        return Err(DialRefused::Unsupported);
+            Some(Scheme::Ip(NamedLink::Ip(proto), rest))
+        });
+    let Some(ip) = ip else {
+        return Scheme::Read(Err(DialRefused::Unsupported));
     };
-    socket_addr::<IPV6>(rest, any_port).map(|at| Locator::ip(proto, at))
+    ip
 }
 
 /// The socket address an IP scheme's text names after its `<scheme>/`, read for a stack that
