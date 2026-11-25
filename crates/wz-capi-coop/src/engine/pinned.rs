@@ -23,19 +23,21 @@ use super::*;
 
 use wz_session_core::driver_loop::InPlaceRecord;
 use wz_session_core::pubsub::LentPush;
+use wz_session_core::sample::Sample;
 use wz_session_core::session_tables::PinnedFanOut;
 
 use super::registry::PeerRoom;
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the Push `record` of face `face`, lent where its frame lies, to each subscriber its
-    /// key reaches, one call at a time with the session let go of. `false` for a Push the lent
-    /// form does not represent, which the caller dispatches through the round; `true` for one
-    /// handed out, one dropped, and every record of a closed session.
-    pub(super) fn hand_lent_push(&self, face: HeldFace, record: &InPlaceRecord<'_, '_>) -> bool {
+    /// key reaches, one call at a time with the session let go of: the sample over the frame, or,
+    /// for a Push the lent form does not represent, its owned projection. A closed session hands
+    /// nothing.
+    pub(super) fn hand_lent_push(&self, face: HeldFace, record: &InPlaceRecord<'_, '_>) {
         let mut room = PeerRoom::default();
+        let owned: Option<Sample>;
         let Some(mut held) = self.live() else {
-            return true;
+            return;
         };
         #[cfg(all(test, feature = "std"))]
         let lookups = held.0.session.registry.lookups();
@@ -44,16 +46,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // than this call: the frame is lent by the pump the read holds through it, `room`
             // stays in this frame, and the face's peer and its buffer are neither written nor let
             // go of while it runs (see the module's docs).
-            LentPush::Sample(sample) => unsafe { past_the_lock(sample, record) },
-            LentPush::Nothing => {
-                #[cfg(all(test, feature = "std"))]
-                held.0.session.registry.counted_push(lookups);
-                return true;
+            LentPush::Sample(sample) => Some(unsafe { past_the_lock(sample, record) }),
+            LentPush::Nothing => None,
+            LentPush::Owned => {
+                owned = held.0.session.registry.project_push(face, record);
+                owned.as_ref().map(|projected| SampleRef::of(projected))
             }
-            LentPush::Owned => return false,
         };
         #[cfg(all(test, feature = "std"))]
         held.0.session.registry.counted_push(lookups);
+        let Some(sample) = sample else {
+            return;
+        };
         let mut fan = PinnedFanOut::new(sample.keyexpr);
         let mut next = tables(&held.0.session.registry).pin_next_subscriber(&mut fan);
         drop(held);
@@ -79,7 +83,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         });
         #[cfg(test)]
         self.takes.pinned_records.fetch_add(1, Ordering::Relaxed);
-        true
     }
 }
 

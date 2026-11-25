@@ -43,7 +43,7 @@ use wz_codecs::encoding::Encoding;
 use wz_codecs::push::{PushView, PushViewVariant};
 use wz_codecs::timestamp::Timestamp;
 
-use super::{LocalSubscribers, PeerDelivery, SubscriberPeer};
+use super::{InPlaceFallbacks, LocalSubscribers, PeerDelivery, PeerNaming, SubscriberPeer};
 use crate::bounded::Storage;
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
@@ -80,6 +80,20 @@ enum Fallback {
     /// It carries a timestamp stack, which the delivering node adds to.
     #[cfg(feature = "pubsub-ts-stack")]
     Instrumented,
+}
+
+impl Fallback {
+    /// Count this fallback in `counts`, by why.
+    fn count_in(&self, counts: &mut InPlaceFallbacks) {
+        let count = match self {
+            #[cfg(feature = "pubsub-put")]
+            Self::Sliced => &mut counts.sliced,
+            Self::KeyexprPastBound => &mut counts.keyexpr_past_bound,
+            #[cfg(feature = "pubsub-ts-stack")]
+            Self::Instrumented => &mut counts.instrumented,
+        };
+        *count = count.saturating_add(1);
+    }
 }
 
 /// What a Push the in-place receive path lent comes to before anyone is handed it
@@ -214,28 +228,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
         let sender = record.sender();
-        match self.deliver_lent(subs, cx, push, reliability, sender) {
-            Ok(()) => {}
-            // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
-            #[cfg(feature = "pubsub-put")]
-            Err(Fallback::Sliced) => {
-                self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
-                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
-            Err(Fallback::KeyexprPastBound) => {
-                self.in_place_fallbacks.keyexpr_past_bound =
-                    self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
-                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
-            #[cfg(feature = "pubsub-ts-stack")]
-            Err(Fallback::Instrumented) => {
-                self.in_place_fallbacks.instrumented =
-                    self.in_place_fallbacks.instrumented.saturating_add(1);
-                #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
+        // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
+        if let Err(why) = self.deliver_lent(subs, cx, push, reliability, sender) {
+            why.count_in(&mut self.in_place_fallbacks);
+            #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
+            self.dispatch_owned_projection(subs, cx, push, reliability, sender);
         }
     }
 
@@ -246,8 +243,9 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// side (the peer's literal, the room a key is composed in) is written only by the reading of
     /// this peer's records, so it holds for as long as the caller reads no other.
     ///
-    /// A Push the lent form does not represent is [`LentPush::Owned`]: the caller delivers it
-    /// through `dispatch_iteration_event`, which counts it and takes the owned projection.
+    /// A Push the lent form does not represent is counted, as the dispatch counts it, and is
+    /// [`LentPush::Owned`]: the caller hands out its owned projection
+    /// ([`Self::project_in_place`]).
     pub fn lend_in_place<'s, 'a: 's, L: LocalSubscribers>(
         &'s mut self,
         subs: &L,
@@ -259,10 +257,53 @@ impl<Q: Storage> SubscriberPeer<Q> {
             return LentPush::Nothing;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.lend_sample(subs, push, reliability, record.sender(), room) {
+        let SubscriberPeer {
+            naming,
+            compose,
+            in_place_fallbacks,
+            ..
+        } = self;
+        match Self::lend_sample(
+            naming,
+            compose,
+            subs,
+            push,
+            reliability,
+            record.sender(),
+            room,
+        ) {
             Ok(Some(sample)) => LentPush::Sample(sample),
             Ok(None) => LentPush::Nothing,
-            Err(_) => LentPush::Owned,
+            Err(why) => {
+                why.count_in(in_place_fallbacks);
+                LentPush::Owned
+            }
+        }
+    }
+
+    /// The owned projection of the Push `record` lends, which the lent form does not represent
+    /// ([`LentPush::Owned`]): the sample the copying receive delivers for it, owned, so whoever
+    /// hands it out holds nothing of this side. `None` for a record that is no Push, one the
+    /// projection drops, and every one in a build that lends only (`rx-lent-only`).
+    #[cfg(feature = "alloc")]
+    pub fn project_in_place<L: LocalSubscribers>(
+        &mut self,
+        subs: &L,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<crate::sample::Sample> {
+        #[cfg(not(feature = "rx-lent-only"))]
+        {
+            let push = record.push()?;
+            let reliability = Reliability::from_reliable_bool(record.reliable());
+            // The wire profile is unbounded (`Heap`, or the AP's shared frame ranges), so this
+            // projection cannot refuse a Push its view read.
+            let owned = crate::wire::push_of_view(push).ok()?;
+            self.project_push(subs, &owned, reliability, true, record.sender())
+        }
+        #[cfg(feature = "rx-lent-only")]
+        {
+            let _ = (subs, record);
+            None
         }
     }
 
@@ -276,9 +317,23 @@ impl<Q: Storage> SubscriberPeer<Q> {
         reliability: Reliability,
         sender: u64,
     ) -> Result<(), Fallback> {
-        let class = self.class;
+        let SubscriberPeer {
+            naming,
+            compose,
+            class,
+            ..
+        } = self;
         let mut room = LentRoom::default();
-        let Some(sample) = self.lend_sample(&*subs, push, reliability, sender, &mut room)? else {
+        let Some(sample) = Self::lend_sample(
+            naming,
+            compose,
+            &*subs,
+            push,
+            reliability,
+            sender,
+            &mut room,
+        )?
+        else {
             return Ok(());
         };
         // Through the key gate and, for a key of a closed set, the selection: the one delivery of
@@ -287,7 +342,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let mut turn = FanOut::begin();
         subs.deliver_from_peer(
             sample.keyexpr,
-            class,
+            *class,
             PeerDelivery {
                 no_allocation: true,
                 ..PeerDelivery::default()
@@ -300,12 +355,14 @@ impl<Q: Storage> SubscriberPeer<Q> {
         Ok(())
     }
 
-    /// The sample of `push`, over the frame, this side's table and `room`; `None` for a Push
-    /// the owned path drops too, or the session's own sample echoed back. A keyexpr that has to be
-    /// composed is composed in the side's room ([`Storage::Compose`]): on the lent policy the row
-    /// lent at open, which refuses one past it; elsewhere `room`'s buffer.
+    /// The sample of `push`, over the frame, the peer's table (`naming`) and `room`; `None`
+    /// for a Push the owned path drops too, or the session's own sample echoed back. A keyexpr
+    /// that has to be composed is composed in the side's room (`compose`, [`Storage::Compose`]):
+    /// on the lent policy the row lent at open, which refuses one past it; elsewhere `room`'s
+    /// buffer. Handed the side's fields alone, so a caller counts a fallback in another.
     fn lend_sample<'s, L: LocalSubscribers>(
-        &'s mut self,
+        naming: &'s PeerNaming<Q>,
+        compose: &'s mut Q::Compose,
         subs: &L,
         push: &'s PushView<'_>,
         reliability: Reliability,
@@ -330,9 +387,6 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // the delivery; the subscriptions are another value (`subs`). A composed keyexpr lies in
         // the side's room, a field apart from the table, or in `room` where the policy composes
         // in the delivering call's frame.
-        let SubscriberPeer {
-            naming, compose, ..
-        } = self;
         let LentRoom { frame, source_info } = room;
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into the room before the delivery writes it.
@@ -1146,9 +1200,9 @@ mod tests {
 
     /// A Push lent to a caller that walks the subscribers itself is the sample the fan-out would
     /// hand: an `M=0` key composed whole in the row lent at open. A key past that row is owed to
-    /// the owned projection, and the lend counts nothing: the dispatch that takes the projection
-    /// counts it once. Turned red by a lend that answers a key the delivery refuses, or by one that
-    /// counts the fallback it hands back.
+    /// the owned projection and counted once, as the dispatch counts it; the projection holds the
+    /// key whole where the build has the copying path. Turned red by a lend that answers a key the
+    /// delivery refuses, or one that counts the fallback other than once.
     #[test]
     fn a_lent_push_is_the_sample_the_fan_out_hands_and_a_key_past_the_row_is_owed() {
         let wire = own_space_wire();
@@ -1165,6 +1219,7 @@ mod tests {
             LentPush::Owned => panic!("a key that fits the row was owed to the projection"),
         };
         assert_eq!(key, "mine/x");
+        assert_eq!(side.in_place_fallbacks(), InPlaceFallbacks::default());
 
         let literal = alloc::format!("{}/", "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 1));
         let mut past = lent_side(&literal, true);
@@ -1178,8 +1233,18 @@ mod tests {
         );
         assert_eq!(
             past.in_place_fallbacks(),
-            InPlaceFallbacks::default(),
-            "the lend counted the fallback it handed back"
+            InPlaceFallbacks {
+                keyexpr_past_bound: 1,
+                ..InPlaceFallbacks::default()
+            },
+            "the fallback counted other than once"
         );
+        let projected = past
+            .project_in_place(&*table, &record)
+            .map(|sample| sample.keyexpr().to_string());
+        #[cfg(not(feature = "rx-lent-only"))]
+        assert_eq!(projected, Some(alloc::format!("{literal}x")));
+        #[cfg(feature = "rx-lent-only")]
+        assert_eq!(projected, None, "a build that lends only projects nothing");
     }
 }

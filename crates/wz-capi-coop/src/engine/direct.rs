@@ -174,31 +174,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
         if !push {
             self.end_records();
         }
-        if push {
-            // Handed to its subscribers one at a time (`pinned`); one the lent form does not
-            // represent is dispatched into the round below, which takes its owned projection.
-            let handed = match &event {
-                IterationEvent::InPlace(record) => {
-                    self.engine.hand_lent_push(self.records.face, record)
-                }
-                _ => false,
-            };
-            if handed {
+        match event {
+            // Handed to its subscribers one at a time (`pinned`), none of it into the round.
+            IterationEvent::InPlace(ref record) if push => {
+                self.engine.hand_lent_push(self.records.face, record);
                 self.records.after_pushes = true;
-                self.engine.deliver();
-                return;
             }
-        }
-        {
-            let Some(mut held) = self.engine.live() else {
-                return;
-            };
-            let registry = &mut held.0.session.registry;
-            if push {
-                registry.dispatch_push(self.records.face, event);
-                self.records.after_pushes = true;
-            } else {
-                self.records.dispatch(registry, event);
+            event => {
+                let Some(mut held) = self.engine.live() else {
+                    return;
+                };
+                self.records.dispatch(&mut held.0.session.registry, event);
             }
         }
         self.engine.deliver();

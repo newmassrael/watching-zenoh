@@ -1562,6 +1562,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
         is_remote: bool,
         sender: u64,
     ) {
+        let Some(sample) = self.project_push(&*subs, push, reliability, is_remote, sender) else {
+            return;
+        };
+        // The rows this sample reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
+        if is_remote {
+            subs.deliver_from_peer(
+                sample.keyexpr(),
+                self.class,
+                PeerDelivery::default(),
+                |id, row| {
+                    cx.deliver(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
+            );
+        } else {
+            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
+            });
+        }
+    }
+
+    /// The projection of `push` into the [`Sample`] its subscribers are handed, by
+    /// [`Self::dispatch_push`]'s rules: its key resolved against both id spaces, its body's
+    /// fields, the outer QoS and the reliability; `None` for a Push nobody is handed (a key that
+    /// does not resolve, a body this build does not deliver, the session's own sample echoed
+    /// back from a peer). The sample is owned, so whoever hands it out holds nothing of this side.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    #[cfg(feature = "alloc")]
+    fn project_push<L: LocalSubscribers>(
+        &mut self,
+        subs: &L,
+        push: &PushOwned,
+        reliability: Reliability,
+        is_remote: bool,
+        sender: u64,
+    ) -> Option<Sample> {
         // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
         // the peer mapping table via the shared `resolve_wireexpr` SSOT
         // (the same resolver the four remote-declare registries + the
@@ -1593,7 +1631,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 // every such buffer, confirmed, until the transport ends.
                 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
                 self.settle_unrouted_shm(push);
-                return;
+                return None;
             }
         };
 
@@ -1686,7 +1724,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     let put_payload = if crate::put_payload::is_sliced(put) {
                         match self.unswap_shm_payload(push, put) {
                             Some(bytes) => bytes,
-                            None => return,
+                            None => return None,
                         }
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
@@ -1701,7 +1739,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     let put_payload = match crate::put_payload::collect_wire_payload(put, |_| None)
                     {
                         Ok(bytes) => bytes,
-                        Err(_) => return,
+                        Err(_) => return None,
                     };
                     (
                         SampleKind::Put,
@@ -1751,7 +1789,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                         body_source_info,
                     )
                 }
-                _ => return,
+                _ => return None,
             };
         let outer_exts: &[crate::wire::parts::ExtEntryOwned] =
             push.extensions.entries().unwrap_or(&[]);
@@ -1832,29 +1870,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
             if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
                 let prefix = info.zid_prefix();
                 if !prefix.is_empty() && prefix == own {
-                    return;
+                    return None;
                 }
             }
         }
 
-        // The rows this sample reaches are handed it in one fan-out, each told its turn.
-        let mut turn = FanOut::begin();
-        if is_remote {
-            subs.deliver_from_peer(
-                sample.keyexpr(),
-                self.class,
-                PeerDelivery::default(),
-                |id, row| {
-                    cx.deliver(id, row, &sample, turn);
-                    turn = FanOut::later();
-                },
-            );
-        } else {
-            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
-                cx.deliver(id, row, &sample, turn);
-                turn = FanOut::later();
-            });
-        }
+        Some(sample)
     }
 }
 

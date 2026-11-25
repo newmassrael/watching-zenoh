@@ -497,10 +497,10 @@ pub(super) struct RegistryOf<H: Holders> {
     /// How many sets the walks over the faces read: what a test of the cost of a walk counts.
     #[cfg(test)]
     set_reads: core::cell::Cell<usize>,
-    /// The lent Pushes handed to the subscribers' plane alone ([`Self::dispatch_push`]), the
-    /// face lookups their dispatches made with the drains after them, and the lent Pushes that
-    /// reached the fan over every plane instead ([`Self::dispatch_event`]): what a test of the
-    /// cost of one received sample counts.
+    /// The lent Pushes handed to the subscribers' plane alone (`Self::dispatch_push`, or
+    /// `Self::lend_push`), the face lookups their dispatches made with the drains after them, and
+    /// the lent Pushes that reached the fan over every plane instead ([`Self::dispatch_event`]):
+    /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
 }
@@ -1099,7 +1099,9 @@ impl<H: Holders> RegistryOf<H> {
     /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
     /// of Pushes it is one of ([`Self::after_pushes`]): a Push stages nothing for it to drain, so
     /// it is done once for the run and not once for each. A face the session no longer holds hears
-    /// nothing.
+    /// nothing. A session whose read steps its one link itself hands a lent Push out one
+    /// subscriber at a time instead (`Self::lend_push`).
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         #[cfg(all(test, feature = "std"))]
         let written = self.faces_written;
@@ -1139,6 +1141,19 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
+    /// The owned projection of the Push of face `face` that `record` lends, which the lent form
+    /// does not represent (`LentPush::Owned`): the sample the copying receive delivers for it.
+    /// A face the session no longer holds projects nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn project_push(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<wz_session_core::sample::Sample> {
+        let Split { app, face, .. } = self.split(self.place(face))?;
+        face.peer.subscribers.project_in_place(&app.tables, record)
+    }
+
     /// How often a face's set was looked up to be written since the open: what a lent Push's
     /// count of its lookups starts from ([`Self::counted_push`]).
     #[cfg(all(
@@ -1150,13 +1165,13 @@ impl<H: Holders> RegistryOf<H> {
         self.faces_written
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// under one lookup of the face: the subscribers' tables reconciled with what the application
-    /// registered since, what anything staged drained through `actions`
+    /// What follows the dispatch of a run of lent Pushes of face `id` (`Self::dispatch_push`, or
+    /// `Self::lend_push`), under one lookup of the face: the subscribers' tables reconciled with
+    /// what the application registered since, what anything staged drained through `actions`
     /// ([`Self::flush_pending_replies`]), and each `Final` owed handed to `owe` where the face's
     /// table holds it, the table left empty after: a run of Pushes almost never owes one, so no
-    /// table of them is made and moved out for each run, as [`Self::take_pending_final_rids`]
-    /// makes one. A face the session no longer holds owes nothing.
+    /// table of them is made and moved out for each run, as [`Self::take_pending_final_rids`] makes
+    /// one. A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
     pub(super) fn after_pushes<S>(
         &mut self,
@@ -1192,8 +1207,9 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// What follows the dispatch of a run of lent Pushes of face `id` ([`Self::dispatch_push`]),
-    /// drained under one lookup of the face, as [`Self::dispatch`] drains after every other record.
+    /// What follows the dispatch of a run of lent Pushes of face `id` (`Self::dispatch_push`, or
+    /// `Self::lend_push`), drained under one lookup of the face, as [`Self::dispatch`] drains after
+    /// every other record.
     #[cfg(not(feature = "queryable"))]
     pub(super) fn after_pushes<S>(&mut self, face: HeldFace, actions: &S)
     where
