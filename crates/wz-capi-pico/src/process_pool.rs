@@ -954,6 +954,15 @@ struct Pool {
     free: Option<NonNull<u8>>,
 }
 
+/// Every pool of no slot: the pools before they are laid out, and those of a stage not reserved.
+const NO_POOLS: &[Pool; POOLS] = &[Pool {
+    start: 0,
+    slots: 0,
+    size: 0,
+    fresh: 0,
+    free: None,
+}; POOLS];
+
 impl Pool {
     /// A free slot of this pool, or `None` when it has none: a slot given back before an untouched
     /// one, and the untouched ones lowest first. Counted by its caller.
@@ -1029,13 +1038,7 @@ impl Pools {
             base,
             bytes: 0,
             origin,
-            pools: [Pool {
-                start: 0,
-                slots: 0,
-                size: 0,
-                fresh: 0,
-                free: None,
-            }; POOLS],
+            pools: *NO_POOLS,
             ends: [0; POOLS],
             counts: [ClassCount::default(); CLASSES + 1],
         }
@@ -1292,13 +1295,13 @@ impl Reserved {
             } else {
                 Stage::holding(row.pool)
             };
-            let held = self
-                .stages
-                .get(stage as usize)
-                .and_then(Option::as_ref)
-                .and_then(|pools| pools.pools.get(row.pool))
-                .map_or(0, |pool| pool.slots);
-            row.pool >= POOLS || count <= held
+            // A stage not reserved is read as pools of no slot, so each value is one reading
+            // whether its stage is reserved or not.
+            let pools = match self.stages.get(stage as usize) {
+                Some(Some(pools)) => &pools.pools,
+                _ => NO_POOLS,
+            };
+            row.pool >= POOLS || pools.get(row.pool).is_some_and(|pool| count <= pool.slots)
         })
     }
 }
@@ -3585,6 +3588,17 @@ mod tests {
         }
         let mut elsewhere = 0u64;
         assert!(!reserved.give_back(NonNull::from(&mut elsewhere).cast::<u8>()));
+    }
+
+    /// A stage not reserved holds none of a held value: pools reserved for no stage hold every
+    /// value at none and no value at one, where the build has a pool of it. Turned red by a stage
+    /// not reserved read as holding what is asked of it.
+    #[test]
+    fn a_stage_not_reserved_holds_none_of_a_held_value() {
+        let reserved = Reserved::NONE;
+        assert!(reserved.holds(&Held([0; HELD])));
+        let pooled = HELD_ROWS.iter().any(|row| row.pool < POOLS);
+        assert_eq!(reserved.holds(&Held([1; HELD])), !pooled);
     }
 
     /// The held values are the capacities the declaration classes as counts the first open
