@@ -8484,10 +8484,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> usize {
         let own = self.own_batch_advertisement() as usize;
         let link = self.link_driver().link_mtu_for(class);
-        match peer {
-            Some(p) => own.min(p.batch_size as usize).min(link),
-            None => own.min(link),
-        }
+        // A peer not heard from bounds nothing. One formula with no branch on the caps: a branch
+        // here is a condition the caller's loop over the classes is unswitched on, which writes
+        // the whole loop out once for each arm.
+        let peer = peer.map_or(usize::MAX, |p| usize::from(p.batch_size));
+        own.min(peer).min(link)
     }
 
     /// The batch size this node advertises in its Init, and the own side of

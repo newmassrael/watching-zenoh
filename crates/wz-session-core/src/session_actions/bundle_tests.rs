@@ -1692,6 +1692,44 @@ mod facts_lock {
     }
 }
 
+/// The send budget is the least of the session's own advertisement, the link's bound and the
+/// batch the peer advertised, and a peer not heard from bounds nothing.
+mod batch_budget {
+    use super::bundle;
+    use crate::peer_init_caps::PeerInitCaps;
+
+    fn caps(batch_size: u16) -> Option<PeerInitCaps> {
+        Some(PeerInitCaps {
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size,
+        })
+    }
+
+    /// Turned red by a peer not heard from read as a bound of zero, or by a peer's bound left
+    /// out of the least.
+    #[test]
+    fn the_budget_is_the_least_bound_and_an_unheard_peer_bounds_nothing() {
+        let (actions, _link) = bundle();
+        let unheard = actions.negotiated_batch_mtu();
+        assert_ne!(unheard, 0, "a peer not heard from bounds nothing");
+        assert!(unheard <= usize::from(actions.own_batch_advertisement()));
+        actions.set_peer_init_caps(caps(u16::MAX));
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            unheard,
+            "a peer above both bounds moves nothing"
+        );
+        let below = u16::try_from(unheard - 1).expect("the own bound is a u16");
+        actions.set_peer_init_caps(caps(below));
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            usize::from(below),
+            "a peer below both bounds is the budget"
+        );
+    }
+}
+
 /// A link's time stamps are one row under one lock: what a door writes is what the row reads, the
 /// deadlines read the two stamps they compare in one hold, and a reopen clears all three.
 mod link_stamps {
