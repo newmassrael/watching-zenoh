@@ -1228,7 +1228,8 @@ impl Drop for Pools {
 /// stage's place when a program's door reserved them all at once.
 struct Reserved {
     stages: [Option<Pools>; STAGES],
-    /// A program's door reserved every pool, in the open stage's place.
+    /// A program's door reserved every pool, in the open stage's place; read through
+    /// [`Self::whole`].
     whole: bool,
     /// The first open has reserved its stages, and nothing is reserved after it.
     fixed: bool,
@@ -1242,12 +1243,18 @@ impl Reserved {
         fixed: false,
     };
 
+    /// Whether a program's door reserved every pool, in the open stage's place: never in a build
+    /// without those doors (`object-pool`), whose stages then lose no branch to the case.
+    fn whole(&self) -> bool {
+        cfg!(feature = "object-pool") && self.whole
+    }
+
     /// The pools that hold the objects of `stage`, reserved here from [`first_plan`] when none
     /// are and no open has fixed the pools; `None` when the stage holds no pool, or when the heap
     /// has not the memory. One body for every caller.
     #[inline(never)]
     fn stage(&mut self, stage: Stage) -> Option<&mut Pools> {
-        let at = if self.whole { Stage::Open } else { stage };
+        let at = if self.whole() { Stage::Open } else { stage };
         let fixed = self.fixed;
         let held = self.stages.get_mut(at as usize)?;
         if held.is_none() && !fixed {
@@ -1261,7 +1268,7 @@ impl Reserved {
     /// memory for a stage; `false` too when the pools hold fewer of a held value than `asked`
     /// states, which an open fixed before or an object taken before it reserved.
     fn at_open(&mut self, reserve: &Plan, asked: &Held) -> bool {
-        if !self.whole {
+        if !self.whole() {
             for (stage, held) in Stage::ALL.iter().zip(self.stages.iter_mut()) {
                 if !lay_missing(held, reserve, *stage) {
                     return false;
@@ -1280,7 +1287,7 @@ impl Reserved {
     /// and a value the build has no pool for held by none.
     fn holds(&self, asked: &Held) -> bool {
         HELD_ROWS.iter().zip(asked.0).all(|(row, count)| {
-            let stage = if self.whole {
+            let stage = if self.whole() {
                 Stage::Open
             } else {
                 Stage::holding(row.pool)
@@ -3481,6 +3488,17 @@ mod tests {
             Err(Unlaid::NoMemory)
         );
         assert!(held.is_none());
+    }
+
+    /// Every pool is reserved at once only by a program's door, which a build without
+    /// `object-pool` does not have: there the flag is never read as set. Turned red by a reading
+    /// that ignores the flag, or one that keeps the case in a build without the doors.
+    #[test]
+    fn only_the_doors_reserve_every_pool_at_once() {
+        let mut reserved = Reserved::NONE;
+        assert!(!reserved.whole());
+        reserved.whole = true;
+        assert_eq!(reserved.whole(), cfg!(feature = "object-pool"));
     }
 
     /// The first open lays a stage that holds no pools yet, leaves alone one that holds them, and
