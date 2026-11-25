@@ -114,6 +114,10 @@ use wz_runtime_coop::face_send::{DropSet, HandedLimits};
 use wz_runtime_coop::faces::DialAnswer;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::OwingWaits;
+// A face's link where the read steps the one link itself is a handle on the link's place, read
+// through the trait alone; the session's own wire answers the same calls itself.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use wz_runtime_coop::faces::FaceWire;
 use wz_runtime_coop::faces::{
     DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, LendsSession, Link,
     LinkSupervisor,
