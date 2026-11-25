@@ -85,6 +85,8 @@ impl LinkEnd for DirectEnd {
 pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
+    /// The link the records are read from, which keeps where the datagram it lends lies.
+    pub(super) link: CellRc<LinkGate<C>>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -178,6 +180,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             let Some(mut held) = self.engine.live() else {
                 return;
             };
+            // The round reads the record's parts where the link lends them, so it is told where
+            // that is for the length of the record's dispatch, as a gate of a build whose links
+            // are tasks tells it for the length of the datagram's.
+            // SAFETY: the session's lock is held (`held`).
+            unsafe { self.records.link.lend_to(&self.records.lane) };
             let registry = &mut held.0.session.registry;
             if push {
                 registry.dispatch_push(self.records.face, event);
@@ -185,6 +192,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
             } else {
                 self.records.dispatch(registry, event);
             }
+            // SAFETY: as above.
+            unsafe { self.records.lane.set_lending(None) };
         }
         self.engine.deliver();
     }
@@ -572,6 +581,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.link_due_us = slot.life_due_us.min(slot.pump_due_us);
             core.settle_ledger();
         }
+        // What the records of a round a delivery handed out still hold (the counts of the key
+        // arena, the rejoined buffer kept for them) is let go of before the link is read, as a
+        // gate of a build whose links are tasks lets it go before each receive: a key the peer
+        // undeclared goes back with no record after it, and the chain a fragment read now starts
+        // finds its buffer free.
+        // SAFETY: the session's lock is held (`held`), and no borrow of the round's table.
+        unsafe { self.samples.settle() };
         let jobs_due_ms = core.jobs_due_at(now_us);
         Some(LinkTurn {
             now_us,

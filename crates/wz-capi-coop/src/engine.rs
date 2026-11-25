@@ -54,6 +54,8 @@ use crate::arena::{
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{LockForm, StateGuard, StateLock};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
@@ -2945,7 +2947,8 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
-/// `listen` the admission's under it, which carries the clock.
+/// `listen` the admission's under it, which carries the clock; where the read hands each record
+/// out as it is read, the link alone, which tells the round where the datagram it lends lies.
 trait LinkGates {
     /// The gates.
     type Gate;
@@ -2956,10 +2959,11 @@ impl<C: ClockSource + 'static> LinkGates for C {
     type Gate = RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C, SessionLock>>;
     #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink>>;
-    // The read steps the one link itself and hands each record out as it is read, so no gate
-    // stands between the link and its session (`direct`).
+    // The read steps the one link itself and hands each record out as it is read, so nothing
+    // holds the link back from its session; the read tells the round where the datagram it lends
+    // lies, which the round reads each record's parts in (`direct`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-    type Gate = CellRc<dyn SessionDatagramLink>;
+    type Gate = LendingLink<CellRc<dyn SessionDatagramLink>>;
 }
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
@@ -3274,8 +3278,9 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
-        // Each record is handed out as it is read, so the link is read with no gate before it.
-        pump
+        // Each record is handed out as it is read, so nothing holds the link back; where the
+        // datagram it lends lies is kept for the read to tell the round.
+        LendingLink::new(pump)
     }
 
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3344,6 +3349,8 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let dispatch = direct::FaceRecords {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
+            // What the read tells the round of the datagram a record of it lies in.
+            link: gate.clone(),
             actions: actions.clone(),
             // SAFETY: the records are held beside the link's session in the engine's face, which
             // lets them go before the session's state, which owns the plane.
@@ -3358,7 +3365,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         };
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
-        #[cfg(not(any(feature = "listen", feature = "group")))]
+        #[cfg(all(feature = "threads", not(any(feature = "listen", feature = "group"))))]
         let _ = gate;
         (
             dispatch,
