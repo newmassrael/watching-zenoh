@@ -243,7 +243,11 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         None,
         "a liveliness subscriber is one row, the session core's"
     );
-    assert_eq!(count("session tables"), Some(1));
+    // A build of the region's form holds the session's one table set in its region.
+    assert_eq!(
+        count("session tables"),
+        cfg!(feature = "runtime-plan").then_some(1)
+    );
     assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(plan.tables().key_listeners, key_listeners);
     assert_eq!(

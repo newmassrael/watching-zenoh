@@ -328,13 +328,18 @@ fn a_limit_lowered_at_open_lowers_its_row() {
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(at_two.tables().subscribers, 2);
     assert_eq!(built.tables().subscribers, caps::MAX_SUBSCRIPTIONS);
+    // A build of the region's form keeps the table's rows in its region at the build's bound, and
+    // holds it to the limit by its count alone: its arena lends none of them.
+    #[cfg(feature = "runtime-plan")]
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
 /// The watchers' lists of the application's observer take the row the plan lays out for them: the
 /// session's `MAX_DECL_OBSERVERS` rows of each list, as the observer lent under the same limits
 /// takes them, so a lowered value lowers the row. Turned red by a plan that leaves the lists out,
-/// or an observer that lends them other rows than the plan counts.
+/// or an observer that lends them other rows than the plan counts. A build of the region's form
+/// lends no list from its arena (`crate::region::StateRegion`).
+#[cfg(feature = "runtime-plan")]
 #[test]
 fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
     use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
@@ -534,7 +539,11 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
             "{asked} groups asked"
         );
         assert!(plan.peers().tables <= MAX_FACE_SETS);
+        // A build of the region's form holds its one face's set in its region.
+        #[cfg(feature = "runtime-plan")]
         assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
+        #[cfg(not(feature = "runtime-plan"))]
+        assert!(plan.rows().all(|laid| laid.part() != "face tables"));
         assert_eq!(row(&plan, "room places").count, plan.peers().sets());
         // The index of held sets is a row of a build that takes faces beside the dial role's.
         if crate::arena::TAKES_FACES {
@@ -863,27 +872,34 @@ fn the_plan_lays_out_the_faces_rooms_and_their_places() {
 /// values.
 #[test]
 fn the_plan_lays_out_the_key_arena_the_limits_state() {
-    use wz_session_core::key_arena::KeySpace;
-
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         built.key_bytes(),
         SessionLimits::defaults().key_arena_bytes()
     );
-    assert_eq!(row(&built, "key arena").count, 1);
-    assert_eq!(
-        Some(row(&built, "key arena").entry_bytes),
-        KeySpace::span_bytes(built.key_bytes())
-    );
     let lowered = lowered(|l| l.select_key_arena_bytes(512));
     let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(plan.key_bytes(), 512);
-    assert_eq!(
-        Some(row(&plan, "key arena").entry_bytes),
-        KeySpace::span_bytes(512)
-    );
-    assert!(plan.reserved_bytes() < built.reserved_bytes());
+    // The key arena of a build of the region's form lies in its region, held to the limit by the
+    // bytes it is opened with (`StateRegion::place`): its arena lays out no row of it.
+    #[cfg(feature = "runtime-plan")]
+    {
+        use wz_session_core::key_arena::KeySpace;
+
+        assert_eq!(row(&built, "key arena").count, 1);
+        assert_eq!(
+            Some(row(&built, "key arena").entry_bytes),
+            KeySpace::span_bytes(built.key_bytes())
+        );
+        assert_eq!(
+            Some(row(&plan, "key arena").entry_bytes),
+            KeySpace::span_bytes(512)
+        );
+        assert!(plan.reserved_bytes() < built.reserved_bytes());
+    }
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(built.rows().all(|laid| laid.part() != "key arena"));
     let over = caps::KEY_ARENA_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised.select_key_arena_bytes(over).is_ok() {
@@ -1104,10 +1120,15 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     let lowered = lowered(|l| l.select_max_pending_declares(Quota::at_most(1)));
     let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(at_one.peers().rows.pending_declares, 1);
+    // A build of the region's form lends no peer tables from its arena: its one face's lie in the
+    // region (`crate::region::StateRegion`), held to the limit by the tables themselves.
+    #[cfg(feature = "runtime-plan")]
     assert!(
         row(&at_one, "peer tables").entry_bytes < row(&built, "peer tables").entry_bytes,
         "the staging lent fewer rows"
     );
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(at_one.rows().all(|laid| laid.part() != "peer tables"));
 }
 
 /// The pools of what the faces' peers write hold the fewer of the session's limit and what the
@@ -2744,10 +2765,16 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
             Refusal::TextTooLong
         )))
     );
-    assert_eq!(RECORDED.reserves.load(Ordering::SeqCst), 1, "one arena");
+    // A session of the region's form reserves its region beside its arena.
+    let blocks = 1 + usize::from(cfg!(not(feature = "runtime-plan")));
+    assert_eq!(
+        RECORDED.reserves.load(Ordering::SeqCst),
+        blocks,
+        "one arena, and the region of a session of its form"
+    );
     assert_eq!(
         RECORDED.releases.load(Ordering::SeqCst),
-        1,
+        blocks,
         "given back once"
     );
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);

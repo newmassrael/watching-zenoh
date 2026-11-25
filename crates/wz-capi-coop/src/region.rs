@@ -173,7 +173,8 @@ impl StateRegion {
     }
 
     /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
-    /// its keys at most `limits` long, and hand back the key arena: the parts of the registry whose
+    /// its keys at most `limits` long and together at most the bytes `limits` state (a lowered
+    /// `KEY_ARENA_BYTES` holds the arena as an arena it lends from is held), and hand back the key arena: the parts of the registry whose
     /// empty value is not zero bytes written first, each bound one of nothing until the registry
     /// is bound (`RegistryRegion::bind`).
     ///
@@ -187,7 +188,10 @@ impl StateRegion {
         let at = region.as_ptr();
         // SAFETY: the key arena field alone, reached by this one reference before any key exists
         // and not after `space`; it stays in the region for as long as the tables do.
-        let keys = unsafe { (*addr_of_mut!((*at).keys)).space(limits.max_keyexpr_bytes_held()) };
+        let keys = unsafe {
+            (*addr_of_mut!((*at).keys))
+                .space_of(limits.key_arena_bytes(), limits.max_keyexpr_bytes_held())
+        };
         // SAFETY: the description is this type's own: its lines name the tables' sequences and key
         // handles in the region, each holding no value, and the rows beside them, which only those
         // tables reach; the caller's contract keeps the region in place.
