@@ -68,11 +68,23 @@ use crate::round::{CoopForm, Round};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 const IN_PARTS: bool = !<CoopForm as ThreadForm>::OTHER_THREADS;
 
-/// How many events the dispatch of one record holds for the watches until the delivery after it
-/// hands them out: a lent record is one message, of one event at most, and a copied frame's
-/// messages past the room are lost as a round of one thread loses them.
+/// The watch events the dispatch of one message makes at most: the one declaration or retraction
+/// a `Declare` applies, which its table tells its observers once, and the end of the peer's
+/// initial declarations, told after the dispatch of the message that ends them.
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-const HEARD_EVENTS: usize = 2;
+const MESSAGE_EVENTS: usize = 2;
+
+/// How many events the room holds until the delivery after the dispatch hands them out: those of
+/// one message, so the dispatch of a lent record, which is one message, never finds it full.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const HEARD_EVENTS: usize = MESSAGE_EVENTS;
+
+// A declaration or a retraction and the end of the initial declarations: one of each a message.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+const _: () = assert!(
+    matches!(1usize.checked_add(1), Some(made) if made <= HEARD_EVENTS),
+    "the room holds every event one message makes"
+);
 
 /// Whether this build hears what a peer declares of `plane`: subscribers in every build, whose
 /// declarations the engine reads for its publishers' write filters, queryables with a querier or a
