@@ -7300,7 +7300,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(slot) => slot.as_slice(),
             None => bytes,
         };
-        let now = self.clock.now_monotonic_ms();
         // The keepalive baseline is the time the LINE last spoke. A driver that writes inline
         // spoke at the hand-over, so every frame stamps. A driver with a queue speaks later,
         // when its writer gets to the frame, and says so itself
@@ -7317,6 +7316,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !driver.carries_apart(reliability)
             && (priority == Priority::Control || !driver.reports_wire_writes())
         {
+            // Read only for a frame that stamps: a driver with a queue stamps none of its data.
+            let now = self.clock.now_monotonic_ms();
             link.fact_last_outbound_at(|slot| *slot = Some(now));
         }
 
