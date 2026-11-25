@@ -402,8 +402,10 @@ impl<C: ClockSource> CoopRuntime<C> {
     ) -> Option<Self> {
         let parts = PlacedParts::of::<C>(rows, form)?;
         let at = place.at.as_ptr();
-        // A layout's alignment is a power of two, so a start on it has none of the bits below it.
-        let off_alignment = ((at as usize) & (parts.layout.align() - 1)) != 0;
+        // A layout's alignment is a power of two, so a start on it has none of the bits below it;
+        // being at least one, it takes one away without wrapping.
+        let below = parts.layout.align().wrapping_sub(1);
+        let off_alignment = (at as usize) & below != 0;
         if place.bytes < parts.layout.size() || off_alignment {
             return None;
         }
