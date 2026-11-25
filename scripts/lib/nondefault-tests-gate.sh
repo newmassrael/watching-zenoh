@@ -962,6 +962,11 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # full task table refuses and counts, a finished task's cell is reused, what a
     # task held is dropped once, a full timer table makes the sleep wake itself.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
+    # The WebSocket links of the slot profile (`ws` with `session-slot`, `ws_link::slot::`): a dial
+    # that waits for the upgrade, refuses a server that will not give it, and claims nothing for an
+    # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
+    # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
+    "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.
@@ -1334,6 +1339,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # sees it), and `static-link-storage` is the subject (it must not).
     "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
     "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
+    # WebSocket links over lwIP's TCP on the slot profile (`ws`): a session over `ws/` between two
+    # nodes and an acceptor whose full handshake table leaves the next connection queued, counted by a
+    # counting allocator, so the target is its own process. The file's `required-features`, a node's
+    # real profile.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage,\
+        transport-keepalive,\
+        ws\
+        |--test=session_ws_slot"
     # The TCP stream over lwIP's raw API (`tcp`): its connections, its listener's queue and
     # refusals, a buffer below the window. Once on each profile, as the row above: the default
     # makes a connection's state on the heap, `static-link-storage` in a cell of a pool, and

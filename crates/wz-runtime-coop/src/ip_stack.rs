@@ -105,6 +105,9 @@ pub enum IpDriver<
     Tcp(T::Link<B, X>),
     /// A `tls/` link: the stream link over a secure channel.
     Tls(L::Link<B, X>),
+    /// A `ws/` link: the stream link over a plain stream, each batch one WebSocket message.
+    #[cfg(feature = "ws")]
+    Ws(crate::stream_link::StreamDriver<T, B, X, crate::ws_link::WsFraming>),
 }
 
 /// A link of the heap profile's stack ([`IpLinks`]), as the session shell holds it: the datagram
@@ -172,6 +175,8 @@ macro_rules! either {
             IpDriver::Udp($link) => $body,
             IpDriver::Tcp($link) => $body,
             IpDriver::Tls($link) => $body,
+            #[cfg(feature = "ws")]
+            IpDriver::Ws($link) => $body,
         }
     };
 }
@@ -602,7 +607,7 @@ where
 /// link to an IPv6 end: one protocol it carries does. What `Bind::IPV6` and `SessionLinks::IPV6`
 /// answer for it.
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
-const fn opens_ipv6<U: DatagramSocket, D: StreamDial, L: StreamDial>() -> bool {
+pub(crate) const fn opens_ipv6<U: DatagramSocket, D: StreamDial, L: StreamDial>() -> bool {
     (U::CARRIED && U::IPV6) || (D::CARRIED && D::IPV6) || (L::CARRIED && L::IPV6)
 }
 
@@ -976,9 +981,9 @@ impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
 #[cfg(feature = "session-slot")]
 pub struct IpStack<U, D, L = NoDial> {
     udp: UdpStack<U>,
-    rx: &'static dyn ByteSource,
-    tx: &'static dyn ByteSource,
-    dial: D,
+    pub(crate) rx: &'static dyn ByteSource,
+    pub(crate) tx: &'static dyn ByteSource,
+    pub(crate) dial: D,
     tls: L,
 }
 
@@ -1094,7 +1099,7 @@ where
     }
 
     /// A stream link's receive buffer and frame buffer from the image's tables.
-    fn claim(&self) -> Result<(ByteBuf, ByteBuf), LinkOpenError> {
+    pub(crate) fn claim(&self) -> Result<(ByteBuf, ByteBuf), LinkOpenError> {
         let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
         let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
         Ok((rx, tx))
@@ -1104,7 +1109,7 @@ where
 /// `stream`, when the rows of the build name both its ends ([`StreamEnds::fit`](crate::stream_link::StreamEnds::fit)); otherwise it is closed
 /// and the link refused as [`LinkOpenError::Unsupported`], before a session stands on it.
 #[cfg(feature = "session-slot")]
-fn named<S: StreamSocket>(stream: S) -> Result<S, LinkOpenError> {
+pub(crate) fn named<S: StreamSocket>(stream: S) -> Result<S, LinkOpenError> {
     if stream.ends().fit() {
         Ok(stream)
     } else {

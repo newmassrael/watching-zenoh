@@ -7,7 +7,7 @@
 //! kernel's CSPRNG ([`PosixEntropy`](crate::PosixEntropy)) at each dial.
 
 wz_runtime_coop::with_heap_link_seams! {
-    use wz_runtime_coop::ws_link::{WsLinks, WsOpen};
+    use wz_runtime_coop::ws_link::{WsLinks, WsOpen, WsSource};
     use wz_runtime_coop::ClockSource;
     use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 
@@ -23,7 +23,9 @@ wz_runtime_coop::with_heap_link_seams! {
         fn stream_dial(&self) -> &PosixTcpDial {
             &PosixTcpDial
         }
+    }
 
+    impl WsSource for PosixWsOpen {
         fn now_us(&self) -> u64 {
             crate::PosixClock.now_us()
         }

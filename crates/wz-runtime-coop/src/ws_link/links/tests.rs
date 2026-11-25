@@ -7,11 +7,15 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 use core::net::SocketAddr;
 
-use wz_session_core::ws_link::{accept_value, apply_mask};
+use wz_session_core::entropy::EntropyUnavailable;
+use wz_session_core::ws_link::{
+    accept_value, apply_mask, client_key, read_request, write_request, write_response, RequestRead,
+};
 
 use super::*;
-use crate::link_storage::TxStore;
-use crate::session_drive::{Dialled, NoWaits};
+use crate::link_storage::{RxStore, TxStore};
+use crate::session_drive::{Dialled, LinkProto, NoWaits};
+use crate::stream_link::StreamEnds;
 
 /// One TCP connection of the test: the bytes the link reads, the bytes it wrote, whether the
 /// connect has completed, and the clock a wait for room lets run.
@@ -33,12 +37,12 @@ impl StreamSocket for Conn {
     where
         Self: 'static;
 
-    fn local(&self) -> SocketAddr {
-        SocketAddr::from(([10, 0, 0, 2], 40_000))
-    }
-
-    fn peer(&self) -> SocketAddr {
-        SocketAddr::from(([10, 0, 0, 1], 7447))
+    fn ends(&self) -> StreamEnds<'_> {
+        StreamEnds::Ip {
+            proto: LinkProto::Tcp,
+            local: SocketAddr::from(([10, 0, 0, 2], 40_000)),
+            peer: SocketAddr::from(([10, 0, 0, 1], 7447)),
+        }
     }
 
     fn write(&self, bytes: &[u8]) -> Result<usize, ()> {
@@ -120,7 +124,9 @@ impl WsOpen for Open {
     fn stream_dial(&self) -> &Dial {
         &self.0
     }
+}
 
+impl WsSource for Open {
     fn now_us(&self) -> u64 {
         self.0.net.now_us.get()
     }
