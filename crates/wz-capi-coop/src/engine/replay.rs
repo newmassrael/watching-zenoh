@@ -651,30 +651,6 @@ fn tell_on<C: ClockSource + 'static>(
     });
 }
 
-/// Send `send` to the peer of the one link, whose record names it by `_wire`, through its wire
-/// `tx`, which the caller holds with the link's place, taken before the session's lock
-/// (`CoopEngine::live_on_link`): whether the link took it, `None` while the place holds no
-/// wire. The send neither waits nor is owed.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-fn send_through<C: ClockSource + 'static>(
-    _wire: &impl LendsSession<Session = super::LinkSession<C>>,
-    tx: super::LinkTx<'_, C>,
-    send: &(dyn SendTo<C> + Sync),
-) -> Option<bool> {
-    tx.map(|wire| send.send_to(&wire.actions))
-}
-
-/// Send `send` over the link `wire` holds, through the face's record, which the session's lock
-/// alone reaches where each record holds its link ([`super::send_on`]).
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-fn send_through<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = super::LinkSession<C>>,
-    _tx: super::LinkTx<'_, C>,
-    send: &(dyn SendTo<C> + Sync),
-) -> Option<bool> {
-    super::send_on(wire, 0, send)
-}
-
 /// [`Core::announce_row`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every
 /// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
@@ -707,7 +683,7 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
             continue;
         };
         if emits_now(face)
-            && send_through(wire, tx, send) == Some(false)
+            && super::send_through(wire, tx, send) == Some(false)
             && on_refusal == OnRefusal::Undo
         {
             refused_at = Some(at);

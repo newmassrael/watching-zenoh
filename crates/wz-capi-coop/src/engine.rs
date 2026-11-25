@@ -3287,13 +3287,83 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
     f(abi.0, abi.1)
 }
 
+/// Send `send` to the peer of the one link, whose record names it by `_wire`, through its wire
+/// `tx`, which the caller holds with the link's place, taken before the session's lock
+/// (`CoopEngine::live_on_link`): whether the link took it, `None` while the place holds no
+/// wire. The send neither waits nor is owed.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+fn send_through<C: ClockSource + 'static>(
+    _wire: &impl LendsSession<Session = LinkSession<C>>,
+    tx: LinkTx<'_, C>,
+    send: &(dyn SendTo<C> + Sync),
+) -> Option<bool> {
+    tx.map(|wire| send.send_to(&wire.actions))
+}
+
+/// Send `send` over the link `wire` holds, through the face's record, which the session's lock
+/// alone reaches where each record holds its link ([`send_on`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+fn send_through<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = LinkSession<C>>,
+    _tx: LinkTx<'_, C>,
+    send: &(dyn SendTo<C> + Sync),
+) -> Option<bool> {
+    send_on(wire, 0, send)
+}
+
+/// `f` on the actions of the one link, whose record names it by `_wire`, through its wire `tx`,
+/// held as [`send_through`] holds it: what a send reads of the link before it is made (an id
+/// the link allocates). `None` while the place holds no wire.
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+fn lend_through<C: ClockSource + 'static, U>(
+    _wire: &impl LendsSession<Session = LinkSession<C>>,
+    tx: LinkTx<'_, C>,
+    f: impl FnOnce(&LinkActions<C>) -> U,
+) -> Option<U> {
+    tx.map(|wire| f(&*wire.actions))
+}
+
+/// `f` on the actions of the link `wire` holds, through the face's record, which the session's
+/// lock alone reaches where each record holds its link ([`lend_actions`]).
+#[cfg(all(
+    feature = "query",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
+fn lend_through<C: ClockSource + 'static, U: Send>(
+    wire: &impl LendsSession<Session = LinkSession<C>>,
+    _tx: LinkTx<'_, C>,
+    f: impl FnOnce(&LinkActions<C>) -> U + Send,
+) -> Option<U> {
+    lend_actions(wire, f)
+}
+
+/// What one turn of a get's walk of the faces did, read once the link's place and the session's
+/// lock are let go.
+#[cfg(feature = "query")]
+enum LegTurn {
+    /// No face is left to ask.
+    Done,
+    /// The face was not asked, or its leg was not counted.
+    Skipped,
+    /// The leg was not issued and is over: let go of with nothing held.
+    Ended(u64),
+    /// The leg was issued.
+    Issued,
+}
+
 /// `f` on the actions of the link `wire` holds, lent as [`send_on`] lends them: what a send
 /// reads of the link before it is made (an id the link allocates). `None` while the link is not
 /// lent.
 #[cfg(any(
-    feature = "query",
+    all(
+        feature = "query",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ),
     feature = "transport-stats",
-    all(test, feature = "std")
+    all(test, any(feature = "std", feature = "liveliness-get"))
 ))]
 fn lend_actions<C: ClockSource + 'static, U: Send>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
@@ -9831,90 +9901,94 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the last face it asked and takes the session's lock for each, holding no list of them.
         let mut asked = None;
         loop {
-            let Some(mut guard) = self.live() else {
-                return issued_so_far(issued);
-            };
-            let core = &mut guard.0;
-            let Some(face) = core.transport.next_up_face(remote, asked) else {
-                break;
-            };
-            asked = Some(face);
-            let leg_id = self.next_local_id();
-            // A request id the face's actions allocate, so its peer's answer names it.
-            let Some(rid) = core.up_wire(face).and_then(|link| {
-                lend_actions(link, |actions: &LinkActions<C>| {
-                    actions.alloc_next_request_id()
-                })
-            }) else {
-                continue;
-            };
-            // One Final: the face's peer's. Held before the request goes out, so no answer can
-            // arrive before its entry.
-            // Its deadline may come before the one the step's bookkeeping is due at.
-            core.ledger.owe();
-            match self.hold_leg(
-                core.clock.now_us(),
-                &mut core.session.registry,
-                &mut ask,
-                LegEntry {
+            let turn = self.live_on_link(|core, tx| {
+                let Some(face) = core.transport.next_up_face(remote, asked) else {
+                    return LegTurn::Done;
+                };
+                asked = Some(face);
+                let leg_id = self.next_local_id();
+                // A request id the face's actions allocate, so its peer's answer names it.
+                let Some(rid) = core.up_wire(face).and_then(|link| {
+                    lend_through(link, tx, |actions: &LinkActions<C>| {
+                        actions.alloc_next_request_id()
+                    })
+                }) else {
+                    return LegTurn::Skipped;
+                };
+                // One Final: the face's peer's. Held before the request goes out, so no answer
+                // can arrive before its entry.
+                // Its deadline may come before the one the step's bookkeeping is due at.
+                core.ledger.owe();
+                match self.hold_leg(
+                    core.clock.now_us(),
+                    &mut core.session.registry,
+                    &mut ask,
+                    LegEntry {
+                        face,
+                        leg: leg_id,
+                        rid,
+                        finals: 1,
+                    },
+                ) {
+                    LegHeld::Held => {}
+                    LegHeld::Gone => return LegTurn::Skipped,
+                    LegHeld::NoRoom => {
+                        unheld = unheld.saturating_add(1);
+                        return LegTurn::Skipped;
+                    }
+                    LegHeld::Refused { table_full } => {
+                        unheld = unheld.saturating_add(usize::from(table_full));
+                        // A leg no table holds is let go of with no lock held.
+                        return LegTurn::Ended(leg_id);
+                    }
+                }
+                // The link names the key as its own key-wire form says, and the query is written
+                // from the options where they lie, with nothing copied.
+                let (abi, query) = (abi_names(wire, keyexpr), opts.query_parts());
+                let sent = core.up_wire(face).and_then(|link| {
+                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                            wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
+                                .is_some_and(|key| {
+                                    actions
+                                        .send_get_parts(wz_session_core::query_parts::GetParts {
+                                            rid,
+                                            key,
+                                            query,
+                                        })
+                                        .is_ok()
+                                })
+                        })
+                    })
+                }) == Some(true);
+                if !sent {
+                    // Nothing went out: the entry and the leg go, and the leg is over.
+                    if let Some(tables) = core.session.registry.face_mut(face) {
+                        tables.gets.replies.unregister(rid);
+                    }
+                    return LegTurn::Ended(leg_id);
+                }
+                if !core.session.note_pending(PendingGet {
                     face,
                     leg: leg_id,
-                    rid,
-                    finals: 1,
-                },
-            ) {
-                LegHeld::Held => {}
-                LegHeld::Gone => continue,
-                LegHeld::NoRoom => {
+                    kind: GetKind::Query(rid),
+                    fan: tag,
+                }) {
                     unheld = unheld.saturating_add(1);
-                    continue;
+                    return LegTurn::Skipped;
                 }
-                LegHeld::Refused { table_full } => {
-                    unheld = unheld.saturating_add(usize::from(table_full));
-                    // A leg no table holds is let go of with no lock held.
-                    drop(guard);
+                LegTurn::Issued
+            });
+            match turn {
+                None => return issued_so_far(issued),
+                Some(LegTurn::Done) => break,
+                Some(LegTurn::Skipped) => continue,
+                Some(LegTurn::Ended(leg_id)) => {
                     self.end_leg_now(leg_id);
                     continue;
                 }
+                Some(LegTurn::Issued) => {}
             }
-            // The link names the key as its own key-wire form says, and the query is written
-            // from the options where they lie, with nothing copied.
-            let (abi, query) = (abi_names(wire, keyexpr), opts.query_parts());
-            let sent = core.up_wire(face).and_then(|link| {
-                send_on(link, 0, &|actions: &LinkActions<C>| {
-                    get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
-                        wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
-                            .is_some_and(|key| {
-                                actions
-                                    .send_get_parts(wz_session_core::query_parts::GetParts {
-                                        rid,
-                                        key,
-                                        query,
-                                    })
-                                    .is_ok()
-                            })
-                    })
-                })
-            }) == Some(true);
-            if !sent {
-                // Nothing went out: the entry and the leg go, and the leg is over.
-                if let Some(tables) = core.session.registry.face_mut(face) {
-                    tables.gets.replies.unregister(rid);
-                }
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
-            }
-            if !core.session.note_pending(PendingGet {
-                face,
-                leg: leg_id,
-                kind: GetKind::Query(rid),
-                fan: tag,
-            }) {
-                unheld = unheld.saturating_add(1);
-                continue;
-            }
-            drop(guard);
             issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
@@ -10088,97 +10162,103 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The faces whose links are up, each asked once, as a query's are.
         let mut asked = None;
         loop {
-            let Some(mut guard) = self.live() else {
-                return issued_so_far(issued);
-            };
-            let core = &mut guard.0;
-            let Some(face) = core.transport.next_up_face(true, asked) else {
-                break;
-            };
-            asked = Some(face);
-            let leg_id = self.next_local_id();
-            // A face whose session has no interest id left is not asked, as one that could not
-            // hold the entry.
-            let Some(interest_id) = core
-                .up_wire(face)
-                .and_then(|link| {
-                    lend_actions(link, |actions: &LinkActions<C>| {
-                        actions.alloc_next_interest_id()
+            let turn = self.live_on_link(|core, tx| {
+                let Some(face) = core.transport.next_up_face(true, asked) else {
+                    return LegTurn::Done;
+                };
+                asked = Some(face);
+                let leg_id = self.next_local_id();
+                // A face whose session has no interest id left is not asked, as one that could
+                // not hold the entry.
+                let Some(interest_id) = core
+                    .up_wire(face)
+                    .and_then(|link| {
+                        lend_through(link, tx, |actions: &LinkActions<C>| {
+                            actions.alloc_next_interest_id()
+                        })
                     })
-                })
-                .flatten()
-            else {
-                continue;
-            };
-            let interest_id = u64::from(interest_id);
-            let deadline_ms = Some(leg_deadline_ms(core.clock.now_us(), timeout_ms));
-            // A snapshot no row holds is refused before its leg's callback is minted.
-            if !core
-                .session
-                .registry
-                .face_mut(face)
-                .is_some_and(|tables| tables.gets.liveliness_gets.has_room())
-            {
-                continue;
-            }
-            // A snapshot's replies are tokens, shown as they came.
-            let Some(row) = self.gets.open_leg(leg, true) else {
-                continue;
-            };
-            // SAFETY: the sink goes into a table of pending gets, which the session
-            // reaches under its lock alone, and is handed its replies there; the table is the
-            // registry's, dropped before the owners of the plane and of the round where the build
-            // keeps one, the session state's fields after the registry's.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
-            // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
-            // answer can arrive before its entry.
-            let registered = core
-                .session
-                .registry
-                .face_mut(face)
-                .map(|tables| {
-                    tables
-                        .gets
-                        .liveliness_gets
-                        .register(interest_id, deadline_ms, leg_sink)
-                })
-                .is_some_and(|registered| matches!(registered, Ok(true)));
-            if !registered {
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
-            }
-            // Its deadline may come before the one the step's bookkeeping is due at.
-            core.ledger.owe();
-            // The Interest names the key as the link's own key-wire form says, as a query does.
-            let abi = abi_names(wire, keyexpr);
-            let sent = core.up_wire(face).and_then(|link| {
-                send_on(link, 0, &|actions: &LinkActions<C>| {
-                    get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
-                        actions
-                            .send_interest_liveliness_get(interest_id, mapping_id, suffix)
-                            .is_ok()
-                    })
-                })
-            }) == Some(true);
-            if !sent {
-                // Nothing went out: the entry and the leg go, and the leg is over.
-                if let Some(tables) = core.session.registry.face_mut(face) {
-                    tables.gets.liveliness_gets.unregister(interest_id);
+                    .flatten()
+                else {
+                    return LegTurn::Skipped;
+                };
+                let interest_id = u64::from(interest_id);
+                let deadline_ms = Some(leg_deadline_ms(core.clock.now_us(), timeout_ms));
+                // A snapshot no row holds is refused before its leg's callback is minted.
+                if !core
+                    .session
+                    .registry
+                    .face_mut(face)
+                    .is_some_and(|tables| tables.gets.liveliness_gets.has_room())
+                {
+                    return LegTurn::Skipped;
                 }
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
+                // A snapshot's replies are tokens, shown as they came.
+                let Some(row) = self.gets.open_leg(&mut *leg, true) else {
+                    return LegTurn::Skipped;
+                };
+                // SAFETY: the sink goes into a table of pending gets, which the session
+                // reaches under its lock alone, and is handed its replies there; the table is the
+                // registry's, dropped before the owners of the plane and of the round where the
+                // build keeps one, the session state's fields after the registry's.
+                let leg_sink =
+                    unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
+                // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
+                // answer can arrive before its entry.
+                let registered = core
+                    .session
+                    .registry
+                    .face_mut(face)
+                    .map(|tables| {
+                        tables
+                            .gets
+                            .liveliness_gets
+                            .register(interest_id, deadline_ms, leg_sink)
+                    })
+                    .is_some_and(|registered| matches!(registered, Ok(true)));
+                if !registered {
+                    return LegTurn::Ended(leg_id);
+                }
+                // Its deadline may come before the one the step's bookkeeping is due at.
+                core.ledger.owe();
+                // The Interest names the key as the link's own key-wire form says, as a query
+                // does.
+                let abi = abi_names(wire, keyexpr);
+                let sent = core.up_wire(face).and_then(|link| {
+                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                            actions
+                                .send_interest_liveliness_get(interest_id, mapping_id, suffix)
+                                .is_ok()
+                        })
+                    })
+                }) == Some(true);
+                if !sent {
+                    // Nothing went out: the entry and the leg go, and the leg is over.
+                    if let Some(tables) = core.session.registry.face_mut(face) {
+                        tables.gets.liveliness_gets.unregister(interest_id);
+                    }
+                    return LegTurn::Ended(leg_id);
+                }
+                if !core.session.note_pending(PendingGet {
+                    face,
+                    leg: leg_id,
+                    kind: GetKind::Liveliness(interest_id),
+                    fan: tag,
+                }) {
+                    return LegTurn::Skipped;
+                }
+                LegTurn::Issued
+            });
+            match turn {
+                None => return issued_so_far(issued),
+                Some(LegTurn::Done) => break,
+                Some(LegTurn::Skipped) => continue,
+                Some(LegTurn::Ended(leg_id)) => {
+                    self.end_leg_now(leg_id);
+                    continue;
+                }
+                Some(LegTurn::Issued) => {}
             }
-            if !core.session.note_pending(PendingGet {
-                face,
-                leg: leg_id,
-                kind: GetKind::Liveliness(interest_id),
-                fan: tag,
-            }) {
-                continue;
-            }
-            drop(guard);
             issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
