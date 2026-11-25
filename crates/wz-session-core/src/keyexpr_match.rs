@@ -248,7 +248,6 @@ impl KeyFacts {
 
 /// [`keyexpr_intersects`] for two keys whose [`KeyFacts`] are already known: the same answer,
 /// with no scan of either text unless a wildcard makes the walk necessary.
-#[inline]
 pub fn keyexpr_intersects_text_with(
     candidate: &str,
     candidate_facts: KeyFacts,

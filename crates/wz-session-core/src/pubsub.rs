@@ -2685,9 +2685,6 @@ pub(crate) fn past_matcher_depth(keyexpr: &str, facts: KeyFacts) -> bool {
 /// session itself otherwise, reaches the subscriber `row`: its locality admits the origin and its
 /// pattern intersects the key. The rule of every walk of the subscribers ([`scan_subscribers`]
 /// and the walk that pins one row at a time).
-// Asked once per row of every walk, from walks generic over their rows and so compiled in the
-// crate that names the rows: out of line it is a call through the GOT for each row.
-#[inline]
 pub(crate) fn row_reaches(
     row: &RowRef<'_>,
     keyexpr: &str,
