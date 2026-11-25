@@ -464,9 +464,7 @@ mod alloc_impl {
                     let Some(push) = record.push() else {
                         return 0;
                     };
-                    // The projection consumes its view; the clone is of the
-                    // view (ranges of the frame), not of the bytes.
-                    match push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
+                    match crate::wire::push_of_view(push) {
                         Ok(push) => self.dispatch_push(&push, reliability, peer_table, injector),
                         Err(_) => 0,
                     }

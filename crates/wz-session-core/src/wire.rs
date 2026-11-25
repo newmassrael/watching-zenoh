@@ -63,6 +63,18 @@ pub type PushOwned = wz_codecs::push::PushOwned<WireStorage>;
 #[cfg(feature = "codec-push")]
 pub type PushOwnedVariant = wz_codecs::push::PushOwnedVariant<WireStorage>;
 
+/// The owned form of a Push read as its view where its frame lies: what a receive path that lent
+/// the record hands to a reader of the owned message. The view is first filled into the codec's
+/// record at the wire profile's capacity, whose lists grow, so a chain of any length is kept, and
+/// that record is projected into the owned one.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn push_of_view<'f>(view: &wz_codecs::push::PushView<'f>) -> Result<PushOwned, CodecError> {
+    let mut record =
+        wz_codecs::push::PushIn::<sce_forge_runtime::codec::Lent<'f, WireStorage>>::default();
+    view.into_builder(&mut record)?;
+    record.try_into_owned_in::<WireStorage>()
+}
+
 /// A received `Request`.
 #[cfg(feature = "codec-request")]
 pub type RequestOwned = wz_codecs::request::RequestOwned<WireStorage>;

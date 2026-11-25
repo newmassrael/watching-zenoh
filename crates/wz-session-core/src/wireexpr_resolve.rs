@@ -1013,7 +1013,11 @@ pub fn resolve_wireexpr_view_held_over<
 /// The `(id, suffix)` a wireexpr read as its view (`WireexprView`) carries, as
 /// [`id_and_suffix_view`] reads them, and whether its id names the sender's space (`M=1`, the
 /// codec's `WireexprLocal` arm): what a Request lent by the in-place receive is kept by.
-#[cfg(any(feature = "codec-request", feature = "codec-response"))]
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
 pub fn id_suffix_and_space_viewed<'f>(
     body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
 ) -> (crate::wire_id::ExprId, Option<&'f str>, bool) {
@@ -1052,12 +1056,28 @@ pub fn resolve_wireexpr_viewed_held<'k, 'f: 'k, P: Storage, O: Storage>(
     spaces: MappingSpaces<'k, P, O>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    resolve_wireexpr_viewed_held_over(body, spaces, None::<OwnSpace<'_, O>>, out)
+}
+
+/// [`resolve_wireexpr_viewed_held`] with our own space given apart from the pair
+/// ([`resolve_wireexpr_view_held_over`]): what a Push read as its view is delivered by.
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
+pub fn resolve_wireexpr_viewed_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: Storage>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'f>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
+    out: &'k mut dyn KeyexprOut,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
     use wz_codecs::wireexpr::WireexprViewVariant as V;
     let body = match body {
         V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
         V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
     };
-    resolve_wireexpr_view_held_over(&body, spaces, None::<OwnSpace<'_, O>>, out)
+    resolve_wireexpr_view_held_over(&body, spaces, own, out)
 }
 
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an

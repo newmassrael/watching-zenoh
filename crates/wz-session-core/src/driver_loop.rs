@@ -1145,7 +1145,7 @@ enum LentRecord<'a, 'f> {
             feature = "rx-push"
         )
     ))]
-    Push(&'a wz_codecs::lent::Push<'f>),
+    Push(&'a wz_codecs::push::PushView<'f>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
@@ -1276,7 +1276,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::lent::Push<'f>,
+        push: &'a wz_codecs::push::PushView<'f>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -1530,12 +1530,12 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         self.past_sender_bound
     }
 
-    /// The Push, as it is decoded: its keyexpr, extensions and payload are
-    /// ranges of the frame. `None` when the record is of another kind.
+    /// The Push, as its view: its keyexpr and payload ranges of the frame, and its extension chains
+    /// as the bytes they occupy, walked where they lie. `None` when the record is of another kind.
     ///
     /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
-    pub fn push(&self) -> Option<&'a wz_codecs::lent::Push<'f>> {
+    pub fn push(&self) -> Option<&'a wz_codecs::push::PushView<'f>> {
         match self.record {
             #[cfg(any(
                 all(

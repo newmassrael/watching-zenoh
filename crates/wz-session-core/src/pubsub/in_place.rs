@@ -10,8 +10,9 @@
 //! instead of projecting it into
 //! a boxed owned message. This module is the subscriber side of that: the
 //! keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_view_held_over`]), the payload, attachment and every
-//! extension are read where they lie, and the subscribers are handed a
+//! ([`resolve_wireexpr_viewed_held_over`]), the payload, attachment and every
+//! extension are read where they lie (the Push is read as its view, a few words
+//! and the bytes its chains occupy), and the subscribers are handed a
 //! sample over those bytes ([`SampleRef`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
 //! a view borrowed for the call ([`SampleDelivery::deliver`]), so no subscriber
@@ -36,7 +37,11 @@
 //! copying path delivers it, where the build has that path; a build that lends only
 //! (`rx-lent-only`) counts it and drops it.
 
-use wz_codecs::lent::{Encoding, Push, PushVariant, Timestamp};
+// The view's own timestamp and encoding: they hold their lists inline, where the lent record's
+// (`wz_codecs::lent`) are sized for the deployment's node.
+use wz_codecs::encoding::Encoding;
+use wz_codecs::push::{PushView, PushViewVariant};
+use wz_codecs::timestamp::Timestamp;
 
 use super::{LocalSubscribers, PeerDelivery, SubscriberPeer};
 use crate::bounded::Storage;
@@ -49,7 +54,7 @@ use crate::sink::{FanOut, SampleDelivery, SampleRef};
 use crate::wireexpr_resolve::resolve_plain_parts_over;
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 use crate::wireexpr_resolve::KeyexprBuf;
-use crate::wireexpr_resolve::{resolve_wireexpr_view_held_over, ComposeRoom, KeyexprPastBound};
+use crate::wireexpr_resolve::{resolve_wireexpr_viewed_held_over, ComposeRoom, KeyexprPastBound};
 
 /// The body-level fields of a Put or a Del read in place, before the keyexpr is
 /// known: what `dispatch_push`'s body match projects, on the lent form.
@@ -80,16 +85,25 @@ enum Fallback {
 /// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
 /// owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
-fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fallback> {
+///
+/// Each chain is walked where it lies, once for each field that reads it, so the bytes those
+/// fields hand out stay in the frame.
+fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>, Fallback> {
     match &push.body {
         #[cfg(feature = "pubsub-put")]
-        PushVariant::CodecZenohMsgPut(put) => {
+        PushViewVariant::CodecZenohMsgPut(put) => {
             let wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 { payload, .. } =
                 &put.extensions_has_0x12
             else {
                 return Err(Fallback::Sliced);
             };
-            let exts: &[wz_codecs::lent::ExtEntry<'f>] = crate::put_payload::chain(put);
+            // The whole chain of an inline Put: it carries no shared-memory marker.
+            let exts = || {
+                crate::put_payload::view_chain(put)
+                    .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
+                    .into_iter()
+                    .flatten()
+            };
             #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
             let _ = exts;
             Ok(Some(LentBody {
@@ -104,24 +118,21 @@ fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fal
                 #[cfg(not(feature = "pubsub-encoding"))]
                 encoding: None,
                 #[cfg(feature = "pubsub-attachment")]
-                attachment: crate::attachment::decode_attachment_ext(
-                    exts,
+                attachment: crate::attachment::decode_attachment_ext_in(
+                    exts(),
                     crate::attachment::ATTACHMENT_EXT_ID_PUSH,
                 ),
                 #[cfg(not(feature = "pubsub-attachment"))]
                 attachment: None,
                 #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info(exts),
+                source_info: crate::sample::extract_source_info_in(exts()),
                 #[cfg(not(feature = "pubsub-source-info"))]
                 source_info: None,
             }))
         }
         #[cfg(feature = "pubsub-delete")]
-        PushVariant::CodecZenohMsgDel(del) => {
-            let exts: &[wz_codecs::lent::ExtEntry<'f>] = del
-                .extensions
-                .as_ref()
-                .map_or(&[][..], |chain| chain.as_slice());
+        PushViewVariant::CodecZenohMsgDel(del) => {
+            let exts = || crate::ext_view::walked(del.extensions.as_ref());
             #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
             let _ = exts;
             Ok(Some(LentBody {
@@ -134,14 +145,14 @@ fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fal
                 // Encoding is Put-only on the wire.
                 encoding: None,
                 #[cfg(feature = "pubsub-attachment")]
-                attachment: crate::attachment::decode_attachment_ext(
-                    exts,
+                attachment: crate::attachment::decode_attachment_ext_in(
+                    exts(),
                     crate::attachment::ATTACHMENT_EXT_ID_DEL,
                 ),
                 #[cfg(not(feature = "pubsub-attachment"))]
                 attachment: None,
                 #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info(exts),
+                source_info: crate::sample::extract_source_info_in(exts()),
                 #[cfg(not(feature = "pubsub-source-info"))]
                 source_info: None,
             }))
@@ -206,22 +217,22 @@ impl<Q: Storage> SubscriberPeer<Q> {
         &mut self,
         subs: &mut L,
         cx: &mut X,
-        push: &Push<'_>,
+        push: &PushView<'_>,
         reliability: Reliability,
         sender: u64,
     ) -> Result<(), Fallback> {
         let Some(body) = lent_body(push)? else {
             return Ok(());
         };
+        // The Push's own chain is walked where it lies, once for each field that reads it.
         // A message the nodes record on is delivered with a stack of its own to add to.
         #[cfg(feature = "pubsub-ts-stack")]
-        if push.extensions.as_deref().is_some_and(|outer| {
-            crate::ext_view::find_by_eid(
-                outer,
-                crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
-            )
-            .is_some()
-        }) {
+        if crate::ext_view::find_by_eid_in(
+            crate::ext_view::walked(push.extensions.as_ref()),
+            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+        )
+        .is_some()
+        {
             return Err(Fallback::Instrumented);
         }
         // The keyexpr may be the peer table's own literal, so the table stays
@@ -237,7 +248,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let mut frame = Default::default();
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into the room before the delivery writes it.
-        let (keyexpr, held) = match resolve_wireexpr_view_held_over(
+        let (keyexpr, held) = match resolve_wireexpr_viewed_held_over(
             &push.keyexpr.body,
             naming.spaces().from_sender(sender),
             subs.own_space(),
@@ -250,17 +261,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
             Ok(None) => return Ok(()),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
-        let outer: &[wz_codecs::lent::ExtEntry<'_>] = push
-            .extensions
-            .as_ref()
-            .map_or(&[][..], |chain| chain.as_slice());
         #[cfg(feature = "pubsub-qos")]
-        let qos: Option<QosLevel> = crate::sample::extract_qos_in(outer);
+        let qos: Option<QosLevel> =
+            crate::sample::extract_qos_in(crate::ext_view::walked(push.extensions.as_ref()));
         #[cfg(not(feature = "pubsub-qos"))]
-        let qos: Option<QosLevel> = {
-            let _ = outer;
-            None
-        };
+        let qos: Option<QosLevel> = None;
         // Every field a range of the frame or a value read off it, valid for the delivery call. The
         // hints own heap fields (a schema's bytes), so they are built only when a subscriber asks
         // for them. The attachment and the payload are the link's, lent for the call: a subscriber
@@ -327,14 +332,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         &mut self,
         subs: &mut L,
         cx: &mut X,
-        push: &Push<'_>,
+        push: &PushView<'_>,
         reliability: Reliability,
         sender: u64,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
-        // ranges), so this projection cannot refuse a decoded Push. It
-        // consumes its view; the clone is of the view, not of the bytes.
-        if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
+        // ranges), so this projection cannot refuse a Push its view read.
+        if let Ok(owned) = crate::wire::push_of_view(push) {
             self.dispatch_push(subs, cx, &owned, reliability, true, sender);
         }
     }
@@ -464,6 +468,7 @@ mod tests {
     use alloc::vec::Vec;
     use sce_forge_runtime::codec::SceCursor;
     use std::sync::{Arc, Mutex};
+    use wz_codecs::lent::{Push, PushVariant};
 
     /// The registry over the AP's closure sink, which records what it is handed.
     type SubscriberRegistry = crate::pubsub::SubscriberRegistry<BoxedSink>;
@@ -521,11 +526,16 @@ mod tests {
         push.try_as_borrowed().expect("a view").encode_to_vec()
     }
 
+    /// `wire` read as the view the in-place receive path lends.
+    fn view_of(wire: &[u8]) -> PushView<'_> {
+        PushView::decode(&mut SceCursor::new(wire)).expect("decode")
+    }
+
     /// `push` delivered lent (the in-place path) and owned (the copying path)
     /// to two registries prepared alike: what each subscriber saw, and the
     /// lent registry's fallbacks.
     fn both_ways(
-        push: &Push<'_>,
+        push: &PushView<'_>,
         pattern: &str,
         prepare: impl Fn(&mut SubscriberRegistry),
     ) -> (Vec<Seen>, Vec<Seen>, InPlaceFallbacks) {
@@ -537,9 +547,7 @@ mod tests {
         let (mut owned, owned_seen) = recording(pattern);
         prepare(&mut owned);
         let message = NetworkMessage::Push(Box::new(
-            push.clone()
-                .try_into_owned_in::<crate::wire::WireStorage>()
-                .expect("an owned projection"),
+            crate::wire::push_of_view(push).expect("an owned projection"),
         ));
         owned.dispatch(&message, Reliability::BestEffort);
 
@@ -577,7 +585,7 @@ mod tests {
             crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints()))
                 .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
         assert_eq!(owned.len(), 1, "the owned path delivers it");
         assert_eq!(
@@ -607,7 +615,7 @@ mod tests {
             crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &instrumented)
                 .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
         assert_eq!(owned.len(), 1);
         assert_eq!(owned[0].ts_stack.as_ref(), Some(&stack));
@@ -624,7 +632,7 @@ mod tests {
             crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints))
                 .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, _, fallbacks) = both_ways(&push, "demo/*", |_| {});
         assert_eq!(lent[0].ts_stack, None);
         assert_eq!(fallbacks.instrumented, 0);
@@ -632,12 +640,12 @@ mod tests {
 
     /// A literal Put on `key`, decoded from the wire bytes a peer would send, as both paths read it.
     #[cfg(feature = "key-set-closed")]
-    fn put_on<T>(key: &str, then: impl FnOnce(&Push<'_>) -> T) -> T {
+    fn put_on<T>(key: &str, then: impl FnOnce(&PushView<'_>) -> T) -> T {
         let built =
             crate::push_build::build_push_literal_with_meta(key, b"payload", &meta(&hints()))
                 .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         then(&push)
     }
 
@@ -702,7 +710,7 @@ mod tests {
         let built = crate::push_build::build_push_del_literal_with_meta("demo/a", &meta(&hints()))
             .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, owned, _) = both_ways(&push, "demo/a", |_| {});
         assert_eq!(owned.len(), 1);
         assert_eq!(lent, owned);
@@ -721,7 +729,7 @@ mod tests {
         for suffix in [None, Some("/b")] {
             let built = crate::push_build::build_push_aliased(5, suffix, b"v").expect("build");
             let wire = wire_of(&built);
-            let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+            let push = view_of(&wire);
             let (lent, owned, fallbacks) = both_ways(&push, "demo/**", peer);
             assert_eq!(owned.len(), 1, "suffix {suffix:?}");
             assert_eq!(lent, owned, "suffix {suffix:?}");
@@ -729,7 +737,7 @@ mod tests {
         }
         let built = crate::push_build::build_push_aliased(6, None, b"v").expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, owned, _) = both_ways(&push, "**", peer);
         assert_eq!(
             (lent.len(), owned.len()),
@@ -763,16 +771,12 @@ mod tests {
     }
 
     /// The wire of an aliased Put (id 3, suffix `x`), before it is read as an
-    /// `M=0` alias.
+    /// `M=0` alias: the builder writes the peer-space form, rewritten to the `M=0` form that
+    /// names OUR space.
     fn own_space_wire() -> Vec<u8> {
         let built = crate::push_build::build_push_aliased(3, Some("x"), b"v").expect("build");
-        wire_of(&built)
-    }
-
-    /// `wire` decoded, its keyexpr rewritten from the peer-space form the
-    /// builder writes to the `M=0` form that names OUR space.
-    fn own_space_push(wire: &[u8]) -> Push<'_> {
-        let mut push = Push::decode(&mut SceCursor::new(wire)).expect("decode");
+        let wire = wire_of(&built);
+        let mut push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let wz_codecs::lent::WireexprVariant::WireexprLocal(local) = &push.keyexpr.body else {
             panic!("the builder writes the peer-space form");
         };
@@ -782,7 +786,12 @@ mod tests {
                 suffix_len: local.suffix_len,
                 suffix: local.suffix,
             });
-        push
+        push.encode_to_vec()
+    }
+
+    /// The Push of [`own_space_wire`], read as its view.
+    fn own_space_push(wire: &[u8]) -> PushView<'_> {
+        view_of(wire)
     }
 
     /// Install our space: id 3 is `mine/`.
@@ -821,7 +830,8 @@ mod tests {
             extensions: Default::default(),
             slices: sce_forge_runtime::codec::Bounded::new(slices).unwrap(),
         };
-        let (lent, owned, fallbacks) = both_ways(&push, "demo/s", |_| {});
+        let sliced = push.encode_to_vec();
+        let (lent, owned, fallbacks) = both_ways(&view_of(&sliced), "demo/s", |_| {});
         #[cfg(not(feature = "rx-lent-only"))]
         assert_eq!(lent, owned);
         // A build that lends only refuses it where it lies, and counts it all the same.
@@ -865,7 +875,7 @@ mod tests {
         };
         let built = crate::push_build::build_push_aliased(9, Some("tail"), b"v").expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let (lent, owned, fallbacks) = both_ways(&push, "**", peer);
         assert_eq!(owned.len(), 1);
         #[cfg(not(feature = "rx-lent-only"))]
@@ -924,7 +934,7 @@ mod tests {
     /// keys the table was handed.
     fn delivered_from(
         side: &mut SubscriberPeer<crate::bounded::Lent>,
-        push: &Push<'_>,
+        push: &PushView<'_>,
         pattern: &str,
     ) -> Vec<String> {
         let (mut registry, seen) = recording(pattern);
@@ -996,7 +1006,7 @@ mod tests {
         assert_eq!(composed, ["mine/x"]);
         let built = crate::push_build::build_push_literal("mine/y", b"v").expect("build");
         let wire = wire_of(&built);
-        let literal = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let literal = view_of(&wire);
         assert_eq!(delivered_from(&mut side, &literal, "mine/*"), ["mine/y"]);
         assert_eq!(
             side.in_place_fallbacks(),
@@ -1052,7 +1062,7 @@ mod tests {
             crate::push_build::build_push_literal_with_meta("demo/a", b"p", &meta(&hints()))
                 .expect("build");
         let wire = wire_of(&built);
-        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let push = view_of(&wire);
         let own = |r: &mut SubscriberRegistry| {
             assert!(r.set_own_zid(alloc::vec![0x51, 0x52, 0x53, 0x54]));
         };
