@@ -2706,7 +2706,6 @@ pub(crate) fn ingest_multicast_fragment_in_place<
                     }
                 },
             );
-            records.end_records();
         },
     );
     // The chain this fragment ended besides its own, which the records lent

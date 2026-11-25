@@ -927,8 +927,6 @@ where
             }
         },
     );
-    // What the host put off for the records it was handed is owed whatever the walk answers.
-    crate::driver_loop::EventSink::end_records(&mut records);
     // Only a datagram a transport keeps is walked on from where the walk stopped.
     #[cfg(not(feature = "reassembly"))]
     let _ = walked;
