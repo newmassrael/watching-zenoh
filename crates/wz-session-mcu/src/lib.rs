@@ -77,8 +77,9 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-// The unit tests' allocator, which refuses on a thread that asks it to.
-#[cfg(test)]
+// The unit tests' allocator, which refuses on a thread that asks it to. Only the in-memory
+// network's tests ask it, so it is built where they are.
+#[cfg(all(test, not(feature = "session-slot")))]
 mod test_heap;
 
 // R2827 — the application layer attached to the session drive.
