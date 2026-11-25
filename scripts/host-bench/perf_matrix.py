@@ -1755,9 +1755,10 @@ WINDOWS_NOT_RUN = {
 def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str) -> dict:
     """What a run on Windows measures, from a package's manifest and build statement: arm W is the package's
     library, built for `target` with the features its manifest lists on the engine its statement states and with
-    the standard library its manifest states (`pico_windows_package.stdlib_of`: the release ships the library
-    without `std`), and arm P zenoh-pico built as the same build, every switch the declaration answers set from
-    those features (`wz_config.pico_reference`), as `reference` derives the Linux arm from the bench's build.
+    the standard library its manifest states (`pico_windows_package.stdlib_of`: every package is the library
+    without `std`, so none is on the tokio engine), and arm P zenoh-pico built as the same build, every switch
+    the declaration answers set from those features (`wz_config.pico_reference`), as `reference` derives the
+    Linux arm from the bench's build.
     `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that
     names a feature the crate lacks, one whose statement's engine is not the one its features run, and one whose
     manifest states no standard library, or one its features do not build, are refused."""
@@ -2168,9 +2169,9 @@ def cmd_selftest() -> int:
            and refused_call(lambda: stdlib_named({"stdlib": "alloc"}, "r")))
     import pico_windows_package as pwp
     import wz_config
-    expect("the standard libraries a run names are the ones a bench builds and a package states",
-           STDLIBS == wz_config.PICO_STDLIBS and set(pwp.STDLIBS) == set(STDLIBS)
-           and set(pwp.RELEASE_STDLIBS) <= set(STDLIBS))
+    expect("the standard libraries a run names are the ones a bench builds, and a package states one of them",
+           STDLIBS == wz_config.PICO_STDLIBS and set(pwp.STDLIBS) <= set(STDLIBS)
+           and set(pwp.RELEASE_STDLIBS) <= set(pwp.STDLIBS))
     # -- arm X ------------------------------------------------------------------------------------------
     expect("arm X runs every transport but the program's, from a probe of its own",
            binary_name("X", "udp") == "perf_probe_X" and binary_name("X", "tcp") == "perf_probe_X"
@@ -2462,10 +2463,6 @@ def cmd_selftest() -> int:
            and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "os-host"]
            and planned["wz_stdlib"] == "nostd")
     tokio_manifest = {"target": x64, "features": ["engine-tokio", "app-transport"], "stdlib": "std"}
-    tokio_plan = windows_plan(tokio_manifest, {"engine": "tokio"}, feature_table, switch_rows, x64)
-    expect("a package on the tokio engine is planned with std, its reference the same build",
-           tokio_plan["wz_stdlib"] == "std" and tokio_plan["wz_engine"] == "tokio"
-           and tokio_plan["reference_switches"] == planned["reference_switches"])
 
     def plan_refused(manifest, statement):
         try:
@@ -2479,17 +2476,16 @@ def cmd_selftest() -> int:
            and plan_refused(dict(package_manifest, features=[]), {"engine": "coop"}))
     expect("a package that names a feature the crate does not have is refused",
            plan_refused(dict(package_manifest, features=["os-host", "gone"]), {"engine": "coop"}))
-    expect("a package whose manifest states a standard library its engine's library does not have is refused",
-           plan_refused(dict(package_manifest, stdlib="std"), {"engine": "coop"})
+    expect("a package on the tokio engine is refused, as every package is the C library without std",
+           plan_refused(tokio_manifest, {"engine": "tokio"})
            and plan_refused(dict(tokio_manifest, stdlib="nostd"), {"engine": "tokio"}))
     expect("a statement whose engine is not the one the package's features run is refused",
            plan_refused(package_manifest, {"engine": "tokio"})
            and plan_refused(dict(package_manifest, features=["engine-tokio"]), {"engine": "coop"})
            and plan_refused(package_manifest, {}))
-    expect("a package whose manifest states no standard library, or one its features do not build, is refused",
+    expect("a package whose manifest states no standard library, or one no package is built with, is refused",
            plan_refused({k: v for k, v in package_manifest.items() if k != "stdlib"}, {"engine": "coop"})
-           and plan_refused(dict(package_manifest, stdlib="nostd"), {"engine": "coop"})
-           and plan_refused(dict(bare_manifest, stdlib="std"), {"engine": "coop"})
+           and plan_refused(dict(package_manifest, stdlib="std"), {"engine": "coop"})
            and plan_refused(dict(package_manifest, stdlib="alloc"), {"engine": "coop"}))
     expect("a run on Windows leaves out only the transport perf_probe.c does not build there",
            set(WINDOWS_NOT_RUN) == {"program"})
