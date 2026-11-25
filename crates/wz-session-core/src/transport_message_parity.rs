@@ -26,7 +26,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::SceCursor;
+use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::transport_close::TransportCloseView;
 use wz_codecs::transport_init::TransportInitView;
 use wz_codecs::transport_keep_alive::TransportKeepAliveView;
@@ -36,7 +36,10 @@ use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
 use crate::ext_chain::ChainHeaders;
-use crate::handshake_encode::{encode_close, encode_init, encode_keep_alive, encode_open};
+use crate::handshake_encode::{
+    encode_close, encode_init, encode_keep_alive, encode_open, HANDSHAKE_CHAIN_MAX,
+    STAGED_CHAIN_MAX,
+};
 use crate::inbound::{parse_inbound, InboundFrame};
 use crate::parse_error::InboundParseError;
 use crate::session_init_params::{cookie_bytes, SessionInitParams};
@@ -103,15 +106,33 @@ fn unit(header: u8) -> ExtEntryOwned {
     }
 }
 
-/// The chains every encoder is driven with: none, one entry, and two entries
-/// of two encodings, so the continuation flag is set on one entry and cleared
-/// on the last.
-fn chains() -> [Vec<ExtEntryOwned>; 3] {
+/// The chains every encoder is driven with, by boundary value on the longest a
+/// session of this build stages (`STAGED_CHAIN_MAX`): none, one entry, one under
+/// the longest, the longest, and one past it. Each is a prefix of the patch level
+/// (a z64) followed by units of ascending id, so every chain of two or more
+/// entries carries both encodings, sets the continuation flag on all but its last
+/// entry, and names no id twice up to the longest, which the decoder of a build
+/// that keeps one entry per extension it reads takes whole.
+fn chains() -> [Vec<ExtEntryOwned>; 5] {
+    let past: Vec<ExtEntryOwned> = core::iter::once(crate::extpatch::encode_patch_ext_at(1))
+        .chain((0x01..=0x06u8).cycle().map(unit))
+        .take(STAGED_CHAIN_MAX + 1)
+        .collect();
     [
-        Vec::new(),
-        vec![crate::extpatch::encode_patch_ext_at(1)],
-        vec![unit(0x01), crate::extpatch::encode_patch_ext_at(1)],
+        0,
+        1,
+        STAGED_CHAIN_MAX - 1,
+        STAGED_CHAIN_MAX,
+        STAGED_CHAIN_MAX + 1,
     ]
+    .map(|len| past[..len].to_vec())
+}
+
+/// Whether the build writes a chain of `len` entries, as the encoders state it
+/// (`HANDSHAKE_CHAIN_MAX`): past it each refuses the chain with
+/// `CapacityExceeded`, and there is no frame to read.
+fn admitted(len: usize) -> bool {
+    HANDSHAKE_CHAIN_MAX.is_none_or(|max| len <= max)
 }
 
 /// The headers of the entries a view's chain yields, none when its header's Z
@@ -351,8 +372,12 @@ fn every_init_written_here_is_the_init_the_document_reads() {
             for chain in chains() {
                 for is_ack in [false, true] {
                     for cookie in [None, Some(&[0x77u8; 9][..])] {
-                        let wire = encode_init(&params, is_ack, &chain, cookie).expect("encodes");
-                        assert_init_read_alike(&wire);
+                        let written = encode_init(&params, is_ack, &chain, cookie);
+                        if !admitted(chain.len()) {
+                            assert_eq!(written, Err(CodecError::CapacityExceeded));
+                            continue;
+                        }
+                        assert_init_read_alike(&written.expect("encodes"));
                     }
                 }
             }
@@ -360,12 +385,20 @@ fn every_init_written_here_is_the_init_the_document_reads() {
     }
 }
 
+/// Upstream's frame carries two entries, the QoS offer and the patch level: a
+/// build whose session stages the patch level alone (no QoS) and bounds the
+/// chain (`HANDSHAKE_CHAIN_MAX`) refuses to write it, and reads it as every
+/// build does.
 #[test]
 fn the_init_written_here_for_upstreams_values_is_upstreams_frame() {
     let params = init_params(WhatAmI::Router, &[0xAA, 0xBB], 10_000);
     let chain = [unit(0x01), crate::extpatch::encode_patch_ext_at(1)];
-    let wire = encode_init(&params, true, &chain, None).expect("encodes");
-    assert_eq!(wire, UPSTREAM_INIT_ACK);
+    let written = encode_init(&params, true, &chain, None);
+    if admitted(chain.len()) {
+        assert_eq!(written.expect("encodes"), UPSTREAM_INIT_ACK);
+    } else {
+        assert_eq!(written, Err(CodecError::CapacityExceeded));
+    }
     assert_init_read_alike(&UPSTREAM_INIT_ACK);
 }
 
@@ -378,8 +411,12 @@ fn every_open_written_here_is_the_open_the_document_reads() {
         for chain in chains() {
             for is_ack in [false, true] {
                 for cookie in [None, Some(&[0x77u8; 9][..])] {
-                    let wire = encode_open(&params, is_ack, cookie, &chain).expect("encodes");
-                    assert_open_read_alike(&wire);
+                    let written = encode_open(&params, is_ack, cookie, &chain);
+                    if !admitted(chain.len()) {
+                        assert_eq!(written, Err(CodecError::CapacityExceeded));
+                        continue;
+                    }
+                    assert_open_read_alike(&written.expect("encodes"));
                 }
             }
         }
@@ -444,13 +481,15 @@ fn the_keep_alive_written_here_is_the_keep_alive_the_document_reads() {
     assert_keep_alive_read_alike(&UPSTREAM_KEEP_ALIVE_WITH_EXT);
 }
 
-/// A frame cut inside its body or its chain is refused by both readers.
+/// A frame cut inside its body or its chain is refused by both readers: an
+/// InitAck with the longest chain a session of this build stages.
 #[test]
 fn a_frame_cut_short_is_refused_by_both_readers() {
+    let [.., longest, _] = chains();
     let init = encode_init(
         &init_params(WhatAmI::Peer, &[0x01, 0x02], 10_000),
         true,
-        &chains()[2],
+        &longest,
         None,
     )
     .expect("encodes");

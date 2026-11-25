@@ -21,8 +21,9 @@
 //! The inputs are the ones the build admits, read from its own bounds rather than
 //! chosen here, so a build that moves a bound moves the inputs with it: the widest
 //! zid (`ZID_MAX`), the longest cookie a session keeps (`COOKIE_MAX`), and chains
-//! up to the longest a session stages (`STAGED_CHAIN_MAX`) with one entry past it,
-//! which each form refuses unwritten where the build bounds the chain
+//! by boundary value on the longest a session stages (`STAGED_CHAIN_MAX`, one
+//! entry per place of the staged chain): none, one, one under it, it, and one
+//! past it, which each form refuses unwritten where the build bounds the chain
 //! (`HANDSHAKE_CHAIN_MAX`) and writes where it does not.
 //!
 //! Compiles empty without the lend-only profile and the three message codecs,
@@ -95,10 +96,18 @@ fn chain_past_the_staged() -> Vec<ExtEntryOwned> {
         .collect()
 }
 
-/// The chains each encoder is handed: the longest a session stages, one entry,
-/// none, and one entry past the longest.
-fn chains(past: &[ExtEntryOwned]) -> [&[ExtEntryOwned]; 4] {
-    [&past[..STAGED_CHAIN_MAX], &past[..1], &[], past]
+/// The chains each encoder is handed, by boundary value on the longest a
+/// session stages: none, one entry, one under the longest, the longest, and one
+/// entry past it.
+fn chains(past: &[ExtEntryOwned]) -> [&[ExtEntryOwned]; 5] {
+    [
+        0,
+        1,
+        STAGED_CHAIN_MAX - 1,
+        STAGED_CHAIN_MAX,
+        STAGED_CHAIN_MAX + 1,
+    ]
+    .map(|len| &past[..len])
 }
 
 /// Whether the build writes a chain of `len` entries, as it states it

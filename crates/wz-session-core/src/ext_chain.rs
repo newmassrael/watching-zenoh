@@ -222,6 +222,10 @@ impl StagedExt {
 pub type ExtChainBuf = Vec<ExtEntryOwned>;
 
 /// See the growable form of this alias.
+///
+/// `repr(C)`: its places are laid out in the order they are declared with nothing between them,
+/// all of one type, so the chain is laid out as an array of `STAGED_CHAIN_MAX` places, which
+/// the assertion after it holds.
 #[cfg(all(
     feature = "session-fixed-storage",
     feature = "session-unicast",
@@ -237,6 +241,7 @@ pub type ExtChainBuf = Vec<ExtEntryOwned>;
     )
 ))]
 #[derive(Debug, Clone, Default)]
+#[repr(C)]
 pub struct ExtChainBuf {
     #[cfg(all(
         feature = "transport-qos",
@@ -277,6 +282,93 @@ pub struct ExtChainBuf {
     /// The patch level or the remote bound, which share id 0x7.
     patch_or_bound: Option<ExtEntryOwned>,
 }
+
+/// The most entries a handshake chain a session stages holds: one per place of the staged chain,
+/// which is one per extension id the build stages (`StagedExt`). The patch level and the remote
+/// bound share id 0x7 and so one place, which every build with a handshake has (the patch level on
+/// an Init, the bound on an Open), and is counted once; each other place counts where the gate of
+/// its field in the fixed `ExtChainBuf` holds, and by that gate. The growable chain keeps the
+/// same places, an id's entry replacing the one before it (`stage`). A build that stages no
+/// handshake extension holds no chain and writes the one entry of id 0x7 from its parameters, so
+/// one is its bound too.
+///
+/// Counted from the gates rather than read off the type because the heap profile's chain is a
+/// `Vec`; where the fixed chain is compiled, the assertion below it holds the two to one number,
+/// so a place added, removed or gated otherwise in one and not the other fails the build.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+pub const STAGED_CHAIN_MAX: usize = 1
+    + cfg!(all(
+        feature = "transport-qos",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extshm",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extauth",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "transport-multilink",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "transport-lowlatency",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize
+    + cfg!(all(
+        feature = "session-extcompression",
+        feature = "codec-init-body",
+        any(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept"
+        )
+    )) as usize;
+
+// The fixed chain is exactly `STAGED_CHAIN_MAX` places: laid out as it is declared (`repr(C)`),
+// with every field one place, it is the size of an array of that many places and of no other
+// length.
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast",
+    any(
+        not(feature = "tx-lend-only"),
+        feature = "session-unicast-accept",
+        feature = "transport-qos",
+        feature = "session-extshm",
+        feature = "session-extauth",
+        feature = "transport-multilink",
+        feature = "transport-lowlatency",
+        feature = "session-extcompression"
+    ),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+const _: () = assert!(
+    core::mem::size_of::<ExtChainBuf>()
+        == core::mem::size_of::<[Option<ExtEntryOwned>; STAGED_CHAIN_MAX]>(),
+    "STAGED_CHAIN_MAX is not the number of places of the fixed ExtChainBuf"
+);
 
 #[cfg(all(
     feature = "session-fixed-storage",
