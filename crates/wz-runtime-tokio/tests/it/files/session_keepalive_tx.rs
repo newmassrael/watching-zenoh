@@ -20,6 +20,8 @@
 //! `drive_session_until_terminal` wiring (deadline arming + emit +
 //! the lease-expiry interplay) over wall-clock-short leases, the R76b
 //! loop-testing convention.
+// Every test here reads the keepalive track, so a build without it has nothing to run.
+#![cfg(feature = "transport-keepalive")]
 
 use std::sync::Arc;
 

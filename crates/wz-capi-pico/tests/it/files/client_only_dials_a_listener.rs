@@ -14,11 +14,11 @@
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
 //! WZ_PICO_LISTENER_BIN=$PWD/target/release/examples/hold_a_listener \
 //!     cargo test --release -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,link-udp,query,queryable,liveliness-get \
-//!     --test client_only_dials_a_listener
+//!     --features os-host,link-udp,query,queryable,liveliness-get,object-pool \
+//!     --test it files::client_only_dials_a_listener::
 //! ```
 //!
-//! and again with `engine-tokio` in place of `engine-coop`, and each without `queryable`. Layer
+//! and again with `engine-tokio` in place of `os-host`, and each without `queryable`. Layer
 //! C1co runs the four (`scripts/run-ci.sh`).
 //!
 //! A missing example is a failure and not a skip: a test that passes by not running would say a

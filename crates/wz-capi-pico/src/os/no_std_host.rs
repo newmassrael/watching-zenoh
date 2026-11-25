@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What the library links in `std`'s place on a host when it is built without it (`os-posix` on a
-//! POSIX host, `os-windows` on Windows): the global allocator, the C library the platform exports
-//! forward to, and the panic handler, which aborts the process.
+//! What the library links in `std`'s place on a host (`os-host`): the global allocator, the C
+//! library the platform exports forward to, and the abort a panic ends in. The allocator and the
+//! panic handler are defined by the C library's artifact (`c_library_runtime!`), not by this rlib.
 //!
 //! On a POSIX host the heap is the process's own `malloc`, the one zenoh-pico allocates from and
 //! the one `z_malloc` hands a program (`os::malloc`), so the library adds no allocator of its own
@@ -52,7 +52,7 @@ mod c_heap {
     }
 
     /// The C library's heap.
-    pub(crate) struct CHeap;
+    pub struct CHeap;
 
     // SAFETY: every block is the C library's, of at least the layout's size and alignment, and is
     // released by the call that matches the one that took it (`malloc_fits` reads the same answer
@@ -134,7 +134,7 @@ mod process_heap {
     }
 
     /// The process heap.
-    pub(crate) struct ProcessHeap;
+    pub struct ProcessHeap;
 
     impl ProcessHeap {
         /// A block of `layout` with `flags` (`HEAP_ZERO_MEMORY` for a zeroed one). Null when the
@@ -220,19 +220,13 @@ mod process_heap {
 // object, so `z_condvar_init` failed and a timed wait returned at once (measured on the first
 // build). Named here, the link records the C library and the default version of every symbol.
 // `pthread` is its own library before glibc 2.34; the linker drops a library nothing needs.
-#[cfg(all(
-    feature = "os-posix",
-    not(feature = "std"),
-    target_os = "linux",
-    target_env = "gnu"
-))]
+#[cfg(all(feature = "os-host", target_os = "linux", target_env = "gnu"))]
 #[link(name = "pthread")]
 #[link(name = "c")]
 extern "C" {}
 // Every other POSIX host keeps its threads in its C library.
 #[cfg(all(
-    feature = "os-posix",
-    not(feature = "std"),
+    feature = "os-host",
     unix,
     not(all(target_os = "linux", target_env = "gnu"))
 ))]
@@ -248,8 +242,7 @@ extern "C" {}
 // for the runtime's own startup code; the system calls of this crate and its dependencies name
 // their DLLs themselves (`windows-sys`'s `raw-dylib` imports).
 #[cfg(all(
-    feature = "os-windows",
-    not(feature = "std"),
+    feature = "os-host",
     target_env = "msvc",
     not(target_feature = "crt-static")
 ))]
@@ -257,8 +250,7 @@ extern "C" {}
 #[link(name = "kernel32")]
 extern "C" {}
 #[cfg(all(
-    feature = "os-windows",
-    not(feature = "std"),
+    feature = "os-host",
     target_env = "msvc",
     target_feature = "crt-static"
 ))]
@@ -266,40 +258,19 @@ extern "C" {}
 #[link(name = "kernel32")]
 extern "C" {}
 
-// The library's own memory, in a build that has no `std` to give it. A test build links `std`,
-// whose allocator and panic handler are the test's.
-#[cfg(all(feature = "os-posix", not(feature = "std"), not(test), unix))]
-#[global_allocator]
-static HEAP: c_heap::CHeap = c_heap::CHeap;
-#[cfg(all(feature = "os-windows", not(feature = "std"), not(test), windows))]
-#[global_allocator]
-static HEAP: process_heap::ProcessHeap = process_heap::ProcessHeap;
+// The heap a library without `std` allocates from, the global allocator of the C library's
+// artifact (`c_library_runtime!`).
+#[cfg(all(feature = "os-host", unix))]
+pub use c_heap::CHeap as Heap;
+#[cfg(all(feature = "os-host", windows))]
+pub use process_heap::ProcessHeap as Heap;
 
-#[cfg(all(
-    any(feature = "os-posix", feature = "os-windows"),
-    not(feature = "std"),
-    not(test)
-))]
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    // SAFETY: ends the process; nothing returns.
-    unsafe { libc::abort() }
-}
-
-// The toolchain's `core` and `alloc` are prebuilt to unwind, and on a POSIX host their unwind
-// tables name the personality routine `std`'s unwinder defines (`DW.ref.rust_eh_personality`);
-// linking the library as one program does not take that reference out (measured: an undefined
-// `rust_eh_personality` in the fat-LTO build, which no C program linking the library resolves).
-// Nothing unwinds here: the library is built `panic = "abort"` and its panic handler aborts, so no
-// unwind ever starts and the routine is never called. It is the name answered, and if it were ever
-// reached, the answer is the panic handler's. Rebuilding `core` without unwinding (`-Z build-std`
-// with `panic_abort`) would take the reference out at its source, but needs a nightly toolchain,
-// and the pin is the stable one (`rust-toolchain.toml`). An MSVC build's tables name the C
-// runtime's `__CxxFrameHandler3` and not this routine, so `os-windows` defines none. The same
-// answer as the host program glue's (`wz_runtime_posix::posix_image_no_heap!`).
-#[cfg(all(feature = "os-posix", not(feature = "std"), not(test), unix))]
-#[no_mangle]
-extern "C" fn rust_eh_personality() -> ! {
+/// Ends the process: where a panic of the C library ends (`c_library_runtime!`), and the
+/// personality routine's answer if it were ever reached, since nothing unwinds. The prebuilt
+/// `core`'s unwind tables name that routine on a POSIX host; an MSVC build's name the C runtime's
+/// `__CxxFrameHandler3` instead.
+#[cfg(feature = "os-host")]
+pub fn abort() -> ! {
     // SAFETY: ends the process; nothing returns.
     unsafe { libc::abort() }
 }

@@ -11785,6 +11785,8 @@ mod send_deferral_tests {
     use wz_session_core::inbound::InboundFrame;
     use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
     use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+    // Named here, not through `super`: the module's own import of it is the multicast group's.
+    use wz_session_core::qos::Priority;
 
     /// A link with no room for a message that may not be dropped until the test opens it. A
     /// sender that asks for room while the link is shut waits, and is counted as waiting, until

@@ -14,10 +14,10 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread,config-document,object-pool \
+//!     --features os-host,peer,multi-thread,config-document,object-pool \
 //!     --test it files::matching_listener_refused::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicUsize, Ordering};

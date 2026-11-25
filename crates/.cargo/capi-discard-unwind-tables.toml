@@ -6,12 +6,12 @@
 # compiles, so the link discards them (`wz-capi-pico/link/discard-unwind-tables.ld`). Named on the
 # command line after the configuration of that form, with the host's own target, from `crates/`:
 #
-#   cargo build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+#   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
 #       --profile capi-nostd --config .cargo/capi-nostd.toml \
 #       --config .cargo/capi-discard-unwind-tables.toml --target x86_64-unknown-linux-gnu
 #
-# For that form only: a library with `std` unwinds a panic to the door that catches it, through
-# these tables, and its build script refuses this file (`wz-capi-pico/build.rs`). The script's path
+# For that form only: a library with `std` (the tokio engine's) unwinds a panic through these
+# tables, and the ABI crate's build script refuses this file (`wz-capi-pico/build.rs`). The script's path
 # is from `crates/`, the directory cargo runs the compiler and so the linker in for a member of
 # this workspace. The form is linked by GNU ld, named here (`-fuse-ld=bfd`, after any linker a
 # caller's own configuration names, so it is the one the C compiler takes): GNU ld honours the

@@ -453,8 +453,7 @@ rx-lent-only = []
 # value, whatever the policy of this crate's own tables: the domain of such a parameter stops at the
 # build's value (`limit_binding::LIMITS_LENT_AT_OPEN`), so a document stating more is refused by
 # name before any open instead of by the open's arena. A SELECTOR, named by the final build of a C
-# library on the cooperative engine (`wz-capi-pico`'s `engine-coop`, `os-posix`, `os-windows`,
-# `os-zephyr`) as `rx-lent-only` is, so a heap engine's sessions keep the whole range the
+# library on the cooperative engine (`wz-capi-pico`'s `os-host`, `os-zephyr`) as `rx-lent-only` is, so a heap engine's sessions keep the whole range the
 # declaration states.
 limits-lent-at-open = []
 # A session's storage is fixed at its open: the bytes it holds for the length of a handshake (the
@@ -463,13 +462,13 @@ limits-lent-at-open = []
 # build's sizes in the session's own storage, and a value past one is refused by name, never grown
 # into. `session-slot` turns it on; a heap engine's sessions keep their growable forms. A SELECTOR,
 # named by the final build of a C library on the cooperative engine (`wz-capi-pico`'s
-# `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) and by no dependency line.
+# `os-host`, `os-zephyr`) and by no dependency line.
 session-fixed-storage = []
 # The engine this build links keeps the key expressions a session declared on the session, one
 # table for every link it has (`declared_keyexprs`), so a link keeps no table of its own: the
 # link's growable one, a hash map of strings, is not compiled. A SELECTOR, named by the final build
-# of a C library on the cooperative engine (`wz-capi-pico`'s `engine-coop`, `os-posix`,
-# `os-windows`, `os-zephyr`) and by no dependency line, because the AP engine declares through
+# of a C library on the cooperative engine (`wz-capi-pico`'s `os-host`, `os-zephyr`) and by no
+# dependency line, because the AP engine declares through
 # its one link and reads its own aliases from that link's table; `wz-runtime-tokio` asserts at
 # build time that it is off (`declared_keyexprs::SESSION_KEEPS_KEYEXPRS`).
 session-keeps-keyexprs = []

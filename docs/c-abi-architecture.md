@@ -7,7 +7,7 @@ structure change of the pico and zenoh-c presets is judged against.
 
 ## 1. Why a new structure: what is measured
 
-The release form (`os-posix` / `os-windows`, no `std`, `capi-nostd` profile) against zenoh-pico
+The release form (`os-host`, no `std`, `capi-nostd` profile) against zenoh-pico
 built as the same build, function bytes with aliases of one address counted once (int5, 2026-11-23):
 
 | area | wz | zenoh-pico | ratio |

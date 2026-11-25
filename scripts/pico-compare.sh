@@ -172,6 +172,25 @@ pico_lib="$WZ_ARTIFACTS/target/zenoh-pico-build/lib"
 # codegen unit), so a comparison with the original reads the library that ships and every arm one profile.
 wz_profile=ship
 wz_lib="$WZ_ARTIFACTS/crates/target/$wz_profile"
+# The pico C library is a crate of its own, wz-capi-pico-lib (wz-capi-pico is the ABI's rlib). On the cooperative
+# engine it has no `std` (docs/win-budget/std-heap.md, S1) and is built as that library ships: the `capi-nostd`
+# profile and its configuration, for the host's own target, in a directory of its own. On the tokio engine it links
+# `std` and is built as the zenoh-c library is. pico_form sets the words and the directory of that build for
+# $wz_engine, once the engine is known.
+wz_pico_args=(--profile "$wz_profile")
+wz_pico_lib="$wz_lib"
+pico_form() {
+    local triple
+    if [ "$wz_engine" = coop ]; then
+        triple="$(rustc -vV | sed -n 's/^host: //p')"
+        [ -n "$triple" ] || { echo "pico-compare: NOT-MEASURED, rustc named no host target"; exit 2; }
+        wz_pico_args=(--profile capi-nostd --config .cargo/capi-nostd.toml --target "$triple")
+        wz_pico_lib="$WZ_ARTIFACTS/crates/target/$triple/capi-nostd"
+    else
+        wz_pico_args=(--profile "$wz_profile")
+        wz_pico_lib="$wz_lib"
+    fi
+}
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
@@ -187,6 +206,7 @@ resolve_wz_engine() {
     fi
     wz_engine="$(python3 -I scripts/lib/wz_config.py --bench-engine ${PICO_CMP_ENGINE:+"$PICO_CMP_ENGINE"})" \
         || { echo "pico-compare: NOT-MEASURED, the engine of the wz library did not resolve"; exit 2; }
+    pico_form
 }
 
 # wz_cargo_args <features>: the cargo words of the wz library on $wz_engine with <features> (a comma list, empty for
@@ -202,6 +222,7 @@ stamped_engine() {
         echo "pico-compare: PICO_CMP_ENGINE=$PICO_CMP_ENGINE, and the library PICO_CMP_NO_BUILD=1 finds is built on the $wz_engine engine" >&2
         exit 2
     fi
+    pico_form
 }
 
 if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ] \
@@ -213,7 +234,7 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
         || { echo "pico-compare: NOT-MEASURED, no cargo words for the $wz_engine engine"; exit 2; }
     rm -f "$out/wz-engine"
     # shellcheck disable=SC2086 # the cargo words are words on purpose
-    (cd crates && cargo build --profile "$wz_profile" -p wz-capi-pico $wz_args) >"$out/build-wz.log" 2>&1 \
+    (cd crates && cargo build "${wz_pico_args[@]}" -p wz-capi-pico-lib $wz_args) >"$out/build-wz.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the wz library did not build (see $out/build-wz.log)"; exit 2; }
     echo "$wz_engine" >"$out/wz-engine"
 fi
@@ -223,14 +244,14 @@ case "${1:-}" in
         ;;
 esac
 
-# THE WZ ARM OF THE INSTRUCTION COUNTS (subprofile, opprofile) is the library a release ships: wz-capi-pico for
+# THE WZ ARM OF THE INSTRUCTION COUNTS (subprofile, opprofile) is the library a release ships: wz-capi-pico-lib for
 # configs/zenoh-pico_defconfig under the limits and policies it sets, in the release's form (no_std, no heap after
 # the open) unless PICO_CMP_STDLIB names the other, built as the size gate builds that case: the same build as arm
 # W of `parity pico` (perf_matrix.py preset-arm). A count read off another form says nothing of what ships.
 # PICO_CMP_ENGINE does not apply: the defconfig states the engine. With PICO_CMP_NO_BUILD=1 the library of an
 # earlier build is read, and its record names its form.
 shipped_dir="$out/shipped"
-wz_bench_lib="$wz_lib"
+wz_bench_lib="$wz_pico_lib"
 case "${1:-}" in
     subprofile | opprofile)
         if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
@@ -267,7 +288,7 @@ build_example() {
         lib="$pico_lib"
         name=zenohpico
     else
-        lib="$wz_lib"
+        lib="$wz_pico_lib"
         name=wz_capi_pico
     fi
     cc -O2 "$examples/$example.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${example}_$variant" \
@@ -1078,7 +1099,7 @@ parity_build_pico() {
         || parity_fail "the standard library of the wz preset did not resolve (bench-stdlib said why above)"
     built="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" preset-arm --out "$dir" --original zenoh-pico \
         --stdlib "$stdlib")" \
-        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico was not built for the preset: $built"
+        || parity_fail_log "$dir/build-wz.log" "wz-capi-pico-lib was not built for the preset: $built"
     cp -a "$(dirname "$lib_p")"/libzenohpico.so* "$dir/lib-P/" || parity_fail "the pico library did not copy"
     for example in "${PARITY_PROGRAMS[@]}"; do
         for variant in P W; do
@@ -1322,7 +1343,7 @@ perf_external_arm() {
     fi
 }
 
-# perf_wz_arm <dir> <arm> <features>: wz-capi-pico in $wz_profile for its default features and <features> (a comma
+# perf_wz_arm <dir> <arm> <features>: wz-capi-pico-lib built as pico_form says for its default features and <features> (a comma
 # list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
 # <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
 # (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
@@ -1333,9 +1354,9 @@ perf_wz_arm() {
         || perf_fail "arm $arm has no build on the $wz_engine engine (wz_config.py --bench-cargo-args $wz_engine '$features')"
     report="$dir/build-wz-$arm.json"
     # shellcheck disable=SC2086 # the cargo words are words on purpose
-    (cd crates && cargo build --profile "$wz_profile" --message-format=json-render-diagnostics -p zenoh-pico-sys \
-        -p wz-capi-pico $args) >"$report" 2>"$dir/build-wz-$arm.log" \
-        || perf_fail "wz-capi-pico for arm $arm did not build (see $dir/build-wz-$arm.log)"
+    (cd crates && cargo build "${wz_pico_args[@]}" --message-format=json-render-diagnostics -p zenoh-pico-sys \
+        -p wz-capi-pico-lib $args) >"$report" 2>"$dir/build-wz-$arm.log" \
+        || perf_fail "wz-capi-pico-lib for arm $arm did not build (see $dir/build-wz-$arm.log)"
     inc="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pico-sys-include "$report")" \
         || perf_fail "the build of arm $arm named no single pico header arm"
     rm -rf "$dir/include-$arm" "$dir/lib-$arm"
@@ -1344,7 +1365,7 @@ perf_wz_arm() {
     python3 -I scripts/lib/wz_config.py --bench-config-h "$wz_engine" ${features:+"$features"} \
         >"$dir/include-$arm/zenoh-pico/config.h" \
         || perf_fail "the config.h of arm $arm did not render (wz_config.py --bench-config-h $wz_engine '$features')"
-    cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-$arm/" || perf_fail "the library of arm $arm did not copy"
+    cp "$wz_pico_lib/libwz_capi_pico.so" "$dir/lib-$arm/" || perf_fail "the library of arm $arm did not copy"
 }
 
 # recorded_engine <reference.json>: the engine arm W was built on, as the record of its build states it.

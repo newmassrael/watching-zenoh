@@ -362,13 +362,13 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     #
     # The leg is the TOKIO engine's build. `transport-link-quic`, `transport-link-tls` and
     # `transport-link-ws` select `engine-tokio`, and `src/lib.rs` refuses each beside the
-    # crate's default `engine-coop` by name, so the same list over the default features is a
-    # build that never compiles. The features are the crate's default list with `engine-coop`
+    # crate's default `os-host` by name, so the same list over the default features is a
+    # build that never compiles. The features are the crate's default list with `os-host`
     # replaced by the tokio option's of deploy/wz-config.toml (`wz_config.py --bench-cargo-args
     # tokio` prints them), spelled out because a leg's field is cargo features. The cooperative
     # engine's serial and unixpipe links are the legs after this one; its admin space is the
     # `resource-snapshot,peer,query,admin-space` leg's.
-    "wz-capi-pico|hook|-default,std,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+    "wz-capi-pico|hook|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
 unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
 transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
@@ -379,7 +379,7 @@ transport-link-ws|"
     # ships. These legs run it whole with the door, on each engine, the tokio one over the list of
     # the row above; a leg that names a file of it names the door too.
     "wz-capi-pico|hook|object-pool|--test-target=it"
-    "wz-capi-pico|hook|-default,std,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+    "wz-capi-pico|hook|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
 unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
 transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
@@ -490,7 +490,7 @@ transport-link-ws,object-pool|--test-target=it"
     # module paths.
     "wz-capi-pico|hook|\
         -default,\
-        engine-coop,\
+        os-host,\
         app-transport,\
         peer,\
         query,\
@@ -507,7 +507,7 @@ transport-link-ws,object-pool|--test-target=it"
     "wz-capi-pico|hook|app-transport,multicast-declarations,object-pool|--test=app_transport_doors"
     "wz-capi-pico|hook|\
         -default,\
-        engine-coop,\
+        os-host,\
         app-transport,\
         peer,\
         query,\
@@ -520,7 +520,7 @@ transport-link-ws,object-pool|--test-target=it"
     # The scout of an image (`scout-mcu`), over one datagram socket of the cooperative engine's
     # stack, here the host's: an open that names no locator scouts for the budget and finds nobody,
     # where a build that cannot scout answers at once. The C1co lane runs the same file with `scout`.
-    "wz-capi-pico|hook|-default,engine-coop,link-udp,scout-mcu,object-pool|--test=open_scouts_for_a_locator"
+    "wz-capi-pico|hook|-default,os-host,link-udp,scout-mcu,object-pool|--test=open_scouts_for_a_locator"
     "wz-capi-pico|hook|shared-key-ids,object-pool|--test=key_ids_tokio"
     # A session's batch size stated by its config's document (`wz/limits`) through the document door:
     # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
@@ -536,11 +536,11 @@ transport-link-ws,object-pool|--test-target=it"
     # ...`): every name says `time_base`, which is the filter. The tokio engine first (8), then the
     # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
-    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,connectivity,time-base|time_base"
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # The code a refused open of the cooperative engine answers (`coop_open_refusal_tests`, behind
     # the engine the default build does not name): an arena the memory cannot give is pico's out of
     # memory, a session limit over the build's value an invalid value.
-    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp|session::coop_open_refusal_tests::"
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|session::coop_open_refusal_tests::"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
@@ -617,7 +617,7 @@ transport-link-ws,object-pool|--test-target=it"
     # filter names both, and a listener's links are bounded as its engine bounds them. With the
     # document door, a session whose document lowers the batch size reports the lowered size.
     "wz-capi-pico|hook|session-memory|session_memory"
-    "wz-capi-pico|hook|-default,engine-coop,peer,multi-thread,link-udp,session-memory|session_memory"
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,session-memory|session_memory"
     "wz-capi-pico|hook|session-memory,config-document,object-pool|session_memory_door::a_document"
     # The rows of the process's machines in the report, which follow what its runtime lends them.
     "wz-capi-pico|hook|session-memory,supervision,e2e-supervision,message-catalog|session_memory::tests::the_process_rows"
@@ -2130,11 +2130,11 @@ the pinned OpenMetrics text describes a build without transport-stats' four coun
     # engine's, which a library names alone: every build of this crate the table spells keeps the
     # tokio engine on (no leg of it is `-default`), beside which `tls-mbedtls` is refused. The
     # census lists them in the crate's cooperative feature set. The cooperative engine runs them
-    # in `run-ci.sh`, the lane `C1co tls engine-coop`, with 2 passed guarded.
+    # in `run-ci.sh`, the lane `C1co tls os-host`, with 2 passed guarded.
     "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
-the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
+the cooperative engine's test, run by lane C1co tls os-host; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
     "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_another_certificate_does_not_open|\
-the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
+the cooperative engine's test, run by lane C1co tls os-host; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
     # The listener's event for a dropped handshake (`tests/tls_handshake_drop_event.rs`, needs
     # `tls-mbedtls` and `event-ring`): the same cooperative engine, run by lane C1co tls handshake
     # drop event, with 2 passed guarded.

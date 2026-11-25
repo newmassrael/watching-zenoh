@@ -139,7 +139,7 @@ std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # program that calls one session from two threads at once orders those calls itself, as it does
 # on zenoh-pico's single-threaded arm.
 threads = []
-# The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
+# The host without `std` (the pico C ABI's `os-host`, a POSIX host or Windows): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
 # library built without `std` runs the read task and holds the locks as one with `std` does, and
 # links no `critical-section` implementation, which it would export beside its C ABI.
@@ -365,7 +365,7 @@ declarations-synced-event = []
 # The lend-only send (`wz-session-core`'s `tx-lend-only`): every frame is encoded into a slot the
 # link lends from the session's arena, and a send that finds every slot out is refused and counted
 # (`SessionLinkActions::tx_refusals`), never built on the heap. A SELECTOR, off by default, named by
-# the C library's final build (`--features wz-capi-coop/tx-lend-only` beside `engine-coop`) and by
+# the C library's final build (`--features wz-capi-coop/tx-lend-only` beside `os-host`) and by
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]

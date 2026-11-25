@@ -34,7 +34,9 @@ of the stack a door names only stateless libraries (`wz-app-frame`, the models a
 
 `wz_additional_apart` takes the door modules out of the core's crate root and nothing else: the
 extension interface stays, since the other library calls it. It is a cfg given to the core's own
-compile (`cargo rustc -p wz-capi-pico -- --cfg wz_additional_apart`) and not a cargo feature,
+compile (given through the target's flags to the C library's build, `cargo build -p
+wz-capi-pico-lib --config "target.'cfg(unix)'.rustflags = ['--cfg', 'wz_additional_apart']"`,
+since `cargo rustc` would give it to the library's own crate alone) and not a cargo feature,
 because it takes exports away, and a feature that removes what another crate of a build relies on
 breaks feature unification. The core alone states the same capabilities as the one library and
 answers the same conformance digest: the pair is the build the profile describes.

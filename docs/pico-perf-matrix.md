@@ -34,13 +34,12 @@ carries it into `perf.json` (`record.engine`) and prints it, and the gate refuse
 table filled from the other engine. The other host modes of `scripts/pico-compare.sh` (`rtt`, `thr`,
 `nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings.
 
-**The standard library.** Arm W is the library the release ships: without `std` (`os-posix` in the
-place of `engine-coop`, docs/c-abi-engine-and-memory.md phase P4), the one form
+**The standard library.** Arm W is the library the release ships: without `std` (`os-host`,
+docs/c-abi-engine-and-memory.md phase P4), the one form
 `pico_windows_package.RELEASE_STDLIBS` names, unless `PICO_CMP_STDLIB` (`std` or `nostd`) names the
 other to compare them; `perf_matrix.py bench-stdlib` is where a run learns it, and a release of more than
-one form makes a run name the one it measures. Its feature list is the cooperative engine's with
-`os-posix` in the place of `engine-coop` and `std` left out (`wz_config.bench_named_features`, the rule
-the Windows package without `std` is made by); a capability that turns `std` on is refused by name, and
+one form makes a run name the one it measures. Its feature list is the cooperative engine's on the
+host, `os-host` (`wz_config.bench_named_features`, the rule the Windows package is made by); a capability that turns `std` on is refused by name, and
 so is the form without `std` on the tokio engine. `reference --stdlib` records it (`wz_stdlib` in
 `reference.json`), the run carries it into `perf.json` (`record.stdlib`; a reading that names none was
 made before the field, of a library with `std`), and the gate refuses a run against a table filled from
@@ -522,7 +521,7 @@ the single library without `std`, the form a release ships: `docs/c-abi-engine-a
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
-gh run download <platform run id> -n pico-windows-package-x64-single-nostd -D "$out"
+gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
 zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
 python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD

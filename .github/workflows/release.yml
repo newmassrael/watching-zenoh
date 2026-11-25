@@ -280,17 +280,16 @@ jobs:
 
   # The Windows packages of the pico C ABI library, one matrix row per width, made and tested by the
   # composite action the Platform workflow's `package-windows` job runs, so a release ships the
-  # package that job tests. The form is the library without `std` (`os-windows`, whose allocations
-  # after open the units of docs/c-abi-no-heap-pools.md take away), the one library, which is the only form a
-  # release carries (owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7): the library with `std`
-  # is built by the Platform lane to compare against, and the split form, whose additional library has
-  # no form without `std`, is not released. `pico_windows_package.py --release` refuses a set that
+  # package that job tests. The DLL is the C library without `std` (`os-host`, whose allocations
+  # after open the units of docs/c-abi-no-heap-pools.md take away), in the one library, which is the
+  # only form a release carries (owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7): the split form
+  # is built by the Platform lane and is not released. `pico_windows_package.py --release` refuses a set that
   # differs. A row whose build or test fails fails the run, and `windows-packages-attach`, which needs
   # every row, attaches nothing. It runs beside the release job rather than after it, so the release
   # waits on the longer of the two and not on their sum. No Rust cache, for the reasons the release
   # job and the Platform job each give.
   windows-packages:
-    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     permissions:
@@ -300,7 +299,6 @@ jobs:
       matrix:
         arch: [x64, x86]
         form: [single]
-        stdlib: [nostd]
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -314,12 +312,11 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
-          stdlib: ${{ matrix.stdlib }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}-${{ matrix.stdlib }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
           path: |
             ${{ steps.package.outputs.directory }}/*.zip
             ${{ steps.package.outputs.directory }}/*.zip.sha256

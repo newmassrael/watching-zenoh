@@ -52,12 +52,12 @@ config WZ_ENGINE_TOKIO
 	bool "The tokio engine: each session on a runtime of its own"
 	help
 	  `engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
-	  named in the place of the base's `engine-coop`.
+	  named in the place of the base's `os-host`; the library links `std`.
 
 config WZ_ENGINE_COOP
 	bool "The cooperative engine: each session stepped by the program or its read task"
 	help
-	  `engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
+	  `os-host`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
 	  zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
 	  arm, as zenoh-pico's are. It is the base's engine; a configuration that also turns on a
 	  capability only the tokio engine runs is refused when it is resolved, by the capability's name.

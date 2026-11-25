@@ -4,10 +4,10 @@
 # wz-capi-pico — §5.27 api-compat-pico, Round 1.
 #
 # A zenoh-pico-compatible C ABI (`z_*` / `zp_*` `#[no_mangle] extern "C"`
-# symbols) over the wz session engines (`engine-coop` by default). This is the
+# symbols) over the wz session engines (`os-host` by default). This is the
 # REVERSE of the `*-sys` crates (zenoh-pico-sys / freertos-sys bind TO a C
 # library); here wz EXPORTS a C ABI so a zenoh-pico C program can link the
-# wz cdylib as a binary drop-in.
+# wz library as a binary drop-in.
 #
 # Round 1 scope: a complete core session + pub/sub slice (config, session
 # open/close, keyexpr-view, bytes/slice/string, publisher, session-put,
@@ -17,15 +17,14 @@
 # Z_FEATURE-flag dependent; R1 ships this crate's own header, so a program
 # compiled against THIS header is self-consistent).
 #
-# crate-type = ["cdylib", "rlib"]:
-#   - cdylib: the C ABI artifact a pico program links.
-#   - rlib:   required so the `wz` facade can `pub use wz_capi_pico as
-#             capi_pico` (a pure cdylib is not a linkable Rust dependency),
-#             and so the Round-1 gate `#[test]` (tests/pubsub_roundtrip.rs)
-#             can drive the exported symbols in-process.
+# crate-type = ["rlib"]: the `wz` facade (`pub use wz_capi_pico as capi_pico`) and the
+# tests drive the exported symbols in-process, and they link `std`. The library a C program
+# links is `wz-capi-pico-lib`, the artifact of this rlib (`libwz_capi_pico.so`, `.a`), which
+# defines what a program without `std` needs (the global allocator, the panic handler) and so
+# cannot be the rlib a `std` program links.
 #
-# `std` is a default feature: without it the crate is `no_std` with `alloc`, for the
-# pico C ABI on an MCU (`std` below, docs/upstream-parity.md section 5a).
+# The crate is `no_std` with `alloc` outside its tests in every build but the tokio engine's,
+# on a host (`os-host`) and on an MCU (`os-zephyr`, docs/upstream-parity.md section 5a).
 
 [package]
 name = "wz-capi-pico"
@@ -38,38 +37,61 @@ repository.workspace = true
 readme.workspace = true
 description = "zenoh-pico-compatible C ABI (cdylib) over the wz cooperative session engine — a binary drop-in for zenoh-pico C programs (§5.27 api-compat-pico R1)."
 
-# The two configurations the crate can hold at once, which Layers C1bf and C1bz build in place of
-# `--all-features` (`scripts/lib/doc_feature_sets.py`): the library has one engine, so the
-# tokio engine's set gives up the cooperative forms and the cooperative set gives up the tokio
-# engine, and with it every capability only that engine runs.
+# The configurations the crate can hold at once, which Layers C1bf and C1bz build in place of
+# `--all-features` (`scripts/lib/doc_feature_sets.py`). A library has one engine and is for one
+# system (`src/lib.rs`), so the tokio engine's set gives up both cooperative systems, the host's
+# set gives up the tokio engine and the Zephyr image, and the image's set gives up the tokio engine,
+# the host and every capability `src/lib.rs` refuses beside `os-zephyr` alone: the host's
+# multicast scouting (and so `peer` and `multicast-transport`, which bring it), the planes that
+# need a host's lock, clock or threads, and the links over the host's own sockets, ttys and FIFOs.
 [package.metadata.wz-docs]
 feature-sets = [
-    { name = "tokio", except = ["engine-coop", "os-posix", "os-windows", "os-zephyr"] },
-    { name = "coop", except = ["engine-tokio"] },
+    { name = "tokio", except = ["os-host", "os-zephyr"] },
+    { name = "host", except = ["engine-tokio", "os-zephyr"] },
+    { name = "zephyr", except = [
+        "engine-tokio",
+        "os-host",
+        "scout",
+        "advanced",
+        "admin-space",
+        "clock-source",
+        "e2e-receiver",
+        "e2e-sender",
+        "e2e-supervision",
+        "event-ring",
+        "instance-key",
+        "message-catalog",
+        "raweth-transport",
+        "replay-cache",
+        "resource-snapshot",
+        "segment-sender",
+        "supervision",
+        "time-base",
+        "transport-link-serial",
+        "transport-link-unixpipe",
+        "transport-link-ws",
+    ] },
 ]
 
 [lib]
 name = "wz_capi_pico"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
-# R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. Without
-# one, a pico program that links this artifact by path records that absolute
-# build-time path in DT_NEEDED and cannot redistribute what it built.
+# The conformance digest of the build (`build.rs`). The SONAME is the artifact's
+# (`wz-capi-pico-lib/build.rs`).
 [build-dependencies]
-wz-cdylib-build = { path = "../wz-cdylib-build" }
 wz-conformance-build = { path = "../wz-conformance-build" }
 
 [features]
 # The default build is the zenoh-pico preset on the cooperative engine (docs/c-abi-engine-and-memory.md,
 # E1 and P1): every capability of pico's default build, and the wz-own planes the preset turns on,
-# over `engine-coop`. The tokio engine is built by naming it without the default features
+# over `os-host`. The tokio engine is built by naming it without the default features
 # (`--no-default-features --features engine-tokio,serial-drive-own-thread,rx-busy-poll,...`,
 # `wz_config.py --bench-cargo-args tokio` prints the list), until phase P5 takes it out of the C
 # library. `gossip` is off in the preset (decision Q7): it runs only on the tokio engine today.
 default = [
-    "std",
-    "engine-coop",
+    "os-host",
     "link-udp",
     "peer",
     "multicast-transport",
@@ -86,67 +108,33 @@ default = [
     "conformance-digest",
     "device-requires",
 ]
-# `std`: the library runs on a host and links its standard library. The engine port's threads,
-# sleep and locks are `wz-host-sync`'s (`wz-capi-port`'s `os`) as without it, the locks in its
-# `std` build, which take no memory when first taken on any host, and the host layer under the
-# platform exports (`src/os/unix.rs`, `src/os/windows.rs`). Without it the crate is `no_std` with
-# `alloc` and the ABI layer stands on the port alone, so that the pico C ABI on an MCU is this
-# crate and not a copy of it (`docs/upstream-parity.md` section 5a). The two host engines select
-# it; no capability does: a capability that needs a host's lock or clock is refused by name in a
-# build with none of `std`, `os-posix` and `os-windows` (`src/lib.rs`).
-std = [
-    "dep:wz-host-sync",
-    "wz-host-sync/std",
-    "wz-capi-port/std",
-    "wz-capi-coop?/std",
-    "wz-ext-pubsub?/std",
-    "wz-node-time?/std",
-]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
 # `engine-tokio`: `wz-capi-core`, a session on its own OS thread and tokio runtime. It carries
-# every capability below, so each capability that only it has selects it.
+# every capability below, so each capability that only it has selects it. It is the one build of
+# this crate that links `std` outside its tests (the tokio form, given no budget, leaves the C
+# library in phase P5 of `docs/c-abi-engine-and-memory.md`), so it names the host halves of the
+# port, the locks and the clocks that `std` answers.
 #
-# `engine-coop`: `wz-capi-coop`, one session the program steps with `zp_read` and
-# `zp_spin_once`, as zenoh-pico's single-threaded arm does, and a read task that is a thread
-# stepping it. It has the client's pub/sub surface (`z_open` dialling `tcp/` or `udp/`, the
-# publisher, the subscriber, key expressions, write filters, batching) over the host's sockets.
-#
-# A library has one engine (`docs/c-abi-engine-and-memory.md`, E1 and E3): a build that names
-# `engine-tokio`, or a capability only the tokio engine runs, beside `engine-coop`, `os-posix`,
-# `os-windows` or `os-zephyr` is refused by name (`src/lib.rs`), and so is a build that names
-# neither. The cooperative forms read and send only what the session lends (the session core's
-# lent-only receive, `rx-lent-only`, and `wz-capi-coop`'s `tx-lend-only`), so the C library has
-# no heap-backed form beside the no-heap one, and `wz-runtime-tokio` refuses to be built beside those selectors. The
-# session core is told its engine lends the bytes of the parameters bound at the open from the
-# session's arena (`wz-session-core/limits-lent-at-open`), so a document stating a batch or a lane
-# past the build's is refused by name at the door rather than by the arena when the session opens.
-# It is told too that its engine keeps a session's declared key expressions on the session for
-# every link (`wz-session-core/session-keeps-keyexprs`), so no link carries a table of them.
-# The selection reads features, not a config key, because what an engine does not have is not
-# linked.
-#
-# Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
-# (`wz-runtime-posix`: Linux, Android, QNX Neutrino, macOS, and Winsock on Windows), so each selects
-# `std`.
-#
-# The cooperative engine on a host (`engine-coop`, `os-posix`, `os-windows`) announces a session's
-# initial sequence number by the session core's compact function of the two zids
-# (`wz-session-core/initial-sn-compact`) in place of zenoh's SHAKE128 of them: zenoh-pico draws
-# that origin from its random source, so zenoh's derivation is no part of this ABI's contract, and
-# without it the Keccak permutation is not linked. The origin keeps what a derivation is for (one
-# pair of zids, one origin; each end its own). A build of the tokio engine alone keeps zenoh's.
-engine-tokio = ["std", "dep:wz-capi-core", "dep:tokio"]
-engine-coop = [
-    "std",
-    "dep:wz-capi-coop",
-    "dep:wz-runtime-posix",
-    "wz-session-core/rx-lent-only",
-    "wz-capi-coop/tx-lend-only",
-    "wz-session-core/initial-sn-compact",
-    "wz-session-core/limits-lent-at-open",
-    "wz-session-core/session-fixed-storage",
-    "wz-session-core/session-keeps-keyexprs",
+# The cooperative engine (`wz-capi-coop`, one session the program steps with `zp_read` and
+# `zp_spin_once` and a read task that is a thread stepping it) is named by the system it runs on:
+# `os-host` on a POSIX host or Windows, `os-zephyr` in a Zephyr image. A library has one engine
+# (`docs/c-abi-engine-and-memory.md`, E1 and E3): a build that names `engine-tokio`, or a
+# capability only the tokio engine runs, beside either is refused by name (`src/lib.rs`), and so
+# is a build that names none. The cooperative forms read and send only what the session lends
+# (`wz-session-core/rx-lent-only`, `wz-capi-coop/tx-lend-only`), so the C library has no
+# heap-backed form beside the no-heap one, and `wz-runtime-tokio` refuses to be built beside those
+# selectors. The session core is told its engine lends the bytes of the parameters bound at the
+# open from the session's arena (`wz-session-core/limits-lent-at-open`) and keeps a session's
+# declared key expressions on the session for every link (`session-keeps-keyexprs`).
+engine-tokio = [
+    "dep:wz-capi-core",
+    "dep:tokio",
+    "dep:wz-host-sync",
+    "wz-host-sync/std",
+    "wz-capi-port/std",
+    "wz-ext-pubsub?/std",
+    "wz-node-time?/std",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
 # own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
@@ -167,49 +155,23 @@ os-zephyr = [
     "wz-session-core/session-fixed-storage",
     "wz-session-core/session-keeps-keyexprs",
 ]
-# `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
-# (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
-# sockets, clock and random source as `engine-coop` runs it (`wz-runtime-posix`: Linux, Android,
-# QNX Neutrino, macOS), the host layer of `src/os/unix.rs` under the platform exports, the port's `os`
-# and the runtime's critical sections made of the host's own calls (`wz-capi-coop`'s `host-sys`
-# over `wz-host-sync`'s pthreads), and what a library without `std` links in its place
-# (`src/os/no_std_host.rs`): the C library's heap as the global allocator, which is the one
-# `z_malloc` hands a program, and a panic that aborts the process. A library without `std` does
-# not unwind, so it is built with the `capi-nostd` profile, and for the host's own target with the
-# configuration beside it (`.cargo/capi-nostd.toml`). As beside `os-zephyr`, a capability that
-# selects `std` is refused (`src/lib.rs`), and a build that also names a host engine keeps `std`.
-# Windows has its own form, `os-windows`, and a Windows build of this one is refused by name.
-os-posix = [
-    "dep:wz-capi-coop",
-    "dep:wz-host-sync",
-    "dep:wz-runtime-posix",
-    "wz-capi-coop/host-sys",
-    "wz-session-core/rx-lent-only",
-    "wz-capi-coop/tx-lend-only",
-    "wz-capi-port/os-sys",
-    "wz-session-core/initial-sn-compact",
-    "wz-session-core/limits-lent-at-open",
-    "wz-session-core/session-fixed-storage",
-    "wz-session-core/session-keeps-keyexprs",
-    # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
-    "wz-ext-pubsub?/host-sync",
-    "wz-node-time?/host-sync",
-]
-# `os-windows`: the same library on Windows without `std`, for the MSVC targets
-# (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`). The cooperative engine over the system's own
-# calls (`wz-runtime-posix`'s Windows module: Winsock sockets waited on with `WSAPoll`, the
-# performance counter, the system's preferred random number generator, the precise system time),
-# the host layer of `src/os/windows.rs` under the platform exports, the port's `os` and the
-# runtime's critical sections made of the slim reader/writer lock, the condition variable and the
-# threads of Win32 (`wz-capi-coop`'s `host-sys` over `wz-host-sync`), and what a library without
-# `std` links in its place (`src/os/no_std_host.rs`): the process heap (`HeapAlloc`) as the
-# global allocator, the C runtime the platform exports forward to, and a panic that aborts the
-# process. Built as `os-posix` is, with the `capi-nostd` profile and its configuration for the
-# target named with `--target`. The list is `os-posix`'s: the two forms differ by the host each
-# names, which the sources read from the target. A build for any other target is refused by name,
-# and so is a build that names `os-posix` or `os-zephyr` beside it or a capability that selects
-# `std`, as beside `os-posix` (`src/lib.rs`).
-os-windows = [
+# `os-host`: the library on a host, without `std` (`docs/win-budget/std-heap.md`, S1: a C
+# library has no `std` form). The cooperative engine over the host's sockets, clock and random
+# source (`wz-runtime-posix`: Linux, Android, QNX Neutrino and macOS through POSIX, Windows through
+# Winsock, the performance counter and the system's generator), the host layer of `src/os/unix.rs`
+# or `src/os/windows.rs` under the platform exports, and the port's `os` and the runtime's
+# critical sections made of the host's own calls (`wz-capi-coop`'s `host-sys` over
+# `wz-host-sync`: pthreads, or Win32's slim lock, condition variable and threads). Which host is
+# read from the target, so one feature names both; a target that is neither a POSIX host nor an
+# MSVC Windows target is refused by name (`src/lib.rs`). This crate is the rlib: what a program
+# without `std` links in its place (the host's heap as the global allocator, a panic that aborts)
+# is the C library's artifact, `wz-capi-pico-lib`, built with the `capi-nostd` profile and its
+# configuration (`.cargo/capi-nostd.toml`), so a Rust program or test linking this crate keeps
+# `std`'s own. The cooperative engine on a host announces a session's initial sequence number by
+# the session core's compact function of the two zids (`initial-sn-compact`) in place of zenoh's
+# SHAKE128 of them: zenoh-pico draws that origin from its random source, so the derivation is no
+# part of this ABI's contract, and the Keccak permutation is not linked.
+os-host = [
     "dep:wz-capi-coop",
     "dep:wz-host-sync",
     "dep:wz-runtime-posix",
@@ -348,7 +310,7 @@ liveliness-get = [
 # on the runtime's advanced features, the cooperative engine's `ticker` is the periodic job the
 # heartbeat and the sweeps are, and a build without either carries none.
 #
-# It selects no `std`: beside `os-posix` or `os-windows` the cache's and the subscriber's locks
+# It selects no `std`: beside `os-host` the cache's and the subscriber's locks
 # and the node clock's wall clock are the host's own calls (`wz-host-sync`). An image has neither, and a build
 # with neither is refused by name (`src/lib.rs`).
 advanced = [
@@ -430,8 +392,8 @@ session-memory = ["unstable-api", "wz-capi-core?/session-memory"]
 # profile's header describes, put on a publisher or handed to a callback. wz's own, which zenoh-pico
 # has not, so off as the reference build is, and part of the unstable surface: it implies
 # `unstable-api`. The piece writer is `wz-app-frame`'s, the one the zenoh-c ABI's doors of the same
-# capability write with. Each sender is held under the host's lock (`std`, `os-posix` or
-# `os-windows`; src/lib.rs refuses a build with none). A put is the publisher's, which both
+# capability write with. Each sender is held under the host's lock (`os-host`, or `std`'s
+# beside `engine-tokio`; src/lib.rs refuses a build with none). A put is the publisher's, which both
 # engines have, so it selects neither and forwards weakly.
 segment-sender = [
     "unstable-api",
@@ -469,7 +431,7 @@ e2e-supervision = [
 # zenoh-c ABI's default and off in this one's (`default_off_abis` in the declaration): wz's own,
 # which zenoh-pico has not, and part of the unstable surface. The frame writer is `wz-app-frame`'s.
 # Each sender is held under the host's lock, `std`'s or, in a host library without `std`,
-# `wz-host-sync`'s (`os-posix`, `os-windows`), so it selects no `std`; it touches no session, so
+# `wz-host-sync`'s (`os-host`), so it selects no `std`; it touches no session, so
 # it selects neither engine and forwards weakly.
 e2e-sender = [
     "unstable-api",
@@ -741,7 +703,7 @@ transport-link-tls = ["engine-tokio", "dep:wz-tls-pem", "wz-capi-core/transport-
 # the tokio one (rustls): a build names the secure channel it wants, and with it the one engine
 # the library has. The default features name the cooperative engine, so a default build takes it
 # with `--features tls-mbedtls`; beside the tokio engine it is refused.
-tls-mbedtls =["engine-coop", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
+tls-mbedtls =["os-host", "dep:wz-tls-pem", "wz-capi-coop/tls-mbedtls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
 # `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds. It selects no engine: the tokio
@@ -813,14 +775,14 @@ required-features = ["app-transport", "peer", "query", "queryable", "multi-threa
 # with the tokio engine compiles none of it (the file is `cfg(not(feature = "engine-tokio"))`).
 [[test]]
 name = "no_heap_after_open"
-required-features = ["engine-coop", "app-transport", "peer", "query", "queryable", "multi-thread"]
+required-features = ["os-host", "app-transport", "peer", "query", "queryable", "multi-thread"]
 
 # What a session's open allocates, phase by phase, on the cooperative engine: the reservations a
 # measurement of the library's memory against zenoh-pico's is read from. An executable of its own
 # because its `#[global_allocator]` records them; its test is `#[ignore]`d.
 [[test]]
 name = "open_heap"
-required-features = ["engine-coop", "peer", "multi-thread"]
+required-features = ["os-host", "peer", "multi-thread"]
 
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
@@ -846,11 +808,11 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 # arrived: two ABIs, one session model. See wz-capi-core's manifest for why
 # duplicating it was the worse option.
 wz-capi-core = { path = "../wz-capi-core", default-features = false, optional = true }
-# The cooperative engine (`engine-coop`), over the host's sockets and clock
+# The cooperative engine (`os-host`, `os-zephyr`), over the host's sockets and clock
 # (`wz-runtime-posix`). Its runtime's critical sections are a lock of the process (the
-# engine selects the runtime's `host-lock`), so this library links no `critical-section`
+# engine selects the runtime's `host-lock-sys`), so this library links no `critical-section`
 # implementation and exports nothing beside its C ABI. Without its default features: its host half
-# comes with this crate's `std`.
+# comes with `os-host`.
 wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = true }
 # The PEM bytes a `Z_CONFIG_TLS_*` key names, read from a file path or a base64 token. This ABI is
 # the edge that holds the key spellings, so it resolves "path or base64" once, here, and hands PEM
@@ -859,8 +821,7 @@ wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = 
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
 # The host's lock and condition variable, with `std` and without, which the doors of the additional
-# features hold and wait on, and its threads and monotonic clock without `std` (`os-posix`,
-# `os-windows`).
+# features hold and wait on, and its threads and monotonic clock without `std` (`os-host`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 # The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
 # sockets as the session's links on the heap profile, the kernel's tick as its clock, and the
@@ -893,7 +854,7 @@ wz-app-frame = { path = "../wz-app-frame", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
 # layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1). Without its
-# default features: its host half comes with this crate's `std`.
+# default features: its host half comes with `os-host` (or `std`'s with `engine-tokio`).
 wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # The tokio RUNTIME is not a dependency of this crate: it is the tokio engine's
 # (`wz-capi-core`), and the modules of the capabilities only that engine has reach
@@ -1018,7 +979,7 @@ libc = "0.2"
 # (the async runtime reaches it), so this adds no new third-party crate; each feature
 # below is one namespace the file calls into, and nothing else is enabled.
 # `System_Memory` is the process heap the library's own memory comes from in a build
-# without `std` (`os-windows`, `src/os/no_std_host.rs`).
+# without `std` (`os-host` on Windows, `src/os/no_std_host.rs`).
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
@@ -1047,7 +1008,7 @@ base64 = "0.22"
 # The port pickers (`free_port`) and the self-signed `localhost` certificate of the TLS and QUIC
 # tests, without the default `sessions`: those fixtures build on the tokio engine, and a test build
 # of the cooperative engine must not link it (`wz-runtime-tokio` refuses to be built beside the
-# lent-only selectors `engine-coop` names). The tests that drive the runtime's own sessions beside
+# lent-only selectors `os-host` names). The tests that drive the runtime's own sessions beside
 # the C ABI's (a wz peer, a router) reach it as the library does, through the engine they are
 # gated on (`wz_capi_core::runtime`, behind `engine-tokio`), so the runtime has no edge here.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", default-features = false, features = [

@@ -6,10 +6,9 @@
 //! timestamp reads (`docs/upstream-parity.md` section 5a, E2).
 //!
 //! The engine names none of them: `CoopEngine::open` takes the four as values, so the ABI hands it
-//! the ones of its host, in one place. On a host (`engine-coop`, or `os-posix` and `os-windows`
-//! without `std`) they are `wz-runtime-posix`'s, the process's sockets and clocks (on Windows its
+//! the ones of its host, in one place. On a host (`os-host`) they are `wz-runtime-posix`'s, the process's sockets and clocks (on Windows its
 //! `windows` module's, Winsock and the system's counter, generator and time); in a Zephyr image
-//! (`os-zephyr`, without `std`) they are `wz-runtime-zephyr`'s, the kernel's own sockets, its
+//! (`os-zephyr`) they are `wz-runtime-zephyr`'s, the kernel's own sockets, its
 //! tick, and the board's random source and wall clock. A build that names both keeps the host's, as the platform exports' host layer does
 //! (`os`). Both stacks dial `udp/` and `tcp/` and bind on every interface of the node, so a config
 //! reads the same on either; a `tls/` dial is the host's (`tls-mbedtls`), which an image refuses as
@@ -17,10 +16,7 @@
 
 // Each system's answers are a module of its own name, and the one this build runs on is re-exported
 // below: the rest of the crate and `scouting` name the items, never the module.
-#[cfg(all(
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    not(windows)
-))]
+#[cfg(all(feature = "os-host", not(windows)))]
 mod posix_host {
     /// The host's sockets as the session's links: without its datagram links in a build without
     /// pico's unicast UDP link (`link-udp`).
@@ -150,10 +146,7 @@ mod posix_host {
 // performance counter, the system's random number generator, the precise system time and
 // Winsock. A config that carries the program's transport (`app-transport`) opens no socket of
 // these: its links are the program's, and only the clock and the random source are the host's.
-#[cfg(all(
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    windows
-))]
+#[cfg(all(feature = "os-host", windows))]
 mod windows_host {
     /// Winsock's sockets as the session's links: without its datagram links in a build without
     /// pico's unicast UDP link (`link-udp`).
@@ -230,7 +223,7 @@ mod windows_host {
 // The cooperative engine's host is a system's calls, and a host whose calls no module above names
 // has none: refused here by name, rather than by the empty runtime crate the open would reach.
 #[cfg(all(
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
+    feature = "os-host",
     not(any(
         target_os = "linux",
         target_os = "android",
@@ -247,10 +240,8 @@ compile_error!(
 
 #[cfg(all(
     feature = "os-zephyr",
-    not(feature = "engine-coop"),
-    not(feature = "os-posix"),
-    not(feature = "os-windows"),
-    not(feature = "std")
+    not(feature = "os-host"),
+    not(feature = "engine-tokio")
 ))]
 mod zephyr_host {
     /// The kernel's tick rate as the image's build states it (`CONFIG_SYS_CLOCK_TICKS_PER_SEC`,
@@ -306,22 +297,14 @@ mod zephyr_host {
     pub(crate) type Datagram = wz_runtime_zephyr::net::ZephyrUdpSocket;
 }
 
-#[cfg(all(
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    not(windows)
-))]
+#[cfg(all(feature = "os-host", not(windows)))]
 pub(crate) use posix_host::*;
-#[cfg(all(
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-windows"),
-    windows
-))]
+#[cfg(all(feature = "os-host", windows))]
 pub(crate) use windows_host::*;
 #[cfg(all(
     feature = "os-zephyr",
-    not(feature = "engine-coop"),
-    not(feature = "os-posix"),
-    not(feature = "os-windows"),
-    not(feature = "std")
+    not(feature = "os-host"),
+    not(feature = "engine-tokio")
 ))]
 pub(crate) use zephyr_host::*;
 
@@ -363,7 +346,7 @@ pub(crate) use scouting::*;
 
 // A host build's answers, read as the ABI reads them. The open over the links is the engine's
 // tests' and the round trips' (`tests/`), which dial through `links()` on every cooperative build.
-#[cfg(all(test, feature = "engine-coop"))]
+#[cfg(all(test, feature = "os-host"))]
 mod tests {
     use super::*;
 

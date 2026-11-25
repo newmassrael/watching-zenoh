@@ -900,37 +900,87 @@ pub mod common {
     /// shaped library at link time.
     ///
     /// The ENGINE the artifact runs its sessions on is a second axis of the same ABI
-    /// (`docs/capi-pico-on-coop-engine.md`): the default build is the tokio engine's, and
-    /// `WZ_PICO_ENGINE=coop` names the cooperative engine's, a build of its own in
+    /// (`docs/capi-pico-on-coop-engine.md`): unset or `tokio`, `WZ_PICO_ENGINE` names the tokio
+    /// engine's library, and `coop` the cooperative engine's, a build of its own in
     /// [`PICO_COOP_TARGET_DIR`] because each build is `libwz_capi_pico.so` and a shared
     /// directory would hold whichever ran last. The programs and the header arm are the same;
     /// only the library they link differs, which is what makes one file the witness of both.
+    /// Both are the C library's crate, `wz-capi-pico-lib` (the ABI crate is an rlib); where each
+    /// lands is [`pico_cdylib_candidates`].
     pub fn wz_capi_pico_cdylib() -> PathBuf {
-        let crates_dir = project_root().join("crates");
-        let target = artifact("crates").join(if pico_engine_is_coop() {
-            PICO_COOP_TARGET_DIR
+        let coop = pico_engine_is_coop();
+        let target = artifact("crates").join(if coop { PICO_COOP_TARGET_DIR } else { "target" });
+        let features = if coop {
+            "$(python3 ../scripts/lib/wz_config.py --bench-cargo-args coop)"
         } else {
-            "target"
-        });
-        let candidates = [
-            target.join("debug/libwz_capi_pico.so"),
-            target.join("release/libwz_capi_pico.so"),
-        ];
+            "$(python3 ../scripts/lib/wz_config.py --bench-cargo-args tokio transport-link-tls)"
+        };
+        find_pico_cdylib(&target, coop, || {
+            format!(
+                "from crates/, run `{}`",
+                pico_cdylib_build_words(features, &target, coop)
+            )
+        })
+    }
+
+    /// The host's target triple, the directory a build for the host's own target (`--target`)
+    /// puts its products under: `<target dir>/<triple>/<profile>/`. Set by this crate's build
+    /// script, which is the one place cargo names it.
+    pub const HOST_TARGET: &str = env!("WZ_INTEGRATION_TESTS_HOST_TARGET");
+
+    /// The profile the cooperative engine's C library is built with. That library has no `std`
+    /// form and so does not unwind, which no other profile builds (`crates/wz-capi-pico-lib`).
+    pub const PICO_NOSTD_PROFILE: &str = "capi-nostd";
+
+    /// Where a build of the pico C library into the target directory `target` puts it: the
+    /// cooperative engine's (`coop`), built by [`PICO_NOSTD_PROFILE`] for [`HOST_TARGET`], in
+    /// that one directory; the tokio engine's, built without `--target`, in either profile's.
+    pub fn pico_cdylib_candidates(target: &Path, coop: bool) -> Vec<PathBuf> {
+        if coop {
+            vec![target
+                .join(HOST_TARGET)
+                .join(PICO_NOSTD_PROFILE)
+                .join("libwz_capi_pico.so")]
+        } else {
+            vec![
+                target.join("debug/libwz_capi_pico.so"),
+                target.join("release/libwz_capi_pico.so"),
+            ]
+        }
+    }
+
+    /// The cargo command, run from `crates/`, that builds the pico C library with the cargo
+    /// feature words `features` into `target`, where [`pico_cdylib_candidates`] looks for it.
+    pub fn pico_cdylib_build_words(features: &str, target: &Path, coop: bool) -> String {
+        let form = if coop {
+            format!(
+                " --profile {PICO_NOSTD_PROFILE} --config .cargo/capi-nostd.toml \
+                 --target {HOST_TARGET}"
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "cargo build -p wz-capi-pico-lib {features}{form} --target-dir {}",
+            target.display()
+        )
+    }
+
+    /// The first of [`pico_cdylib_candidates`] on disk, held not to be older than the ABI
+    /// crate's sources; with none there, a panic naming the candidates and `how` to build one.
+    fn find_pico_cdylib(target: &Path, coop: bool, how: impl FnOnce() -> String) -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = pico_cdylib_candidates(target, coop);
         for c in &candidates {
             if c.is_file() {
                 assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
                 return c.clone();
             }
         }
-        panic!(
-            "libwz_capi_pico.so not found in {candidates:?}; run `cargo build -p wz-capi-pico` \
-             (for `WZ_PICO_ENGINE=coop`, with the features of Layer E's cooperative leg and \
-             `--target-dir {}`) first",
-            artifact("crates").join(PICO_COOP_TARGET_DIR).display()
-        );
+        panic!("libwz_capi_pico.so is not in {candidates:?}; {}", how());
     }
 
-    /// The target directory, under `crates/`, the cooperative engine's `wz-capi-pico` lands in.
+    /// The target directory, under `crates/`, the cooperative engine's C library lands in.
     /// A tree path: read it through [`artifact`], which moves it under the artifact root.
     pub const PICO_COOP_TARGET_DIR: &str = "target/wz-capi-pico-coop";
 
@@ -1064,32 +1114,20 @@ pub mod common {
             if self == Self::MultiThreaded {
                 return wz_capi_pico_cdylib();
             }
-            let crates_dir = project_root().join("crates");
+            let coop = pico_engine_is_coop();
             let target = artifact("crates").join(self.wz_target_dir());
-            let candidates = [
-                target.join("debug/libwz_capi_pico.so"),
-                target.join("release/libwz_capi_pico.so"),
-            ];
-            for c in &candidates {
-                if c.is_file() {
-                    assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
-                    return c.clone();
-                }
-            }
-            panic!(
-                "wz's {self:?} libwz_capi_pico.so is not in {candidates:?}; from \
-                 crates/, run `cargo build -p wz-capi-pico $(python3 \
-                 ../scripts/lib/wz_config.py --features pico{} {}) --target-dir {}`",
-                if pico_engine_is_coop() {
-                    " --engine coop"
-                } else {
-                    ""
-                },
-                zenoh_pico_generated_include_dir(self.cmake_suffix())
-                    .join("zenoh-pico/config.h")
-                    .display(),
-                target.display()
-            );
+            find_pico_cdylib(&target, coop, || {
+                format!(
+                    "this is wz's {self:?} build: from crates/, run `{}`, each feature of \
+                     `python3 ../scripts/lib/wz_config.py --features pico --engine {} {}` \
+                     named through the C library's dependency on the ABI crate (`abi/<feature>`)",
+                    pico_cdylib_build_words("<those features>", &target, coop),
+                    if coop { "coop" } else { "tokio" },
+                    zenoh_pico_generated_include_dir(self.cmake_suffix())
+                        .join("zenoh-pico/config.h")
+                        .display(),
+                )
+            })
         }
     }
 
@@ -1526,7 +1564,8 @@ pub mod common {
              is not a dependency of this crate), so this run would witness code that \
              is no longer in the tree -- including a damage edit that would read as \
              'not load-bearing'.\n\
-             run: cargo build -p {krate}",
+             rebuild the library that links {krate} (the pico ABI's is the C library \
+             crate, wz-capi-pico-lib)",
             cdylib.display(),
         );
     }
@@ -8285,7 +8324,52 @@ mod tests {
         ZENOHD_TCP_ACCEPT_BUDGET,
     };
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    /// The cooperative engine's pico C library has no `std` form, so it is built by the profile
+    /// that does not unwind for the host's own target, and read from that one directory: never
+    /// from `debug` or `release`, where a build of the ABI crate's rlib or another engine lands.
+    #[test]
+    fn the_cooperative_pico_library_is_read_from_the_host_target_nostd_profile() {
+        use super::common::{pico_cdylib_candidates, HOST_TARGET};
+        assert_eq!(
+            pico_cdylib_candidates(Path::new("/t"), true),
+            vec![PathBuf::from(format!(
+                "/t/{HOST_TARGET}/capi-nostd/libwz_capi_pico.so"
+            ))]
+        );
+    }
+
+    /// The tokio engine's library is built without `--target`, by either profile.
+    #[test]
+    fn the_tokio_pico_library_is_read_from_either_profile_without_a_target() {
+        assert_eq!(
+            super::common::pico_cdylib_candidates(Path::new("/t"), false),
+            vec![
+                PathBuf::from("/t/debug/libwz_capi_pico.so"),
+                PathBuf::from("/t/release/libwz_capi_pico.so"),
+            ]
+        );
+    }
+
+    /// The command a missing library names builds the C library's crate into the directory the
+    /// lookup reads: for the cooperative engine with the profile, its configuration and the host
+    /// target that put it there.
+    #[test]
+    fn the_pico_library_build_command_lands_where_the_lookup_reads() {
+        use super::common::{pico_cdylib_build_words, HOST_TARGET};
+        assert_eq!(
+            pico_cdylib_build_words("--features abi/os-host", Path::new("/t"), true),
+            format!(
+                "cargo build -p wz-capi-pico-lib --features abi/os-host --profile capi-nostd \
+                 --config .cargo/capi-nostd.toml --target {HOST_TARGET} --target-dir /t"
+            )
+        );
+        assert_eq!(
+            pico_cdylib_build_words("--features abi/engine-tokio", Path::new("/t"), false),
+            "cargo build -p wz-capi-pico-lib --features abi/engine-tokio --target-dir /t"
+        );
+    }
 
     /// The devices holding a group are read off the kernel's table: a device is named
     /// when one of ITS groups is the one asked for, a group another device holds does

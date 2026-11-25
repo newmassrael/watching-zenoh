@@ -4001,7 +4001,6 @@ dependencies = [
  "wz-capi-coop",
  "wz-capi-core",
  "wz-capi-port",
- "wz-cdylib-build",
  "wz-codecs",
  "wz-conformance-build",
  "wz-ext-pubsub",
@@ -4022,6 +4021,14 @@ dependencies = [
  "wz-cdylib-build",
  "wz-host-sync",
  "wz-session-core",
+]
+
+[[package]]
+name = "wz-capi-pico-lib"
+version = "0.1.0"
+dependencies = [
+ "wz-capi-pico",
+ "wz-cdylib-build",
 ]
 
 [[package]]

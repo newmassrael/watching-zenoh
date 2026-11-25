@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The pico C ABI's library, the artifact a zenoh-pico C program links (`libwz_capi_pico.so` and
+# `.a`, `wz_capi_pico.dll`): `wz-capi-pico` linked as one program, with what a program without
+# `std` takes from its last Rust crate (the global allocator over the host's heap, a panic handler
+# that aborts, the personality routine the prebuilt `core` names), which `wz-capi-pico`'s
+# `c_library_runtime!` defines here (docs/win-budget/std-heap.md, S1 and S2). The rlib stays free
+# of them, so a Rust program or test links it beside `std`.
+#
+# Built with the `capi-nostd` profile and its configuration, for the host's own target, from
+# `crates/`; the capabilities are the ABI crate's features, named through the dependency:
+#
+#   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
+#       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu
+#
+# The library is without `std` under the profiles it ships with, which do not unwind; under one that
+# unwinds (`dev`, `release`, `ship`), the workspace's own build and lint of it, it links `std`,
+# since a stable toolchain builds no unwinding library without it (`src/lib.rs`). The tokio
+# engine's library (`abi/engine-tokio`) links `std`, defines none of those items and builds with
+# any profile. Every export is the ABI crate's `#[no_mangle]`
+# function; that each reaches the artifact is held by the export check of the library's symbols
+# (`nm`, `scripts/lib/capi_abi_pin.py`).
+
+[package]
+name = "wz-capi-pico-lib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The zenoh-pico-compatible C library (cdylib, staticlib) of wz-capi-pico, without std: the artifact a zenoh-pico C program links."
+
+[lib]
+name = "wz_capi_pico"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib"]
+# The library is a C program's, with no Rust test of its own: the ABI crate's tests drive the same
+# exports in-process.
+test = false
+doctest = false
+bench = false
+
+# The SONAME of the shared library: without one, a program that links it by path records that
+# absolute build-time path in DT_NEEDED and cannot redistribute what it built.
+[build-dependencies]
+wz-cdylib-build = { path = "../wz-cdylib-build" }
+
+[features]
+# The ABI crate's own default build, the zenoh-pico preset on the cooperative engine.
+default = ["abi/default"]
+
+[dependencies]
+# Named `abi`, since this artifact's library is `wz_capi_pico` too, the name C programs link.
+abi = { package = "wz-capi-pico", path = "../wz-capi-pico", default-features = false }
+
+[lints]
+workspace = true

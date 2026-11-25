@@ -403,16 +403,16 @@ impl InCallback {
 }
 
 /// How many of the program's callbacks the library did not run because the table that marks the
-/// threads inside one was full (`InCallback::enter` answered `None`); 0 in a build with `std`,
-/// which marks every thread and so runs every callback.
+/// threads inside one was full (`InCallback::enter` answered `None`); 0 in the tokio engine's
+/// build, which marks every thread and so runs every callback.
 #[no_mangle]
 pub extern "C" fn wz_ext_callbacks_refused() -> usize {
     callback_depth::refused()
 }
 
-/// How many of the program's callbacks each thread is running: a thread-local count on a host,
-/// whose callbacks are on the hot path of every delivery.
-#[cfg(feature = "std")]
+/// How many of the program's callbacks each thread is running: a thread-local count in the tokio
+/// engine's build, which links `std` and whose callbacks are on the hot path of every delivery.
+#[cfg(feature = "engine-tokio")]
 mod callback_depth {
     use core::cell::Cell;
 
@@ -444,14 +444,14 @@ mod callback_depth {
     }
 }
 
-/// How many of the program's callbacks each thread is running, without `std`: one entry for each
+/// How many of the program's callbacks each thread is running in a library without `std`: one entry for each
 /// thread in a callback, keyed by the thread's word, in a table of the process whose room is fixed
 /// by the build, because an MCU kernel gives a Rust image no thread-local storage and a session
 /// takes no heap after it opens. It is asked on every delivery, so it takes no lock: a thread
 /// claims a free entry with one compare-and-swap and is then the only one to write it until it
 /// frees it, and a thread looks for nothing but its own word, which only its own writes put in the
 /// table. Compiled for the host's tests too, so the table is run where the tests run.
-#[cfg(any(not(feature = "std"), test))]
+#[cfg(any(not(feature = "engine-tokio"), test))]
 mod callback_table {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -562,7 +562,7 @@ mod callback_table {
                 let at = self
                     .used
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                        (used < N).then_some(used + 1)
+                        used.checked_add(1).filter(|&next| next <= N)
                     })
                     .ok()?;
                 if self.entries.get(at)?.claim(thread) {
@@ -598,12 +598,10 @@ mod callback_table {
             let Some(entry) = self.entries.get(at) else {
                 return;
             };
-            let depth = entry.depth.load(Ordering::Relaxed);
-            if depth > 1 {
-                entry.depth.store(depth - 1, Ordering::Relaxed);
-            } else {
+            match entry.depth.load(Ordering::Relaxed).checked_sub(1) {
+                Some(rest) if rest > 0 => entry.depth.store(rest, Ordering::Relaxed),
                 // Release: the thread that claims the entry next writes its depth after this one.
-                entry.thread.store(NO_THREAD, Ordering::Release);
+                _ => entry.thread.store(NO_THREAD, Ordering::Release),
             }
         }
     }
@@ -658,7 +656,7 @@ mod callback_table {
     }
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(feature = "engine-tokio"))]
 use callback_table as callback_depth;
 
 #[cfg(test)]

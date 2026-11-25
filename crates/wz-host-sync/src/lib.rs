@@ -45,6 +45,9 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use core::time::Duration;
 
+// Each host's wait and wake on a word are out of line (`#[inline(never)]` in its module): each is a
+// call of the system, beside which a call of a function costs nothing, and a lock, a condition
+// variable or a parker that inlined it would carry a copy of it at every take, release and wait.
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -170,8 +173,9 @@ impl RawLock {
 
     /// The lock was held when it was tried: spin a little while its holder has it and nobody
     /// waits, then mark it contended in the same step that takes it if it is free, and otherwise
-    /// sleep until the word moves from the mark.
+    /// sleep until the word moves from the mark. Out of line, so a take inlines its exchange alone.
     #[cold]
+    #[inline(never)]
     fn lock_contended(&self) {
         let mut state = self.spin();
         if state == UNLOCKED {
@@ -222,8 +226,16 @@ impl RawLock {
     /// The calling thread holds the lock.
     pub unsafe fn unlock(&self) {
         if self.state.swap(UNLOCKED, Ordering::Release) == CONTENDED {
-            sys::wake_one(&self.state);
+            self.wake_waiter();
         }
+    }
+
+    /// Wake a thread that waits for the lock. Out of line, so a release inlines its exchange
+    /// alone, as a take does.
+    #[cold]
+    #[inline(never)]
+    fn wake_waiter(&self) {
+        sys::wake_one(&self.state);
     }
 }
 
@@ -265,8 +277,12 @@ impl RawCondvar {
     /// again. A wake may come without a notification, so the caller waits in a loop on its own
     /// condition.
     ///
+    /// Out of line: the wait sleeps, and a caller that inlined it would carry its release, its
+    /// sleep and its take again.
+    ///
     /// # Safety
     /// The calling thread holds `lock`.
+    #[inline(never)]
     pub unsafe fn wait(&self, lock: &RawLock) {
         let seen = self.waiting();
         lock.unlock();
@@ -275,10 +291,12 @@ impl RawCondvar {
     }
 
     /// [`Self::wait`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
-    /// `deadline_ns`: whether a notification came (false: the deadline came first).
+    /// `deadline_ns`: whether a notification came (false: the deadline came first). Out of line,
+    /// as [`Self::wait`] is.
     ///
     /// # Safety
     /// The calling thread holds `lock`.
+    #[inline(never)]
     pub unsafe fn wait_until(&self, lock: &RawLock, deadline_ns: u64) -> bool {
         let seen = self.waiting();
         lock.unlock();

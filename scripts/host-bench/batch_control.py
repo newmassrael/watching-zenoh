@@ -295,7 +295,7 @@ def cmd_reference(out: pathlib.Path, sizes: list[int], engine: str) -> int:
     import capability_cost_gate as cost
     import wz_config
 
-    table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
+    table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
     try:
         features = wz_config.bench_features(engine, list(WZ_FEATURES), table)
     except wz_config.PresetError as error:

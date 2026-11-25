@@ -184,15 +184,15 @@ catalog_version = 2
 # is not a capability: no build chooses it, the zenoh-c ABI and the Rust API always have it, and
 # the pico ABI, which reads no zenoh configuration, names the features it wants and so never does.
 core = ["rx-busy-poll", "open-plan"]
-# `std`: the pico ABI layer on the host's standard library (its locks, condition variables and
-# allocator), which the crate's default names first. It is not a capability: no plane comes or
-# goes with it, every host engine selects it, and only a Zephyr image builds the layer without it
-# (`os-zephyr`), from a manifest of its own.
-# `engine-coop`: the engine a pico build runs its sessions on (docs/c-abi-engine-and-memory.md, E1
-# and P1). A configuration that chooses the tokio engine on the global axis `engine` (below) is
-# resolved from the same list with `engine-coop` replaced by that option's `features`, the engine
-# and the two switches of its drive (`wz_config.py` `engine_features`).
-pico = ["std", "engine-coop"]
+# `os-host`: the engine a pico build runs its sessions on, the cooperative one on the host's own
+# calls without `std` (docs/c-abi-engine-and-memory.md, E1 and P1; docs/win-budget/std-heap.md,
+# S1: a C library has no `std` form). It is not a capability: no plane comes or goes with it, and
+# only a Zephyr image builds the crate without it (`os-zephyr`), from a manifest of its own. A
+# configuration that chooses the tokio engine on the global axis `engine` (below) is resolved from
+# the same list with `os-host` replaced by that option's `features`, the engine and the two
+# switches of its drive (`wz_config.py` `engine_features`).
+pico = ["os-host"]
+
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities
@@ -797,6 +797,13 @@ help = "Messages larger than one batch, split and put back together."
 [[artifact]]
 id = "capi-pico"
 package = "wz-capi-pico"
+# The ABI crate is an rlib: the file is its C library's crate, which names the ABI crate's features
+# through its dependency on it. The library has no `std` form, so it is built by the profile that
+# does not unwind, with that profile's configuration, for the platform's triple.
+build_package = "wz-capi-pico-lib"
+build_dependency = "abi"
+cargo_profile = "capi-nostd"
+cargo_config = "crates/.cargo/capi-nostd.toml"
 kind = "shared-library"
 file = "wz_capi_pico"
 family = "capi-pico"
@@ -6561,11 +6568,11 @@ id = "tokio"
 axis = "engine"
 kconfig = "WZ_ENGINE_TOKIO"
 prompt = "The tokio engine: each session on a runtime of its own"
-# What the base's `engine-coop` is replaced by in a build that chooses this option.
+# What the base's `os-host` is replaced by in a build that chooses this option.
 features = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 help = '''
 `engine-tokio` with the two switches of its drive (`serial-drive-own-thread`, `rx-busy-poll`),
-named in the place of the base's `engine-coop`.
+named in the place of the base's `os-host`; the library links `std`.
 '''
 
 [[axis_option]]
@@ -6574,7 +6581,7 @@ axis = "engine"
 kconfig = "WZ_ENGINE_COOP"
 prompt = "The cooperative engine: each session stepped by the program or its read task"
 help = '''
-`engine-coop`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
+`os-host`: a session is stepped by the program's own calls (zp_read, zp_spin_once) in
 zenoh-pico's single-threaded arm, and by the read task the program starts in its multi-threaded
 arm, as zenoh-pico's are. It is the base's engine; a configuration that also turns on a
 capability only the tokio engine runs is refused when it is resolved, by the capability's name.

@@ -24,9 +24,8 @@ std::thread_local! {
 #[cfg(any(
     all(feature = "engine-tokio", feature = "connectivity"),
     all(
-        not(feature = "engine-tokio"),
+        feature = "os-host",
         feature = "queryable",
-        feature = "std",
         feature = "peer",
         feature = "query",
         feature = "multi-thread"

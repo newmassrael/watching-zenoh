@@ -65,7 +65,7 @@ LANES = ("coverage", "tsan", "asan", "miri")
 # than measured).
 LIBRARY_PROFILE = "configs/profiles/host-peer-ext.conf"
 LIBRARY_CRATE = "wz-capi-pico"
-LIBRARY_ENGINE = "engine-coop"
+LIBRARY_ENGINE = "os-host"
 PROFILE_PREFIX = ("--no-default-features", "--features")
 
 # The kit images: the manifest of the image's Rust half, the cargo arguments of its build and the
@@ -88,7 +88,7 @@ KITS: dict[str, tuple[str, tuple[str, ...], str]] = {
 
 # The cooperative engine's planes with the read task of the multi-threaded arm: the set Layer C1p32
 # tests the engine in, and the arm whose threads the race detector is for.
-COOP_THREADS = ("engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness,liveliness-get,"
+COOP_THREADS = ("os-host,peer,multi-thread,link-udp,query,queryable,liveliness,liveliness-get,"
                 "advanced,unstable-api,connectivity,app-transport")
 # The lent records of the slot profile, as Layer C1ns tests `lent_tests` in.
 LENT_RECORDS = ("alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,"
@@ -346,12 +346,12 @@ def selftest() -> int:
     cases += 1
 
     # The profile's arguments: the shape wz_config prints, the engine, and the list without it.
-    args = parse_profile_args("--no-default-features --features engine-coop,peer,query\n")
-    assert args == ("--no-default-features", "--features", "engine-coop,peer,query"), args
+    args = parse_profile_args("--no-default-features --features os-host,peer,query\n")
+    assert args == ("--no-default-features", "--features", "os-host,peer,query"), args
     assert library_features(args) == "peer,query"
     for bad, needle in (("--no-default-features --features engine-tokio,peer", "cooperative engine"),
                         ("--no-default-features", "not "),
-                        ("--features engine-coop extra words", "not ")):
+                        ("--features os-host extra words", "not ")):
         try:
             parse_profile_args(bad)
         except Refused as error:
@@ -361,12 +361,12 @@ def selftest() -> int:
             raise AssertionError(f"{bad!r} was read as the library's arguments")
 
     # cargo tree's lines: the first naming of a package wins, a repeat marker and an empty list read.
-    tree = parse_tree("wz-capi-pico v0.1.0 (/x/crates/wz-capi-pico)|engine-coop,std\n"
+    tree = parse_tree("wz-capi-pico v0.1.0 (/x/crates/wz-capi-pico)|os-host,peer\n"
                       "wz-session-core v0.1.0 (/x/crates/wz-session-core)|alloc,codec-push\n"
                       "wz-session-core v0.1.0 (/x/crates/wz-session-core)|alloc (*)\n"
                       "wz-capi-port v0.1.0 (/x/crates/wz-capi-port)| (*)\n"
                       "noise without a separator\n")
-    assert tree == {"wz-capi-pico": ["engine-coop", "std"], "wz-session-core": ["alloc", "codec-push"],
+    assert tree == {"wz-capi-pico": ["os-host", "peer"], "wz-session-core": ["alloc", "codec-push"],
                     "wz-capi-port": []}, tree
     cases += 1
 

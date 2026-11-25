@@ -21,7 +21,7 @@ default features and its dev-dependencies, which is what the workspace lanes
 unify -- enables `sce-rust-runtime feature "no_std"`.
 
 The cooperative engine's C library is the second kind (docs/c-abi-engine-and-
-memory.md, P1): `wz-capi-pico`'s default build names `engine-coop`, which
+memory.md, P1): `wz-capi-pico`'s default build names `os-host`, which
 switches `wz-session-core/rx-lent-only` on, and `wz-runtime-tokio` refuses to
 be built in a graph that has it (a const assertion in its `lib.rs`). A member
 whose own build enables `wz-session-core feature "rx-lent-only"` is excluded by
@@ -127,7 +127,7 @@ def selftest() -> int:
     lent = "\n".join([
         "0wz-session-core v0.1.0 (/x/wz-session-core)",
         '1wz-session-core feature "rx-lent-only"',
-        '2wz-capi-pico feature "engine-coop"',
+        '2wz-capi-pico feature "os-host"',
         '3wz-capi-pico feature "default"',
         "4wz-capi-pico v0.1.0 (/x/wz-capi-pico)",
     ])
