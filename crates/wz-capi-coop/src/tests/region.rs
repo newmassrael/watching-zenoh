@@ -19,10 +19,12 @@ use crate::arena::{
 use crate::region::{RegionBlock, StateRegion};
 use crate::CoopConfig;
 
-/// The allocator, counting its reservations and what it is given back.
+/// The allocator, counting its reservations and what it is given back, and keeping the bytes it
+/// was last asked for.
 struct Counted {
     reserves: AtomicUsize,
     releases: AtomicUsize,
+    last: AtomicUsize,
 }
 
 impl Counted {
@@ -30,6 +32,7 @@ impl Counted {
         Self {
             reserves: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
+            last: AtomicUsize::new(0),
         }
     }
 
@@ -45,6 +48,7 @@ impl Counted {
 impl ArenaMemory for Counted {
     fn reserve(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
         self.reserves.fetch_add(1, Ordering::SeqCst);
+        self.last.store(layout.size(), Ordering::SeqCst);
         AllocatorMemory.reserve(layout)
     }
 
@@ -172,6 +176,50 @@ fn a_state_refused_by_its_region_or_its_memory_reserves_nothing() {
         Some(ArenaRefused::NoMemory {
             bytes: head + bytes,
         })
+    );
+}
+
+/// An open of a session whose shape the build fixes reserves one block, and its size is the
+/// region's span at its head and the arena the open's plan lays out after it: the region asks
+/// nothing apart, and the arena holds nothing the region does. Turned red by an open that reserves
+/// the region or a table apart from the block, or a block sized by anything but the two.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_open_reserves_one_block_of_its_region_and_its_plan() {
+    use super::{CatchAll, Engine, Router, LOOPBACK};
+    use crate::arena::{HeldPlaces, OpenStorage, PlanFrom};
+    use wz_runtime_posix::links::PosixLinks;
+    use wz_runtime_posix::stream::PosixTcpDial;
+    use wz_runtime_posix::{PosixClock, PosixEntropy};
+    use wz_session_core::bounded::ARENA_ALIGN;
+
+    static BLOCK: Counted = Counted::new();
+    let router = Router::start(CatchAll::None);
+    let region: &'static ArenaRegion = Box::leak(Box::new(region_of(&super::config(&router))));
+    let engine = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || super::config(&router),
+        wz_session_core::policy::SessionPolicy::defaults(),
+        crate::OpenKeyIds::none(),
+        OpenStorage {
+            memory: &BLOCK,
+            held: HeldPlaces::NONE,
+            plan: PlanFrom::Region(region),
+        },
+    )
+    .expect("the session opens in its region");
+    assert_eq!(
+        BLOCK.counts(),
+        (1, 0),
+        "one block for the region and its arena"
+    );
+    let head = Arena::span(core::mem::size_of::<StateRegion>()).expect("a region in the space");
+    assert_eq!(
+        BLOCK.last.load(Ordering::SeqCst),
+        head + engine.arena_bytes().max(ARENA_ALIGN),
+        "the block is the region's span and the plan's arena"
     );
 }
 
