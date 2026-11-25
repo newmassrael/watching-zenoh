@@ -861,7 +861,7 @@ fn lend_session(
     )
     .map_err(ArenaRefused::Lend)?;
     let runtime = arena
-        .runtime_place(runtime_bytes)
+        .runtime_place(holds.runtime)
         .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
         runtime,
