@@ -425,20 +425,23 @@ opt-level = 3
 # (`scripts/lib/capability_cost_gate.py`). It is linked as one program (`fat`, one codegen unit):
 # a generic instantiated in several crates is kept once and what no export reaches is not
 # carried, where thin LTO left 201 same-named copies (43,573 bytes) in the Windows x64 DLL with
-# `std`. A panic still unwinds, as in `release`, so the ABI doors catch it (`ffi::guarded`).
-# Selected with `cargo build --profile ship`.
+# `std`. A panic still unwinds inside Rust, as in `release`, but no ABI door catches it: a panic
+# that reaches an `extern "C"` frame aborts there (`ffi::catch` is a plain call, the owner's
+# panic policy for the C libraries). The panic strategy row stays until the C libraries' packages
+# move onto `capi-nostd` (std-heap SH3). Selected with `cargo build --profile ship`.
 [profile.ship]
 inherits = "release"
 lto = "fat"
 codegen-units = 1
 
 # The C ABI libraries for a deployer who wants the smallest binary, selected with
-# `cargo build --profile capi-small`. A panic ABORTS the process instead of unwinding: `ship`
-# keeps unwinding because the ABI doors catch a panic and return an error code
-# (`ffi::guarded`), and a deployer who has not chosen otherwise gets that. zenoh-pico is C,
-# where the same bug is an assertion or a fault, so for the pico-class client this is the
-# like-for-like build. What it drops is the unwind tables and the std backtrace support; the
-# size gate grades both profiles (`scripts/lib/capability_cost_gate.py`).
+# `cargo build --profile capi-small`. A panic ABORTS the process without unwinding. Under `ship`
+# a panic aborts at the C boundary too, as no ABI door catches one (`ffi::catch` is a plain
+# call); what this profile drops beyond that is the unwind tables and the std backtrace support.
+# zenoh-pico is C, where the same bug is an assertion or a fault, so for the pico-class client
+# this is the like-for-like build. Moving the C libraries' packages onto an aborting profile is
+# std-heap SH3's, not this comment's. The size gate grades both profiles
+# (`scripts/lib/capability_cost_gate.py`).
 [profile.capi-small]
 inherits = "ship"
 panic = "abort"
