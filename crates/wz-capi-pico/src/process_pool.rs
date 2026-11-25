@@ -3070,4 +3070,21 @@ mod tests {
         assert_eq!(held.select("MAX_SUBSCRIPTIONS", 1), None);
         assert_eq!(held, Held::BUILD);
     }
+
+    /// The held values are the capacities the declaration classes as counts the first open
+    /// states, each once and no other: the configs' count, made before any open, is not among
+    /// them. Turned red by an id dropped from either list, or added to one alone.
+    #[test]
+    fn the_held_values_are_the_declarations_process_open_counts() {
+        let open_counts = &wz_session_core::limits::PROCESS_OPEN_COUNTS;
+        assert_eq!(Held::IDS.len(), open_counts.len());
+        for id in Held::IDS {
+            let found = open_counts.iter().filter(|&&open| open == id).count();
+            assert_eq!(found, 1, "{id} among the process open counts");
+        }
+        for id in open_counts {
+            let found = Held::IDS.iter().filter(|&&held| held == *id).count();
+            assert_eq!(found, 1, "{id} among the held values");
+        }
+    }
 }
