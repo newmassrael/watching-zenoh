@@ -161,8 +161,16 @@ unsafe impl ConfinedOwner for UnderCoreLock {}
 pub(crate) type SessionLock = <CoopForm as LockForm>::SessionLock;
 
 /// How the handles on the parts of one link are counted under [`SessionLock`]: the stacks the
-/// engine opens its links over serve sessions counted so.
-pub(crate) type LinkCount = <SessionLock as LockKind>::LinkCount;
+/// engine opens its links over serve sessions counted so. Named by the crate's concrete kind
+/// rather than as the lock kind's projection, so a bound that names it (`CoopLinks`) states one
+/// trait: a supertrait over the projection is seen beside its normalized form, and a shorthand
+/// such as `L::Pump` in a body is then ambiguous between the two.
+pub(crate) use crate::LinkCount;
+
+// The crate's kind is the one the form's lock kind counts a link's parts by, in every build.
+const _: fn(
+    core::marker::PhantomData<<SessionLock as LockKind>::LinkCount>,
+) -> core::marker::PhantomData<LinkCount> = core::convert::identity;
 
 /// How the handles on what the session's faces share are counted under [`SessionLock`]: the
 /// session's entropy handle is counted so.
@@ -245,7 +253,7 @@ mod tests {
             PhantomData::<wz_runtime_coop::link_cells::Atomic>,
         );
         same(
-            PhantomData::<super::LinkCount>,
+            PhantomData::<<super::SessionLock as LockKind>::LinkCount>,
             PhantomData::<crate::LinkCount>,
         );
         same(
