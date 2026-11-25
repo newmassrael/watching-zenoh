@@ -153,7 +153,7 @@ use wz_session_core::slot_observer::Requesters;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::SlotObserverOf;
 
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use crate::engine::LegHold;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use crate::engine::LegSink;
@@ -3803,17 +3803,31 @@ mod tests {
             .into_iter()
             .fold(HeldPlaces::NONE, |held, kind| held.with_entity(kind, place));
         plan.holding(&held).expect("the places fit");
+        // With the connectivity plane the engine lodges a watcher of the faces' snapshots for each
+        // transport events listener the session keeps, so its lodging places are laid out though
+        // the ABI named none (`NO_LODGINGS`).
+        #[cfg(feature = "connectivity")]
+        const LODGED: &[&str] = &["lodging places"];
+        #[cfg(not(feature = "connectivity"))]
+        const LODGED: &[&str] = &[];
         let parts: alloc::vec::Vec<_> = plan.rows().map(ArenaRow::part).collect();
+        let named = [
+            "publisher place flags",
+            "publisher places",
+            "token place flags",
+            "token places",
+            "link events listener place flags",
+            "link events listener places",
+        ];
+        let want: alloc::vec::Vec<&str> = named.iter().chain(LODGED).copied().collect();
+        assert_eq!(parts, want);
+        #[cfg(feature = "connectivity")]
         assert_eq!(
-            parts,
-            [
-                "publisher place flags",
-                "publisher places",
-                "token place flags",
-                "token places",
-                "link events listener place flags",
-                "link events listener places",
-            ]
+            plan.rows()
+                .find(|row| row.part() == "lodging places")
+                .map(|row| row.count),
+            Some(plan.entities().of_kind(EntityKind::TransportEventsListener)),
+            "a lodging place for each transport events listener"
         );
         let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("an arena");
         let mut lend = arena.lender();
