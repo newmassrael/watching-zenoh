@@ -60,6 +60,10 @@ pub enum RegisterError {
     /// The entity the declaration is made on is not declared: a matching listener's write filter,
     /// undeclared with its publisher or querier.
     OwnerGone,
+    /// A key expression declaration the entity's row would hold (the one its key is named by, or
+    /// the one of its own key) has as many holders as its count holds
+    /// ([`crate::session_tables::KeyexprHolds`]).
+    KeyexprHoldsFull,
 }
 
 impl core::fmt::Display for RegisterError {
@@ -74,6 +78,9 @@ impl core::fmt::Display for RegisterError {
                 f.write_str("registry has handed out every 32-bit declaration id")
             }
             Self::OwnerGone => f.write_str("the entity the declaration is made on is not declared"),
+            Self::KeyexprHoldsFull => {
+                f.write_str("a declaration the entity names has no room for one more holder")
+            }
         }
     }
 }

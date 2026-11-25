@@ -358,7 +358,7 @@ pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
     // Each table and the round on a span of its own, rounded up to the next start of one.
     let bytes = events * RECORD_BYTES
         + counts.callbacks * CALLBACK_BYTES
-        + counts.key_bytes()
+        + counts.key_bytes::<CoopForm>()
         + core::mem::size_of::<Round>()
         + 4 * ARENA_ALIGN;
     let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(

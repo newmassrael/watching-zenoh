@@ -338,9 +338,10 @@ fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[..2]), true) };
     unsafe { round.offer_sample(second.call(), &borrowed(&datagram[..2]), false) };
     unsafe { round.offer_sample(first.call(), &borrowed(&datagram[2..]), true) };
-    assert!(
+    assert_eq!(
         gate.takes_input(),
-        "the round takes the datagram's next record"
+        <crate::round::CoopForm as wz_session_core::row_callback::ThreadForm>::OTHER_THREADS,
+        "a round of threads takes the datagram's next record; one of one thread hands these out first"
     );
     unsafe { round.set_lending(None) };
     assert!(round.lends_a_datagram(), "the round holds the link back");
@@ -972,13 +973,14 @@ fn the_gate_reads_a_link_only_while_the_round_has_a_records_room() {
 #[test]
 fn the_gate_reads_no_link_while_retractions_are_owed() {
     use wz_runtime_coop::session_drive::SessionDatagramLink;
+    use wz_session_core::round::Owing;
 
     let round = round(4);
     // SAFETY: this thread is the round's one writer.
     let gate = unsafe { RoundGate::new(Quiet, round, ONE) };
-    round.owe(true);
+    round.owe(Owing::Retractions, true);
     assert!(!gate.takes_input(), "owed, no link is read");
-    round.owe(false);
+    round.owe(Owing::Retractions, false);
     assert!(gate.takes_input(), "CONTROL: nothing owed");
 }
 
@@ -1433,6 +1435,8 @@ fn a_record_with_a_part_the_round_cannot_read_where_it_lies_is_refused_and_count
 /// The gate asks a filling round for room in its keys: once the keys a session composed leave no
 /// room for one more of the longest, no link is read until the round is handed out, so no key
 /// finds no place. Turned red by a gate that asks for none of the keys.
+// A round of one thread takes no second message while it holds one, whatever its keys.
+#[cfg(feature = "threads")]
 #[test]
 fn the_gate_stops_a_link_where_the_rounds_keys_have_no_room() {
     let round = round(8);

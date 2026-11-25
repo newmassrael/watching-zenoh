@@ -196,18 +196,26 @@ impl WireDeclaration {
     }
 }
 
-impl Clone for WireDeclaration {
-    fn clone(&self) -> Self {
+impl WireDeclaration {
+    /// Another holder of the declaration, as pico's `_z_keyexpr_wire_declaration_rc_clone` is: one
+    /// more of the session's count of its holders. Refused with pico's code for a count past its
+    /// bound (`vendor/zenoh-pico/src/collections/refcount.c` @
+    /// `_Z_ERROR_RETURN(_Z_ERR_OVERFLOW);`) when the count holds as many as it can: a copy that held
+    /// nothing would name a declaration its last counted holder's going retracts.
+    fn share(&self) -> Result<Self, ZResult> {
         let hold = match self.session.upgrade() {
-            Some(engine) => self.hold.share(Arc::as_ref(&engine)),
+            Some(engine) => self
+                .hold
+                .share(Arc::as_ref(&engine))
+                .ok_or(crate::result::Z_ERR_OVERFLOW)?,
             // A session that is gone counts nothing: the copy gives nothing back either.
             None => self.hold.unheld(),
         };
-        Self {
+        Ok(Self {
             session: self.session.clone(),
             hold: ManuallyDrop::new(hold),
             prefix_len: self.prefix_len,
-        }
+        })
     }
 }
 
@@ -420,12 +428,18 @@ impl DeclaredKeyexpr {
     }
 
     /// Another key sharing this one's literal and declaration — pico
-    /// `_z_declared_keyexpr_copy`, which clones the refcount.
-    pub(crate) fn share(&self) -> Self {
-        Self {
+    /// `_z_declared_keyexpr_copy`, which clones the refcount; refused, making nothing, when the
+    /// declaration's count holds as many holders as it can ([`WireDeclaration::share`]).
+    pub(crate) fn share(&self) -> Result<Self, ZResult> {
+        let declaration = self
+            .declaration
+            .as_ref()
+            .map(WireDeclaration::share)
+            .transpose()?;
+        Ok(Self {
             literal: self.literal.share(),
-            declaration: self.declaration.clone(),
-        }
+            declaration,
+        })
     }
 
     /// A new literal that keeps this key's declaration — pico's
@@ -443,10 +457,15 @@ impl DeclaredKeyexpr {
     pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
         let kept = self.literal.beside(literal)?;
-        let declaration = self.declaration.clone().filter(|d| {
-            literal.get(..d.prefix_len).is_some()
-                && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
-        });
+        let declaration = self
+            .declaration
+            .as_ref()
+            .filter(|d| {
+                literal.get(..d.prefix_len).is_some()
+                    && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
+            })
+            .map(WireDeclaration::share)
+            .transpose()?;
         Ok(Self {
             literal: kept,
             declaration,
@@ -574,7 +593,7 @@ impl DeclaredKeyexpr {
                 .declared_on(Arc::as_ref(shared))
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
-                return Ok(existing.share());
+                return existing.share();
             }
         }
         // The key is kept before anything is declared, so one the session's key arena has no room
@@ -1226,8 +1245,10 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         let Some(text) = keyexpr_str(src) else {
             return Z_ERR_NULL;
         };
-        let key = match declared_of(src) {
-            Some(declared) => declared.share(),
+        // A copy its declaration's count has no room for is refused, and `dst` stays null.
+        let key = match declared_of(src).map(DeclaredKeyexpr::share) {
+            Some(Ok(key)) => key,
+            Some(Err(code)) => return code,
             None => DeclaredKeyexpr::literal_only(text),
         };
         store_owned_keyexpr(dst, key);
@@ -2005,6 +2026,57 @@ mod tests {
         assert!(shared.keyexpr_declarations().is_empty());
     }
 
+    /// A copy of a key whose declaration's count holds as many holders as it can is refused with
+    /// pico's code for a count past its bound, and its destination is left null: a copy that held
+    /// nothing would name a declaration its last counted holder's going retracts. Turned red by a
+    /// `z_keyexpr_clone` that makes the copy anyway (`Z_OK`, or a destination that is not null),
+    /// or one that makes it holding nothing (the declaration gone before the copy is dropped).
+    #[test]
+    fn a_clone_past_the_declarations_count_is_refused_and_left_null() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let declared = DeclaredKeyexpr::declare(&engine, "demo/kd/full", None).expect("declared");
+        let mut key = z_owned_keyexpr_t::null_value();
+        // SAFETY: `key` is a live owned key the store writes over.
+        unsafe { store_owned_keyexpr(&mut key, declared) };
+        // The count is filled: the program's key holds one, and each acquire one more until the
+        // count refuses.
+        let mut holds = Vec::new();
+        while let Some(hold) = shared.acquire_keyexpr("demo/kd/full".to_owned()) {
+            holds.push(hold);
+        }
+        assert_eq!(
+            holds.len(),
+            usize::from(wz_session_core::session_tables::KeyexprHolds::MAX) - 1,
+            "CONTROL: the count holds its bound"
+        );
+        let mut copy = z_owned_keyexpr_t::null_value();
+        // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
+        let refused = unsafe { z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)) };
+        assert_eq!(refused, crate::result::Z_ERR_OVERFLOW);
+        // SAFETY: `copy` is a live owned key, null or not.
+        assert!(
+            !unsafe { z_internal_keyexpr_check(&copy) },
+            "the destination is left null"
+        );
+        holds.pop().expect("a hold").release(&*shared);
+        // SAFETY: as above.
+        let taken = unsafe { z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)) };
+        assert_eq!(taken, Z_OK, "CONTROL: a count with room takes the copy");
+        // SAFETY: both hold the owned keys made above, each moved out once here.
+        unsafe {
+            z_keyexpr_drop(z_keyexpr_move(&mut key));
+            z_keyexpr_drop(z_keyexpr_move(&mut copy));
+        }
+        for hold in holds {
+            hold.release(&*shared);
+        }
+        assert!(
+            shared.keyexpr_declarations().is_empty(),
+            "every hold went back"
+        );
+    }
+
     /// R2959 — the wire form: the declaration's id plus the remainder of the
     /// key, and the literal on a session that did not make the declaration.
     #[test]
@@ -2565,7 +2637,7 @@ mod key_text_tests {
     fn a_key_with_no_session_is_a_copy_of_its_own() {
         let key = DeclaredKeyexpr::literal_only("demo/own/key");
         assert!(!key.literal.is_session());
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         assert!(!shared.literal.is_session());
         assert_ne!(
             shared.literal().as_ptr(),
@@ -2702,7 +2774,7 @@ mod arena_key_tests {
         assert!(key.literal.is_session());
         assert_eq!(key.literal(), "demo/pk/a1");
         assert!(room_for(&engine, 10), "one block is left");
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         drop(key);
         assert_eq!(shared.literal(), "demo/pk/a1", "the share reads the key");
         let second = DeclaredKeyexpr::declare(&engine, "demo/pk/b2", None).expect("the last block");
@@ -2730,7 +2802,7 @@ mod arena_key_tests {
             !room_for(&engine, text.len()),
             "the declaration takes the last block"
         );
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         let wire = key.wire(Arc::as_ref(&engine));
         assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
         drop(key);
@@ -2841,7 +2913,7 @@ mod arena_key_tests {
             key.wire(Arc::as_ref(&engine)).is_literal(),
             "nothing is declared"
         );
-        let shared = key.share();
+        let shared = key.share().expect("a share");
         assert!(shared.literal.is_session(), "a share holds the block");
         assert_eq!(shared.literal(), "demo/adv/base");
         let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;

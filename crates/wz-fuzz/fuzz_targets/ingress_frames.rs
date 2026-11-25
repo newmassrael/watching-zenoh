@@ -45,7 +45,7 @@ use wz_session_core::network_message::{
 use wz_session_core::reassembly_dispatch::{
     Fragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
 };
-use wz_session_core::sn::mask_from_res;
+use wz_session_core::sn::{mask_from_res, Sn};
 
 /// The Router's slots and the bytes each holds: few, so a peer that opens chains it never ends
 /// fills them within one input.
@@ -88,7 +88,7 @@ fuzz_target!(|data: &[u8]| {
 
 /// Read `unit` as a session's receive reads a batch: one transport message after another, a
 /// Frame's records up to the next transport message, a Fragment into the Router.
-fn read_unit(unit: &[u8], router: &mut Router, mask: u64, now_ms: u64, lend: bool) {
+fn read_unit(unit: &[u8], router: &mut Router, mask: Sn, now_ms: u64, lend: bool) {
     let mut at = 0;
     while at < unit.len() {
         let rest = &unit[at..];
@@ -279,7 +279,7 @@ fn accounts_for_its_bytes(payload: &[u8], batch: &BatchParse) {
 }
 
 /// Hand `fragment` to the Router, each way it delivers a chain, and hold the delivery.
-fn ingest(router: &mut Router, fragment: Fragment<'_>, mask: u64, now_ms: u64, lend: bool) {
+fn ingest(router: &mut Router, fragment: Fragment<'_>, mask: Sn, now_ms: u64, lend: bool) {
     let last = fragment.payload;
     let bound = router.max_message_bytes();
     let mut delivered = 0u32;

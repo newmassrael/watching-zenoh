@@ -138,7 +138,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
     // A large ring mask so the small mint counts below never wrap; the advertised
     // next_sn then equals the mint count, and we read the exact values back for
     // the pico reference (so both encoders see identical logical inputs).
-    let mask = (1u64 << 32) - 1;
+    let mask = wz_session_core::sn::from_wire((1u64 << 32) - 1);
     let mut tx = MulticastTxConduits::new(mask);
 
     // Leave Control (priority 0) at {0,0} (the union-alias base decoy match).
@@ -164,8 +164,12 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
     }
 
     let per = tx.advertise_per_priority();
-    let per_priority: [(u64, u64); Priority::NUM] =
-        core::array::from_fn(|i| (per[i].next_reliable, per[i].next_best_effort));
+    let per_priority: [(u64, u64); Priority::NUM] = core::array::from_fn(|i| {
+        (
+            wz_session_core::sn::to_wire(per[i].next_reliable),
+            wz_session_core::sn::to_wire(per[i].next_best_effort),
+        )
+    });
     // Sanity: Control is the {0,0} base decoy; the rest are distinct and non-zero.
     assert_eq!(
         per_priority[Priority::Control as usize],

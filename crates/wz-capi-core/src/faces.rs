@@ -127,7 +127,7 @@ use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::session_tables::{KeyexprHandle, RowCallbacks, SessionTables};
+use wz_session_core::session_tables::{KeyexprHandle, KeyexprHolds, RowCallbacks, SessionTables};
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
@@ -161,8 +161,8 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, KeyHold, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, HoldRefused, KeyHold, MatchId, MatchingSink,
+    QblId, StatementNotHonoured, SubId, TokenId, WireKey,
 };
 
 /// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
@@ -1332,7 +1332,7 @@ struct SubEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
-    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// The rows of the declarations it holds ([`SharedSession::admit_entry`]), named by handle so
     /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
     /// in its place.
     held: [Option<KeyexprHandle>; 2],
@@ -1362,7 +1362,7 @@ struct QblEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
-    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// The rows of the declarations it holds ([`SharedSession::admit_entry`]), named by handle so
     /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
     /// in its place.
     held: [Option<KeyexprHandle>; 2],
@@ -1415,7 +1415,7 @@ struct TokenEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
-    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// The rows of the declarations it holds ([`SharedSession::admit_entry`]), named by handle so
     /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
     /// in its place.
     held: [Option<KeyexprHandle>; 2],
@@ -1456,7 +1456,7 @@ struct LiveSubEntry {
     links: LinkRestriction,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
-    /// The rows of the declarations it holds ([`SharedSession::hold_named`]), named by handle so
+    /// The rows of the declarations it holds ([`SharedSession::admit_entry`]), named by handle so
     /// that a declaration retracted whatever held it, whose id a later one takes, is not let go of
     /// in its place.
     held: [Option<KeyexprHandle>; 2],
@@ -3284,20 +3284,38 @@ impl SharedSession {
         }
     }
 
-    /// Hold, for an entry the registry records from here on, each declaration it names
-    /// ([`declarations_named`]) in the session's one count of a declaration's holders, as zenoh-pico
-    /// counts its resource's `_refcount`: the key the entry was declared on holds none of its own.
-    /// One no longer declared takes none. The rows held, for the entry to keep.
-    fn hold_named(guard: &mut Inner, named: [ExprId; 2]) -> [Option<KeyexprHandle>; 2] {
-        named.map(|id| {
+    /// The entity id of an entry the registry records from here on, and each declaration it names
+    /// ([`declarations_named`]) held in the session's one count of a declaration's holders, as
+    /// zenoh-pico counts its resource's `_refcount`: the key the entry was declared on holds none
+    /// of its own. One no longer declared takes none. Refused, taking nothing, when a declaration
+    /// it names has as many holders as its count holds (`KeyHoldsFull`, as zenoh-pico refuses the
+    /// copy of the key its entity keeps), and when every entity id was handed out
+    /// (`NoEntityId`). The rows held, for the entry to keep.
+    fn admit_entry(
+        guard: &mut Inner,
+        named: [ExprId; 2],
+    ) -> Result<(EntityId, [Option<KeyexprHandle>; 2]), wz_capi_port::Refusal> {
+        let rows = named.map(|id| guard.tables.keyexpr_by_id(id));
+        // Every count is read before any is taken, so a refusal has no hold to give back.
+        if rows.into_iter().flatten().any(|row| {
             guard
                 .tables
-                .keyexpr_by_id(id)
-                .filter(|&handle| guard.tables.retain_keyexpr(handle))
-        })
+                .keyexprs()
+                .get(row)
+                .is_some_and(|row| row.holds() == KeyexprHolds::MAX)
+        }) {
+            return Err(wz_capi_port::Refusal::KeyHoldsFull);
+        }
+        let id = guard
+            .take_entity_id()
+            .ok_or(wz_capi_port::Refusal::NoEntityId)?;
+        Ok((
+            id,
+            rows.map(|row| row.filter(|&row| guard.tables.retain_keyexpr(row))),
+        ))
     }
 
-    /// Let go of what an entry taken out of the registry held ([`Self::hold_named`]), after its
+    /// Let go of what an entry taken out of the registry held ([`Self::admit_entry`]), after its
     /// own retraction went, by the rows it held: a row retracted whatever held it is gone, and a
     /// declaration that took its id since is another row, which this does not touch. With no lock
     /// held on the way in, since the last hold of a declaration retracts it, which takes the lock.
@@ -5145,10 +5163,17 @@ impl SharedSession {
 
     /// One more holder of the declaration in row `row`, which a holder already holds: it stays
     /// declared until this holder lets go too ([`Self::release_keyexpr`]), and nothing goes on
-    /// the wire. `false`, taking none, for a row that went or a count that holds as many as it
-    /// can.
-    pub fn retain_keyexpr(&self, row: KeyexprHandle) -> bool {
-        self.lock().tables.retain_keyexpr(row)
+    /// the wire. Refused, taking none, for a count that holds as many as it can
+    /// ([`HoldRefused::Full`]) or a row that went ([`HoldRefused::Gone`]).
+    pub fn retain_keyexpr(&self, row: KeyexprHandle) -> Result<(), HoldRefused> {
+        let mut guard = self.lock();
+        if guard.tables.retain_keyexpr(row) {
+            Ok(())
+        } else if guard.tables.keyexprs().get(row).is_some() {
+            Err(HoldRefused::Full)
+        } else {
+            Err(HoldRefused::Gone)
+        }
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
@@ -5221,6 +5246,7 @@ impl SharedSession {
         options: LivelinessOptions,
     ) -> Option<TokenId> {
         self.declare_liveliness_token_on_links(keyexpr, wire, options, LinkRestriction::Any)
+            .ok()
     }
 
     /// [`Self::declare_liveliness_token_on_wire`] for a token limited to the links of `links`
@@ -5234,12 +5260,15 @@ impl SharedSession {
         wire: WireKey,
         options: LivelinessOptions,
         links: LinkRestriction,
-    ) -> Option<TokenId> {
+    ) -> Result<TokenId, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        let Some(id) = guard.take_entity_id() else {
-            drop(guard);
-            drop(wire);
-            return None;
+        let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, None)) {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                drop(guard);
+                drop(wire);
+                return Err(refused);
+            }
         };
 
         // R2580 — the local plane is in this walk. MEASURED against
@@ -5263,7 +5292,6 @@ impl SharedSession {
         // unlocked: what they run may re-enter the session.
         let legs = self.own_liveliness_legs(&guard, &keyexpr);
         // Its retraction names the key it was declared on, the declaration its key names.
-        let held = Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.tokens.push(TokenEntry {
             held,
             id,
@@ -5274,7 +5302,7 @@ impl SharedSession {
         });
         drop(guard);
         tell_liveliness(legs, LivelinessSampleKind::Put, &keyexpr, id);
-        Some(id)
+        Ok(id)
     }
 
     /// Retract a C liveliness token: drop the SSOT entry so no future face
@@ -5364,6 +5392,7 @@ impl SharedSession {
             LinkRestriction::Any,
             sink,
         )
+        .ok()
     }
 
     /// [`Self::declare_liveliness_subscriber_on_wire`] for a subscription limited to the links
@@ -5379,12 +5408,15 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        let Some(id) = guard.take_entity_id() else {
-            drop(guard);
-            drop(wire);
-            return None;
+        let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, None)) {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                drop(guard);
+                drop(wire);
+                return Err(refused);
+            }
         };
 
         // R2580 — the plane included, which is the receiving half of the same
@@ -5420,7 +5452,6 @@ impl SharedSession {
             Vec::new()
         };
         let leg = (!history.is_empty()).then(|| sink());
-        let held = Self::hold_named(&mut guard, declarations_named(&wire, None));
         guard.live_subs.push(LiveSubEntry {
             held,
             id,
@@ -5446,7 +5477,7 @@ impl SharedSession {
                 });
             }
         }
-        Some(id)
+        Ok(id)
     }
 
     /// The legs of the liveliness subscriptions that the token on `keyexpr` is told to, one per
@@ -6251,7 +6282,9 @@ impl SharedSession {
     /// entry — pico's declare-before-peer.
     ///
     /// `None` when the session has handed out every `u32` entity id
-    /// ([`Self::next_entity_id`]): nothing is recorded and nothing is sent.
+    /// ([`Self::next_entity_id`]), or when a declaration its key names has no room for one more
+    /// holder ([`Self::declare_subscriber_on_links`] says which): nothing is recorded and nothing
+    /// is sent.
     pub fn declare_subscriber(
         &self,
         keyexpr: String,
@@ -6280,6 +6313,7 @@ impl SharedSession {
             retraction,
             sink,
         )
+        .ok()
     }
 
     /// [`Self::declare_subscriber_on_wire`] for a subscriber limited to the links of `links`
@@ -6287,7 +6321,9 @@ impl SharedSession {
     /// only, so it hears nothing that arrives over the others, and a link that comes up later
     /// is declared to only if its slot is named. The local plane is not a link and always
     /// holds it. A multicast group is a link no slot names, so a limited subscriber does not
-    /// join one.
+    /// join one. Refused, recording and sending nothing, by its cause ([`Self::admit_entry`]): no
+    /// entity id left, or a declaration its key names with no room for one more holder; every
+    /// `_on_links` declaration of this registry answers so.
     pub fn declare_subscriber_on_links(
         &self,
         keyexpr: String,
@@ -6296,12 +6332,16 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        let Some(id) = guard.take_entity_id() else {
-            drop(guard);
-            drop(wire);
-            return None;
+        let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
+        {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                drop(guard);
+                drop(wire);
+                return Err(refused);
+            }
         };
         wz_runtime_tokio::route_trace(format_args!(
             "peer {} declares subscriber key={keyexpr} to faces {:?}",
@@ -6341,7 +6381,6 @@ impl SharedSession {
         // Every listener that counts the session's own entities reads it again, whatever origin
         // this one accepts: a listener of upstream's rule counts it either way.
         let local_key = Some(keyexpr.clone());
-        let held = Self::hold_named(&mut guard, declarations_named(&wire, retraction));
         let entry = SubEntry {
             held,
             id,
@@ -6364,7 +6403,7 @@ impl SharedSession {
         if let Some(key) = local_key {
             self.refresh_local_matches(FilterPlane::Subscribers, &key);
         }
-        Some(id)
+        Ok(id)
     }
 
     /// Record a C matching listener in the SSOT and install it on every live
@@ -7290,6 +7329,7 @@ impl SharedSession {
             retraction,
             sink,
         )
+        .ok()
     }
 
     /// [`Self::declare_queryable_on_wire`] for a queryable limited to the links of `links`
@@ -7304,12 +7344,16 @@ impl SharedSession {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Option<QblId> {
+    ) -> Result<QblId, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        let Some(id) = guard.take_entity_id() else {
-            drop(guard);
-            drop(wire);
-            return None;
+        let (id, held) = match Self::admit_entry(&mut guard, declarations_named(&wire, retraction))
+        {
+            Ok(admitted) => admitted,
+            Err(refused) => {
+                drop(guard);
+                drop(wire);
+                return Err(refused);
+            }
         };
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
@@ -7332,7 +7376,6 @@ impl SharedSession {
             }
         }
         let local_key = Some(keyexpr.clone());
-        let held = Self::hold_named(&mut guard, declarations_named(&wire, retraction));
         let entry = QblEntry {
             held,
             id,
@@ -7362,7 +7405,7 @@ impl SharedSession {
                 &key,
             );
         }
-        Some(id)
+        Ok(id)
     }
 
     /// Drop a C queryable: remove it from the SSOT so no future face replays
@@ -7728,6 +7771,92 @@ mod matching_aggregate_tests {
             SessionEngine::send_join_on_groups(&shared),
             Err(Refusal::Closed)
         );
+    }
+
+    /// A declaration whose key names a declaration with as many holders as its count holds is
+    /// refused by that cause, through the engine port and through the registry's own door alike,
+    /// and takes nothing: no entry, no entity id, no hold. A declaration that went refuses
+    /// nothing. Turned red by an `admit_entry` that records the entry when the count is full
+    /// (holding nothing, or past the count).
+    #[test]
+    fn a_declaration_whose_key_declaration_is_full_is_refused() {
+        use wz_capi_port::{Refusal, SessionEngine};
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let mut holds = Vec::new();
+        while let Some(hold) = shared.acquire_keyexpr("wz/full".to_owned()) {
+            holds.push(hold);
+        }
+        assert_eq!(
+            holds.len(),
+            usize::from(KeyexprHolds::MAX),
+            "CONTROL: the count holds its bound"
+        );
+        let id = holds[0].mapping_id();
+        let row = holds[0].row().expect("a hold names its row");
+        let declare = |shared: &SharedSession| {
+            SessionEngine::declare_subscriber_on_wire(
+                shared,
+                "wz/full/x",
+                WireKey::aliased_tail(id, "/x".len()),
+                Locality::Any,
+                None,
+                wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {}),
+            )
+        };
+        let next = shared.lock().tables.next_entity_id();
+        assert_eq!(declare(&shared), Err(Refusal::KeyHoldsFull));
+        // The registry's door, the declaration named by the retraction alone.
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        assert_eq!(
+            shared.declare_subscriber_on_links(
+                "wz/full/x".to_owned(),
+                WireKey::literal(),
+                Locality::Any,
+                LinkRestriction::Any,
+                Some(RetractionKey::declared(id, "/x")),
+                sink,
+            ),
+            Err(Refusal::KeyHoldsFull)
+        );
+        assert_eq!(
+            shared.lock().tables.next_entity_id(),
+            next,
+            "no entity id was taken"
+        );
+        assert_eq!(
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds()),
+            Some(KeyexprHolds::MAX),
+            "no hold was taken"
+        );
+        // CONTROL: a holder lets go, and the declaration takes the room it left.
+        holds.pop().expect("a hold").release(&shared);
+        let sub = declare(&shared).expect("a count with room takes the entry");
+        assert_eq!(
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds()),
+            Some(KeyexprHolds::MAX)
+        );
+        SessionEngine::undeclare_subscriber(&shared, sub);
+        for hold in holds {
+            hold.release(&shared);
+        }
+        assert!(
+            shared.keyexpr_declarations().is_empty(),
+            "every hold went back"
+        );
+        // A declaration that went is held by nothing and refuses nothing.
+        assert!(declare(&shared).is_ok());
     }
 
     /// Through the engine port a get asked of a closed session is refused as closed and mints no
@@ -10340,14 +10469,16 @@ mod face_up_order_tests {
         );
         let near_before = near.resp_driver.snapshot().sends.len();
         let far_before = far.resp_driver.snapshot().sends.len();
-        shared.declare_subscriber_on_links(
-            "wz/link/sub".to_owned(),
-            WireKey::literal(),
-            Locality::Any,
-            LinkRestriction::only([2]).expect("one slot"),
-            None,
-            sink.clone(),
-        );
+        shared
+            .declare_subscriber_on_links(
+                "wz/link/sub".to_owned(),
+                WireKey::literal(),
+                Locality::Any,
+                LinkRestriction::only([2]).expect("one slot"),
+                None,
+                sink.clone(),
+            )
+            .expect("declares");
         assert_eq!(
             (
                 declares_and_pushes_since(&near, near_before).0,
@@ -10507,13 +10638,15 @@ mod face_up_order_tests {
             "slot 2"
         );
         let (near_before, far_before) = (sent(&near), sent(&far));
-        shared.declare_liveliness_subscriber_on_links(
-            "wz/link/live".to_owned(),
-            WireKey::literal(),
-            LivelinessSubscriberOptions::default(),
-            LinkRestriction::only([2]).expect("one slot"),
-            sink.clone(),
-        );
+        shared
+            .declare_liveliness_subscriber_on_links(
+                "wz/link/live".to_owned(),
+                WireKey::literal(),
+                LivelinessSubscriberOptions::default(),
+                LinkRestriction::only([2]).expect("one slot"),
+                sink.clone(),
+            )
+            .expect("declares");
         assert_eq!(
             (sent(&near) - near_before, sent(&far) > far_before),
             (0, true),

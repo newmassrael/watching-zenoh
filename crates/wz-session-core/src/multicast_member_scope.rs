@@ -198,6 +198,17 @@ impl MemberDeclarations {
             DeclKind::Subscriber => &mut self.subscribers,
             DeclKind::Queryable => &mut self.queryables,
             DeclKind::Token => &mut self.tokens,
+            // A keyexpr is held in the member's own table (`MemberKeyexprs`), by its own id under
+            // the member's tag, and is not an entity id this scopes.
+            #[cfg(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            DeclKind::Keyexpr => return None,
         };
         if declared {
             held.insert(raw);

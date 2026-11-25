@@ -27,7 +27,7 @@ use crate::key_arena::KeySpace;
 use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
 use crate::replay_pacing::ReplayPacing;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-use crate::round::{ReadRoom, Round, RoundCalls};
+use crate::round::{Owing, ReadRoom, Round, RoundCalls};
 use crate::session_tables::{KeyForm, Retraction, RowCallbacks, SessionTables};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
@@ -215,7 +215,7 @@ where
         // SAFETY: the caller's contract.
         let mut has_room = || unsafe { round.has_room(room) };
         let done = P::faces_mut(&mut self.registry).retract_owed(&mut has_room);
-        round.owe(!done);
+        round.owe(Owing::Retractions, !done);
     }
 }
 

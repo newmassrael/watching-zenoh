@@ -450,7 +450,9 @@ mod tests {
                 .expect("the put builds"),
             true,
         );
-        let mut conduits = wz_session_core::sn::MulticastTxConduits::new(u64::from(u32::MAX));
+        let mut conduits = wz_session_core::sn::MulticastTxConduits::new(
+            wz_session_core::sn::from_wire(u64::from(u32::MAX)),
+        );
         let fragments = wz_session_core::frame_encode::multicast_frame_or_fragments(
             big,
             0,

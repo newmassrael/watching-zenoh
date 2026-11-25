@@ -152,7 +152,7 @@ fn round<C: RoundCalls>() -> Placed<Round<C>> {
     // Each table on a span of its own, rounded up to the next start of one.
     let bytes = counts.records * RoundRows::<C>::RECORD_BYTES
         + counts.callbacks * RoundRows::<C>::CALLBACK_BYTES
-        + counts.key_bytes()
+        + counts.key_bytes::<C::Form>()
         + core::mem::size_of::<Round<C>>()
         + 4 * ARENA_ALIGN;
     let mut arena = arena(bytes);

@@ -70,8 +70,14 @@
 //! per-runtime alias surface keeps both flavours composable through a
 //! cfg switch at the consumer's import line.
 
+#[cfg(all(feature = "runtime", debug_assertions))]
+use core::cell::Cell;
 #[cfg(not(feature = "host-lock"))]
 use core::cell::RefCell;
+#[cfg(feature = "runtime")]
+use core::cell::UnsafeCell;
+#[cfg(feature = "runtime")]
+use core::marker::PhantomData;
 
 /// MCU-profile mutual-exclusion lock alias (R311w option (a),
 /// R311au scope C realisation).
@@ -98,48 +104,197 @@ pub type Mutex<T> = critical_section::Mutex<RefCell<T>>;
 #[cfg(feature = "host-lock")]
 pub type Mutex<T> = crate::cs::HostMutex<T>;
 
-/// A value in a new [`Mutex`] of this profile.
+/// How a [`CoopRuntime`](crate::CoopRuntime) locks the values it lends a session
+/// (`Runtime::Mutex`): the profile's own lock ([`Shared`]), or none, where one lock of the
+/// engine that owns every session already keeps each value to one thread at a time
+/// ([`Confined`]).
 #[cfg(feature = "runtime")]
-#[inline]
-pub(crate) fn new<T>(value: T) -> Mutex<T> {
-    #[cfg(not(feature = "host-lock"))]
-    {
-        critical_section::Mutex::new(RefCell::new(value))
+pub trait LockKind: 'static {
+    /// The form a value of `T` is lent in.
+    type Mutex<T>: Send + Sync + 'static
+    where
+        T: Send + 'static;
+
+    /// `value`, in this kind's form.
+    fn wrap<T: Send + 'static>(value: T) -> Self::Mutex<T>;
+
+    /// Run `f` on the value of `mutex`, held.
+    fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U;
+
+    /// [`Self::with`] that does not wait: `None` when another thread holds `mutex` now, and `f`
+    /// has not run.
+    fn try_with<T: Send + 'static, U>(
+        mutex: &Self::Mutex<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U>;
+}
+
+/// The profile's lock ([`Mutex`]): a critical section, or on a host (`host-lock`) the value's
+/// own lock. What every runtime that is not told otherwise lends.
+#[cfg(feature = "runtime")]
+pub struct Shared;
+
+#[cfg(feature = "runtime")]
+impl LockKind for Shared {
+    type Mutex<T>
+        = crate::sync::Mutex<T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn wrap<T: Send + 'static>(value: T) -> Self::Mutex<T> {
+        #[cfg(not(feature = "host-lock"))]
+        {
+            critical_section::Mutex::new(RefCell::new(value))
+        }
+        #[cfg(feature = "host-lock")]
+        {
+            crate::cs::HostMutex::new(value)
+        }
     }
-    #[cfg(feature = "host-lock")]
-    {
-        crate::cs::HostMutex::new(value)
+
+    #[inline]
+    fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        #[cfg(not(feature = "host-lock"))]
+        {
+            crate::cs::with(|cs| f(&mut *mutex.borrow(cs).borrow_mut()))
+        }
+        #[cfg(feature = "host-lock")]
+        {
+            mutex.with(f)
+        }
+    }
+
+    /// On a host each value has its lock and another thread may hold it; under a critical
+    /// section no other context runs while this one does, so there is never a holder to find and
+    /// `f` always runs.
+    #[inline]
+    fn try_with<T: Send + 'static, U>(
+        mutex: &Self::Mutex<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U> {
+        #[cfg(not(feature = "host-lock"))]
+        {
+            Some(Self::with(mutex, f))
+        }
+        #[cfg(feature = "host-lock")]
+        {
+            mutex.try_with(f)
+        }
     }
 }
 
-/// Run `f` on the value of `mutex` with it locked.
+/// The owner of every value a runtime of [`Confined<Self>`](Confined) lends: an engine that
+/// reaches each of its sessions only under one lock of its own.
+///
+/// # Safety
+///
+/// Every value made by a `CoopRuntime<_, _, Confined<Self>>` is reached by one thread at a time
+/// for as long as it lives: each `Runtime::with_mutex_mut` / `try_with_mutex_mut` on it runs
+/// under one lock the implementor's engine holds around every path to the session's state, or in
+/// the one frame that owns the value, and nothing that holds such a value is handed out of that
+/// lock to be used without it.
 #[cfg(feature = "runtime")]
-#[inline]
-pub(crate) fn with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
-    #[cfg(not(feature = "host-lock"))]
-    {
-        crate::cs::with(|cs| f(&mut *mutex.borrow(cs).borrow_mut()))
+pub unsafe trait ConfinedOwner: 'static {}
+
+/// No lock of the value's own: the values are [`OwnerHeld`], reached under the lock of `O`'s
+/// engine ([`ConfinedOwner`]). A lock here would be a second one around what that lock already
+/// keeps to one thread, taken and let go at every one of the session's accesses.
+#[cfg(feature = "runtime")]
+pub struct Confined<O: ConfinedOwner>(PhantomData<fn() -> O>);
+
+#[cfg(feature = "runtime")]
+impl<O: ConfinedOwner> LockKind for Confined<O> {
+    type Mutex<T>
+        = OwnerHeld<T, O>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn wrap<T: Send + 'static>(value: T) -> Self::Mutex<T> {
+        OwnerHeld::new(value)
     }
-    #[cfg(feature = "host-lock")]
-    {
+
+    #[inline]
+    fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
         mutex.with(f)
     }
+
+    /// No other thread reaches the value (`O`'s contract), so there is never a holder to find and
+    /// `f` always runs.
+    #[inline]
+    fn try_with<T: Send + 'static, U>(
+        mutex: &Self::Mutex<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U> {
+        Some(mutex.with(f))
+    }
 }
 
-/// [`with`] that does not wait: `None` when another thread holds `mutex` now, and `f` has not
-/// run. On a host each value has its lock and another thread may hold it; under a critical
-/// section no other context runs while this one does, so there is never a holder to find and `f`
-/// always runs.
+/// A value of a session reached only under the lock of the engine `O` that owns the session, and
+/// so taking no lock of its own: [`Self::with`] is the closure called on the value.
+///
+/// A value is never taken inside its own hold: the session's code does not nest one value in
+/// itself (a lock of the value would wait on itself there). A debug build checks it, and fails at
+/// the nested take instead of handing out a second `&mut`.
 #[cfg(feature = "runtime")]
-#[inline]
-pub(crate) fn try_with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
-    #[cfg(not(feature = "host-lock"))]
-    {
-        Some(with(mutex, f))
+pub struct OwnerHeld<T, O: ConfinedOwner> {
+    value: UnsafeCell<T>,
+    /// Whether a closure is inside the value now.
+    #[cfg(debug_assertions)]
+    inside: Cell<bool>,
+    owner: PhantomData<fn() -> O>,
+}
+
+// SAFETY: the value is reached only inside `with`, and `O`'s `unsafe impl ConfinedOwner` states
+// that `with` is called by one thread at a time, which is what `Sync` asks of a value that is
+// `Send`. The debug build's flag is read and written inside the same calls.
+#[cfg(feature = "runtime")]
+unsafe impl<T: Send, O: ConfinedOwner> Sync for OwnerHeld<T, O> {}
+
+#[cfg(feature = "runtime")]
+impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
+    fn new(value: T) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+            #[cfg(debug_assertions)]
+            inside: Cell::new(false),
+            owner: PhantomData,
+        }
     }
-    #[cfg(feature = "host-lock")]
-    {
-        mutex.try_with(f)
+
+    /// Run `f` on the value.
+    #[inline]
+    pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+        #[cfg(debug_assertions)]
+        let _inside = Inside::enter(&self.inside);
+        // SAFETY: one thread at a time calls this (`O`'s contract), and the value is not taken
+        // inside its own hold (checked in a debug build), so no other reference to it lives while
+        // `f` runs.
+        f(unsafe { &mut *self.value.get() })
+    }
+}
+
+/// A closure inside an [`OwnerHeld`], from [`Inside::enter`] to drop, on return and on unwind
+/// alike: what lets a debug build fail a take nested in the hold of the same value.
+#[cfg(all(feature = "runtime", debug_assertions))]
+struct Inside<'a>(&'a Cell<bool>);
+
+#[cfg(all(feature = "runtime", debug_assertions))]
+impl<'a> Inside<'a> {
+    fn enter(inside: &'a Cell<bool>) -> Self {
+        assert!(
+            !inside.replace(true),
+            "a session's value is taken again inside its own hold"
+        );
+        Self(inside)
+    }
+}
+
+#[cfg(all(feature = "runtime", debug_assertions))]
+impl Drop for Inside<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
     }
 }
 
@@ -152,3 +307,69 @@ pub(crate) fn try_with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> O
 /// `T: Send` for `Mutex`) is preserved at the call-site contract;
 /// the alias body is the same primitive.
 pub type RwLock<T> = Mutex<T>;
+
+#[cfg(all(test, feature = "runtime"))]
+pub(crate) mod tests {
+    use super::{Confined, ConfinedOwner, LockKind};
+
+    /// The owner of the values the tests below make: each test's one thread is the only one that
+    /// reaches them.
+    pub(crate) struct TestOwner;
+
+    // SAFETY: a value of a `Confined<TestOwner>` runtime is made and reached by one test's thread
+    // alone and never handed to another.
+    unsafe impl ConfinedOwner for TestOwner {}
+
+    type Held = Confined<TestOwner>;
+
+    /// Each closure runs on the value and sees what the one before it left, and two values nest,
+    /// one inside the other's hold.
+    #[test]
+    fn a_value_its_owner_holds_runs_each_closure_on_it() {
+        let value = Held::wrap(1u32);
+        assert_eq!(
+            Held::with(&value, |held| {
+                *held += 1;
+                *held
+            }),
+            2
+        );
+        let other = Held::wrap(10u32);
+        assert_eq!(
+            Held::with(&value, |first| Held::with(&other, |second| *first
+                + *second)),
+            12
+        );
+        assert_eq!(
+            Held::try_with(&value, |held| *held),
+            Some(2),
+            "the nested hold left the value, and a try always runs"
+        );
+    }
+
+    /// A debug build fails a value taken inside its own hold, where a lock would wait on itself.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "taken again inside its own hold")]
+    fn a_debug_build_fails_a_value_taken_inside_its_own_hold() {
+        let value = Held::wrap(0u8);
+        Held::with(&value, |_| Held::with(&value, |_| ()));
+    }
+
+    /// A hold that unwound leaves the value free for the next one.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_hold_that_unwound_leaves_the_value_free() {
+        extern crate std;
+        let value = Held::wrap(3u8);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Held::with(&value, |held| {
+                if *held == 3 {
+                    panic!("inside the hold");
+                }
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(Held::with(&value, |held| *held), 3);
+    }
+}

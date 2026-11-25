@@ -516,10 +516,10 @@ impl BoundedEncoding {
     /// so that a holder of a large place keeps one without a copy made on the stack first. A schema
     /// longer than [`crate::caps::MAX_ENCODING_SCHEMA_BYTES`] is refused before anything is
     /// written, so the room keeps what it held.
-    pub fn write_into(
-        room: &mut core::mem::MaybeUninit<Self>,
+    pub fn write_into<'room>(
+        room: &'room mut core::mem::MaybeUninit<Self>,
         encoding: EncodingRef<'_>,
-    ) -> Result<&mut Self, SchemaPastBound> {
+    ) -> Result<&'room mut Self, SchemaPastBound> {
         let bytes = encoding.schema.unwrap_or_default();
         let past = SchemaPastBound { len: bytes.len() };
         if bytes.len() > crate::caps::MAX_ENCODING_SCHEMA_BYTES {

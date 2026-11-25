@@ -72,7 +72,7 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(mask: u64) -> Mutex<Self> {
+    fn new(mask: sn::Sn) -> Mutex<Self> {
         #[cfg(not(any(
             feature = "codec-push",
             feature = "codec-response",
@@ -105,7 +105,7 @@ type Stages = [Mutex<Stage>; Priority::NUM];
 
 /// A fresh stage per conduit, every ring at 0 (the JOIN advertisement makes
 /// any start valid).
-fn new_stages(mask: u64) -> Arc<Stages> {
+fn new_stages(mask: sn::Sn) -> Arc<Stages> {
     Arc::new(std::array::from_fn(|_| Stage::new(mask)))
 }
 
@@ -1060,7 +1060,7 @@ impl MulticastTxPlane {
                 .queued
                 .pop_front();
             if let Some(Some((reliable, sn))) = front {
-                self.on_wire.written(priority, reliable, sn);
+                self.on_wire.written(priority, reliable, sn::from_wire(sn));
             }
         }
     }

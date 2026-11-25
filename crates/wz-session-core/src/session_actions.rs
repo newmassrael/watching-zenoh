@@ -1750,14 +1750,15 @@ impl<W: crate::runtime_cell::WordCell> ConduitTxSn<W> {
     /// `mask`, advancing that channel one step (the shared twin of
     /// [`crate::sn::TxSn::mint`]). Masking a raw monotonic `fetch_add` IS
     /// the ring walk — `(n + 1) & mask` is the ring successor of `n & mask`
-    /// across the `u64` boundary too.
-    pub fn mint(&self, reliable: bool, mask: u64) -> u64 {
+    /// across the `u64` boundary too, and the low bits of the count
+    /// ([`crate::sn::from_wire`]) hold every ring the build runs.
+    pub fn mint(&self, reliable: bool, mask: crate::sn::Sn) -> crate::sn::Sn {
         let slot = if reliable {
             &self.reliable
         } else {
             &self.best_effort
         };
-        slot.fetch_add(1, Ordering::SeqCst) & mask
+        crate::sn::from_wire(slot.fetch_add(1, Ordering::SeqCst)) & mask
     }
 
     /// Reserve (burn) one SN on `reliable`'s channel WITHOUT returning it —
@@ -1847,7 +1848,7 @@ impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
     }
 
     /// Mint the next SN for `(priority, reliable)` — see [`ConduitTxSn::mint`].
-    pub fn mint(&self, priority: Priority, reliable: bool, mask: u64) -> u64 {
+    pub fn mint(&self, priority: Priority, reliable: bool, mask: crate::sn::Sn) -> crate::sn::Sn {
         self.select(priority).mint(reliable, mask)
     }
 
@@ -4281,14 +4282,14 @@ struct FrameEmit {
     ext_qos: Option<Priority>,
     /// The already-minted Frame SN. A fragment chain reuses it as the FIRST
     /// fragment's SN (R311y206) rather than re-minting a block.
-    sn: u64,
+    sn: crate::sn::Sn,
     /// Reliable vs best-effort — selects the conduit and the frame's R flag.
     reliable: bool,
     /// The outbound budget one frame may occupy; over it, the message
     /// fragments (or is emitted as-is when fragmentation is compiled out).
     mtu: usize,
     /// The negotiated SN ring the chain's follow-on SNs walk.
-    sn_mask: u64,
+    sn_mask: crate::sn::Sn,
     /// This profile's reassembly cap — a chain longer than this is refused,
     /// because no same-profile peer could rejoin it. `usize::MAX` = no cap.
     max_reassembly_bytes: usize,
@@ -4384,7 +4385,7 @@ fn size_hint(measure: impl FnOnce() -> usize) -> SizeHint {
 ))]
 trait FrameSn {
     /// The frame's SN.
-    fn take_sn(&self) -> u64;
+    fn take_sn(&self) -> crate::sn::Sn;
 }
 
 #[cfg(all(
@@ -4402,8 +4403,8 @@ trait FrameSn {
         feature = "liveliness-token",
     )
 ))]
-impl<F: Fn() -> u64> FrameSn for F {
-    fn take_sn(&self) -> u64 {
+impl<F: Fn() -> crate::sn::Sn> FrameSn for F {
+    fn take_sn(&self) -> crate::sn::Sn {
         self()
     }
 }
@@ -6255,7 +6256,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // The SN is taken once the frame has a slot to be written in: a link that lent none
             // leaves the conduit's next SN untaken.
-            let filled = fill_lent_frame(slot, mtu, sn.take_sn(), reliable, ext_qos, encode_body);
+            let filled = fill_lent_frame(
+                slot,
+                mtu,
+                crate::sn::to_wire(sn.take_sn()),
+                reliable,
+                ext_qos,
+                encode_body,
+            );
             if filled != LentFill::Fits {
                 return Some(filled);
             }
@@ -6536,7 +6544,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         priority: Priority,
         head: LentFrameHead,
-        sn: u64,
+        sn: crate::sn::Sn,
         encode_body: &P,
     ) -> LentBatchOpen
     where
@@ -7878,7 +7886,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.derive_open_initial_sn(f),
             )
         });
-        let initial_sn = self.reseed_tx_sn(derived).unwrap_or(self.params.initial_sn);
+        let initial_sn = self
+            .reseed_tx_sn(derived)
+            .map(crate::sn::to_wire)
+            .unwrap_or(self.params.initial_sn);
         #[cfg(any(
             not(feature = "session-fixed-storage"),
             not(feature = "tx-lend-only"),
@@ -8117,14 +8128,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and OpenSyn (the caps ride the cookie's head), so the fallback is what
     /// this returns in that window. Nothing that needs the negotiated ring
     /// runs there: the acceptor's RX SN seed waits for the restore.
-    pub fn negotiated_sn_mask(&self) -> u64 {
+    pub fn negotiated_sn_mask(&self) -> crate::sn::Sn {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         self.sn_mask_for(peer)
     }
 
     /// The SN ring mask [`Self::negotiated_sn_mask`] answers, for the peer's capabilities
     /// `peer` as read by the caller.
-    pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
+    pub(crate) fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> crate::sn::Sn {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
             self.params.seq_num_res.wire_code(),
             peer,
@@ -8155,7 +8166,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits(&self) -> (usize, u64) {
+    pub fn negotiated_tx_limits(&self) -> (usize, crate::sn::Sn) {
         self.negotiated_tx_limits_for(Reliability::Reliable)
     }
 
@@ -8176,7 +8187,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, u64) {
+    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> (usize, crate::sn::Sn) {
         let (budget, ring) = self.link.tx_limits.get(class);
         (budget, crate::sn::mask_from_res(ring))
     }
@@ -8752,7 +8763,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn open_params(&self) -> Option<SessionInitParams> {
         let initial_sn = self.open_initial_sn()?;
         let mut params = self.params.clone();
-        params.initial_sn = initial_sn;
+        params.initial_sn = crate::sn::to_wire(initial_sn);
         Some(params)
     }
 
@@ -8762,14 +8773,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// derivation reads it where the session holds it. `None` when the peer zid
     /// is not yet known.
     #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
-    fn open_initial_sn(&self) -> Option<u64> {
+    fn open_initial_sn(&self) -> Option<crate::sn::Sn> {
         self.reseed_tx_sn(self.with_facts(|f| self.derive_open_initial_sn(f)))
     }
 
     /// The Open's `initial_sn` derived from the ring and the peer's zid, both read off `facts`,
     /// the hold its caller has: `None` when the peer zid is not yet known.
     #[cfg(feature = "codec-open-body")]
-    fn derive_open_initial_sn(&self, facts: &SessionFacts) -> Option<u64> {
+    fn derive_open_initial_sn(&self, facts: &SessionFacts) -> Option<crate::sn::Sn> {
         let mask = self.sn_mask_for(facts.handshake.inbound_peer_init_caps);
         facts
             .handshake
@@ -8780,9 +8791,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Re-seed the TX conduits to the Open's derived origin, when there is one, and hand it on.
     #[cfg(feature = "codec-open-body")]
-    fn reseed_tx_sn(&self, initial_sn: Option<u64>) -> Option<u64> {
+    fn reseed_tx_sn(&self, initial_sn: Option<crate::sn::Sn>) -> Option<crate::sn::Sn> {
         if let Some(initial_sn) = initial_sn {
-            self.outbound_frame_sn.reset(initial_sn);
+            self.outbound_frame_sn.reset(crate::sn::to_wire(initial_sn));
         }
         initial_sn
     }
@@ -11538,7 +11549,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-open-body")]
     fn seed_rx_sn_in(&self, facts: &mut SessionFacts, initial_sn: u64) {
         let mask = self.sn_mask_for(facts.handshake.inbound_peer_init_caps);
-        facts.rx_sn.seed(mask, initial_sn);
+        facts.rx_sn.seed(mask, crate::sn::from_wire(initial_sn));
     }
 
     /// R2782 — everything an ADMITTED OpenSyn does to the acceptor, in one
@@ -12440,7 +12451,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session passes `Priority::DEFAULT` and gates on the single conduit.
         self.with_facts(|f| {
             let mask = self.sn_mask_for(f.handshake.inbound_peer_init_caps);
-            f.rx_sn.admit_judged(priority, mask, reliable, sn)
+            f.rx_sn
+                .admit_judged(priority, mask, reliable, crate::sn::from_wire(sn))
         })
     }
 
@@ -12483,7 +12495,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// monotonicity. The hot path is one outbound Frame per
     /// application-layer batch — the atomic cost is in the noise
     /// vs. the codec encode + TCP write below it.
-    pub fn next_outbound_frame_sn(&self, priority: Priority, reliable: bool, sn_mask: u64) -> u64 {
+    pub fn next_outbound_frame_sn(
+        &self,
+        priority: Priority,
+        reliable: bool,
+        sn_mask: crate::sn::Sn,
+    ) -> crate::sn::Sn {
         self.outbound_frame_sn.mint(priority, reliable, sn_mask)
     }
 
@@ -13133,11 +13150,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         stage
                             .buf
                             .reserve(worst_case_payload.saturating_add(1 + 10 + 2));
-                        let staged =
-                            match begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos) {
-                                Ok(()) => encode_into(&mut stage.buf),
-                                Err(refused) => Err(refused),
-                            };
+                        let staged = match begin_frame(
+                            &mut stage.buf,
+                            crate::sn::to_wire(sn),
+                            frame_flags(reliable),
+                            ext_qos,
+                        ) {
+                            Ok(()) => encode_into(&mut stage.buf),
+                            Err(refused) => Err(refused),
+                        };
                         if let Err(refused) = staged {
                             // The body refused its message: the frame it opened is dropped whole
                             // and its SN given back, before a byte left.
@@ -13291,7 +13312,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     }
                 }
                 let wire = match crate::frame_encode::encode_frame_envelope(
-                    sn,
+                    crate::sn::to_wire(sn),
                     crate::frame_encode::frame_flags(reliable),
                     worst_case_payload,
                     ext_qos,
@@ -13683,7 +13704,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // so `body` must be ONLY the NetworkMessage batch (else the stale
                 // `[0x31][priority]` prepends to the reassembled batch and breaks
                 // the peer's parse_frame_payload).
-                let body = crate::frame_encode::frame_wire_body(frame, sn, ext_qos);
+                let body =
+                    crate::frame_encode::frame_wire_body(frame, crate::sn::to_wire(sn), ext_qos);
                 return self.emit_fragment_chain(
                     batch,
                     crate::frame_encode::FragmentBody::Bytes(body),
@@ -20834,6 +20856,34 @@ mod held_answer_tests {
         assert_eq!(holds_answer(ExtChainRole::OpenSyn), replays);
         assert!(!holds_answer(ExtChainRole::InitSyn));
         assert!(!holds_answer(ExtChainRole::OpenAck));
+    }
+}
+
+#[cfg(test)]
+mod conduit_tx_sn_tests {
+    use super::ConduitTxSn;
+    use crate::sn::{mask_from_res, to_wire};
+    use core::cell::Cell;
+
+    /// A channel's count runs past 32 bits on a long session, and what it mints is still the
+    /// count's position on the ring in either word: the 28-bit ring wraps to 0 where the count
+    /// crosses 2^32, and the channel steps on from there.
+    #[test]
+    fn a_count_past_32_bits_mints_its_ring_position_in_either_word() {
+        let mask = mask_from_res(0x02);
+        let tx = ConduitTxSn::<Cell<u64>>::new(u64::from(u32::MAX));
+        assert_eq!(to_wire(tx.mint(true, mask)), 0x0FFF_FFFF);
+        assert_eq!(
+            to_wire(tx.mint(true, mask)),
+            0,
+            "the count crossed 2^32 at the seam"
+        );
+        assert_eq!(to_wire(tx.mint(true, mask)), 1);
+        assert_eq!(
+            to_wire(tx.mint(false, mask)),
+            0x0FFF_FFFF,
+            "the other channel did not move"
+        );
     }
 }
 
