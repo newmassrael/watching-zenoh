@@ -12517,13 +12517,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The RX-activity stamp [`Self::observe_inbound`] takes for every decoded
     /// transport message but an unknown one. A `Frame` read where its unit lies
-    /// (`drive::dispatch_datagram`, under `codec-frame`) takes nothing else from
-    /// it here: a Frame carries no handshake fact.
+    /// (`drive::dispatch_datagram`, under `codec-frame`) takes
+    /// [`Self::stamp_rx_activity_at`] instead, and nothing else from it here: a Frame
+    /// carries no handshake fact.
     // Out of line: every receive path takes the stamp, and the clock read and lock it inlines
     // were copied into each.
     #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
         self.link.note_received_at(self.clock.now_monotonic_ms());
+    }
+
+    /// [`Self::stamp_rx_activity`] at `now_ms`, a reading of this session's clock its caller
+    /// already holds: the receive in place stamps the time of the turn of input that read the
+    /// datagram, so a message on that path reads no clock.
+    #[cfg(feature = "codec-frame")]
+    #[inline]
+    pub(crate) fn stamp_rx_activity_at(&self, now_ms: u64) {
+        self.link.note_received_at(now_ms);
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.
